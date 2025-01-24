@@ -20,7 +20,7 @@
 """This module contains the shared state for the abci skill of Mech."""
 import dataclasses
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional, cast, Tuple
 
 from aea.exceptions import enforce
 from aea.skills.base import Model
@@ -54,8 +54,9 @@ class Params(Model):
         )
 
         self.in_flight_req: bool = False
+        self.in_flight_req_timeout: float = 0
         self.from_block: Optional[int] = None
-        self.req_to_callback: Dict[str, Callable] = {}
+        self.req_to_callback: Dict[str, Tuple[Callable, int]] = {}
         self.api_keys: Dict = self._nested_list_todict_workaround(
             kwargs, "api_keys_json"
         )
@@ -82,6 +83,10 @@ class Params(Model):
         # maps the request id to the number of times it has timed out
         self.request_id_to_num_timeouts: Dict[int, int] = defaultdict(lambda: 0)
         self.mech_to_config: Dict[str, MechConfig] = self._parse_mech_configs(kwargs)
+        self.max_queue_size: int = kwargs.get("max_queue_size", 30)
+        self.max_executing_tasks: int = kwargs.get("max_executing_tasks", 4)
+        self.req_id_to_data = {}
+        self.clear_queue: bool = kwargs.get("clear_queue", False)
         super().__init__(*args, **kwargs)
 
     def _nested_list_todict_workaround(

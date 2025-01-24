@@ -23,7 +23,7 @@ import threading
 import time
 from abc import ABC
 from copy import deepcopy
-from typing import Any, Dict, Generator, List, Optional, Set, Type, cast
+from typing import Any, Dict, Generator, List, Optional, Set, Type, cast, Tuple
 
 import openai  # noqa
 from aea.helpers.cid import CID, to_v1
@@ -63,7 +63,7 @@ from packages.valory.skills.task_submission_abci.rounds import (
     TransactionPreparationRound,
 )
 from packages.valory.skills.transaction_settlement_abci.payload_tools import (
-    hash_payload_to_hex,
+    hash_payload_to_hex, VerificationStatus,
 )
 
 
@@ -77,6 +77,7 @@ ZERO_IPFS_HASH = (
 )
 FILENAME = "usage"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+LAST_TX = "last_tx"
 
 
 class TaskExecutionBaseBehaviour(BaseBehaviour, ABC):
@@ -103,6 +104,12 @@ class TaskExecutionBaseBehaviour(BaseBehaviour, ABC):
         """
         done_tasks = deepcopy(self.context.shared_state.get(DONE_TASKS, []))
         return cast(List[Dict[str, Any]], done_tasks)
+
+    def set_tx(self, last_tx: str) -> None:
+        """Signal that the transaction was prepared."""
+        now = time.time()
+        # store the tx hash and the time it was stored
+        self.context.shared_state[LAST_TX] = (last_tx, now)
 
     def done_tasks_lock(self) -> threading.Lock:
         """Get done_tasks_lock."""
@@ -188,12 +195,37 @@ class TaskPoolingBehaviour(TaskExecutionBaseBehaviour, ABC):
 
     def handle_submitted_tasks(self) -> None:
         """Handle tasks that have been already submitted before (in a prev. period)."""
-        submitted_tasks = cast(List[Dict[str, Any]], self.synchronized_data.done_tasks)
-        self.context.logger.info(
-            f"Tasks {submitted_tasks} has already been submitted. "
-            f"Removing them from the list of tasks to be processed."
-        )
-        self.remove_tasks(submitted_tasks)
+        status, tx_hash = self.check_last_tx_status()
+        self.context.logger.info(f"Last tx status is: {status}")
+        if status:
+            submitted_tasks = cast(
+                List[Dict[str, Any]], self.synchronized_data.done_tasks
+            )
+            self.context.logger.info(
+                f"Tasks {submitted_tasks} has already been submitted. The corresponding tx_hash is: {tx_hash}. "
+                f"Removing them from the list of tasks to be processed."
+            )
+            self.remove_tasks(submitted_tasks)
+
+    def check_last_tx_status(self) -> Tuple[bool, Optional[str]]:
+        """Check if the tx in the last round was successful or not"""
+        # Try to fetch the final tx hash from the sync db
+        # If the value exists and is not None, we return True, else False
+        # ref: https://github.com/valory-xyz/open-autonomy/blob/main/packages/valory/skills/transaction_settlement_abci/rounds.py#L432-L434
+        try:
+            if self.synchronized_data.final_verification_status != VerificationStatus.VERIFIED:
+                return False, None
+            final_tx_hash = self.synchronized_data.final_tx_hash
+            # added for healthcheck purposes
+            self.set_tx(final_tx_hash)
+        except Exception as e:
+            self.context.logger.error(e)
+            return False, None
+        else:
+            if final_tx_hash is not None:
+                return True, final_tx_hash
+            else:
+                return False, None
 
 
 class DeliverBehaviour(TaskExecutionBaseBehaviour, ABC):
@@ -794,12 +826,11 @@ class TransactionPreparationBehaviour(
                 all_txs.append(response_tx)
 
         update_usage_tx = yield from self.get_update_usage_tx()
-        if update_usage_tx is None:
+        if update_usage_tx is not None:
             # something went wrong, respond with ERROR payload for now
             # in case we cannot update the usage, we should not proceed with the rest of the txs
-            return TransactionPreparationRound.ERROR_PAYLOAD
+            all_txs.append(update_usage_tx)
 
-        all_txs.append(update_usage_tx)
         multisend_tx_str = yield from self._to_multisend(all_txs)
         if multisend_tx_str is None:
             # something went wrong, respond with ERROR payload for now

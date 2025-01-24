@@ -48,6 +48,7 @@ from packages.valory.protocols.contract_api import ContractApiMessage
 from packages.valory.protocols.ipfs import IpfsMessage
 from packages.valory.protocols.ipfs.dialogues import IpfsDialogue
 from packages.valory.protocols.ledger_api import LedgerApiMessage
+from packages.valory.skills.task_execution.handlers import LAST_SUCCESSFUL_EXECUTED_TASK
 from packages.valory.skills.task_execution.models import Params
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 from packages.valory.skills.task_execution.utils.benchmarks import TokenCounterCallback
@@ -69,6 +70,7 @@ GNOSIS_CHAIN = "gnosis"
 
 LEDGER_API_ADDRESS = str(LEDGER_CONNECTION_PUBLIC_ID)
 
+REORG_WINDOW = 200
 
 class TaskExecutionBehaviour(SimpleBehaviour):
     """A class to execute tasks."""
@@ -76,17 +78,16 @@ class TaskExecutionBehaviour(SimpleBehaviour):
     def __init__(self, **kwargs: Any):
         """Initialise the agent."""
         super().__init__(**kwargs)
-        # we only want to execute one task at a time, for the time being
-        self._executor = ProcessPoolExecutor(max_workers=1)
-        self._executing_task: Optional[Dict[str, Any]] = None
+        self._executor: Dict[int, ProcessPoolExecutor] = {}
+        self._executing_tasks: Dict[int, Dict[str, Any]] = {}
         self._tools_to_file_hash: Dict[str, str] = {}
         self._all_tools: Dict[str, Tuple[str, str, Dict[str, Any]]] = {}
         self._inflight_tool_req: Optional[str] = None
-        self._done_task: Optional[Dict[str, Any]] = None
+        self._done_tasks: Dict[int, Dict[str, Any]] = {}
         self._last_polling: Optional[float] = None
-        self._invalid_request = False
-        self._async_result: Optional[Future] = None
+        self._invalid_requests = Dict[str, Any]
         self._keychain: Optional[KeyChain] = None
+        self._task_index: int = 0
 
     def setup(self) -> None:
         """Implement the setup."""
@@ -97,6 +98,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             for value in values
         }
         self._keychain = KeyChain(self.params.api_keys)
+        self._executor = {
+            idx: ProcessPoolExecutor(max_workers=1) for idx in range(self.params.max_executing_tasks)
+        }
 
     def act(self) -> None:
         """Implement the act."""
@@ -118,6 +122,13 @@ class TaskExecutionBehaviour(SimpleBehaviour):
     def request_id_to_num_timeouts(self) -> Dict[int, int]:
         """Maps the request id to the number of times it has timed out."""
         return self.params.request_id_to_num_timeouts
+
+    def set_last_executed_task(self, request_id: int) -> None:
+        """Set the last executed task."""
+        self.context.shared_state[LAST_SUCCESSFUL_EXECUTED_TASK] = (
+            request_id,
+            time.time(),
+        )
 
     def count_timeout(self, request_id: int) -> None:
         """Increase the timeout for a request."""
@@ -143,29 +154,35 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             return True
         return self._last_polling + self.params.polling_interval <= time.time()
 
-    def _is_executing_task_ready(self) -> bool:
+    def _is_executing_task_ready(self, req_id: int) -> bool:
         """Check if the executing task is ready."""
-        if self._executing_task is None or self._async_result is None:
+        executing_task = self.params.req_id_to_data.get(req_id)
+        async_result = executing_task.get("async_result", None) if executing_task is not None else None
+        if executing_task is None or async_result is None:
             return False
-        return self._async_result.done()
+        return async_result.done()
 
-    def _has_executing_task_timed_out(self) -> bool:
+    def _has_executing_task_timed_out(self, req_id: int) -> bool:
         """Check if the executing task timed out."""
-        if self._executing_task is None:
+        executing_task = self.params.req_id_to_data.get(req_id)
+        if executing_task is None:
             return False
-        timeout_deadline = self._executing_task.get("timeout_deadline", None)
+        timeout_deadline = executing_task.get("timeout_deadline", None)
         if timeout_deadline is None:
             return False
         return timeout_deadline <= time.time()
 
-    def _get_executing_task_result(self) -> Any:
+    def _get_executing_task_result(self, req_id: int) -> Any:
         """Get the executing task result."""
-        if self._executing_task is None:
-            raise ValueError("Executing task is None")
-        if self._invalid_request:
+        executing_task = self.params.req_id_to_data.get(req_id)
+        if executing_task is None:
+            self.context.logger.error(f"Request ID {req_id} not found.")
+            self.params.req_id_to_data.pop(req_id, None)
+            return None
+        if executing_task.get("is_invalid", False):
             return None
         try:
-            async_result = cast(Future, self._async_result)
+            async_result = cast(Future, executing_task["async_result"])
             return async_result.result()
         except Exception as e:  # pylint: disable=broad-except
             self.context.logger.error(
@@ -187,10 +204,11 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             # read one at a time
             ipfs_msg, message = self._build_ipfs_get_file_req(file_hash)
             self._inflight_tool_req = tool
-            self.send_message(ipfs_msg, message, self._handle_get_tool)
+            dummy_req_id = 0
+            self.send_message(ipfs_msg, message, self._handle_get_tool, dummy_req_id)
             return
 
-    def _handle_get_tool(self, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_get_tool(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
         """Handle get tool response"""
         component_yaml, tool_py, callable_method = ComponentPackageLoader.load(
             message.files
@@ -209,12 +227,13 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             ledger_id=self.context.default_ledger_id,
             args=(),
         )
-        self.context.outbox.put_message(message=ledger_api_msg)
         self.params.in_flight_req = True
+        self.params.in_flight_req_timeout = time.time() + 10
+        self.context.outbox.put_message(message=ledger_api_msg)
 
     def _check_for_new_reqs(self) -> None:
         """Check for new reqs."""
-        if self.params.in_flight_req or not self._should_poll():
+        if (self.params.in_flight_req and time.time() < self.params.in_flight_req_timeout) or not self._should_poll():
             # do nothing if there is an in flight request
             # or if we should not poll yet
             return
@@ -230,7 +249,8 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             callable="get_multiple_undelivered_reqs",
             kwargs=ContractApiMessage.Kwargs(
                 dict(
-                    from_block=self.params.from_block,
+                    # add a reorg window to allow for block reorgs and avoid missing requests
+                    from_block=(self.params.from_block - REORG_WINDOW),
                     chain_id=GNOSIS_CHAIN,
                     contract_addresses=self.params.agent_mech_contract_addresses,
                     max_block_window=self.params.max_block_window,
@@ -239,52 +259,97 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             counterparty=LEDGER_API_ADDRESS,
             ledger_id=self.context.default_ledger_id,
         )
-        self.context.outbox.put_message(message=contract_api_msg)
         self.params.in_flight_req = True
+        self.params.in_flight_req_timeout = time.time() + 900
+        self.context.outbox.put_message(message=contract_api_msg)
         self._last_polling = time.time()
+
+    def _is_task_invalid(self, req_id: int) -> bool:
+        """Check if the task is invalid."""
+        executing_task = self.params.req_id_to_data.get(req_id)
+        if executing_task is None:
+            return False
+        return executing_task.get("is_invalid", False)
 
     def _execute_task(self) -> None:
         """Execute tasks."""
         # check if there is a task already executing
-        if self.params.in_flight_req:
+        if self.params.in_flight_req and time.time() < self.params.in_flight_req_timeout:
             # there is an in flight request
+            # self.context.logger.info("Not executing task, in flight request.")
             return
 
-        if self._executing_task is not None:
-            if self._is_executing_task_ready() or self._invalid_request:
-                task_result = self._get_executing_task_result()
-                self._handle_done_task(task_result)
-            elif self._has_executing_task_timed_out():
-                self._handle_timeout_task()
-            return
+        pending_finalization = any(
+            task_data.get("pending_finalization", False)
+            for task_data in self.params.req_id_to_data.values()
+        )
+        for task_data in self.params.req_id_to_data.values():
+            # mark tasks that are pending finalization as invalid if they have timed out
+            if task_data.get("pending_finalization", False) and time.time() > task_data.get("finalization_timeout", 0):
+                task_data["is_invalid"] = True
+                pending_finalization = False
+                break
+
+        if not pending_finalization:
+            for req_id, task_data in self.params.req_id_to_data.items():
+                if self._is_executing_task_ready(req_id) or self._is_task_invalid(req_id):
+                    task_result = self._get_executing_task_result(req_id)
+                    task_data["pending_finalization"] = True
+                    task_data["finalization_timeout"] = time.time() + 30
+                    self._handle_done_task(req_id, task_result)
+                    break
+                elif self._has_executing_task_timed_out(req_id):
+                    self._handle_timeout_task(req_id)
+                    task_data["pending_finalization"] = True
+                    task_data["finalization_timeout"] = time.time() + 30
+                    break
 
         if len(self.pending_tasks) == 0:
             # not tasks (requests) to execute
             return
 
+        if len(self.params.req_id_to_data) >= len(self._executor):
+            # all executors are busy
+            return
+
+        executor_idx = self._task_index % len(self._executor)
+        self._task_index += 1
+
         # create new task
         task_data = self.pending_tasks.pop(0)
+        task_data["executor_idx"] = executor_idx
         self.context.logger.info(f"Preparing task with data: {task_data}")
-        self._executing_task = task_data
+        self.params.req_id_to_data[task_data["requestId"]] = task_data
+        # num_pending_tasks = len(self.pending_tasks)
+        # if num_pending_tasks > 30:
+        #     self.context.logger.warning(
+        #         f"Number of pending tasks is {num_pending_tasks}."
+        #     )
+        #     self._invalid_request = True
+        #     return
         task_data_ = task_data["data"]
-        ipfs_hash = get_ipfs_file_hash(task_data_)
-        self.context.logger.info(f"IPFS hash: {ipfs_hash}")
+        try:
+            ipfs_hash = get_ipfs_file_hash(task_data_)
+        except Exception:
+            ipfs_hash = "bafybeigatmm7mwx5bx3bbsiouaasbpgnd7a3rrxhzw7eia3w5yj6cvvfxq"
+        self.context.logger.info(f"IPFS hash: {ipfs_hash} {threading.current_thread().name}")
         ipfs_msg, message = self._build_ipfs_get_file_req(ipfs_hash)
-        self.send_message(ipfs_msg, message, self._handle_get_task)
+        self.send_message(ipfs_msg, message, self._handle_get_task, task_data["requestId"])
 
     def send_message(
-        self, msg: Message, dialogue: Dialogue, callback: Callable
+        self, msg: Message, dialogue: Dialogue, callback: Callable, req_id: int
     ) -> None:
         """Send message."""
+        self.params.in_flight_req = True
+        self.params.in_flight_req_timeout = time.time() + 30
         self.context.outbox.put_message(message=msg)
         nonce = dialogue.dialogue_label.dialogue_reference[0]
-        self.params.req_to_callback[nonce] = callback
-        self.params.in_flight_req = True
+        self.params.req_to_callback[nonce] = callback, req_id
 
-    def _handle_done_task(self, task_result: Any) -> None:
+
+    def _handle_done_task(self, req_id: int, task_result: Any) -> None:
         """Handle done tasks"""
-        executing_task = cast(Dict[str, Any], self._executing_task)
-        req_id = executing_task.get("requestId", None)
+        executing_task = self.params.req_id_to_data[req_id]
         request_id_nonce = executing_task.get("requestIdWithNonce", None)
         mech_address = executing_task.get("contract_address", None)
         tool = executing_task.get("tool", None)
@@ -292,7 +357,7 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         tool_params = executing_task.get("params", None)
         response = {"requestId": req_id, "result": "Invalid response"}
         task_executor = self.context.agent_address
-        self._done_task = {
+        executing_task["done_task"] = {
             "request_id": req_id,
             "mech_address": mech_address,
             "task_executor_address": task_executor,
@@ -317,7 +382,7 @@ class TaskExecutionBehaviour(SimpleBehaviour):
                 "cost_dict": cost_dict,
                 "metadata": metadata,
             }
-            self._done_task["transaction"] = transaction
+            executing_task["done_task"]["transaction"] = transaction
 
             # update the keychain, it's possible that rotations happened
             # we want to use the most up-to-date key priority
@@ -327,38 +392,40 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         msg, dialogue = self._build_ipfs_store_file_req(
             {str(req_id): json.dumps(response)}
         )
-        self.send_message(msg, dialogue, self._handle_store_response)
+        self.send_message(msg, dialogue, self._handle_store_response, req_id)
 
-    def _restart_executor(self) -> None:
+    def _restart_executor(self, idx: int) -> None:
         """Restarts the executor."""
-        self._executor.shutdown(wait=False)
+        self._executor[idx].shutdown(wait=False)
         # create a new executor
-        self._executor = ProcessPoolExecutor(max_workers=1)
+        self._executor[idx] = ProcessPoolExecutor(max_workers=1)
 
-    def _handle_timeout_task(self) -> None:
+    def _handle_timeout_task(self, req_id: int) -> None:
         """Handle timeout tasks"""
-        executing_task = cast(Dict[str, Any], self._executing_task)
+        executing_task = self.params.req_id_to_data[req_id]
         req_id = executing_task.get("requestId", None)
         self.count_timeout(req_id)
         self.context.logger.info(f"Task timed out for request {req_id}")
         self.context.logger.info(
             f"Task {req_id} has timed out {self.request_id_to_num_timeouts[req_id]} times"
         )
-        async_result = cast(Future, self._async_result)
-        async_result.cancel()
+        async_result = executing_task.get("async_result", None)
+        if async_result is not None:
+            async_result.cancel()
 
         # we restart the executor in case of a timeout.
         # we do this because its possible the .cancel() call above is not respected
         # by the executor. Since we only have 1 process running at a time, this would
         # mean that the task being executed next would be queued. We want to avoid this.
-        self._restart_executor()
+        executor_idx = executing_task["executor_idx"]
+        self._restart_executor(executor_idx)
 
         # check if we can add the task to the end of the queue
         if not self.timeout_limit_reached(req_id):
             # added to end of queue
             self.context.logger.info(f"Adding task {req_id} to the end of the queue")
-            self.pending_tasks.append(executing_task)
-            self._executing_task = None
+            self.pending_tasks.append({**executing_task, "pending_finalization": False})
+            self.params.req_id_to_data.pop(req_id, None)
             return None
 
         self.context.logger.info(
@@ -371,41 +438,56 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             None,
             None,
         )
-        self._handle_done_task(task_result)
+        self._handle_done_task(req_id, task_result)
 
-    def _handle_get_task(self, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_get_task(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
         """Handle the response from ipfs for a task request."""
+        executing_task = cast(Dict[str, Any], self.params.req_id_to_data.get(req_id))
+        if executing_task is None:
+            self.context.logger.warning(f"Request ID {req_id} not found.")
+            return
         task_data = [json.loads(content) for content in message.files.values()][0]
         is_data_valid = (
             task_data
             and isinstance(task_data, dict)
             and "prompt" in task_data
             and "tool" in task_data
+            and not self.params.clear_queue
         )  # pylint: disable=C0301
         if is_data_valid and task_data["tool"] in self._tools_to_file_hash:
-            self._prepare_task(task_data)
+            self._prepare_task(req_id, task_data)
         elif is_data_valid:
             tool = task_data["tool"]
-            executing_task = cast(Dict[str, Any], self._executing_task)
             executing_task["tool"] = tool
             self.context.logger.warning(f"Tool {tool} is not valid.")
-            self._invalid_request = True
+            executing_task["is_invalid"] = True
         else:
             self.context.logger.warning("Data for task is not valid.")
-            self._invalid_request = True
+            executing_task["is_invalid"] = True
 
-    def _submit_task(self, fn: Any, *args: Any, **kwargs: Any) -> Future:
+    def _submit_task(self, executor_idx: int, fn: Any, *args: Any, **kwargs: Any) -> Future:
         """Submit a task."""
         try:
-            return self._executor.submit(fn, *args, **kwargs)  # type: ignore
+            return self._executor[executor_idx].submit(fn, *args, **kwargs)  # type: ignore
         except BrokenProcessPool:
             self.context.logger.warning("Executor is broken. Restarting...")
             # restart the executor
-            self._restart_executor()
+            self._restart_executor(executor_idx)
             # try to run the task again
-            return self._executor.submit(fn, *args, **kwargs)  # type: ignore
+            return self._executor.submit(executor_idx, fn, *args, **kwargs)  # type: ignore
 
-    def _prepare_task(self, task_data: Dict[str, Any]) -> None:
+    @property
+    def task_deadline(self) -> float:
+        """Get the task deadline."""
+        queue_size = len(self.pending_tasks)
+        if self.params.max_queue_size < queue_size:
+            # make the deadline smaller if the queue is full, do it according to the size
+            denom = min(self.params.max_queue_size / queue_size, 5)
+            return time.time() + (self.params.task_deadline / denom)
+
+        return time.time() + self.params.task_deadline
+
+    def _prepare_task(self, req_id: int, task_data: Dict[str, Any]) -> None:
         """Prepare the task."""
         tool_task = AnyToolAsTask()
         tool_py, callable_method, component_yaml = self._all_tools[task_data["tool"]]
@@ -417,15 +499,16 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         task_data["model"] = task_data.get(
             "model", tool_params.get("default_model", None)
         )
-        future = self._submit_task(tool_task.execute, **task_data)
-        executing_task = cast(Dict[str, Any], self._executing_task)
-        executing_task["timeout_deadline"] = time.time() + self.params.task_deadline
+        executing_task = cast(Dict[str, Any], self.params.req_id_to_data[req_id])
+        future = self._submit_task(executing_task["executor_idx"], tool_task.execute, **task_data)
+        executing_task["timeout_deadline"] = time.time() + self.task_deadline
         executing_task["tool"] = task_data["tool"]
         executing_task["model"] = task_data.get(
             "model", tool_params.get("default_model", None)
         )
         executing_task["params"] = tool_params
-        self._async_result = cast(Optional[Future], future)
+        executing_task["async_result"] = future
+        self.params.req_id_to_data[req_id] = executing_task
 
     def _build_ipfs_message(
         self,
@@ -477,9 +560,12 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         )
         return message, dialogue
 
-    def _handle_store_response(self, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_store_response(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
         """Handle the response from ipfs for a store response request."""
-        executing_task = cast(Dict[str, Any], self._executing_task)
+        executing_task = cast(Dict[str, Any], self.params.req_id_to_data.get(req_id))
+        if executing_task is None:
+            self.context.logger.warning(f"Request ID {req_id} not found.")
+            return
         req_id, sender = (
             executing_task["requestId"],
             executing_task["sender"],
@@ -493,7 +579,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             request_id=str(req_id),
             data=ipfs_hash,
         )
-        done_task = cast(Dict[str, Any], self._done_task)
+        # for health check metrics
+        self.set_last_executed_task(req_id)
+        done_task = executing_task["done_task"]
         task_result = to_multihash(ipfs_hash)
         cost = get_cost_for_done_task(done_task)
         self.context.logger.info(f"Cost for task {req_id}: {cost}")
@@ -508,10 +596,8 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         # add to done tasks, in thread safe way
         with self.done_tasks_lock:
             self.done_tasks.append(done_task)
-        # reset tasks
-        self._executing_task = None
-        self._done_task = None
-        self._invalid_request = False
+
+        self.params.req_id_to_data.pop(req_id, None)
 
     def send_data_via_acn(
         self,

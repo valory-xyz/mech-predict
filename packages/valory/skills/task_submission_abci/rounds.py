@@ -22,6 +22,8 @@ import json
 from enum import Enum
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, cast
 
+from packages.valory.skills.transaction_settlement_abci.payload_tools import VerificationStatus
+
 from packages.valory.skills.abstract_round_abci.base import (
     AbciApp,
     AbciAppTransitionFunction,
@@ -67,6 +69,19 @@ class SynchronizedData(BaseSynchronizedData):
         """Done tasks."""
         return cast(List[Dict[str, Any]], self.db.get("done_tasks", []))
 
+    @property
+    def final_tx_hash(self) -> str:
+        """Get the verified tx hash."""
+        return cast(str, self.db.get_strict("final_tx_hash"))
+
+    @property
+    def final_verification_status(self) -> VerificationStatus:
+        """Get the final verification status."""
+        status_value = self.db.get("final_verification_status", None)
+        if status_value is None:
+            return VerificationStatus.NOT_VERIFIED
+        return VerificationStatus(status_value)
+
 
 class TaskPoolingRound(CollectionRound):
     """TaskPoolingRound"""
@@ -110,6 +125,7 @@ class TaskPoolingRound(CollectionRound):
                 synchronized_data_class=SynchronizedData,
                 **{
                     get_name(SynchronizedData.done_tasks): unique_done_tasks,
+                    get_name(SynchronizedData.final_tx_hash): None,
                 }
             )
             if len(unique_done_tasks) > 0:
@@ -236,13 +252,17 @@ class TaskSubmissionAbciApp(AbciApp[Event]):
         Event.ROUND_TIMEOUT: 60.0,
     }
     cross_period_persisted_keys: FrozenSet[str] = frozenset(
-        [get_name(SynchronizedData.done_tasks)]
+        [
+            get_name(SynchronizedData.done_tasks),
+            get_name(SynchronizedData.final_tx_hash),
+        ]
     )
     db_pre_conditions: Dict[AppState, Set[str]] = {
         TaskPoolingRound: set(),
     }
     db_post_conditions: Dict[AppState, Set[str]] = {
-        FinishedTaskPoolingRound: {"most_voted_tx_hash"},
+        FinishedTaskPoolingRound: {"most_voted_tx_hash", "final_tx_hash"},
+        # added to avoid ABCI check errors
+        FinishedWithoutTasksRound: {"most_voted_tx_hash", "final_tx_hash"},
         FinishedTaskExecutionWithErrorRound: set(),
-        FinishedWithoutTasksRound: set(),
     }

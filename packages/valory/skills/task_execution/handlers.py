@@ -19,7 +19,8 @@
 
 """This package contains a scaffold of a handler."""
 import threading
-from typing import Any, Dict, List, cast
+import time
+from typing import Any, Dict, List, Optional, cast
 
 from aea.protocols.base import Message
 from aea.skills.base import Handler
@@ -37,6 +38,9 @@ from packages.valory.skills.task_execution.models import Params
 PENDING_TASKS = "pending_tasks"
 DONE_TASKS = "ready_tasks"
 DONE_TASKS_LOCK = "lock"
+LAST_SUCCESSFUL_READ = "last_successful_read"
+LAST_SUCCESSFUL_EXECUTED_TASK = "last_successful_executed_task"
+WAS_LAST_READ_SUCCESSFUL = "was_last_read_successful"
 
 LEDGER_API_ADDRESS = str(LEDGER_CONNECTION_PUBLIC_ID)
 
@@ -83,7 +87,6 @@ class AcnHandler(BaseHandler):
         """Handle the message."""
         # we don't respond to ACN messages at this point
         self.context.logger.info(f"Received message: {message}")
-        self.on_message_handled(message)
 
 
 class IpfsHandler(BaseHandler):
@@ -101,17 +104,19 @@ class IpfsHandler(BaseHandler):
         ipfs_msg = cast(IpfsMessage, message)
         if ipfs_msg.performative == IpfsMessage.Performative.ERROR:
             self.context.logger.warning(
-                f"IPFS Message performative not recognized: {ipfs_msg.performative}"
+                f"IPFS Message performative not recognized: {ipfs_msg.performative} {ipfs_msg.reason}"
             )
             self.params.in_flight_req = False
             return
 
-        dialogue = self.context.ipfs_dialogues.update(ipfs_msg)
-        nonce = dialogue.dialogue_label.dialogue_reference[0]
-        callback = self.params.req_to_callback.pop(nonce)
-        callback(ipfs_msg, dialogue)
+        try:
+            dialogue = self.context.ipfs_dialogues.update(ipfs_msg)
+            nonce = dialogue.dialogue_label.dialogue_reference[0]
+            callback, req_id = self.params.req_to_callback.pop(nonce)
+            callback(req_id, ipfs_msg, dialogue)
+        except Exception as e:
+            self.context.logger.error(f"Error handling IPFS message: {e}")
         self.params.in_flight_req = False
-        self.on_message_handled(message)
 
 
 class ContractHandler(BaseHandler):
@@ -131,6 +136,14 @@ class ContractHandler(BaseHandler):
         """Get pending_tasks."""
         return self.context.shared_state[PENDING_TASKS]
 
+    def set_last_successful_read(self, block_number: Optional[int]) -> None:
+        """Set the last successful read."""
+        self.context.shared_state[LAST_SUCCESSFUL_READ] = (block_number, time.time())
+
+    def set_was_last_read_successful(self, was_successful: bool) -> None:
+        """Set the last successful read."""
+        self.context.shared_state[WAS_LAST_READ_SUCCESSFUL] = was_successful
+
     def handle(self, message: Message) -> None:
         """
         Implement the reaction to a contract message.
@@ -140,6 +153,8 @@ class ContractHandler(BaseHandler):
         self.context.logger.info(f"Received message: {message}")
         contract_api_msg = cast(ContractApiMessage, message)
         if contract_api_msg.performative != ContractApiMessage.Performative.STATE:
+            # for healthcheck metrics
+            self.set_was_last_read_successful(False)
             self.context.logger.warning(
                 f"Contract API Message performative not recognized: {contract_api_msg.performative}"
             )
@@ -148,23 +163,29 @@ class ContractHandler(BaseHandler):
 
         body = contract_api_msg.state.body
         self._handle_get_undelivered_reqs(body)
-        self.params.in_flight_req = False
+        self.set_was_last_read_successful(True)
         self.on_message_handled(message)
+        self.params.in_flight_req = False
 
     def _handle_get_undelivered_reqs(self, body: Dict[str, Any]) -> None:
         """Handle get undelivered reqs."""
         reqs = body.get("data", [])
         if len(reqs) == 0:
+            # for healthcheck metrics
+            self.set_last_successful_read(self.params.from_block)
             return
 
         self.params.from_block = max([req["block_number"] for req in reqs]) + 1
         self.context.logger.info(f"Received {len(reqs)} new requests.")
+        # for healthcheck metrics
+        self.set_last_successful_read(self.params.from_block)
+        current_tasks = set([task["requestId"] for task in self.pending_tasks] + [task["request_id"] for task in self.context.shared_state[DONE_TASKS]])
         reqs = [
             req
             for req in reqs
-            if req["block_number"] % self.params.num_agents == self.params.agent_index
+            if req["block_number"] % self.params.num_agents == self.params.agent_index and req["requestId"] not in current_tasks
         ]
-        self.context.logger.info(f"Processing only {len(reqs)} of the new requests.")
+        self.context.logger.info(f"Processing only {len(reqs)} of the new requests. {reqs}")
         self.pending_tasks.extend(reqs)
         self.context.logger.info(
             f"Monitoring new reqs from block {self.params.from_block}"
@@ -190,8 +211,7 @@ class LedgerHandler(BaseHandler):
             )
             self.params.in_flight_req = False
             return
-
         block_number = ledger_api_msg.state.body["number"]
         self.params.from_block = block_number - self.params.from_block_range
-        self.params.in_flight_req = False
         self.on_message_handled(message)
+        self.params.in_flight_req = False

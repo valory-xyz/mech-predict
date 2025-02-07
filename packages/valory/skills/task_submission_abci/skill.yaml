@@ -8,30 +8,30 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiholqak7ltw6bbmn2c5tn3j7xgzkdlfzp3kcskiqsvmxoih6m4muq
-  behaviours.py: bafybeiaem6jmknhuthbiud7nrfmqjno7uxdoimhmsr3ovtjybviroksuca
+  behaviours.py: bafybeigtyf6e6xvzme5scvmn3mh7fm5jr7vl473szhwegl6j7ubzkyfkae
   dialogues.py: bafybeibmac3m5u5h6ucoyjr4dazay72dyga656wvjl6z6saapluvjo54ne
   fsm_specification.yaml: bafybeidtmsmpunr3t77pshd3k2s6dd6hlvhze6inu3gj7xyvlg4wi3tnuu
   handlers.py: bafybeibe5n7my2vd2wlwo73sbma65epjqc7kxgtittewlylcmvnmoxtxzq
-  models.py: bafybeicoes4rtg2edxpdxlrow5dmnof2lm6xscagzp55mocrkbxy2xlxwe
+  models.py: bafybeial64x2qjzhxyojlkyea6kpyryqjz32la4pltjqwa4braighea7zi
   payloads.py: bafybeia2yorri2u5rwh6vukb6iwdrbn53ygsuuhthns2txptvjipyb6f4e
-  rounds.py: bafybeig5jg5ouji5xjbovboihjndhyzaioqnc4sqxsemqnt5mol3w4ugcu
+  rounds.py: bafybeicac6eqg7otvvaduzig5dsgsqcqxmv46ajnt6bkau4xj6xcq2tbjy
   tasks.py: bafybeicu5t5cvfhbndgpxbbtmp4vbmtyb6fba6vsnlewftvuderxp5lwcy
 fingerprint_ignore_patterns: []
 connections: []
 contracts:
 - valory/agent_mech:0.1.0:bafybeiah6b5epo2hlvzg5rr2cydgpp2waausoyrpnoarf7oa7bw33rex34
 - valory/agent_registry:0.1.0:bafybeiarzhzs2wm2sl47qg37tqoc3qok54enxlcj6vx3hldozg537uslnq
-- valory/gnosis_safe:0.1.0:bafybeibq77mgzhyb23blf2eqmia3kc6io5karedfzhntvpcebeqdzrgyqa
+- valory/gnosis_safe:0.1.0:bafybeiaw4yr7ubqlp63iz5wxqep3a5fokqs3kqva7sp2nsqg355zzucqgm
 - valory/multisend:0.1.0:bafybeig5byt5urg2d2bsecufxe5ql7f4mezg3mekfleeh32nmuusx66p4y
-- valory/service_registry:0.1.0:bafybeicbxmbzt757lbmyh6762lrkcrp3oeum6dk3z7pvosixasifsk6xlm
+- valory/service_registry:0.1.0:bafybeicky7duncl25yif5gduo7a3ccgbgfo4pkx6rvexooyvzgyomcfuy4
 - valory/hash_checkpoint:0.1.0:bafybeicbycr6rxods7sg3f2qlhgkjqrbh7kymmy2yw7bewxdwjyp7ibtg4
 protocols:
 - valory/acn_data_share:0.1.0:bafybeih5ydonnvrwvy2ygfqgfabkr47s4yw3uqxztmwyfprulwfsoe7ipq
 - valory/contract_api:1.0.0:bafybeidgu7o5llh26xp3u3ebq3yluull5lupiyeu6iooi2xyymdrgnzq5i
 - valory/ledger_api:1.0.0:bafybeihdk6psr4guxmbcrc26jr2cbgzpd5aljkqvpwo64bvaz7tdti2oni
 skills:
-- valory/abstract_round_abci:0.1.0:bafybeiepfm4dz4kwdv7rjozhgekjn6dheft7ca6fih4jj4olhffn2xrhs4
-- valory/transaction_settlement_abci:0.1.0:bafybeiho77x27kfytgjnipcjco3nfhvyfdjr43vxsqmjlig7k2krmckvv4
+- valory/abstract_round_abci:0.1.0:bafybeifb2a7rbveyyu6ireniwtrwfkubyjxojgmjylcy4k525qzq7zcgjm
+- valory/transaction_settlement_abci:0.1.0:bafybeia6h53sknnvku7cwahorb2q6l4ja3dvtdyug4y65j7dtvj2ctceii
 behaviours:
   main:
     args: {}

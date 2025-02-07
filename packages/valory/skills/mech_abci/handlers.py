@@ -357,6 +357,25 @@ class HttpHandler(BaseHttpHandler):
         grace_period = 300  # 5 min
         we_can_get_new_reqs = last_successful_read > time.time() - grace_period
 
+        error = ""
+        if not we_are_delivering:
+            error = (
+                f"The service is failing to deliver responses. "
+                f"Last executed task was at {last_executed_task} and last tx was at {last_tx_made}. "
+                f"Potential reasons this could happen:\n"
+                f"- RPC Issues. Make sure the RPC is working properly, and there are no reverting txs due to GS026.\n"
+                f"- One of the agents has not enough funds to make a tx. Make sure all agents have enough funds. \n"
+            )
+
+        if not we_can_get_new_reqs:
+            error = (
+                f"The service is failing to get new requests. "
+                f"Last successful read was at {last_successful_read}. "
+                f"This is likely happening becuase the service cannot get new requests from the ledger. "
+                f"Make sure the RPC is working properly."
+            )
+
+
         data = {
             "seconds_since_last_transition": seconds_since_last_transition,
             "is_tm_healthy": not is_tm_unhealthy,
@@ -386,6 +405,7 @@ class HttpHandler(BaseHttpHandler):
             else None,
             "queue_size": len(self.context.shared_state.get(PENDING_TASKS, [])),
             "is_ok": (we_are_delivering and we_can_get_new_reqs),
+            "error": error,
         }
 
         self._send_ok_response(http_msg, http_dialogue, data)

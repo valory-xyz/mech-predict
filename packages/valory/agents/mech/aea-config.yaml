@@ -38,12 +38,12 @@ skills:
 - valory/abstract_abci:0.1.0:bafybeihat4giyc4bz6zopvahcj4iw53356pbtwfn7p4d5yflwly2qhahum
 - valory/abstract_round_abci:0.1.0:bafybeiepfm4dz4kwdv7rjozhgekjn6dheft7ca6fih4jj4olhffn2xrhs4
 - valory/contract_subscription:0.1.0:bafybeiefuemlp75obgpxrp6iuleb3hn6vcviwh5oetk5djbuprf4xsmgjy
-- valory/mech_abci:0.1.0:bafybeigofwsa7kt3sp6mnpzhgf5jjts6pxqbv2vmdv3doq4wrsdyqwxb7e
+- valory/mech_abci:0.1.0:bafybeiae62s26l3arsomcbau7dhj36zddjvseia6a4ydis73ev3bkkkbke
 - valory/registration_abci:0.1.0:bafybeiclrvoscx5xarcg5sr7io5hcbhqxx3hjxdkzkomh2dqrsgt7cbncu
 - valory/reset_pause_abci:0.1.0:bafybeicz7p5jdarlq2yubla3korxsaetbpp2g7vaahylpqxy2fjurtfxvq
 - valory/subscription_abci:0.1.0:bafybeiga6qrhlcdd45xj32cptdp2vvezyusgpidyotgpbd73on3uiw7n4m
 - valory/task_execution:0.1.0:bafybeigfdibias4jobov2p62k4zu22gex4ctni2p3ap2iaempcfavcywzu
-- valory/task_submission_abci:0.1.0:bafybeib7nglqubd6fye2eutsiac4wk27uu5o7k47ksxhkrokix7fjlropu
+- valory/task_submission_abci:0.1.0:bafybeih6f4exgckeajcumevozod2gb2fpci7zgz53q7vcf6kyikxcj3g6q
 - valory/termination_abci:0.1.0:bafybeiety5ucnnd245p72i2pfxmuzkwglapglblbldnncozdbrbvx7obiy
 - valory/transaction_settlement_abci:0.1.0:bafybeiho77x27kfytgjnipcjco3nfhvyfdjr43vxsqmjlig7k2krmckvv4
 - valory/websocket_client:0.1.0:bafybeif7rrvsu6z4evqkhblxj3u6wwv2eqou576hgkyoehxuj7cntw7o2m
@@ -204,32 +204,28 @@ models:
       tendermint_max_retries: ${int:5}
       tendermint_url: ${str:http://localhost:26657}
       use_termination: ${bool:false}
-      agent_mech_contract_addresses: ${list:["0xFf82123dFB52ab75C417195c5fDB87630145ae81"]}
       round_timeout_seconds: ${float:30.0}
-      validate_timeout: ${int:1205}
       reset_period_count: ${int:1000}
       on_chain_service_id: ${int:1}
-      agent_registry_address: ${str:0x0000000000000000000000000000000000000000}
+      mech_staking_instance_address: ${str:0x0000000000000000000000000000000000000000}
+      mech_marketplace_address: ${str:0x0000000000000000000000000000000000000000}
+      agent_registry_address: ${str:0xE49CB081e8d96920C38aA7AB90cb0294ab4Bc8EA}
       agent_id: ${int:3}
       metadata_hash: ${str:0000000000000000000000000000000000000000000000000000000000000000}
       share_tm_config_on_startup: ${bool:false}
       multisend_address: ${str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
       service_registry_address: ${str:0x9338b5153AE39BB89f50468E608eD9d764B755fD}
       service_endpoint_base: ${str:https://dummy_service.autonolas.tech/}
-      gas_params:
-        gas_price: ${int:null}
-        max_fee_per_gas: ${int:null}
-        max_priority_fee_per_gas: ${int:null}
       init_fallback_gas: ${int:500000}
       manual_gas_limit: ${int:1000000}
       service_owner_share: ${float:0.1}
       profit_split_freq: ${int:1}
       agent_funding_amount: ${int:200000000000000000}
       minimum_agent_balance: ${int:100000000000000000}
-      retry_attempts: ${int:300}
-      retry_timeout: ${int:1}
       termination_from_block: ${int:0}
-      mech_to_subscription: ${list:[["0x77af31De935740567Cf4fF1986D04B2c964A786a",["0x0000000000000000000000000000000000000000","1"]]]}
+      mech_to_subscription: ${dict:{"0x77af31De935740567Cf4fF1986D04B2c964A786a":{"tokenAddress":"0x0000000000000000000000000000000000000000",
+        "tokenId":"1"},"0xA6bE7Ef2e2FbdA7fB2BfE60726b74A3B2206D67f":{"tokenAddress":"0x0000000000000000000000000000000000000001",
+        "tokenId":"2"}}}
       hash_checkpoint_address: ${str:0x694e62BDF7Ff510A4EE66662cf4866A961a31653}
       setup:
         all_participants: ${list:["0x10E867Ac2Fb0Aa156ca81eF440a5cdf373bE1AaC"]}
@@ -241,21 +237,38 @@ type: skill
 models:
   params:
     args:
-      agent_mech_contract_addresses: ${list:["0xFf82123dFB52ab75C417195c5fDB87630145ae81"]}
       task_deadline: ${float:240.0}
-      file_hash_to_tools_json: ${list:[["bafybeicziwfw7nb7gaxso357hrvtdlv6f23grm2c2rlfngpz4vbvoz2bke",["openai-gpt-3.5-turbo-instruct","openai-gpt-3.5-turbo","openai-gpt-4"]],["bafybeibaalr745aqajcaijykactx2nmg3jviefvnvpuk5kkxlt2yeedc2q",["stabilityai-stable-diffusion-v1-5","stabilityai-stable-diffusion-xl-beta-v2-2-2","stabilityai-stable-diffusion-512-v2-1","stabilityai-stable-diffusion-768-v2-1"]],["bafybeideuyqn4uslp4ccanzd5tjladzotyi6tiwfxbouecw5ufzgyi4ryy",["transfer-native"]],["bafybeig7yntvhhfufaadhd43zr4loivpit43kwfgban72w43xz4u3tansi",["prediction-offline","prediction-online","prediction-online-summarized-info"]],["bafybeiautzxe3faq53ceogfjtfbml5373wvqpsk77c4k3hjivloblivuxy",["prediction-online-sme","prediction-offline-sme"]],["bafybeifp6tn3ovhuz4oipy67ijfdm4y7t2o7en3xuggn6kh5wbwokxmczu",["claude-prediction-online","claude-prediction-offline"]],["bafybeievl777e2425q7zy6qkt26luu2i6xzp4q6pquykntx2yzivy3iwum",["deepmind-optimization-strong","deepmind-optimization"]],["bafybeihsyxhchqgtdwsd53z4a2lswt6ri4fre2yg2bpjo36kwboilsp7ai",["prediction-sentence-embedding-conservative","prediction-sentence-embedding-bold"]],["bafybeial5a56vsowqu4suynnmv5pkt5iebkxtmpgrae57qzi7s6tg4vq6e",["prediction-online-sum-url-content"]]]}
-      api_keys_json: ${list:[["openai", "dummy_api_key"],["stabilityai", "dummy_api_key"],["google_api_key",
-        "dummy_api_key"],["google_engine_id", "dummy_api_key"]]}
+      tools_to_package_hash: ${dict:{"openai-gpt-3.5-turbo-instruct":"bafybeicziwfw7nb7gaxso357hrvtdlv6f23grm2c2rlfngpz4vbvoz2bke",
+        "openai-gpt-3.5-turbo":"bafybeicziwfw7nb7gaxso357hrvtdlv6f23grm2c2rlfngpz4vbvoz2bke",
+        "openai-gpt-4":"bafybeicziwfw7nb7gaxso357hrvtdlv6f23grm2c2rlfngpz4vbvoz2bke",
+        "stabilityai-stable-diffusion-v1-5":"bafybeibaalr745aqajcaijykactx2nmg3jviefvnvpuk5kkxlt2yeedc2q",
+        "stabilityai-stable-diffusion-xl-beta-v2-2-2":"bafybeibaalr745aqajcaijykactx2nmg3jviefvnvpuk5kkxlt2yeedc2q",
+        "stabilityai-stable-diffusion-512-v2-1":"bafybeibaalr745aqajcaijykactx2nmg3jviefvnvpuk5kkxlt2yeedc2q",
+        "stabilityai-stable-diffusion-768-v2-1":"bafybeibaalr745aqajcaijykactx2nmg3jviefvnvpuk5kkxlt2yeedc2q",
+        "transfer-native":"bafybeideuyqn4uslp4ccanzd5tjladzotyi6tiwfxbouecw5ufzgyi4ryy",
+        "prediction-offline":"bafybeig7yntvhhfufaadhd43zr4loivpit43kwfgban72w43xz4u3tansi",
+        "prediction-online":"bafybeig7yntvhhfufaadhd43zr4loivpit43kwfgban72w43xz4u3tansi",
+        "prediction-online-summarized-info":"bafybeig7yntvhhfufaadhd43zr4loivpit43kwfgban72w43xz4u3tansi",
+        "prediction-online-sme":"bafybeiautzxe3faq53ceogfjtfbml5373wvqpsk77c4k3hjivloblivuxy",
+        "prediction-offline-sme":"bafybeiautzxe3faq53ceogfjtfbml5373wvqpsk77c4k3hjivloblivuxy",
+        "claude-prediction-online":"bafybeifp6tn3ovhuz4oipy67ijfdm4y7t2o7en3xuggn6kh5wbwokxmczu",
+        "claude-prediction-offline":"bafybeifp6tn3ovhuz4oipy67ijfdm4y7t2o7en3xuggn6kh5wbwokxmczu",
+        "deepmind-optimization-strong":"bafybeievl777e2425q7zy6qkt26luu2i6xzp4q6pquykntx2yzivy3iwum",
+        "deepmind-optimization":"bafybeievl777e2425q7zy6qkt26luu2i6xzp4q6pquykntx2yzivy3iwum",
+        "prediction-sentence-embedding-conservative":"bafybeihsyxhchqgtdwsd53z4a2lswt6ri4fre2yg2bpjo36kwboilsp7ai",
+        "prediction-sentence-embedding-bold":"bafybeihsyxhchqgtdwsd53z4a2lswt6ri4fre2yg2bpjo36kwboilsp7ai",
+        "prediction-online-sum-url-content":"bafybeial5a56vsowqu4suynnmv5pkt5iebkxtmpgrae57qzi7s6tg4vq6e"}}
+      api_keys: ${dict:{"openai":["dummy_api_key"], "stabilityai":["dummy_api_key"],
+        "google_api_key":["dummy_api_key"], "google_engine_id":["dummy_api_key"]}}
       polling_interval: ${float:30.0}
       agent_index: ${int:0}
       num_agents: ${int:4}
-      max_queue_size: ${int:30}
       from_block_range: ${int:50000}
-      mech_to_config: ${list:[["0xFf82123dFB52ab75C417195c5fDB87630145ae81",["use_dynamic_pricing","false"]]]}
+      mech_marketplace_address: ${str:0x0000000000000000000000000000000000000000}
+      mech_to_config: ${dict:{"0xFf82123dFB52ab75C417195c5fDB87630145ae81":{"use_dynamic_pricing":false,"is_marketplace_mech":false},
+        "0x77af31De935740567Cf4fF1986D04B2c964A786a":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}}
       timeout_limit: ${int:3}
       max_block_window: ${int:500}
-      max_executing_tasks: ${int:4}
-      clear_queue: ${bool:false}
 ---
 public_id: valory/ledger:0.19.0
 type: connection

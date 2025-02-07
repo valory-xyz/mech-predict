@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023-2024 Valory AG
+#   Copyright 2024-2025 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -72,6 +72,7 @@ LEDGER_API_ADDRESS = str(LEDGER_CONNECTION_PUBLIC_ID)
 
 REORG_WINDOW = 200
 
+
 class TaskExecutionBehaviour(SimpleBehaviour):
     """A class to execute tasks."""
 
@@ -99,7 +100,8 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         }
         self._keychain = KeyChain(self.params.api_keys)
         self._executor = {
-            idx: ProcessPoolExecutor(max_workers=1) for idx in range(self.params.max_executing_tasks)
+            idx: ProcessPoolExecutor(max_workers=1)
+            for idx in range(self.params.max_executing_tasks)
         }
 
     def act(self) -> None:
@@ -157,7 +159,11 @@ class TaskExecutionBehaviour(SimpleBehaviour):
     def _is_executing_task_ready(self, req_id: int) -> bool:
         """Check if the executing task is ready."""
         executing_task = self.params.req_id_to_data.get(req_id)
-        async_result = executing_task.get("async_result", None) if executing_task is not None else None
+        async_result = (
+            executing_task.get("async_result", None)
+            if executing_task is not None
+            else None
+        )
         if executing_task is None or async_result is None:
             return False
         return async_result.done()
@@ -208,7 +214,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             self.send_message(ipfs_msg, message, self._handle_get_tool, dummy_req_id)
             return
 
-    def _handle_get_tool(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_get_tool(
+        self, req_id: int, message: IpfsMessage, dialogue: Dialogue
+    ) -> None:
         """Handle get tool response"""
         component_yaml, tool_py, callable_method = ComponentPackageLoader.load(
             message.files
@@ -233,7 +241,10 @@ class TaskExecutionBehaviour(SimpleBehaviour):
 
     def _check_for_new_reqs(self) -> None:
         """Check for new reqs."""
-        if (self.params.in_flight_req and time.time() < self.params.in_flight_req_timeout) or not self._should_poll():
+        if (
+            self.params.in_flight_req
+            and time.time() < self.params.in_flight_req_timeout
+        ) or not self._should_poll():
             # do nothing if there is an in flight request
             # or if we should not poll yet
             return
@@ -274,7 +285,10 @@ class TaskExecutionBehaviour(SimpleBehaviour):
     def _execute_task(self) -> None:
         """Execute tasks."""
         # check if there is a task already executing
-        if self.params.in_flight_req and time.time() < self.params.in_flight_req_timeout:
+        if (
+            self.params.in_flight_req
+            and time.time() < self.params.in_flight_req_timeout
+        ):
             # there is an in flight request
             # self.context.logger.info("Not executing task, in flight request.")
             return
@@ -285,14 +299,18 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         )
         for task_data in self.params.req_id_to_data.values():
             # mark tasks that are pending finalization as invalid if they have timed out
-            if task_data.get("pending_finalization", False) and time.time() > task_data.get("finalization_timeout", 0):
+            if task_data.get(
+                "pending_finalization", False
+            ) and time.time() > task_data.get("finalization_timeout", 0):
                 task_data["is_invalid"] = True
                 pending_finalization = False
                 break
 
         if not pending_finalization:
             for req_id, task_data in self.params.req_id_to_data.items():
-                if self._is_executing_task_ready(req_id) or self._is_task_invalid(req_id):
+                if self._is_executing_task_ready(req_id) or self._is_task_invalid(
+                    req_id
+                ):
                     task_result = self._get_executing_task_result(req_id)
                     task_data["pending_finalization"] = True
                     task_data["finalization_timeout"] = time.time() + 30
@@ -332,9 +350,13 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             ipfs_hash = get_ipfs_file_hash(task_data_)
         except Exception:
             ipfs_hash = "bafybeigatmm7mwx5bx3bbsiouaasbpgnd7a3rrxhzw7eia3w5yj6cvvfxq"
-        self.context.logger.info(f"IPFS hash: {ipfs_hash} {threading.current_thread().name}")
+        self.context.logger.info(
+            f"IPFS hash: {ipfs_hash} {threading.current_thread().name}"
+        )
         ipfs_msg, message = self._build_ipfs_get_file_req(ipfs_hash)
-        self.send_message(ipfs_msg, message, self._handle_get_task, task_data["requestId"])
+        self.send_message(
+            ipfs_msg, message, self._handle_get_task, task_data["requestId"]
+        )
 
     def send_message(
         self, msg: Message, dialogue: Dialogue, callback: Callable, req_id: int
@@ -345,7 +367,6 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         self.context.outbox.put_message(message=msg)
         nonce = dialogue.dialogue_label.dialogue_reference[0]
         self.params.req_to_callback[nonce] = callback, req_id
-
 
     def _handle_done_task(self, req_id: int, task_result: Any) -> None:
         """Handle done tasks"""
@@ -440,7 +461,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         )
         self._handle_done_task(req_id, task_result)
 
-    def _handle_get_task(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_get_task(
+        self, req_id: int, message: IpfsMessage, dialogue: Dialogue
+    ) -> None:
         """Handle the response from ipfs for a task request."""
         executing_task = cast(Dict[str, Any], self.params.req_id_to_data.get(req_id))
         if executing_task is None:
@@ -465,7 +488,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             self.context.logger.warning("Data for task is not valid.")
             executing_task["is_invalid"] = True
 
-    def _submit_task(self, executor_idx: int, fn: Any, *args: Any, **kwargs: Any) -> Future:
+    def _submit_task(
+        self, executor_idx: int, fn: Any, *args: Any, **kwargs: Any
+    ) -> Future:
         """Submit a task."""
         try:
             return self._executor[executor_idx].submit(fn, *args, **kwargs)  # type: ignore
@@ -500,7 +525,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             "model", tool_params.get("default_model", None)
         )
         executing_task = cast(Dict[str, Any], self.params.req_id_to_data[req_id])
-        future = self._submit_task(executing_task["executor_idx"], tool_task.execute, **task_data)
+        future = self._submit_task(
+            executing_task["executor_idx"], tool_task.execute, **task_data
+        )
         executing_task["timeout_deadline"] = time.time() + self.task_deadline
         executing_task["tool"] = task_data["tool"]
         executing_task["model"] = task_data.get(
@@ -560,7 +587,9 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         )
         return message, dialogue
 
-    def _handle_store_response(self, req_id: int, message: IpfsMessage, dialogue: Dialogue) -> None:
+    def _handle_store_response(
+        self, req_id: int, message: IpfsMessage, dialogue: Dialogue
+    ) -> None:
         """Handle the response from ipfs for a store response request."""
         executing_task = cast(Dict[str, Any], self.params.req_id_to_data.get(req_id))
         if executing_task is None:

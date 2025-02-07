@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023-2024 Valory AG
+#   Copyright 2024-2025 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -73,6 +73,7 @@ LAST_SUCCESSFUL_EXECUTED_TASK = "last_successful_executed_task"
 WAS_LAST_READ_SUCCESSFUL = "was_last_read_successful"
 LAST_TX = "last_tx"
 PENDING_TASKS = "pending_tasks"
+
 
 class HttpCode(Enum):
     """Http codes"""
@@ -375,7 +376,6 @@ class HttpHandler(BaseHttpHandler):
                 f"Make sure the RPC is working properly."
             )
 
-
         data = {
             "seconds_since_last_transition": seconds_since_last_transition,
             "is_tm_healthy": not is_tm_unhealthy,
@@ -384,25 +384,31 @@ class HttpHandler(BaseHttpHandler):
             "current_round": current_round,
             "previous_rounds": previous_rounds,
             "is_transitioning_fast": is_transitioning_fast,
-            "last_successful_read": {
-                "block_number": self.last_successful_read[0],
-                "timestamp": self.last_successful_read[1],
-            }
-            if self.last_successful_read
-            else None,
-            "last_successful_executed_task": {
-                "request_id": self.last_successful_executed_task[0],
-                "timestamp": self.last_successful_executed_task[1],
-            }
-            if self.last_successful_executed_task
-            else None,
+            "last_successful_read": (
+                {
+                    "block_number": self.last_successful_read[0],
+                    "timestamp": self.last_successful_read[1],
+                }
+                if self.last_successful_read
+                else None
+            ),
+            "last_successful_executed_task": (
+                {
+                    "request_id": self.last_successful_executed_task[0],
+                    "timestamp": self.last_successful_executed_task[1],
+                }
+                if self.last_successful_executed_task
+                else None
+            ),
             "was_last_read_successful": self.was_last_read_successful,
-            "last_tx": {
-                "tx_hash": self.last_tx[0],
-                "timestamp": self.last_tx[1],
-            }
-            if self.last_tx
-            else None,
+            "last_tx": (
+                {
+                    "tx_hash": self.last_tx[0],
+                    "timestamp": self.last_tx[1],
+                }
+                if self.last_tx
+                else None
+            ),
             "queue_size": len(self.context.shared_state.get(PENDING_TASKS, [])),
             "is_ok": (we_are_delivering and we_can_get_new_reqs),
             "error": error,

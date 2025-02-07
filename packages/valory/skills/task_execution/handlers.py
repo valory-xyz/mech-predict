@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023 Valory AG
+#   Copyright 2023-2025 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -179,13 +179,19 @@ class ContractHandler(BaseHandler):
         self.context.logger.info(f"Received {len(reqs)} new requests.")
         # for healthcheck metrics
         self.set_last_successful_read(self.params.from_block)
-        current_tasks = set([task["requestId"] for task in self.pending_tasks] + [task["request_id"] for task in self.context.shared_state[DONE_TASKS]])
+        current_tasks = set(
+            [task["requestId"] for task in self.pending_tasks]
+            + [task["request_id"] for task in self.context.shared_state[DONE_TASKS]]
+        )
         reqs = [
             req
             for req in reqs
-            if req["block_number"] % self.params.num_agents == self.params.agent_index and req["requestId"] not in current_tasks
+            if req["block_number"] % self.params.num_agents == self.params.agent_index
+            and req["requestId"] not in current_tasks
         ]
-        self.context.logger.info(f"Processing only {len(reqs)} of the new requests. {reqs}")
+        self.context.logger.info(
+            f"Processing only {len(reqs)} of the new requests. {reqs}"
+        )
         self.pending_tasks.extend(reqs)
         self.context.logger.info(
             f"Monitoring new reqs from block {self.params.from_block}"

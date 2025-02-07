@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023-2024 Valory AG
+#   Copyright 2023-2025 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -63,7 +63,8 @@ from packages.valory.skills.task_submission_abci.rounds import (
     TransactionPreparationRound,
 )
 from packages.valory.skills.transaction_settlement_abci.payload_tools import (
-    hash_payload_to_hex, VerificationStatus,
+    hash_payload_to_hex,
+    VerificationStatus,
 )
 
 
@@ -215,7 +216,10 @@ class TaskPoolingBehaviour(TaskExecutionBaseBehaviour, ABC):
         # If the value exists and is not None, we return True, else False
         # ref: https://github.com/valory-xyz/open-autonomy/blob/main/packages/valory/skills/transaction_settlement_abci/rounds.py#L432-L434
         try:
-            if self.synchronized_data.final_verification_status != VerificationStatus.VERIFIED:
+            if (
+                self.synchronized_data.final_verification_status
+                != VerificationStatus.VERIFIED
+            ):
                 return False, None
             final_tx_hash = self.synchronized_data.final_tx_hash
             # added for healthcheck purposes

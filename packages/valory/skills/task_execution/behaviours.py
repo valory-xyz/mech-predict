@@ -290,7 +290,6 @@ class TaskExecutionBehaviour(SimpleBehaviour):
             and time.time() < self.params.in_flight_req_timeout
         ):
             # there is an in flight request
-            # self.context.logger.info("Not executing task, in flight request.")
             return
 
         pending_finalization = any(
@@ -338,13 +337,6 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         task_data["executor_idx"] = executor_idx
         self.context.logger.info(f"Preparing task with data: {task_data}")
         self.params.req_id_to_data[task_data["requestId"]] = task_data
-        # num_pending_tasks = len(self.pending_tasks)
-        # if num_pending_tasks > 30:
-        #     self.context.logger.warning(
-        #         f"Number of pending tasks is {num_pending_tasks}."
-        #     )
-        #     self._invalid_request = True
-        #     return
         task_data_ = task_data["data"]
         try:
             ipfs_hash = get_ipfs_file_hash(task_data_)

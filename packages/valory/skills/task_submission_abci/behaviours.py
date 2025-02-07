@@ -23,7 +23,7 @@ import threading
 import time
 from abc import ABC
 from copy import deepcopy
-from typing import Any, Dict, Generator, List, Optional, Set, Type, cast, Tuple
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Type, cast
 
 import openai  # noqa
 from aea.helpers.cid import CID, to_v1
@@ -63,8 +63,8 @@ from packages.valory.skills.task_submission_abci.rounds import (
     TransactionPreparationRound,
 )
 from packages.valory.skills.transaction_settlement_abci.payload_tools import (
-    hash_payload_to_hex,
     VerificationStatus,
+    hash_payload_to_hex,
 )
 
 

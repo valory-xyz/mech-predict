@@ -20,7 +20,7 @@
 """This module contains the shared state for the abci skill of Mech."""
 import dataclasses
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, cast, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from aea.exceptions import enforce
 from aea.skills.base import Model
@@ -60,11 +60,11 @@ class Params(Model):
         self.api_keys: Dict = self._nested_list_todict_workaround(
             kwargs, "api_keys_json"
         )
-        self.file_hash_to_tools: Dict[str, List[str]] = (
-            self._nested_list_todict_workaround(
-                kwargs,
-                "file_hash_to_tools_json",
-            )
+        self.file_hash_to_tools: Dict[
+            str, List[str]
+        ] = self._nested_list_todict_workaround(
+            kwargs,
+            "file_hash_to_tools_json",
         )
         self.polling_interval = kwargs.get("polling_interval", 30.0)
         self.task_deadline = kwargs.get("task_deadline", 240.0)
@@ -85,7 +85,7 @@ class Params(Model):
         self.mech_to_config: Dict[str, MechConfig] = self._parse_mech_configs(kwargs)
         self.max_queue_size: int = kwargs.get("max_queue_size", 30)
         self.max_executing_tasks: int = kwargs.get("max_executing_tasks", 4)
-        self.req_id_to_data = {}
+        self.req_id_to_data: Dict[int, Any] = {}
         self.clear_queue: bool = kwargs.get("clear_queue", False)
         super().__init__(*args, **kwargs)
 

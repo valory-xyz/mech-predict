@@ -934,11 +934,10 @@ class TransactionPreparationBehaviour(
         tx_hash = cast(str, response.state.body["tx_hash"])[2:]
         return tx_hash
 
-    def _get_agent_mech_deliver_tx(
-        self,
-        task_data: Dict[str, Any],
+    def _get_deliver_tx(
+        self, task_data: Dict[str, Any]
     ) -> Generator[None, None, Optional[Dict]]:
-        """Get the deliver tx for the mech delivery."""
+        """Get the deliver tx."""
         contract_api_msg = yield from self.get_contract_api_response(
             performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
             contract_address=task_data["mech_address"],
@@ -965,54 +964,6 @@ class TransactionPreparationBehaviour(
             "data": data,
             "simulation_ok": simulation_ok,
         }
-
-    def _get_deliver_marketplace_tx(
-        self,
-        task_data: Dict[str, Any],
-    ) -> Generator[None, None, Optional[Dict]]:
-        """Get the deliver tx for the marketplace delivery."""
-        contract_api_msg = yield from self.get_contract_api_response(
-            performative=ContractApiMessage.Performative.GET_STATE,  # type: ignore
-            contract_address=task_data["mech_address"],
-            contract_id=str(AgentMechContract.contract_id),
-            contract_callable="get_deliver_to_market_tx",
-            request_id=task_data["request_id"],
-            sender_address=self.synchronized_data.safe_contract_address,
-            data=task_data["task_result"],
-            mech_staking_instance=self.params.mech_staking_instance_address,
-            mech_service_id=self.params.on_chain_service_id,
-        )
-        if (
-            contract_api_msg.performative != ContractApiMessage.Performative.STATE
-        ):  # pragma: nocover
-            self.context.logger.warning(
-                f"get_deliver_data unsuccessful!: {contract_api_msg}"
-            )
-            return None
-
-        data = cast(bytes, contract_api_msg.state.body["data"])
-        simulation_ok = cast(bool, contract_api_msg.state.body["simulation_ok"])
-
-        return {
-            "to": task_data["mech_address"],
-            "value": ZERO_ETHER_VALUE,
-            "data": data,
-            "simulation_ok": simulation_ok,
-        }
-
-    def _get_deliver_tx(
-        self, task_data: Dict[str, Any]
-    ) -> Generator[None, None, Optional[Dict]]:
-        """Get the deliver tx."""
-        is_marketplace_mech = task_data.get("is_marketplace_mech", False)
-        request_id = task_data["request_id"]
-        if is_marketplace_mech:
-            self.context.logger.info(
-                f"Delivering reqId {request_id} to marketplace mech contract."
-            )
-            return self._get_deliver_marketplace_tx(task_data)
-
-        return self._get_agent_mech_deliver_tx(task_data)
 
 
 class TaskSubmissionRoundBehaviour(AbstractRoundBehaviour):

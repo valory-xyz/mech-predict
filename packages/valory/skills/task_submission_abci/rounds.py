@@ -22,6 +22,8 @@ import json
 from enum import Enum
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, cast
 
+from packages.valory.skills.transaction_settlement_abci.payload_tools import VerificationStatus
+
 from packages.valory.skills.abstract_round_abci.base import (
     AbciApp,
     AbciAppTransitionFunction,
@@ -36,9 +38,6 @@ from packages.valory.skills.abstract_round_abci.base import (
 from packages.valory.skills.task_submission_abci.payloads import (
     TaskPoolingPayload,
     TransactionPayload,
-)
-from packages.valory.skills.transaction_settlement_abci.payload_tools import (
-    VerificationStatus,
 )
 
 

@@ -20,13 +20,13 @@ contracts: []
 protocols:
 - valory/http:1.0.0:bafybeifugzl63kfdmwrxwphrnrhj7bn6iruxieme3a4ntzejf6kmtuwmae
 skills:
-- valory/abstract_round_abci:0.1.0:bafybeifb2a7rbveyyu6ireniwtrwfkubyjxojgmjylcy4k525qzq7zcgjm
-- valory/registration_abci:0.1.0:bafybeibcgr3ovmv4qd6hqprytkkpgc6akldgrst7yjgzg2fwhrebodvexe
-- valory/reset_pause_abci:0.1.0:bafybeigbeu4aji4bqkl2nttkuymufkawfdglkyvxev7njruqhmnozsriku
-- valory/task_submission_abci:0.1.0:bafybeihh4snbd2ej2yhx7azd72gc7uebwn3br64vlosezrd6naioud6bgm
-- valory/termination_abci:0.1.0:bafybeibvx4fczfojbcwlkh6pmxckschuxhllepfo6ruvneajkhmuprxxve
-- valory/transaction_settlement_abci:0.1.0:bafybeia6h53sknnvku7cwahorb2q6l4ja3dvtdyug4y65j7dtvj2ctceii
-- valory/subscription_abci:0.1.0:bafybeifd2sp5p4rav5z65iju3nh5ypz25cn2xvysdvjszaxpu2m45zwgju
+- valory/abstract_round_abci:0.1.0:bafybeiepfm4dz4kwdv7rjozhgekjn6dheft7ca6fih4jj4olhffn2xrhs4
+- valory/registration_abci:0.1.0:bafybeiclrvoscx5xarcg5sr7io5hcbhqxx3hjxdkzkomh2dqrsgt7cbncu
+- valory/reset_pause_abci:0.1.0:bafybeicz7p5jdarlq2yubla3korxsaetbpp2g7vaahylpqxy2fjurtfxvq
+- valory/task_submission_abci:0.1.0:bafybeiheedvg7xkfoktnsizuuxeruehublgdn3blcvtgrjgk6nusjza5pm
+- valory/termination_abci:0.1.0:bafybeiety5ucnnd245p72i2pfxmuzkwglapglblbldnncozdbrbvx7obiy
+- valory/transaction_settlement_abci:0.1.0:bafybeiho77x27kfytgjnipcjco3nfhvyfdjr43vxsqmjlig7k2krmckvv4
+- valory/subscription_abci:0.1.0:bafybeievufepx3n3l2wtqeyli53fm7foqngxyha5abssfu5azcj7bc3f34
 behaviours:
   main:
     args: {}
@@ -172,7 +172,10 @@ models:
       serious_slash_unit_amount: 8000000000000000
       agent_funding_amount: 200000000000000000
       minimum_agent_balance: 100000000000000000
-      mech_to_subscription: {}
+      mech_to_subscription:
+      - - '0x77af31De935740567Cf4fF1986D04B2c964A786a'
+        - - '0x0000000000000000000000000000000000000000'
+          - '1'
       service_endpoint_base: https://dummy_service.autonolas.tech/
     class_name: Params
   randomness_api:

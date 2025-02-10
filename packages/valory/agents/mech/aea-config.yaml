@@ -38,12 +38,12 @@ skills:
 - valory/abstract_abci:0.1.0:bafybeieo7pe5wqjphs5izpz5aujjbubymlxub62b3rhx6yglu65ibalffu
 - valory/abstract_round_abci:0.1.0:bafybeifb2a7rbveyyu6ireniwtrwfkubyjxojgmjylcy4k525qzq7zcgjm
 - valory/contract_subscription:0.1.0:bafybeiefuemlp75obgpxrp6iuleb3hn6vcviwh5oetk5djbuprf4xsmgjy
-- valory/mech_abci:0.1.0:bafybeibfzunoprdixyijwnfbc4z33mtjefxoh5q5q2k4i6ufmpxzf7so4e
+- valory/mech_abci:0.1.0:bafybeih5kiulghpem6kerhh577r3wfpl7denhtvk7lplbd4tahgcqyhmha
 - valory/registration_abci:0.1.0:bafybeibcgr3ovmv4qd6hqprytkkpgc6akldgrst7yjgzg2fwhrebodvexe
 - valory/reset_pause_abci:0.1.0:bafybeigbeu4aji4bqkl2nttkuymufkawfdglkyvxev7njruqhmnozsriku
-- valory/subscription_abci:0.1.0:bafybeihav6zh33z4d7yssutbcuvefzinlpeog5deedxduazialqfvppmla
-- valory/task_execution:0.1.0:bafybeiaueqdhoe4e37euwbleguke37h3id3mrrjmgacpzuz662cza76wsu
-- valory/task_submission_abci:0.1.0:bafybeiaybtgkzh776ojytxar6dvbs7msugrx34k3u5sphomkqyylsrzplm
+- valory/subscription_abci:0.1.0:bafybeifd2sp5p4rav5z65iju3nh5ypz25cn2xvysdvjszaxpu2m45zwgju
+- valory/task_execution:0.1.0:bafybeifhidytmxr4slfelidtnrm33e5k5pxrz4ehrg5f6ueeczpbvuoze4
+- valory/task_submission_abci:0.1.0:bafybeihh4snbd2ej2yhx7azd72gc7uebwn3br64vlosezrd6naioud6bgm
 - valory/termination_abci:0.1.0:bafybeibvx4fczfojbcwlkh6pmxckschuxhllepfo6ruvneajkhmuprxxve
 - valory/transaction_settlement_abci:0.1.0:bafybeia6h53sknnvku7cwahorb2q6l4ja3dvtdyug4y65j7dtvj2ctceii
 - valory/websocket_client:0.1.0:bafybeif7rrvsu6z4evqkhblxj3u6wwv2eqou576hgkyoehxuj7cntw7o2m
@@ -224,8 +224,7 @@ models:
       minimum_agent_balance: ${int:100000000000000000}
       termination_from_block: ${int:0}
       mech_to_subscription: ${dict:{"0x77af31De935740567Cf4fF1986D04B2c964A786a":{"tokenAddress":"0x0000000000000000000000000000000000000000",
-        "tokenId":"1"},"0xA6bE7Ef2e2FbdA7fB2BfE60726b74A3B2206D67f":{"tokenAddress":"0x0000000000000000000000000000000000000001",
-        "tokenId":"2"}}}
+        "tokenId":"1"}}}
       hash_checkpoint_address: ${str:0x694e62BDF7Ff510A4EE66662cf4866A961a31653}
       setup:
         all_participants: ${list:["0x10E867Ac2Fb0Aa156ca81eF440a5cdf373bE1AaC"]}

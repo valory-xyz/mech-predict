@@ -17,6 +17,7 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
+import logging
 import os
 import time
 
@@ -25,18 +26,18 @@ import requests
 from propel_client.propel import PropelClient
 from propel_client.propel import CredentialStorage
 
-agent_urls = [
-    "https://bbc9b272e8601990.agent.propel.autonolas.tech/healthcheck",
-    "https://683dcd5c4524ed21.agent.propel.autonolas.tech/healthcheck",
-    "https://56523691161fd4ed.agent.propel.autonolas.tech/healthcheck",
-    "https://26c5a45d2f1d8b31.agent.propel.autonolas.tech/healthcheck",
-]
-keys = [
-    169,
-    170,
-    171,
-    172
-]
+logger = logging.getLogger(__name__)
+
+key_to_agent_url = {
+    169: "https://bbc9b272e8601990.agent.propel.autonolas.tech/healthcheck",
+    170: "https://56523691161fd4ed.agent.propel.autonolas.tech/healthcheck",
+    171: "https://683dcd5c4524ed21.agent.propel.autonolas.tech/healthcheck",
+    172: "https://26c5a45d2f1d8b31.agent.propel.autonolas.tech/healthcheck",
+}
+agent_url_to_key = {v: k for k, v in key_to_agent_url.items()}
+
+agent_urls = list(key_to_agent_url.values())
+keys = list(key_to_agent_url.keys())
 
 username = os.getenv("PROPEL_USERNAME")
 password = os.getenv("PROPEL_PASSWORD")
@@ -66,6 +67,13 @@ def get_agents():
     return agent_ids
 
 
+def get_agent_id(key: int):
+    """Get the agent id from the key"""
+    propel_client = get_propel()
+    agent_id = [agent["id"] for agent in propel_client.agents_list() if agent["key"] == key]
+    return agent_id[0]
+
+
 def restart_service():
     """Restarting the service"""
     propel_client = get_propel()
@@ -87,7 +95,14 @@ while True:
 
             data = res.json()
             if data["last_successful_executed_task"]["timestamp"] < time.time() - 600 and data["queue_size"] > 25:
-                print(f"Restarting service, agent={agent_url} is not executing.")
+                agent_id = get_agent_id(agent_url_to_key[agent_url])
+                logger.warning(
+                    f"Restarting service, agent={agent_id} with healthcheck={agent_url} is not executing task. "
+                    f"This is likely related to issues with some external APIs the agent is using. "
+                    f"Please check that the RPC is working as expected, that means that its returning a response in a timely manner. "
+                    f"Make sure the IPFS is working as expected, that means that its returning a response in a timely manner. "
+                    f"Make sure there are no issues with APIs used for tasks, example: OpenAI, Claude, Google Search, Serper, etc."
+                )
                 restart_service()
                 time.sleep(600)
 
@@ -107,9 +122,14 @@ while True:
         # at least one of the agents is in registration
         if average_period_count > 5:
             # period count average is more than 5, meaning registration should've finished, hence one agent is stuck
+            logger.warning(
+                f"One of the agents has crashed, and is stuck in registration_startup_round. "
+                f"Restarting all agents s.t. the service can continue working normally. "
+            )
+            logger.info(f"Agents data: {agents_to_data}")
             restart_service()
             time.sleep(600)
             continue
 
     except Exception as e:
-        print(e)
+        logger.exception(e)

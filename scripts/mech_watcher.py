@@ -28,16 +28,23 @@ from propel_client.propel import CredentialStorage
 
 logger = logging.getLogger(__name__)
 
-key_to_agent_url = {
+key_to_agent_url_mech_predict = {
     169: "https://bbc9b272e8601990.agent.propel.autonolas.tech/healthcheck",
     170: "https://56523691161fd4ed.agent.propel.autonolas.tech/healthcheck",
     171: "https://683dcd5c4524ed21.agent.propel.autonolas.tech/healthcheck",
     172: "https://26c5a45d2f1d8b31.agent.propel.autonolas.tech/healthcheck",
 }
-agent_url_to_key = {v: k for k, v in key_to_agent_url.items()}
+key_to_agent_url_mech_marketplace = {
+    305: "https://8aac3a49d4ee162a.agent.propel.autonolas.tech/healthcheck",
+    319: "https://3f937d50881d3919.agent.propel.autonolas.tech/healthcheck",
+    320: "https://0ad6d33fa06f4fcb.agent.propel.autonolas.tech/healthcheck",
+    321: "https://bbbc5776f825edf3.agent.propel.autonolas.tech/healthcheck",
+}
 
-agent_urls = list(key_to_agent_url.values())
-keys = list(key_to_agent_url.keys())
+services = {
+    "mech_predict": key_to_agent_url_mech_predict,
+    "mech_marketplace": key_to_agent_url_mech_marketplace,
+}
 
 username = os.getenv("PROPEL_USERNAME")
 password = os.getenv("PROPEL_PASSWORD")
@@ -60,9 +67,10 @@ def get_propel(retries = 0):
             raise e
         return get_propel(retries + 1)
 
-def get_agents():
+def get_agents(service_id: str):
     """Get the agents from the key ids"""
     propel_client = get_propel()
+    keys = list(services[service_id].keys())
     agent_ids = [agent["id"] for agent in propel_client.agents_list() if agent["key"] in keys]
     return agent_ids
 
@@ -74,10 +82,10 @@ def get_agent_id(key: int):
     return agent_id[0]
 
 
-def restart_service():
+def restart_service(service_id: str):
     """Restarting the service"""
     propel_client = get_propel()
-    agent_ids = get_agents()
+    agent_ids = get_agents(service_id)
     for agent_id in agent_ids:
         print(f"Restating {agent_id=}")
         propel_client.agents_restart(agent_id)
@@ -86,50 +94,53 @@ def restart_service():
 while True:
     try:
         time.sleep(15)
+        for service_id, key_to_agent_urls in services.items():
+            agent_urls = key_to_agent_urls.values()
+            agent_url_to_key = {url: key for key, url in key_to_agent_urls.items()}
+            agents_to_data = {}
+            for agent_url in agent_urls:
+                res = requests.get(agent_url)
+                if res.status_code != 200:
+                    continue
 
-        agents_to_data = {}
-        for agent_url in agent_urls:
-            res = requests.get(agent_url)
-            if res.status_code != 200:
+                data = res.json()
+                if data["last_successful_executed_task"]["timestamp"] < time.time() - 600 and data["queue_size"] > 25:
+                    agent_id = get_agent_id(agent_url_to_key[agent_url])
+                    logger.warning(
+                        f"Restarting service, agent={agent_id} with healthcheck={agent_url} is not executing task. "
+                        f"This is likely related to issues with some external APIs the agent is using. "
+                        f"Please check that the RPC is working as expected, that means that its returning a response in a timely manner. "
+                        f"Make sure the IPFS is working as expected, that means that its returning a response in a timely manner. "
+                        f"Make sure there are no issues with APIs used for tasks, example: OpenAI, Claude, Google Search, Serper, etc."
+                    )
+                    restart_service(service_id)
+                    time.sleep(600)
+
+                agents_to_data[agent_url] = data
+
+            agents_in_registration = sum([
+                data["current_round"] == "registration_startup_round"
+                for data in agents_to_data.values()
+            ])
+            average_period_count = sum([data["period"] for data in agents_to_data.values()]) / len(agents_to_data)
+
+            # check if any agent's current round is registration_startup_round
+            if agents_in_registration == 0 or agents_in_registration == len(agents_to_data):
+                # all agents are in registration_startup_round, skip
+                logger.info("All agents operating normally.")
                 continue
 
-            data = res.json()
-            if data["last_successful_executed_task"]["timestamp"] < time.time() - 600 and data["queue_size"] > 25:
-                agent_id = get_agent_id(agent_url_to_key[agent_url])
+            # at least one of the agents is in registration
+            if average_period_count > 5:
+                # period count average is more than 5, meaning registration should've finished, hence one agent is stuck
                 logger.warning(
-                    f"Restarting service, agent={agent_id} with healthcheck={agent_url} is not executing task. "
-                    f"This is likely related to issues with some external APIs the agent is using. "
-                    f"Please check that the RPC is working as expected, that means that its returning a response in a timely manner. "
-                    f"Make sure the IPFS is working as expected, that means that its returning a response in a timely manner. "
-                    f"Make sure there are no issues with APIs used for tasks, example: OpenAI, Claude, Google Search, Serper, etc."
+                    f"One of the agents has crashed, and is stuck in registration_startup_round. "
+                    f"Restarting all agents s.t. the service can continue working normally. "
                 )
-                restart_service()
+                logger.info(f"Agents data: {agents_to_data}")
+                restart_service(service_id)
                 time.sleep(600)
-
-            agents_to_data[agent_url] = data
-
-        agents_in_registration = sum([
-            data["current_round"] == "registration_startup_round"
-            for data in agents_to_data.values()
-        ])
-        average_period_count = sum([data["period"] for data in agents_to_data.values()]) / len(agents_to_data)
-
-        # check if any agent's current round is registration_startup_round
-        if agents_in_registration == 0 or agents_in_registration == len(agents_to_data):
-            # all agents are in registration_startup_round, skip
-            continue
-
-        # at least one of the agents is in registration
-        if average_period_count > 5:
-            # period count average is more than 5, meaning registration should've finished, hence one agent is stuck
-            logger.warning(
-                f"One of the agents has crashed, and is stuck in registration_startup_round. "
-                f"Restarting all agents s.t. the service can continue working normally. "
-            )
-            logger.info(f"Agents data: {agents_to_data}")
-            restart_service()
-            time.sleep(600)
-            continue
+                continue
 
     except Exception as e:
         logger.exception(e)

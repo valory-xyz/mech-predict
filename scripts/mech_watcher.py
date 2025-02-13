@@ -27,6 +27,7 @@ from propel_client.propel import PropelClient
 from propel_client.propel import CredentialStorage
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 key_to_agent_url_mech_predict = {
     169: "https://bbc9b272e8601990.agent.propel.autonolas.tech/healthcheck",
@@ -84,6 +85,7 @@ def get_agent_id(key: int):
 
 def restart_service(service_id: str):
     """Restarting the service"""
+    print(f"Restarting {service_id=}")
     propel_client = get_propel()
     agent_ids = get_agents(service_id)
     for agent_id in agent_ids:
@@ -104,7 +106,12 @@ while True:
                     continue
 
                 data = res.json()
-                if data["last_successful_executed_task"]["timestamp"] < time.time() - 600 and data["queue_size"] > 25:
+                if data is None:
+                    continue
+                if (
+                    data.get("last_successful_executed_task", {}).get("timestamp", float("inf")) < time.time() - 600
+                    and data.get("queue_size", 0) > 25
+                ):
                     agent_id = get_agent_id(agent_url_to_key[agent_url])
                     logger.warning(
                         f"Restarting service, agent={agent_id} with healthcheck={agent_url} is not executing task. "
@@ -133,11 +140,15 @@ while True:
             # at least one of the agents is in registration
             if average_period_count > 5:
                 # period count average is more than 5, meaning registration should've finished, hence one agent is stuck
+                agent_id_to_data = {
+                    get_agent_id(agent_url_to_key[agent_url]): data
+                    for agent_url, data in agents_to_data.items()
+                }
                 logger.warning(
                     f"One of the agents has crashed, and is stuck in registration_startup_round. "
                     f"Restarting all agents s.t. the service can continue working normally. "
+                    f"Agent data: {agent_id_to_data}"
                 )
-                logger.info(f"Agents data: {agents_to_data}")
                 restart_service(service_id)
                 time.sleep(600)
                 continue

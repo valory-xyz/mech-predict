@@ -154,7 +154,7 @@ Now, you have two options to run the worker: as a standalone agent or as a servi
 
 #### Configuration of the service
 
-First, you need to configure the worker service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
+First, you need to configure the service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
 
 ```bash
 # Copy the prefilled template

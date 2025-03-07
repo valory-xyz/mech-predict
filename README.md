@@ -195,6 +195,9 @@ You may customize the agent's behaviour by setting these environment variables.
 /!\ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract.
 
+If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
+Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
+
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 
 #### Running the service 

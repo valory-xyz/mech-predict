@@ -216,15 +216,16 @@ The rest of the common environment variables are present in the [service.yaml](h
 
 3. Run the service:
 
-    ```bash
+    ```
     bash run_service.sh
     ```
 
-4. Build the docker container: copy the four letters word in the folder `abci_build_{word}` in the `mech` folder and run the following:
+4. Build the docker container by running the following:
 
 ```
 cd mech
-autonomy deploy run --build-dir abci_build_{word} 
+build_dir=$(ls -d abci_build_????/ 2>/dev/null || echo "abci_build")
+autonomy deploy run --build-dir $build_dir
 ```
 
 where word is replaced by this four letters word.
@@ -232,6 +233,7 @@ where word is replaced by this four letters word.
 5. In a separate terminal, run the following to see the logs:
 
 ```
+container = $()
 docker logs -f mech{word}_abci_0
 ```
 
@@ -247,19 +249,19 @@ The variables to change are the same as for the [service](#configuration-of-the-
 
 1. Ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
 
-   ```bash
+   ```
    autonomy generate-key ethereum 
    ```
 
 2. From one terminal, run the agent:
 
-    ```bash
+    ```
     bash run_agent.sh
     ```
 
 3. From another terminal, run the Tendermint node:
 
-    ```bash
+    ```
     bash run_tm.sh
     ```
 

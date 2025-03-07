@@ -192,6 +192,8 @@ You may customize the agent's behaviour by setting these environment variables.
 | `CHECKPOINT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of a contract recording metadata.                                         |
 
 /!\ The variables ETHEREUM_LEDGER_RPC_0 and GNOSIS_RPC_0 are expected to be identical.
+/!\ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
+to the address of the Mech contract.
 
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 

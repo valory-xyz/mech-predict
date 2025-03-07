@@ -144,7 +144,17 @@ The old repo is no longer the recommended approach for running and extending the
 
 Follow the instructions below to run the AI Mech demo executing the tool in `./packages/valory/customs/openai_request.py`. Note that AI Mechs can be configured to work in two modes: *polling mode*, which periodically reads the chain, and *websocket mode*, which receives event updates from the chain. The default mode used by the demo is *polling*.
 
-First, you need to configure the worker service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
+> **Warning**<br />
+> **The demo service is configured to match a specific on-chain agent (ID 3 on [Mech Hub](https://aimechs.autonolas.network/registry)). Since you will not have access to its private key, your local instance will not be able to transact.
+> However, it will be able to receive Requests for AI tasks [sent from Mech Hub](https://aimechs.autonolas.network/mech). These Requests will be executed by your local instance, but you will notice that a failure will occur when it tries to submit the transaction on-chain (Deliver type).**
+
+Now, you have two options to run the worker: as a standalone agent or as a service.
+
+### Option 1: Run the Mech as a service
+
+#### Configuration of the service
+
+First, you need to configure the service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
 
 ```bash
 # Copy the prefilled template
@@ -155,6 +165,12 @@ cp .example.env .1env
 # Source the env file
 source .1env
 ```
+
+Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+
+    ```bash
+    autonomy generate-key ethereum -n 1
+    ```
 
 ##### Environment Variables
 
@@ -169,55 +185,83 @@ You may customize the agent's behaviour by setting these environment variables.
 | `MECH_MARKETPLACE_ADDRESS` | `str`  | `"0x4554fE75c1f5576c1d7F765B2A036c199Adae329"`                                                                                                                                                                                                                      | Marketplace for posting and delivering requests served by agent mechs. |
 | `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x77af31De935740567Cf4fF1986D04B2c964A786a":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
 | `MECH_TO_CONFIG`           | `dict` | `{"0xFf82123dFB52ab75C417195c5fDB87630145ae81":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
- 
+| `ON_CHAIN_SERVICE_ID`           | `int` | 1966                                                                                                                                                          | The id of the service in Olas Service Registry                                          |
+| `NUM_AGENTS`           | `int` | 4                                                                                                                                                          | Number of workers in the service.                                         |
+| `ETHEREUM_LEDGER_RPC_0`           | `str` | `https://nd-549-204-122.p2pify.com/ad3676fcfec45f3cc967a3260f556e74`                                                                                                                                                          | RPC for ethereum.                                         |
+| `GNOSIS_RPC_0`           | `str` | `https://nd-549-204-122.p2pify.com/ad3676fcfec45f3cc967a3260f556e74`                                                                                                                                                          | RPC for ethereum.                                         |
+| `ETHEREUM_WEBSOCKET_RPC_0`           | `str` | `wss://rpc.gnosischain.com/wss`                                                                                                                                                          | Websockets.                                         |
+| `ETHEREUM_LEDGER_CHAIN_ID`           | `str` | 100                                                                                                                                                          | The id of the chain.                                         |
+| `ALL_PARTICIPANTS`           | `list` | `'["0x6A69696C29808F0A6638230fC0Cc752080c5dd7F"]'`                                                                                                                                                         | The list of addresses of workers.                                         |
+| `RESET_PAUSE_DURATION`           | `int` | 100                                                                                                                                                         | The list of addresses of workers.                                         |
+| `SAFE_CONTRACT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of the service's safe contract.                                         |
+| `CHECKPOINT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of a contract recording metadata.                                         |
+
+⚠️ The variables ETHEREUM_LEDGER_RPC_0 and GNOSIS_RPC_0 are expected to be identical.
+
+⚠️ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
+to the address of the Mech contract.
+
+If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
+Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
+
+Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent address as in `keys.json`.
+
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 
+#### Running the service 
 
-> **Warning**<br />
-> **The demo service is configured to match a specific on-chain agent (ID 3 on [Mech Hub](https://aimechs.autonolas.network/registry)). Since you will not have access to its private key, your local instance will not be able to transact.
-> However, it will be able to receive Requests for AI tasks [sent from Mech Hub](https://aimechs.autonolas.network/mech). These Requests will be executed by your local instance, but you will notice that a failure will occur when it tries to submit the transaction on-chain (Deliver type).**
 
-Now, you have two options to run the worker: as a standalone agent or as a service.
+1. Run the service:
 
-### Option 1: Run the Mech as a standalone agent
+    ```
+    bash run_service.sh
+    ```
 
-1. Ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+2. Build the docker container by running the following:
 
-   ```bash
+```
+cd mech
+build_dir=$(ls -d abci_build_????/ 2>/dev/null || echo "abci_build")
+autonomy deploy run --build-dir $build_dir
+```
+
+where word is replaced by this four letters word.
+
+3. In a separate terminal, run the following to see the logs:
+
+```
+container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
+container = "mech${container}_abci_0"
+docker logs -f container
+```
+
+### Option 2: Run the Mech as a standalone agent
+
+#### Configuration of the agent
+
+First, ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+
+   ```
    autonomy generate-key ethereum 
    ```
 
-2. From one terminal, run the agent:
+Then you need to configure the agent, by adding parameters to the `packages/valory/agents/mech/aea-config.yaml` file. 
+The variables to change are the same as for the [service](#configuration-of-the-service). In this file you can also find other variables which can be customized.
 
-    ```bash
+#### Running the agent 
+
+1. From one terminal, run the agent:
+
+    ```
     bash run_agent.sh
     ```
 
-3. From another terminal, run the Tendermint node:
+2. From another terminal, run the Tendermint node:
 
-    ```bash
+    ```
     bash run_tm.sh
     ```
 
-### Option 2: Run the Mech as an agent service
-
-1. Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
-
-    ```bash
-    autonomy generate-key ethereum -n 1
-    ```
-
-2. Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the agent address from `keys.json`:
-
-   ```bash
-   ALL_PARTICIPANTS='["your_agent_address"]'
-   ```
-
-3. Run, the service:
-
-    ```bash
-    bash run_service.sh
-    ```
 
 ## Integrating mechs into your application
 

@@ -150,7 +150,7 @@ Follow the instructions below to run the AI Mech demo executing the tool in `./p
 
 Now, you have two options to run the worker: as a standalone agent or as a service.
 
-### Option 1: Run the Mech as an agent service
+### Option 1: Run the Mech as a service
 
 #### Configuration of the service
 

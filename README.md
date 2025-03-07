@@ -166,6 +166,12 @@ cp .example.env .1env
 source .1env
 ```
 
+Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+
+    ```bash
+    autonomy generate-key ethereum -n 1
+    ```
+
 ##### Environment Variables
 
 You may customize the agent's behaviour by setting these environment variables.
@@ -198,29 +204,20 @@ to the address of the Mech contract.
 If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
 Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
 
+Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent address as in `keys.json`.
+
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 
 #### Running the service 
 
-1. Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
 
-    ```bash
-    autonomy generate-key ethereum -n 1
-    ```
-
-2. Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent address as in `keys.json`:
-
-   ```bash
-   ALL_PARTICIPANTS='["your_agent_address"]'
-   ```
-
-3. Run the service:
+1. Run the service:
 
     ```
     bash run_service.sh
     ```
 
-4. Build the docker container by running the following:
+2. Build the docker container by running the following:
 
 ```
 cd mech
@@ -230,7 +227,7 @@ autonomy deploy run --build-dir $build_dir
 
 where word is replaced by this four letters word.
 
-5. In a separate terminal, run the following to see the logs:
+3. In a separate terminal, run the following to see the logs:
 
 ```
 container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')

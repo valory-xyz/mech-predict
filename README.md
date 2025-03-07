@@ -190,8 +190,9 @@ You may customize the agent's behaviour by setting these environment variables.
 | `SAFE_CONTRACT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of the service's safe contract.                                         |
 | `CHECKPOINT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of a contract recording metadata.                                         |
 
-/!\ The variables ETHEREUM_LEDGER_RPC_0 and GNOSIS_RPC_0 are expected to be identical.
-/!\ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
+⚠️ The variables ETHEREUM_LEDGER_RPC_0 and GNOSIS_RPC_0 are expected to be identical.
+
+⚠️ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract.
 
 If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
@@ -232,33 +233,33 @@ where word is replaced by this four letters word.
 5. In a separate terminal, run the following to see the logs:
 
 ```
-container = $()
-docker logs -f mech{word}_abci_0
+container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
+container = "mech${container}_abci_0"
+docker logs -f container
 ```
 
 ### Option 2: Run the Mech as a standalone agent
 
 #### Configuration of the agent
 
-First, you need to configure the agent, by adding parameters to the `packages/valory/agents/mech/aea-config.yaml` file. 
-The variables to change are the same as for the [service](#configuration-of-the-service). In this file you can also find other variables which can be customized.
-
-#### Running the agent 
-
-
-1. Ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+First, ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
 
    ```
    autonomy generate-key ethereum 
    ```
 
-2. From one terminal, run the agent:
+Then you need to configure the agent, by adding parameters to the `packages/valory/agents/mech/aea-config.yaml` file. 
+The variables to change are the same as for the [service](#configuration-of-the-service). In this file you can also find other variables which can be customized.
+
+#### Running the agent 
+
+1. From one terminal, run the agent:
 
     ```
     bash run_agent.sh
     ```
 
-3. From another terminal, run the Tendermint node:
+2. From another terminal, run the Tendermint node:
 
     ```
     bash run_tm.sh

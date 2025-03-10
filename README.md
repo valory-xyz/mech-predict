@@ -144,16 +144,35 @@ The old repo is no longer the recommended approach for running and extending the
 
 Follow the instructions below to run the AI Mech demo executing the tool in `./packages/valory/customs/openai_request.py`. Note that AI Mechs can be configured to work in two modes: *polling mode*, which periodically reads the chain, and *websocket mode*, which receives event updates from the chain. The default mode used by the demo is *polling*.
 
-First, you need to configure the worker service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
+> **Warning**<br />
+> ** You won't be able to run the Mech with the configurations displayed below (in particular since you will not have access to the private key for the agent address displayed), and will need to adjust them.
+
+Now, you have two options to run the worker: as a standalone agent or as a service.
+
+### Option 1: Run the Mech as a service
+
+#### Configuration of the service
+
+First, you need to configure the service. 
+
+Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+
+    ```bash
+    autonomy generate-key ethereum -n 1
+    ```
+
+Replace the address by your own agent address and the private key by the one of this address.
+
+You need to create a `.agentenv` file which contains the service configuration parameters. We provide a prefilled template (`.example_agent.env`). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
 
 ```bash
 # Copy the prefilled template
-cp .example.env .1env
+cp .example_agent.env .agentenv
 
 # Edit ".1env" and replace "dummy_api_key" with your OpenAI API key.
 
 # Source the env file
-source .1env
+source .agentenv
 ```
 
 ##### Environment Variables
@@ -162,62 +181,99 @@ You may customize the agent's behaviour by setting these environment variables.
  
 | Name                       | Type   | Sample Value                                                                                                                                                                                                                                                        | Description                                                            |
 | -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `TOOLS_TO_PACKAGE_HASH`    | `dict` | `{"openai-gpt-3.5-turbo-instruct":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-3.5-turbo":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-4":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq"}` | Tracks services for each tool packages.                                |
-| `API_KEYS`                 | `dict` | `{"openai":["dummy_api_key"], "google_api_key":["dummy_api_key"]}`                                                                                                                                                                                                      | Tracks API keys for each service.                                      |
+| `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_TOOLS_TO_PACKAGE_HASH`    | `dict` | `{"openai-gpt-3.5-turbo-instruct":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-3.5-turbo":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-4":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq"}` | Tracks services for each tool packages.                                |
+| `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_API_KEYS`                 | `dict` | `{"openai":["dummy_api_key"], "google_api_key":["dummy_api_key"]}`                                                                                                                                                                                                      | Tracks API keys for each service.                                      |
 | `SERVICE_REGISTRY_ADDRESS` | `str`  | `"0x9338b5153AE39BB89f50468E608eD9d764B755fD"`                                                                                                                                                                                                                      | Smart contract which registers the services.                           |
-| `AGENT_REGISTRY_ADDRESS`   | `str`  | `"0xE49CB081e8d96920C38aA7AB90cb0294ab4Bc8EA"`                                                                                                                                                                                                                      | Smart contract which registers the agents.                             |
-| `MECH_MARKETPLACE_ADDRESS` | `str`  | `"0x4554fE75c1f5576c1d7F765B2A036c199Adae329"`                                                                                                                                                                                                                      | Marketplace for posting and delivering requests served by agent mechs. |
-| `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x77af31De935740567Cf4fF1986D04B2c964A786a":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
-| `MECH_TO_CONFIG`           | `dict` | `{"0xFf82123dFB52ab75C417195c5fDB87630145ae81":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
- 
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_AGENT_REGISTRY_ADDRESS`   | `str`  | `"0xE49CB081e8d96920C38aA7AB90cb0294ab4Bc8EA"`                                                                                                                                                                                                                      | Smart contract which registers the agents.                             |
+| `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_MARKETPLACE_ADDRESS` | `str`  | `"0x735FAAb1c4Ec41128c367AFb5c3baC73509f70bB"`                                                                                                                                                                                                                      | Marketplace for posting and delivering requests served by agent mechs. |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
+| `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_TO_CONFIG`           | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_ON_CHAIN_SERVICE_ID`           | `int` | 1966                                                                                                                                                          | The id of the service in Olas Service Registry                                          |
+| `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_NUM_AGENTS`           | `int` | 1                                                                                                                                                          | Number of workers in the service.                                         |
+| `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_ETHEREUM_ADDRESS`           | `str` | `https://nd-549-204-122.p2pify.com/API_KEY`                                                                                                                                                          | RPC for ethereum.                                         |
+| `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_GNOSIS_ADDRESS`           | `str` | `https://nd-549-204-122.p2pify.com/API_KEY`                                                                                                                                                          | RPC for ethereum.                                         |
+| `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_ETHEREUM_CHAIN_ID`           | `str` | 100                                                                                                                                                          | The id of the chain.                                         |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_SETUP_ALL_PARTICIPANTS`           | `list` | `'["0x6A69696C29808F0A6638230fC0Cc752080c5dd7F"]'`                                                                                                                                                         | The list of addresses of workers.                                         |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_RESET_PAUSE_DURATION`           | `int` | 100                                                                                                                                                         | Parameter which tells how long the Mech pauses between periods of work.                                         |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_SETUP_SAFE_CONTRACT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of the service's safe contract.                                         |
+| `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_HASH_CHECKPOINT_ADDRESS`           | `str` | `0x694e62BDF7Ff510A4EE66662cf4866A961a31653`                                                                                                                                                         | Address of a contract recording metadata.                                         |
+| `SKILL_MECH_ABCI_MODELS_BENCHMARK_TOOL_ARGS_LOG_DIR`           | `str` |                                                                                                                                                          | Path for storing the logs.                                         |
+
+⚠️ The variables `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_GNOSIS_ADDRESS` and `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_ETHEREUM_ADDRESS` are expected to be identical. The part `API_KEY` can be changed with your own API KEY. You can also use any other RPC.
+
+⚠️ The address in the variables `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_TO_CONFIG` and `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_MECH_TO_SUBSCRIPTION` should be identical and correspond 
+to the address of the Mech contract.
+
+For the variable `SKILL_MECH_ABCI_MODELS_BENCHMARK_TOOL_ARGS_LOG_DIR`, create a folder `tmp` and copy its absolute path, and set the variable `SKILL_MECH_ABCI_MODELS_BENCHMARK_TOOL_ARGS_LOG_DIR` to this path.
+
+If you want to run a legacy Mech, the `KILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
+Furthermore, in the variable `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
+Note that even in this case, the Mech won't run without changing also the other variables. 
+
+Ensure that the variable `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_SETUP_ALL_PARTICIPANTS` in the file `.agentenv` contains the same agent instance address as in `keys.json`.
+
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 
+#### Running the service 
 
-> **Warning**<br />
-> **The demo service is configured to match a specific on-chain agent (ID 3 on [Mech Hub](https://aimechs.autonolas.network/registry)). Since you will not have access to its private key, your local instance will not be able to transact.
-> However, it will be able to receive Requests for AI tasks [sent from Mech Hub](https://aimechs.autonolas.network/mech). These Requests will be executed by your local instance, but you will notice that a failure will occur when it tries to submit the transaction on-chain (Deliver type).**
 
-Now, you have two options to run the worker: as a standalone agent or as a service.
+1. Run the service:
 
-### Option 1: Run the Mech as a standalone agent
+    ```
+    bash run_service.sh
+    ```
 
-1. Ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+2. Build the docker container by running the following:
 
-   ```bash
+```
+cd mech
+build_dir=$(ls -d abci_build_????/ 2>/dev/null || echo "abci_build")
+autonomy deploy run --build-dir $build_dir
+```
+
+
+3. In a separate terminal, run the following to see the logs:
+
+```
+container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
+container = "mech${container}_abci_0"
+docker logs -f container
+```
+
+### Option 2: Run the Mech as a standalone agent
+
+#### Configuration of the agent
+
+First, ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+
+   ```
    autonomy generate-key ethereum 
    ```
 
-2. From one terminal, run the agent:
+Replace the key by the one of your agent's address (you need to have an EOA for this).
 
-    ```bash
+Then you need to configure the agent. You need to create a `.agentenv` file which contains the service configuration parameters. We provide a prefilled template (`.example_agent.env`). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
+
+```bash
+# Copy the prefilled template
+cp .example_agent.env .agentenv
+
+# Edit ".1env" and replace "dummy_api_key" with your OpenAI API key.
+
+# Source the env file
+source .agentenv
+```
+
+The variables to change are the same as for the [service](#configuration-of-the-service). Other customizable variables can be found in the `packages/valory/agents/mech/aea-config.yaml` file. 
+
+#### Running the agent 
+
+From one terminal, run the agent:
+
+    ```
     bash run_agent.sh
     ```
 
-3. From another terminal, run the Tendermint node:
-
-    ```bash
-    bash run_tm.sh
-    ```
-
-### Option 2: Run the Mech as an agent service
-
-1. Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
-
-    ```bash
-    autonomy generate-key ethereum -n 1
-    ```
-
-2. Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the agent address from `keys.json`:
-
-   ```bash
-   ALL_PARTICIPANTS='["your_agent_address"]'
-   ```
-
-3. Run, the service:
-
-    ```bash
-    bash run_service.sh
-    ```
 
 ## Integrating mechs into your application
 
@@ -311,6 +367,3 @@ Make sure you don't have any extra characters in the file, like newlines or spac
 | Base      | https://registry.olas.network/base/services/1      | `0x37C484cc34408d0F827DB4d7B6e54b8837Bf8BDA`  - 1  | `0x111D7DB1B752AB4D2cC0286983D9bd73a49bac6c` - 2  |
 | Celo      | https://registry.olas.network/celo/services/1      | `0xeC20694b7BD7870d2dc415Af3b349360A6183245`  - 1  | `0x230eD015735c0D01EA0AaD2786Ed6Bd3C6e75912` - 2  |
 | Optimism  | https://registry.olas.network/optimism/services/1  | `0xbA4491C86705e8f335Ceaa8aaDb41361b2F82498`  - 1  | `0xDd40E7D93c37eFD860Bd53Ab90b2b0a8D05cf71a` - 2  |
-
-
-bump

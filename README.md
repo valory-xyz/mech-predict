@@ -163,16 +163,16 @@ Ensure you have a file with the agent address and private key (`keys.json`). You
 
 Replace the address by your own agent address and the private key by the one of this address.
 
-You need to create a `.agentenv` file which contains the service configuration parameters. We provide a prefilled template (`.example_agent.env`). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
+You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example_agent.env`). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
 
 ```bash
 # Copy the prefilled template
-cp .example_agent.env .agentenv
+cp .example_agent.env .1env
 
 # Edit ".1env" and replace "dummy_api_key" with your OpenAI API key.
 
 # Source the env file
-source .agentenv
+source .1env
 ```
 
 ##### Environment Variables

@@ -195,20 +195,20 @@ You will need customize the agent's behaviour by setting the environment variabl
 | `AGENT_REGISTRY_ADDRESS`   | `str`  | `"0xE49CB081e8d96920C38aA7AB90cb0294ab4Bc8EA"`                                                                                                                                                                                                                      | Smart contract which registers the agents.                             |
 | `LOG_DIR`           | `str` |                                                                                                                                                          | Path for storing the logs.                                         |
 
-⚠️ The variables `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_GNOSIS_ADDRESS` and `CONNECTION_LEDGER_CONFIG_LEDGER_APIS_ETHEREUM_ADDRESS` are expected to be identical. The part `API_KEY` can be changed with your own API KEY. You can also use any other RPC.
+⚠️ The variables `ETHEREUM_LEDGER_RPC_0` and `GNOSIS_RPC_0` are expected to be identical. The part `API_KEY` can be changed with your own API KEY. You can also use any other RPC.
 
-⚠️ The address in the variables `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_TO_CONFIG` and `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_MECH_TO_SUBSCRIPTION` should be identical and correspond 
+⚠️ The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract.
 
-The variables `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_AGENT_REGISTRY_ADDRESS` and `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_MARKETPLACE_ADDRESS` can be found [there](https://github.com/valory-xyz/autonolas-registries/blob/main/docs/configuration.json) and [there](https://github.com/valory-xyz/ai-registry-mech/blob/main/docs/configuration.json) respectively. They correspond respectively to the "ServiceRegistryL2" address and "MechMarketPlaceProxy" address. You need to select the ones which correspond to the chosen network.
+The variables `AGENT_REGISTRY_ADDRESS` and `MECH_MARKETPLACE_ADDRESS` can be found [there](https://github.com/valory-xyz/autonolas-registries/blob/main/docs/configuration.json) and [there](https://github.com/valory-xyz/ai-registry-mech/blob/main/docs/configuration.json) respectively. They correspond respectively to the "ServiceRegistryL2" address and "MechMarketPlaceProxy" address. You need to select the ones which correspond to the chosen network.
 
-For the variable `SKILL_MECH_ABCI_MODELS_BENCHMARK_TOOL_ARGS_LOG_DIR`, create a folder `tmp` and copy its absolute path, and set the variable `SKILL_MECH_ABCI_MODELS_BENCHMARK_TOOL_ARGS_LOG_DIR` to this path.
+For the variable `LOG_DIR`, create a folder `tmp` and copy its absolute path, and set the variable `LOG_DIR` to this path.
 
-If you want to run a legacy Mech, the `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
-Furthermore, in the variable `SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
+If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
+Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
 Note that even in this case, the Mech won't run without changing also the other variables. 
 
-Ensure that the variable `SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_SETUP_ALL_PARTICIPANTS` in the file `.agentenv` contains the same agent instance address as in `keys.json`.
+Ensure that the variable `ALL_PARTICIPANTS` in the file `.agentenv` contains the same agent instance address as in `keys.json`.
 
 Once you are done modifying the `.1env` file, run the following: 
 

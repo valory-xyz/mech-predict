@@ -37,7 +37,6 @@ set -o allexport
 source .1env
 set +o allexport
 
-
 # Copy env variables
 export SKILL_MECH_ABCI_MODELS_PARAMS_ARGS_ON_CHAIN_SERVICE_ID="$ON_CHAIN_SERVICE_ID"
 export SKILL_TASK_EXECUTION_MODELS_PARAMS_ARGS_NUM_AGENTS="$NUM_AGENTS"

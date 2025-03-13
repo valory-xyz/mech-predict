@@ -156,17 +156,17 @@ both options here.
 
 #### Generating key file
 
-First, you need to configure the agent or service. You will need to have an API Key for the tool want to use.
+First, you need to configure the agent or service. You will need to have an API Key for the tool you want to use.
 
-- If you want to run the Mech as a service, ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+- If you want to run the Mech as a service, make sure that you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI (this is used only to create the keys.json file with the right format):
 
     ```bash
     autonomy generate-key ethereum -n 1
     ```
 
-This is only to create a file with the right format. You need to replace the address by your own agent address and the private key by the one of this address. You do not need to change the ledger.
+Once this is done, you can replace the address by your own agent instance address and the private key by the one of this address. You do not need to change the ledger.
 
-- If you want to run the Mech as an standalone agent, ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+- If you want to run the Mech as an standalone agent, make sure that you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
 
    ```
    autonomy generate-key ethereum 
@@ -204,18 +204,19 @@ You will need to customize the service or agent's behaviour by setting the envir
 | `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
 
 :warning: The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
-to the address of the Mech contract.
+to the address of the Mech contract. Furthermore, `NUM_AGENTS` has to be between 1 and 4.
 
 If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
 Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
-Note that even in this case, the Mech won't run without changing also the other variables. 
+
+In order to run your custom tool, you need to add its name and hash to the variable `TOOLS_TO_PACKAGE_HASH`.
 
 When running the Mech as a service, follow these additional steps: 
 
 - Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent instance address as in `keys.json` when running the Mech as a service.
 
-- In the file `run_service.sh`, change the line `autonomy deploy build -ltm` to `autonomy deploy build -ltm -n k`,
-where k is replaced by the number of agents in your service (this should be between 1 and 4). For instance for 1 agent: `autonomy deploy build -ltm -n 1`.
+- In the file `run_service.sh`, change the line `[autonomy deploy build -ltm](https://github.com/valory-xyz/mech-predict/blob/main/run_service.sh#L28)` to `autonomy deploy build -ltm -n k`,
+where k is replaced by the number of agents in your service (value of the variable `NUM_AGENTS`). For instance for 1 agent: `autonomy deploy build -ltm -n 1`.
 
 - (Optional) You can also customize the rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml).
 

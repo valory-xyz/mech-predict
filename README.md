@@ -211,16 +211,9 @@ Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the ke
 
 In order to run your custom tool, you need to add its name and hash to the variable `TOOLS_TO_PACKAGE_HASH`.
 
-When running the Mech as a service, follow these additional steps: 
+When running the Mech as a service, make sure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent instance address as in `keys.json` when running the Mech as a service.
 
-- Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent instance address as in `keys.json` when running the Mech as a service.
-
-- In the file `run_service.sh`, change the line `[autonomy deploy build -ltm](https://github.com/valory-xyz/mech-predict/blob/main/run_service.sh#L28)` to `autonomy deploy build -ltm -n k`,
-where k is replaced by the number of agents in your service (value of the variable `NUM_AGENTS`). For instance for 1 agent: `autonomy deploy build -ltm -n 1`.
-
-- (Optional) You can also customize the rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml).
-
-When running the Mech as an agent, you can find other customizable variables in the `packages/valory/agents/mech/aea-config.yaml` file. 
+(Optional) When running the Mech as a service, you can also customize the rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml). When running the Mech as an agent, you can find other customizable variables in the `packages/valory/agents/mech/aea-config.yaml` file. 
 
 #### Running the Mech 
 

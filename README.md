@@ -178,11 +178,11 @@ Replace the key by the one of your agent's address (you need to have an EOA for 
 
 You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`).
 
-Run the following:
+Run the following to use this template:
 
 ```bash
 # Copy the prefilled template
-cp .example_service.env .1env
+cp .example.env .1env
 ```
 
 ##### Environment Variables
@@ -235,11 +235,11 @@ When running the Mech as an agent, you can find other customizable variables in 
 
 2. In a separate terminal, run the following to see the logs of the kth agent in the service (replace k with the index of the agent):
 
-```
-container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
-container = "mech${container}_abci_k"
-docker logs -f container
-```
+    ```
+    container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
+    container = "mech${container}_abci_k"
+    docker logs -f container
+    ```
 
 ##### Option 2: Run the Mech as a standalone agent
 

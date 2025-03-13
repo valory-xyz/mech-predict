@@ -203,7 +203,7 @@ You will need to customize the service or agent's behaviour by setting the envir
 | `MECH_TO_CONFIG`           | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
 | `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
 
-:warning: The address in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
+:warning: The addresses in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract. Furthermore, `NUM_AGENTS` has to be between 1 and 4.
 
 If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 

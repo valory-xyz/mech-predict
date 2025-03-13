@@ -174,7 +174,7 @@ cp .example_service_network.env .1env
 
 ##### Environment Variables
 
-You will need customize the agent's behaviour by setting the environment variables in the `.1env` file. The following table provides a description and templates for these variables. You can find also additional instructions below it.
+You will need to customize the service's behaviour by setting the environment variables in the `.1env` file. The following table provides a description and templates for these variables. You can also find additional instructions below it.
  
 | Name                       | Type   | Sample Value                                                                                                                                                                                                                                                        | Description                                                            |
 | -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -208,7 +208,7 @@ If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Ot
 Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
 Note that even in this case, the Mech won't run without changing also the other variables. 
 
-Ensure that the variable `ALL_PARTICIPANTS` in the file `.agentenv` contains the same agent instance address as in `keys.json`.
+Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent instance address as in `keys.json`.
 
 Once you are done modifying the `.1env` file, run the following: 
 
@@ -218,7 +218,7 @@ source .1env
 ```
 
 Finally, in the file `run_service.sh`, change the line `autonomy deploy build -ltm` to `autonomy deploy build -ltm -n k`,
-where k is replaced by the number of agents in your service. For instance for 1 agent: `autonomy deploy build -ltm -n 1`.
+where k is replaced by the number of agents in your service (this should be between 1 and 4). For instance for 1 agent: `autonomy deploy build -ltm -n 1`.
 
 The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
 
@@ -262,7 +262,7 @@ First, ensure you have a file with a private key (`ethereum_private_key.txt`). Y
 
 Replace the key by the one of your agent's address (you need to have an EOA for this).
 
-Then you need to configure the agent. You need to create a `.agentenv` file which contains the service configuration parameters. We provide a prefilled template (`.example_agent.env`). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
+Then you need to configure the agent. You need to create a `.agentenv` file which contains the agent configuration parameters. We provide a prefilled template (`.example_agent_network.env` where `network` should be replaced by the name of the network). You will need to use an [OpenAI API key](https://platform.openai.com/account/api-keys) in the configuration.
 
 Run the following, where `network` is replaced by the name of the network (gnosis or base):
 
@@ -271,7 +271,7 @@ Run the following, where `network` is replaced by the name of the network (gnosi
 cp .example_agent_network.env .agentenv
 ```
 
-The variables to change are the same as for the [service](#configuration-of-the-service). Other customizable variables can be found in the `packages/valory/agents/mech/aea-config.yaml` file. 
+The variables to change are similar to ones for the [service](#configuration-of-the-service). Other customizable variables can be found in the `packages/valory/agents/mech/aea-config.yaml` file. 
 
 #### Running the agent 
 

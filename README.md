@@ -176,7 +176,7 @@ Replace the key by the one of your agent's address (you need to have an EOA for 
 
 #### Configuration
 
-You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`).
+You need to create a `.1env` file which contains the agent or service's configuration parameters. We provide a prefilled template (`.example.env`).
 
 Run the following to use this template:
 

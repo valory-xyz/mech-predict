@@ -206,6 +206,8 @@ You will need to customize the service or agent's behaviour by setting the envir
 :warning: The addresses in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract. Furthermore, `NUM_AGENTS` has to be between 1 and 4.
 
+:warning: The variable `TOOLS_TO_PACKAGE_HASH` must be in-line (no spaces between characters).
+
 If you want to run a legacy Mech, the `MECH_MARKETPLACE_ADDRESS` is optional. Otherwise this variable needs to be defined. 
 Furthermore, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
 

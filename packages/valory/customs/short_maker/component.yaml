@@ -16,3 +16,5 @@ dependencies:
     version: ==1.30.2
   replicate:
     version: ==0.15.7
+  moviepy:
+    version: ==1.0.3

@@ -13,6 +13,6 @@ entry_point: short_maker.py
 callable: run
 dependencies: 
   openai:
-    version: == 1.30.2
+    version: ==1.30.2
   replicate:
-    version: == 0.15.7
+    version: ==0.15.7

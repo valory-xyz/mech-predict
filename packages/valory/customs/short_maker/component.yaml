@@ -18,7 +18,6 @@ dependencies:
     version: ==0.15.7
   moviepy:
     version: ==1.0.3
-  requests: {}
   anthropic:
     version: ==0.21.3
   google-api-python-client:

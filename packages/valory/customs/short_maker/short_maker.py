@@ -433,6 +433,5 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
         "prompt": user_input,
     }
 
-    # Return in the same format as the OpenAI tool:
     # response text, original prompt, metadata, callback
     return json.dumps(body), user_input, None, counter_callback

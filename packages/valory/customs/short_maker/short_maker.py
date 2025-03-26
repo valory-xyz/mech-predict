@@ -361,10 +361,11 @@ def compose_final_video(
     return filename
 
 
-def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
+def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
     """Run the task"""
     user_input = kwargs["prompt"]
     openai_key = kwargs["api_keys"]["openai"]
+    counter_callback = kwargs.get("counter_callback", None)
 
     # Initialize OpenAI client with the provided key
     global client
@@ -431,4 +432,7 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
         "image": image_hash_,
         "prompt": user_input,
     }
-    return json.dumps(body), user_input, None
+
+    # Return in the same format as the OpenAI tool:
+    # response text, original prompt, metadata, callback
+    return json.dumps(body), user_input, None, counter_callback

@@ -7,8 +7,8 @@ license: Apache-2.0
 fingerprint:
   README.md: bafybeif7ia4jdlazy6745ke2k2x5yoqlwsgwr6sbztbgqtwvs3ndm2p7ba
 fingerprint_ignore_patterns: []
-agent: valory/mech:0.1.0:bafybeigi7xvdcq3ewo6to7tiy4wudrv25r5aopajvjlxvd5t2lvlsyws6q
-number_of_agents: 4
+agent: valory/mech:0.1.0:bafybeidwzlk5wz37r6pndgh7ktnsqylpuxh24cp3pz4hxorgcaj6bugliu
+number_of_agents: 1
 deployment:
   agent:
     ports:
@@ -27,6 +27,7 @@ type: skill
   models:
     params:
       args:
+        gas_params: ${GAS_PARAMS:dict:{"gas_price":null, "max_fee_per_gas":null, "max_priority_fee_per_gas":null}}
         multisend_address: ${MULTISEND_ADDRESS:str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
         on_chain_service_id: ${ON_CHAIN_SERVICE_ID:int:null}
         reset_pause_duration: ${RESET_PAUSE_DURATION:int:10}
@@ -59,6 +60,7 @@ type: skill
         profit_split_freq: ${PROFIT_SPLIT_FREQ:int:100}
         hash_checkpoint_address: ${CHECKPOINT_ADDRESS:str:0x0000000000000000000000000000000000000000}
         mech_to_subscription: ${MECH_TO_SUBSCRIPTION:dict:{}}
+        mech_to_config: ${MECH_TO_CONFIG:dict:{}}
         agent_funding_amount: ${AGENT_FUNDING_AMOUNT:int:200000000000000000}
         minimum_agent_balance: ${MINIMUM_AGENT_BALANCE:int:100000000000000000}
         mech_staking_instance_address: ${MECH_STAKING_INSTANCE_ADDRESS:str:0x0000000000000000000000000000000000000000}
@@ -67,6 +69,7 @@ type: skill
   models:
     params:
       args:
+        gas_params: ${GAS_PARAMS:dict:{"gas_price":null, "max_fee_per_gas":null, "max_priority_fee_per_gas":null}}
         multisend_address: ${MULTISEND_ADDRESS:str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
         on_chain_service_id: ${ON_CHAIN_SERVICE_ID:int:null}
         reset_pause_duration: ${RESET_PAUSE_DURATION:int:10}
@@ -95,6 +98,7 @@ type: skill
         hash_checkpoint_address: ${CHECKPOINT_ADDRESS:str:0x0000000000000000000000000000000000000000}
         service_endpoint_base: ${SERVICE_ENDPOINT_BASE:str:https://dummy_service.autonolas.tech/}
         mech_to_subscription: ${MECH_TO_SUBSCRIPTION:dict:{}}
+        mech_to_config: ${MECH_TO_CONFIG:dict:{}}
         agent_funding_amount: ${AGENT_FUNDING_AMOUNT:int:200000000000000000}
         mech_marketplace_address: ${MECH_MARKETPLACE_ADDRESS:str:0x0000000000000000000000000000000000000000}
         minimum_agent_balance: ${MINIMUM_AGENT_BALANCE:int:100000000000000000}
@@ -104,6 +108,7 @@ type: skill
   models:
     params:
       args:
+        gas_params: ${GAS_PARAMS:dict:{"gas_price":null, "max_fee_per_gas":null, "max_priority_fee_per_gas":null}}
         multisend_address: ${MULTISEND_ADDRESS:str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
         on_chain_service_id: ${ON_CHAIN_SERVICE_ID:int:null}
         reset_pause_duration: ${RESET_PAUSE_DURATION:int:10}
@@ -133,6 +138,7 @@ type: skill
         profit_split_freq: ${PROFIT_SPLIT_FREQ:int:100}
         hash_checkpoint_address: ${CHECKPOINT_ADDRESS:str:0x0000000000000000000000000000000000000000}
         mech_to_subscription: ${MECH_TO_SUBSCRIPTION:dict:{}}
+        mech_to_config: ${MECH_TO_CONFIG:dict:{}}
         agent_funding_amount: ${AGENT_FUNDING_AMOUNT:int:200000000000000000}
         minimum_agent_balance: ${MINIMUM_AGENT_BALANCE:int:100000000000000000}
         mech_staking_instance_address: ${MECH_STAKING_INSTANCE_ADDRESS:str:0x0000000000000000000000000000000000000000}
@@ -141,6 +147,7 @@ type: skill
   models:
     params:
       args:
+        gas_params: ${GAS_PARAMS:dict:{"gas_price":null, "max_fee_per_gas":null, "max_priority_fee_per_gas":null}}
         multisend_address: ${MULTISEND_ADDRESS:str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
         on_chain_service_id: ${ON_CHAIN_SERVICE_ID:int:null}
         reset_pause_duration: ${RESET_PAUSE_DURATION:int:10}
@@ -170,6 +177,7 @@ type: skill
         hash_checkpoint_address: ${CHECKPOINT_ADDRESS:str:0x0000000000000000000000000000000000000000}
         service_endpoint_base: ${SERVICE_ENDPOINT_BASE:str:https://dummy_service.autonolas.tech/}
         mech_to_subscription: ${MECH_TO_SUBSCRIPTION:dict:{}}
+        mech_to_config: ${MECH_TO_CONFIG:dict:{}}
         agent_funding_amount: ${AGENT_FUNDING_AMOUNT:int:200000000000000000}
         minimum_agent_balance: ${MINIMUM_AGENT_BALANCE:int:100000000000000000}
         mech_staking_instance_address: ${MECH_STAKING_INSTANCE_ADDRESS:str:0x0000000000000000000000000000000000000000}
@@ -245,7 +253,10 @@ type: connection
         poa_chain: ${ETHEREUM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${ETHEREUM_LEDGER_PRICING:str:eip1559}
       gnosis:
-        address: ${GNOSIS_RPC_0:str:http://host.docker.internal:8545}
+        address: ${GNOSIS_LEDGER_RPC_0:str:http://host.docker.internal:8545}
+        chain_id: ${GNOSIS_LEDGER_CHAIN_ID:int:100}
+        poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
 1:
   config:
     ledger_apis:
@@ -255,7 +266,10 @@ type: connection
         poa_chain: ${ETHEREUM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${ETHEREUM_LEDGER_PRICING:str:eip1559}
       gnosis:
-        address: ${GNOSIS_RPC_1:str:http://host.docker.internal:8545}
+        address: ${GNOSIS_LEDGER_RPC_1:str:http://host.docker.internal:8545}
+        chain_id: ${GNOSIS_LEDGER_CHAIN_ID:int:100}
+        poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
 2:
   config:
     ledger_apis:
@@ -265,7 +279,10 @@ type: connection
         poa_chain: ${ETHEREUM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${ETHEREUM_LEDGER_PRICING:str:eip1559}
       gnosis:
-        address: ${GNOSIS_RPC_2:str:http://host.docker.internal:8545}
+        address: ${GNOSIS_LEDGER_RPC_2:str:http://host.docker.internal:8545}
+        chain_id: ${GNOSIS_LEDGER_CHAIN_ID:int:100}
+        poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
 3:
   config:
     ledger_apis:
@@ -275,7 +292,10 @@ type: connection
         poa_chain: ${ETHEREUM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${ETHEREUM_LEDGER_PRICING:str:eip1559}
       gnosis:
-        address: ${GNOSIS_RPC_3:str:http://host.docker.internal:8545}
+        address: ${GNOSIS_LEDGER_RPC_3:str:http://host.docker.internal:8545}
+        chain_id: ${GNOSIS_LEDGER_CHAIN_ID:int:100}
+        poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
 ---
 public_id: valory/p2p_libp2p_client:0.1.0
 type: connection

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023-2024 Valory AG
+#   Copyright 2023-2025 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -24,9 +24,8 @@ import time
 from asyncio import Future
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 from enum import Enum
-
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 from aea.helpers.cid import to_v1
 from aea.mail.base import EnvelopeContext
@@ -44,7 +43,6 @@ from packages.valory.connections.p2p_libp2p_client.connection import (
     PUBLIC_ID as P2P_CLIENT_PUBLIC_ID,
 )
 from packages.valory.contracts.agent_mech.contract import AgentMechContract
-from packages.valory.contracts.mech_marketplace.contract import MechMarketplaceContract
 from packages.valory.protocols.acn_data_share import AcnDataShareMessage
 from packages.valory.protocols.acn_data_share.dialogues import AcnDataShareDialogues
 from packages.valory.protocols.contract_api import ContractApiMessage
@@ -398,7 +396,7 @@ class TaskExecutionBehaviour(SimpleBehaviour):
         task_data = self.pending_tasks.pop(0)
         self.context.logger.info(f"Preparing task with data: {task_data}")
         # convert request id to int if it's bytes
-        if type(task_data.get("requestId") == bytes):
+        if type(task_data.get("requestId")) == bytes:
             request_id = task_data["requestId"]
             task_data["requestId"] = int.from_bytes(request_id, byteorder="big")
 

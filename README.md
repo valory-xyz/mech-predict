@@ -192,7 +192,6 @@ You will need to customize the service or agent's behaviour by setting the envir
 | Name                       | Type   | Sample Value                                                                                                                                                                                                                                                        | Description                                                            |
 | -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `NETWORK`           | `int` | "gnosis"                                                                                                                                                          | The name of the network                                          |
-| `USE_MARKETPLACE`           | `bool` | "True"                                                                                                                                                          | Tells if the Mech uses the Mech Marketplace or not                                          |
 | `ON_CHAIN_SERVICE_ID`           | `int` | 1966                                                                                                                                                          | The id of the service in Olas Service Registry                                          |
 | `NUM_AGENTS`           | `int` | 1                                                                                                                                                          | Number of workers in the service.                                         |
 | `TOOLS_TO_PACKAGE_HASH`    | `dict` | `{"openai-gpt-3.5-turbo-instruct":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-3.5-turbo":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-4":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq"}` | Tracks services for each tool packages.                                |
@@ -201,17 +200,12 @@ You will need to customize the service or agent's behaviour by setting the envir
 | `ALL_PARTICIPANTS`           | `list` | `'["0x6A69696C29808F0A6638230fC0Cc752080c5dd7F"]'`                                                                                                                                                         | The list of addresses of workers.                                         |
 | `RESET_PAUSE_DURATION`           | `int` | 100                                                                                                                                                         | Parameter which tells how long the Mech pauses between periods of work.                                         |
 | `SAFE_CONTRACT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of the service's safe contract.                                         |
-| `MECH_TO_CONFIG`           | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
-| `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x895c50590a516b451668a620a9ef9b8286b9e72d":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
+| `MECH_ADDRESS`           | `str` | The address of the Mech contract.                                                                                                                                     | Tracks mech's config.                                                  |
 
 :warning: The addresses in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
 to the address of the Mech contract. Furthermore, `NUM_AGENTS` has to be between 1 and 4.
 
-:warning: The variable `TOOLS_TO_PACKAGE_HASH` must be in-line (no spaces between characters).
-
-If you want to run a legacy Mech, you need to set `USE_MARKETPLACE` to False. In this case, in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to false as well.
-
-Otherwise, `USE_MARKETPLACE` must be set to True, and in the variable `MECH_TO_CONFIG`, the value corresponding to the key `is_marketplace_mech` should be set to true.
+:warning: The variables `TOOLS_TO_PACKAGE_HASH` and `API_KEYS` must be in-line (no spaces between characters).
 
 In order to run your custom tool, you need to add its name and hash to the variable `TOOLS_TO_PACKAGE_HASH`.
 

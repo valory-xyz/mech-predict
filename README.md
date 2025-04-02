@@ -144,80 +144,106 @@ The old repo is no longer the recommended approach for running and extending the
 
 Follow the instructions below to run the AI Mech demo executing the tool in `./packages/valory/customs/openai_request.py`. Note that AI Mechs can be configured to work in two modes: *polling mode*, which periodically reads the chain, and *websocket mode*, which receives event updates from the chain. The default mode used by the demo is *polling*.
 
-First, you need to configure the worker service. You need to create a `.1env` file which contains the service configuration parameters. We provide a prefilled template (`.example.env`). You will need to provide or create an [OpenAI API key](https://platform.openai.com/account/api-keys).
-
-```bash
-# Copy the prefilled template
-cp .example.env .1env
-
-# Edit ".1env" and replace "dummy_api_key" with your OpenAI API key.
-
-# Source the env file
-source .1env
-```
-
-##### Environment Variables
-
-You may customize the agent's behaviour by setting these environment variables.
- 
-| Name                       | Type   | Sample Value                                                                                                                                                                                                                                                        | Description                                                            |
-| -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `TOOLS_TO_PACKAGE_HASH`    | `dict` | `{"openai-gpt-3.5-turbo-instruct":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-3.5-turbo":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-4":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq"}` | Tracks services for each tool packages.                                |
-| `API_KEYS`                 | `dict` | `{"openai":["dummy_api_key"], "google_api_key":["dummy_api_key"]}`                                                                                                                                                                                                      | Tracks API keys for each service.                                      |
-| `SERVICE_REGISTRY_ADDRESS` | `str`  | `"0x9338b5153AE39BB89f50468E608eD9d764B755fD"`                                                                                                                                                                                                                      | Smart contract which registers the services.                           |
-| `AGENT_REGISTRY_ADDRESS`   | `str`  | `"0xE49CB081e8d96920C38aA7AB90cb0294ab4Bc8EA"`                                                                                                                                                                                                                      | Smart contract which registers the agents.                             |
-| `MECH_MARKETPLACE_ADDRESS` | `str`  | `"0x4554fE75c1f5576c1d7F765B2A036c199Adae329"`                                                                                                                                                                                                                      | Marketplace for posting and delivering requests served by agent mechs. |
-| `MECH_TO_SUBSCRIPTION`     | `dict` | `{"0x77af31De935740567Cf4fF1986D04B2c964A786a":{"tokenAddress":"0x0000000000000000000000000000000000000000","tokenId":"1"}}`                                                                                                                                        | Tracks mech's subscription details.                                    |
-| `MECH_TO_CONFIG`           | `dict` | `{"0xFf82123dFB52ab75C417195c5fDB87630145ae81":{"use_dynamic_pricing":false,"is_marketplace_mech":false}}`                                                                                                                                                          | Tracks mech's config.                                                  |
- 
-The rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml), which are customizable too.
-
-
 > **Warning**<br />
-> **The demo service is configured to match a specific on-chain agent (ID 3 on [Mech Hub](https://aimechs.autonolas.network/registry)). Since you will not have access to its private key, your local instance will not be able to transact.
-> However, it will be able to receive Requests for AI tasks [sent from Mech Hub](https://aimechs.autonolas.network/mech). These Requests will be executed by your local instance, but you will notice that a failure will occur when it tries to submit the transaction on-chain (Deliver type).**
+> ** You won't be able to run the Mech with the configurations displayed below (in particular since you will not have access to the private key for the agent address displayed), and will need to adjust them.
 
-Now, you have two options to run the worker: as a standalone agent or as a service.
 
-### Option 1: Run the Mech as a standalone agent
 
-1. Ensure you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+### Run the Mech
 
-   ```bash
-   autonomy generate-key ethereum 
-   ```
+Now, you have two options to run the worker: as a standalone agent or as a service. We provide instruction for 
+both options here.
 
-2. From one terminal, run the agent:
+#### Generating key file
 
-    ```bash
-    bash run_agent.sh
-    ```
+First, you need to configure the agent or service. You will need to have an API Key for the tool you want to use.
 
-3. From another terminal, run the Tendermint node:
-
-    ```bash
-    bash run_tm.sh
-    ```
-
-### Option 2: Run the Mech as an agent service
-
-1. Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+- If you want to run the Mech as a service, make sure that you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI (this is used only to create the keys.json file with the right format):
 
     ```bash
     autonomy generate-key ethereum -n 1
     ```
 
-2. Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the agent address from `keys.json`:
+Once this is done, you can replace the address by your own agent instance address and the private key by the one of this address. You do not need to change the ledger.
 
-   ```bash
-   ALL_PARTICIPANTS='["your_agent_address"]'
+- If you want to run the Mech as an standalone agent, make sure that you have a file with a private key (`ethereum_private_key.txt`). You can generate a new private key file using the Open Autonomy CLI:
+
+   ```
+   autonomy generate-key ethereum 
    ```
 
-3. Run, the service:
+Replace the key by the one of your agent's address (you need to have an EOA for this).
 
-    ```bash
+#### Configuration
+
+You need to create a `.1env` file which contains the agent or service's configuration parameters. We provide a prefilled template (`.example.env`).
+
+Run the following to use this template:
+
+```bash
+# Copy the prefilled template
+cp .example.env .1env
+```
+
+##### Environment Variables
+
+You will need to customize the service or agent's behaviour by setting the environment variables in the `.1env` file. The following table provides a description and templates for these variables. You can also find additional instructions below it.
+ 
+| Name                       | Type   | Sample Value                                                                                                                                                                                                                                                        | Description                                                            |
+| -------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `NETWORK`           | `int` | "gnosis"                                                                                                                                                          | The name of the network                                          |
+| `ON_CHAIN_SERVICE_ID`           | `int` | 1966                                                                                                                                                          | The id of the service in Olas Service Registry                                          |
+| `NUM_AGENTS`           | `int` | 1                                                                                                                                                          | Number of workers in the service.                                         |
+| `TOOLS_TO_PACKAGE_HASH`    | `dict` | `{"openai-gpt-3.5-turbo-instruct":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-3.5-turbo":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq","openai-gpt-4":"bafybeigz5brshryms5awq5zscxsxibjymdofm55dw5o6ud7gtwmodm3vmq"}` | Tracks services for each tool packages.                                |
+| `API_KEYS`                 | `dict` | `{"openai":["dummy_api_key"], "google_api_key":["dummy_api_key"]}`                                                                                                                                                                                                      | Tracks API keys for each service.                                      |
+| `ETHEREUM_LEDGER_RPC_0`           | `str` |                                                                                                                                                           | RPC for ethereum.                                         |
+| `ALL_PARTICIPANTS`           | `list` | `'["0x6A69696C29808F0A6638230fC0Cc752080c5dd7F"]'`                                                                                                                                                         | The list of addresses of workers.                                         |
+| `RESET_PAUSE_DURATION`           | `int` | 100                                                                                                                                                         | Parameter which tells how long the Mech pauses between periods of work.                                         |
+| `SAFE_CONTRACT_ADDRESS`           | `str` | `0x8c18415836A6E2e61d1E9cc33F0a1b5Ac2219372`                                                                                                                                                         | Address of the service's safe contract.                                         |
+| `MECH_ADDRESS`           | `str` | The address of the Mech contract.                                                                                                                                     | Tracks mech's config.                                                  |
+
+:warning: The addresses in the variables `MECH_TO_CONFIG` and `MECH_TO_SUBSCRIPTION` should be identical and correspond 
+to the address of the Mech contract. Furthermore, `NUM_AGENTS` has to be between 1 and 4.
+
+:warning: The variables `TOOLS_TO_PACKAGE_HASH` and `API_KEYS` must be in-line (no spaces between characters).
+
+In order to run your custom tool, you need to add its name and hash to the variable `TOOLS_TO_PACKAGE_HASH`.
+
+When running the Mech as a service, make sure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the same agent instance address as in `keys.json` when running the Mech as a service.
+
+(Optional) When running the Mech as a service, you can also customize the rest of the common environment variables are present in the [service.yaml](https://github.com/valory-xyz/mech/blob/main/packages/valory/services/mech/service.yaml). When running the Mech as an agent, you can find other customizable variables in the `packages/valory/agents/mech/aea-config.yaml` file. 
+
+#### Running the Mech 
+
+##### Option 1 : Run the Mech as a service
+
+1. Run the service:
+
+    ```
+    poetry shell
+    poetry install
     bash run_service.sh
     ```
+
+2. In a separate terminal, run the following to see the logs of the kth agent in the service (replace k with the index of the agent):
+
+    ```
+    container = $(basename "$(ls -d ../*/abci_build_????/ 2>/dev/null | head -n 1)" | sed -E 's/^abci_build_//')
+    container = "mech${container}_abci_k"
+    docker logs -f container
+    ```
+
+##### Option 2: Run the Mech as a standalone agent
+
+
+From a terminal, run the following:
+
+    ```
+    poetry shell
+    poetry install
+    bash run_agent.sh
+    ```
+
 
 ## Integrating mechs into your application
 

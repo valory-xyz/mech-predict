@@ -432,28 +432,31 @@ def parser_multi_questions_response(response: str) -> List[str]:
 
 def parser_reasoning_response(response: str) -> str:
     """Parse the response from the reasoning model."""
+    if "<reasoning>" not in response or "</reasoning>" not in response:
+        print("Invalid response format: missing reasoning tags")
+        return ""
     reasoning = response.split("<reasoning>")[1].split("</reasoning>")[0]
     return reasoning.strip()
 
 
 def parser_prediction_response(response: str) -> str:
     """Parse the response from the prediction model."""
+    tags = ["p_yes", "p_no", "info_utility", "confidence"]
     results = {}
-    if "p_yes" not in response:
-        print("Not a valid answer from the model")
-        print(f"response = {response}")
-        return results
 
-    for key in ["p_yes", "p_no", "info_utility", "confidence"]:
+    for key in tags:
         try:
             value = response.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
-            if key in ["p_yes", "p_no", "info_utility", "confidence"]:
-                value = float(value)
+            value = float(value)
             results[key] = value
-        except Exception:
-            raise ValueError(f"Error parsing {key}")
+        except IndexError:
+            print(f"Missing content for {key}")
+            continue
+        except ValueError:
+            print(f"Conversion error for {key}: {value}")
+            continue
 
-    results = json.dumps(results)
+    return json.dumps(results)
     return results
 
 

@@ -449,15 +449,12 @@ def parser_prediction_response(response: str) -> str:
             value = response.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
             value = float(value)
             results[key] = value
-        except IndexError:
-            print(f"Missing content for {key}")
-            continue
-        except ValueError:
-            print(f"Conversion error for {key}: {value}")
-            continue
+        except Exception:
+            print("Not a valid answer from the model")
+            print(f"response = {response}")
+            raise ValueError(f"Error for {key}: {value}")
 
     return json.dumps(results)
-    return results
 
 
 def multi_queries(

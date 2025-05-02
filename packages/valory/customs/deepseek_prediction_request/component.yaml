@@ -1,0 +1,49 @@
+name: deepseek_prediction_request
+author: valory
+version: 0.1.0
+type: custom
+description: Tool description
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeifnxrgw2zpkemhvnbxjkqg4sze2tg3qpmnqmqlhdgixbtmegwzox4
+  deepseek_prediction_request.py: bafybeie5idbu2cc6ilvfeubriwbxkruahjzznf2wzhuwpo2a5pug3d3p4m
+fingerprint_ignore_patterns: []
+entry_point: deepseek_prediction_request.py
+callable: run
+params:
+  default_model: deepseek/deepseek-r1:free
+dependencies:
+  google-api-python-client:
+    version: ==2.95.0
+  googlesearch-python:
+    version: ==1.2.3
+  requests: {}
+  pydantic:
+    version: '>=1.9.0,<3'
+  faiss-cpu:
+    version: ==1.7.4
+  tiktoken:
+    version: ==0.7.0
+  markdownify:
+    version: ==0.11.6
+  openai:
+    version: ==1.30.2
+  docstring-parser:
+    version: ==0.15
+  readability-lxml:
+    version: ==0.8.1
+  pypdf2:
+    version: ==3.0.1
+  numpy:
+    version: '>=1.19.0'
+  spacy:
+    version: ==3.7.2
+  anthropic:
+    version: ==0.21.3
+  lxml:
+    version: ==5.1.0
+  lxml-html-clean:
+    version: ==0.1.0
+  httpx:
+    version: ==0.25.2

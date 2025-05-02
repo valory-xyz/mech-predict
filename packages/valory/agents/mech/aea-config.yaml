@@ -176,6 +176,10 @@ dependencies:
     version: ==0.25.2
   tqdm:
     version: ==4.67.1
+  lxml:
+    version: ==5.1.0
+  lxml-html-clean:
+    version: ==0.1.0
 default_connection: null
 ---
 public_id: valory/websocket_client:0.1.0:bafybeiexove4oqyhoae5xmk2hilskthosov5imdp65olpgj3cfrepbouyy

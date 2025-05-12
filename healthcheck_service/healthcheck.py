@@ -16,19 +16,25 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Contains a small healthcheck server"""
+"""Contains a small healthcheck checker"""
 
-import http.server
 import json
 import os
-import socketserver
+import time
+import logging
 from pathlib import Path
-from time import time
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from web3.types import BlockIdentifier
 
 from web3 import Web3
+
+logging.basicConfig(
+    filename="healthcheck_monitor.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 
 class MechContract:
@@ -62,7 +68,7 @@ class MechContract:
 
     def get_unfulfilled_request(self) -> List[Dict[str, Any]]:
         """Get the unfulfilled events."""
-        from_block = self.web3.eth.block_number - 50_000  # ~ 3.5 days back
+        from_block = self.web3.eth.block_number - 5000
         delivers = self.get_deliver_events(from_block)
         requests = self.get_request_events(from_block)
         undeleted_requests = []
@@ -93,11 +99,11 @@ class MechContract:
         return None
 
 
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    """Healthcheck server handler."""
+class HealthCheckHandler:
+    """Healthcheck handler."""
 
     def __init__(self, *args, **kwargs) -> None:
-        """Initialize the healthcheck server handler."""
+        """Initialize the healthcheck handler."""
         self.mech_contract = MechContract(
             rpc_endpoint=os.getenv("RPC_ENDPOINT", "http://localhost:8545"),
             contract_address=os.getenv("MECH_CONTRACT_ADDRESS"),
@@ -110,39 +116,23 @@ class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
         req_timestamp = self.mech_contract.earliest_unfulfilled_request_timestamp()
         if req_timestamp is None:
             return True
-        return req_timestamp + self.grace_period > time()
-
-    def do_GET(self) -> None:
-        """
-        Handle GET requests and send a health check response with a 200 status code.
-
-        Returns:
-            None
-        """
-        is_healthy = self.is_healthy()
-        code, message = (200, "OK") if is_healthy else (500, "NOT OK")
-        self.send_response(code)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(message.encode())
+        return req_timestamp + self.grace_period > time.time()
 
 
 def run_healthcheck_server() -> None:
     """
-    Run the health check server.
+    Run the health check.
 
     Returns:
         None
     """
-    port = os.getenv("PORT", 8080)
-    handler = HealthCheckHandler
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"Health check server started on port {port}")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            httpd.shutdown()
-            print("\nHealth check server stopped.")
+    handler = HealthCheckHandler()
+    while True:
+        healthy = handler.is_healthy()
+        status = "OK" if healthy else "NOT OK"
+        message = f"Health check: {status}"
+        (logging.info if healthy else logging.error)(message)
+        time.sleep(15)
 
 
 if __name__ == "__main__":

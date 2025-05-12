@@ -22,8 +22,8 @@ import json
 import os
 import time
 import logging
+import urllib.request
 from pathlib import Path
-from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from web3.types import BlockIdentifier
@@ -68,7 +68,7 @@ class MechContract:
 
     def get_unfulfilled_request(self) -> List[Dict[str, Any]]:
         """Get the unfulfilled events."""
-        from_block = self.web3.eth.block_number - 20000
+        from_block = self.web3.eth.block_number - 2500  # ~3hrs
         delivers = self.get_deliver_events(from_block)
         requests = self.get_request_events(from_block)
         undeleted_requests = []
@@ -108,7 +108,7 @@ class HealthCheckHandler:
             rpc_endpoint=os.getenv("RPC_ENDPOINT", "http://localhost:8545"),
             contract_address=os.getenv("MECH_CONTRACT_ADDRESS"),
         )
-        self.grace_period = int(os.getenv("GRACE_PERIOD", 600))
+        self.grace_period = int(os.getenv("GRACE_PERIOD", 3600))
         super().__init__(*args, **kwargs)
 
     def is_healthy(self) -> bool:
@@ -127,11 +127,30 @@ def run_healthcheck_server() -> None:
         None
     """
     handler = HealthCheckHandler()
+    slack_webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+
     while True:
         healthy = handler.is_healthy()
         status = "OK" if healthy else "NOT OK"
         message = f"Health check: {status}"
-        (logging.info if healthy else logging.error)(message)
+
+        if status == "NOT OK":
+            logging.error(message)
+            data = json.dumps({"text": message}).encode("utf-8")
+            req = urllib.request.Request(
+                slack_webhook_url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req) as response:
+                    logging.info(f"Slack message sent status: {response.status}")
+            except Exception as e:
+                logging.error(f"Failed to send message to Slack: {e}")
+                continue
+        else:
+            logging.info(message)
+
         time.sleep(15)
 
 

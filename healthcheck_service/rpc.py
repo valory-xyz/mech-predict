@@ -23,7 +23,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Dict, Any, List
-
+from dotenv import load_dotenv
 from web3 import Web3
 from web3.types import BlockIdentifier
 

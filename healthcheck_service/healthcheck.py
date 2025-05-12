@@ -68,7 +68,7 @@ class MechContract:
 
     def get_unfulfilled_request(self) -> List[Dict[str, Any]]:
         """Get the unfulfilled events."""
-        from_block = self.web3.eth.block_number - 5000
+        from_block = self.web3.eth.block_number - 20000
         delivers = self.get_deliver_events(from_block)
         requests = self.get_request_events(from_block)
         undeleted_requests = []

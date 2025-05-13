@@ -34,6 +34,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+load_dotenv()
 
 class RPCCheckHandler:
     """RPCcheck handler."""
@@ -126,7 +127,9 @@ def run_rpc_checks() -> None:
     while True:
         logging.info("Starting RPC checks...")
         if not rpc_handler.check_rpc_connection():
-            break
+            logging.error("Failed to connect to RPC. Retrying...")
+            time.sleep(10)
+            continue
 
         current_block = rpc_handler.get_current_block()
         if current_block == -1:

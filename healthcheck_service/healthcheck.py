@@ -23,6 +23,7 @@ import os
 import time
 import logging
 import urllib.request
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -36,6 +37,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
+load_dotenv()
 
 class MechContract:
     def __init__(self, rpc_endpoint: str, contract_address: str) -> None:

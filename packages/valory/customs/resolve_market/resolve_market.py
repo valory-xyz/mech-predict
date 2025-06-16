@@ -277,6 +277,7 @@ class CloseMarketBehaviourMock:
                 "temperature", DEFAULT_OPENAI_SETTINGS["temperature"]
             )
             prompt = kwargs.get("prompt")
+            tool = kwargs.get("tool")
             engine = kwargs.get("model", TOOL_TO_ENGINE[tool])
             print(f"ENGINE: {engine}")
             moderation_result = client.moderations.create(input=prompt)

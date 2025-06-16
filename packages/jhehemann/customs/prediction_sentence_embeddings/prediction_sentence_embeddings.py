@@ -1376,7 +1376,7 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
     """
 
     tool = kwargs["tool"]
-    engine = kwargs.get("model", TOOL_TO_ENGINE[tool])
+    engine = kwargs.get("model", ) or TOOL_TO_ENGINE[tool]
     
     with LLMClientManager(
         kwargs["api_keys"], engine, embedding_provider="openai"
@@ -1405,10 +1405,11 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
         engine = TOOL_TO_ENGINE[tool]
 
         # Extract the event question from the prompt
-        event_question = re.search(r"\"(.+?)\"", prompt).group(1)
-        if not event_question:
+        match = re.findall(r"\s*([^\.\?]+\?)", prompt)
+        if not match:
             raise ValueError("No event question found in prompt.")
         
+        event_question = match[0].strip()
         print(f"EVENT_QUESTION: {event_question}")
         print()
 
@@ -1472,3 +1473,4 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
         )
         print(f"RESPONSE: {extracted_block}")
         return extracted_block, prediction_prompt, None, counter_callback
+    

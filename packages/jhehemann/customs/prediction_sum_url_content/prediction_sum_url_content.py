@@ -1145,16 +1145,18 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
         print(f"LLM TEMPERATURE: {temperature}")
 
         # Load the spacy model
-        nlp = spacy.load("en_core_web_sm")
+        nlp = spacy.load("en_core_web_md")
 
         # Get the LLM engine to be used
         engine = kwargs.get("model", TOOL_TO_ENGINE[tool])
         print(f"ENGINE: {engine}")
 
         # Extract the event question from the prompt
-        event_question = re.search(r"\"(.+?)\"", prompt).group(1)
-        if not event_question:
+        match = re.findall(r"\s*([^\.\?]+\?)", prompt)
+        if not match:
             raise ValueError("No event question found in prompt.")
+        
+        event_question = match[0].strip()
         print(f"EVENT_QUESTION: {event_question}")
         print()
 

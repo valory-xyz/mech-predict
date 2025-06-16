@@ -711,7 +711,7 @@ def fetch_additional_information(
 
 
 def extract_question(prompt: str) -> str:
-    pattern = r"\"(.*?)\""
+    pattern = r"\s*([^\.\?]+\?)"
     try:
         question = re.findall(pattern, prompt)[0]
     except Exception as e:

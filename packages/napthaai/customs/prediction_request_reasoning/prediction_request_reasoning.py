@@ -262,6 +262,11 @@ LLM_SETTINGS = {
         "limit_max_tokens": 4096,
         "temperature": 0,
     },
+    "gpt-4.1-2025-04-14": {
+        "default_max_tokens": 4096,
+        "limit_max_tokens": 1_047_576,
+        "temperature": 0,
+    },
     "claude-3-haiku-20240307": {
         "default_max_tokens": 1000,
         "limit_max_tokens": 200_000,
@@ -782,6 +787,7 @@ def do_reasoning_with_retry(
 ):
     """Attempt to do reasoning with retries on failure."""
     attempt = 0
+    tool_errors = []
     while attempt < retries:
         try:
             response_reasoning = client.completions(
@@ -805,10 +811,12 @@ def do_reasoning_with_retry(
 
             return reasoning, counter_callback
         except Exception as e:
-            print(f"Attempt {attempt + 1} failed with error: {e}")
+            error = f"Attempt {attempt + 1} failed with error: {e}"
             time.sleep(delay)
+            # join the tool errors with the exception message
+            tool_errors.append(error)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+    raise Exception(f"Failed to generate prediction after retries:\n{'\n'.join(tool_errors)}")
 
 
 def count_tokens(text: str, model: str) -> int:

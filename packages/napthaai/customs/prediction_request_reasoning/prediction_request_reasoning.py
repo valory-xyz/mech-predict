@@ -19,28 +19,28 @@
 
 """This module implements a Mech tool for binary predictions."""
 import functools
-import re
 import json
-
-import anthropic
-import faiss
-import PyPDF2
-import googleapiclient
-import openai
-import requests
+import re
 import time
-import numpy as np
+from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
 from itertools import islice
-from pydantic import BaseModel
-from collections import defaultdict
-from tiktoken import encoding_for_model
-from markdownify import markdownify as md
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+
+import PyPDF2
+import anthropic
+import faiss
+import googleapiclient
+import numpy as np
+import openai
+import requests
 from googleapiclient.discovery import build
+from markdownify import markdownify as md
+from pydantic import BaseModel
 from readability import Document as ReadabilityDocument
-from concurrent.futures import Future, ThreadPoolExecutor
 from requests.exceptions import RequestException, TooManyRedirects
-from typing import Any, Dict, Generator, List, Optional, Tuple, Callable, Union
+from tiktoken import encoding_for_model
 
 
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
@@ -260,6 +260,11 @@ LLM_SETTINGS = {
     "gpt-4o-2024-08-06": {
         "default_max_tokens": 500,
         "limit_max_tokens": 4096,
+        "temperature": 0,
+    },
+    "gpt-4.1-2025-04-14": {
+        "default_max_tokens": 4096,
+        "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
     "claude-3-haiku-20240307": {
@@ -644,10 +649,17 @@ def clean_text(text: str) -> str:
     """Remove emojis and non-printable characters, collapse whitespace."""
     emoji_pattern = re.compile(
         "["
+<<<<<<< HEAD
         "\U0001f300-\U0001f5ff"
         "\U0001f600-\U0001f64f"
         "\U0001f680-\U0001f6ff"
         "\U0001f1e0-\U0001f1ff"
+=======
+        "\U0001F300-\U0001F5FF"
+        "\U0001F600-\U0001F64F"
+        "\U0001F680-\U0001F6FF"
+        "\U0001F1E0-\U0001F1FF"
+>>>>>>> main
         "]+",
         flags=re.UNICODE,
     )
@@ -814,7 +826,6 @@ def do_reasoning_with_retry(
             return reasoning, counter_callback
         except Exception as e:
             error = f"Attempt {attempt + 1} failed with error: {e}"
-            print(error)
             time.sleep(delay)
             # join the tool errors with the exception message
             tool_errors += f"{error}\n"

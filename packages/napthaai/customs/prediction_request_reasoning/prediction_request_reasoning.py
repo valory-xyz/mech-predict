@@ -649,10 +649,17 @@ def clean_text(text: str) -> str:
     """Remove emojis and non-printable characters, collapse whitespace."""
     emoji_pattern = re.compile(
         "["
+<<<<<<< HEAD
+        "\U0001f300-\U0001f5ff"
+        "\U0001f600-\U0001f64f"
+        "\U0001f680-\U0001f6ff"
+        "\U0001f1e0-\U0001f1ff"
+=======
         "\U0001F300-\U0001F5FF"
         "\U0001F600-\U0001F64F"
         "\U0001F680-\U0001F6FF"
         "\U0001F1E0-\U0001F1FF"
+>>>>>>> main
         "]+",
         flags=re.UNICODE,
     )
@@ -794,7 +801,7 @@ def do_reasoning_with_retry(
 ):
     """Attempt to do reasoning with retries on failure."""
     attempt = 0
-    tool_errors = []
+    tool_errors = ""
     while attempt < retries:
         try:
             response_reasoning = client.completions(
@@ -821,12 +828,9 @@ def do_reasoning_with_retry(
             error = f"Attempt {attempt + 1} failed with error: {e}"
             time.sleep(delay)
             # join the tool errors with the exception message
-            tool_errors.append(error)
+            tool_errors += f"{error}\n"
             attempt += 1
-    error_message = (
-        f"Failed to generate prediction after retries:\n{chr(10).join(tool_errors)}"
-    )
-    raise Exception(error_message)
+    raise Exception(f"Failed to generate prediction after retries:\n{tool_errors}")
 
 
 def count_tokens(text: str, model: str) -> int:

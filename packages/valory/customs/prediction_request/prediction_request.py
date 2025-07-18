@@ -252,6 +252,7 @@ client: Optional[LLMClient] = None
 # Clean text by removing emojis and non-printable characters.
 def clean_text(text: str) -> str:
     """Remove emojis and non-printable characters, collapse whitespace."""
+
     emoji_pattern = re.compile(
         "[\U0001f600-\U0001f64f"
         "\U0001f300-\U0001f5ff"
@@ -263,8 +264,27 @@ def clean_text(text: str) -> str:
     text = emoji_pattern.sub("", text)
     # Decode using UTF-8, replacing invalid bytes
     text = text.encode("utf-8", "replace").decode("utf-8", "replace")
-    text = "".join(ch for ch in text if ch.isprintable())
-    # Collapse whitespace
+    # Replace common problematic Unicode characters
+    replacements = {
+        "\u201c": '"',  # Left double quotation mark
+        "\u201d": '"',  # Right double quotation mark
+        "\u2018": "'",  # Left single quotation mark
+        "\u2019": "'",  # Right single quotation mark
+        "\u2013": "-",  # En dash
+        "\u2014": "-",  # Em dash
+        "\u00a0": " ",  # Non-breaking space
+        "\u00b6": "",  # Pilcrow sign (paragraph mark)
+        "\u2026": "...",  # Horizontal ellipsis
+    }
+
+    for unicode_char, replacement in replacements.items():
+        text = text.replace(unicode_char, replacement)
+    # Modified: Allow common whitespace characters (\n, \t, \r) to pass through
+    # so they can be handled by the subsequent regex for whitespace collapsing.
+    # All other non-printable characters will still be removed.
+    text = "".join(ch for ch in text if ch.isprintable() or ch in ("\n", "\t", "\r"))
+
+    # This line will now correctly collapse newlines, tabs, and spaces into a single space.
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -373,6 +393,7 @@ COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
 MAX_NR_DOCS = 1000
 HTTP_TIMEOUT = 20
+BUFFER = 10000
 
 PREDICTION_PROMPT = """
 You are an LLM inside a multi-agent system that takes in a prompt of a user requesting a probability estimation
@@ -865,18 +886,18 @@ def adjust_additional_information(
 ) -> str:
     """Adjust the additional_information to fit within the token budget"""
 
-    # Encode the user prompt to calculate its token count
-    user_prompt = prompt_template.format(
-        user_prompt=user_prompt, additional_information=additional_information
+    # Encode the user prompt to calculate its token count without additional information
+    final_prompt = prompt_template.format(
+        user_prompt=user_prompt, additional_information=""
     )
-    prompt_tokens = count_tokens(text=user_prompt, model=model)
+    prompt_tokens = count_tokens(text=final_prompt, model=model)
 
     # Calculate available tokens for additional_information
     MAX_PREDICTION_PROMPT_TOKENS = (
         LLM_SETTINGS[model]["limit_max_tokens"]
         - LLM_SETTINGS[model]["default_max_tokens"]
     )
-    available_tokens = cast(int, MAX_PREDICTION_PROMPT_TOKENS) - prompt_tokens
+    available_tokens = cast(int, MAX_PREDICTION_PROMPT_TOKENS) - prompt_tokens - BUFFER
 
     # Encode the additional_information
     additional_info_tokens = count_tokens(text=additional_information, model=model)

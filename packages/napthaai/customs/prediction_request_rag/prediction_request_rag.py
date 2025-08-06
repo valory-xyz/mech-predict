@@ -330,11 +330,10 @@ ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 DEFAULT_NUM_URLS = 3
 DEFAULT_NUM_QUERIES = 3
 NUM_URLS_PER_QUERY = 5
-SPLITTER_CHUNK_SIZE = 1800
+SPLITTER_CHUNK_SIZE = 300
 SPLITTER_OVERLAP = 50
-EMBEDDING_MODEL = "text-embedding-ada-002"
-EMBEDDING_BATCH_SIZE = 1000
-EMBEDDING_SIZE = 1536
+EMBEDDING_MODEL = "text-embedding-3-large"
+EMBEDDING_SIZE = 3072
 SPLITTER_MAX_TOKENS = 1800
 SPLITTER_OVERLAP = 50
 NUM_NEIGHBORS = 4
@@ -343,12 +342,11 @@ HTTP_MAX_REDIRECTS = 5
 HTTP_MAX_RETIES = 2
 DOC_TOKEN_LIMIT = 7000  # Maximum tokens per document for embeddings
 RAG_PROMPT_LENGTH = 320
-DEFAULT_MAX_EMBEDDING_TOKENS = 300000
+DEFAULT_MAX_EMBEDDING_TOKENS = 8192
 BUFFER = 15000  # Buffer for the total tokens in the embeddings batch
 MAX_NR_DOCS = 1000
 TOKENS_DISTANCE_TO_LIMIT = 200
-if DEFAULT_MAX_EMBEDDING_TOKENS - RAG_PROMPT_LENGTH - BUFFER <= 0:
-    raise ValueError("Wrong MAX_EMBEDDING_TOKENS configuration")
+
 
 PREDICTION_PROMPT = """
 You will be evaluating the likelihood of an event based on a user's question and additional information from search results.
@@ -434,7 +432,9 @@ def truncate_text(text: str, model: str, max_tokens: int) -> str:
     return enc.decode(token_ids[:max_tokens])
 
 
-def get_max_embeddings_tokens(model: str) -> int:
+def get_max_embeddings_tokens(
+    model: str, consider_prompt_and_buffer: Optional[bool] = True
+) -> int:
     """Get the maximum number of tokens for embeddings based on the model."""
 
     if model in LLM_SETTINGS:
@@ -443,13 +443,16 @@ def get_max_embeddings_tokens(model: str) -> int:
         limit_max_tokens = min(
             LLM_SETTINGS[model]["limit_max_tokens"], DEFAULT_MAX_EMBEDDING_TOKENS
         )
+        if not consider_prompt_and_buffer:
+            return limit_max_tokens
         max_embeddings_tokens = limit_max_tokens - RAG_PROMPT_LENGTH - BUFFER
         if max_embeddings_tokens <= 0:
             raise ValueError(
                 f"Model {model} has a limit_max_tokens that is too low for embeddings."
             )
         return max_embeddings_tokens
-
+    if not consider_prompt_and_buffer:
+        return DEFAULT_MAX_EMBEDDING_TOKENS
     return DEFAULT_MAX_EMBEDDING_TOKENS - RAG_PROMPT_LENGTH - BUFFER
 
 
@@ -703,14 +706,17 @@ def extract_texts(
 
 
 def find_similar_chunks(
-    query: str, docs_with_embeddings: List[ExtendedDocument], k: int = 4
+    query: str,
+    docs_with_embeddings: List[ExtendedDocument],
+    embedding_model: str,
+    k: int = 4,
 ) -> List:
     """Similarity search to find similar chunks to a query"""
     if not client_embedding:
         raise RuntimeError("Embeddings not intialized")
     query_embedding = (
         client_embedding.embeddings(
-            model=EMBEDDING_MODEL,
+            model=embedding_model,
             input_=query,
         )
         .data[0]
@@ -729,24 +735,22 @@ def find_similar_chunks(
 
 
 def get_embeddings(
-    split_docs: List[ExtendedDocument], model: str
+    split_docs: List[ExtendedDocument], embedding_model: str
 ) -> List[ExtendedDocument]:
     """Get embeddings for the split documents: clean, truncate, then batch by token count."""
     # Preprocess each document: clean and truncate to DOC_TOKEN_LIMIT
-    # Filter out any documents that exceed the maximum token limit individually
     filtered_docs = []
     total_tokens_count = 0
-    max_embeddings_tokens = get_max_embeddings_tokens(model)
+    max_embeddings_tokens = get_max_embeddings_tokens(
+        embedding_model, consider_prompt_and_buffer=False
+    )
     for doc in split_docs:
-        # if we are very close to the limit then break the loop
-        if max_embeddings_tokens - total_tokens_count < TOKENS_DISTANCE_TO_LIMIT:
-            break
         cleaned = clean_text(doc.text)
         # TODO we could summarize instead of truncating
-        doc.text = truncate_text(cleaned, EMBEDDING_MODEL, DOC_TOKEN_LIMIT)
+        doc.text = truncate_text(cleaned, embedding_model, DOC_TOKEN_LIMIT)
         # filter empty strings
         doc.text = doc.text.strip()
-        doc.tokens = count_tokens(doc.text, EMBEDDING_MODEL)
+        doc.tokens = count_tokens(doc.text, embedding_model)
         if total_tokens_count + doc.tokens > max_embeddings_tokens:
             continue
         if doc.text:
@@ -763,7 +767,7 @@ def get_embeddings(
         while i < len(filtered_docs):
             doc = filtered_docs[i]
             if doc.tokens == 0:
-                doc.tokens = count_tokens(doc.text, EMBEDDING_MODEL)
+                doc.tokens = count_tokens(doc.text, embedding_model)
 
             if current_batch_tokens + doc.tokens > max_embeddings_tokens:
                 break
@@ -781,7 +785,7 @@ def get_embeddings(
         if not client_embedding:
             raise RuntimeError("Embeddings not intialized")
         response = client_embedding.embeddings(
-            model=EMBEDDING_MODEL,
+            model=embedding_model,
             input_=batch_texts,
         )
 
@@ -887,12 +891,13 @@ def fetch_additional_information(
         # truncate the split_docs to the first MAX_NR_DOCS documents
         split_docs = split_docs[:MAX_NR_DOCS]
     # Embed the documents
-    docs_with_embeddings = get_embeddings(split_docs, model)
+    docs_with_embeddings = get_embeddings(split_docs, EMBEDDING_MODEL)
 
     # Find similar chunks
     similar_chunks = find_similar_chunks(
         query=prompt,
         docs_with_embeddings=docs_with_embeddings,
+        embedding_model=EMBEDDING_MODEL,
         k=NUM_NEIGHBORS,
     )
     print(f"Similar Chunks: {len(similar_chunks)}")

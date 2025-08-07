@@ -58,6 +58,7 @@ IMAGE_RELATED_PATTERNS = [
     IMAGE_CREDIT_PATTERN,
 ]
 N_MODEL_CALLS = 2
+NON_ZERO_DELIVERY_RATE = 1
 
 USER_AGENT_HEADER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
 
@@ -951,7 +952,9 @@ def run(
     if model is None:
         raise ValueError("Model must be specified in kwargs")
 
-    delivery_rate = int(kwargs.get("delivery_rate", 0))
+    delivery_rate = int(
+        kwargs.get("delivery_rate", NON_ZERO_DELIVERY_RATE)
+    )  # Default delivery rate changed to 1 to avoid the breaking change
     counter_callback: Optional[Callable[..., Any]] = kwargs.get(
         "counter_callback", None
     )

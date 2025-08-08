@@ -24,7 +24,7 @@ import anthropic
 import googleapiclient
 import openai
 from openai import OpenAI
-from tiktoken import encoding_for_model
+from tiktoken import encoding_for_model, get_encoding
 
 
 client: Optional[OpenAI] = None
@@ -116,12 +116,17 @@ class OpenAIClientManager:
 
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
-    enc = encoding_for_model(model)
+    # Workaround since tiktoken does not have support yet for gpt4.1
+    # https://github.com/openai/tiktoken/issues/395
+    if model == "gpt-4.1-2025-04-14":
+        enc = get_encoding("o200k_base")
+    else:
+        enc = encoding_for_model(model)
     return len(enc.encode(text))
 
 
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "temperature": 0.7,
 }
 PREFIX = "openai-"

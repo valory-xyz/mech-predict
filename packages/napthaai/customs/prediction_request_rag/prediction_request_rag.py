@@ -342,6 +342,7 @@ HTTP_MAX_RETIES = 2
 DOC_TOKEN_LIMIT = 7000  # Maximum tokens per document for embeddings
 RAG_PROMPT_LENGTH = 320
 DEFAULT_MAX_EMBEDDING_TOKENS = 8192
+MAX_PER_BATCH_TOKEN_LIMIT = 3_00_000  # Maximum tokens for the embeddings batch
 BUFFER = 15000  # Buffer for the total tokens in the embeddings batch
 MAX_NR_DOCS = 1000
 TOKENS_DISTANCE_TO_LIMIT = 200
@@ -440,7 +441,7 @@ def get_max_embeddings_tokens(
         # Maximum tokens for the embeddings batch
         # there are models with values under 300000
         limit_max_tokens = min(
-            LLM_SETTINGS[model]["limit_max_tokens"], DEFAULT_MAX_EMBEDDING_TOKENS
+            LLM_SETTINGS[model]["limit_max_tokens"], MAX_PER_BATCH_TOKEN_LIMIT
         )
         if not consider_prompt_and_buffer:
             return limit_max_tokens

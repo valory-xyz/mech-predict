@@ -23,7 +23,7 @@ import functools
 import re
 import traceback as traceback_
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 from pydantic import BaseModel
@@ -51,6 +51,7 @@ ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 
 MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MaxCostResponse = float
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -147,7 +148,7 @@ class LLMClient:
         model: str,
         prompt: str,
         temperature: Optional[float] = None,
-        search_context_size: Optional[SearchContextSize] = SearchContextSize.MEDIUM,
+        search_context_size: SearchContextSize = SearchContextSize.MEDIUM,
         output_format: Optional[BaseModel] = None,
     ) -> Optional[LLMResponse]:
         """Generate a completion from the specified LLM provider using the given model and messages."""
@@ -242,10 +243,9 @@ def count_tokens(text: str, model: str) -> int:
 
 
 @with_key_rotation
-def run(*args: Any, **kwargs: Any) -> None:
+def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     """The callable for the prediction_websearch tool."""
-
-    print(f"Running prediction_websearch with {args=} and {kwargs=}.")
+    print(f"Running prediction_websearch with {kwargs=}.")
     tool = kwargs["tool"]
     model = kwargs.get("model")
     api_keys = kwargs.get("api_keys", {})

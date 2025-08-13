@@ -270,64 +270,23 @@ class LLMClient:
 client: Optional[LLMClient] = None
 client_embedding: Optional[LLMClient] = None
 
-LLM_SETTINGS = {
-    "gpt-3.5-turbo-0125": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 4096,
-        "temperature": 0,
-    },
-    "gpt-4-0125-preview": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 8192,
-        "temperature": 0,
-    },
-    "gpt-4o-2024-08-06": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 4096,
-        "temperature": 0,
-    },
-    "gpt-4.1-2025-04-14": {
-        "default_max_tokens": 4096,
-        "limit_max_tokens": 1_047_576,
-        "temperature": 0,
-    },
-    "claude-3-haiku-20240307": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "claude-3-5-sonnet-20240620": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "claude-4-sonnet-20250514": {
-        "default_max_tokens": 4096,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "claude-3-opus-20240229": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "databricks/dbrx-instruct:nitro": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 32_768,
-        "temperature": 0,
-    },
-    "nousresearch/nous-hermes-2-mixtral-8x7b-sft": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 32_000,
-        "temperature": 0,
-    },
-}
 ALLOWED_TOOLS = [
     "prediction-request-rag",
     # LEGACY
     "prediction-request-rag-claude",
 ]
-ALLOWED_MODELS = list(LLM_SETTINGS.keys())
+ALLOWED_MODELS = set(
+    "gpt-3.5-turbo-0125",
+    "gpt-4-0125-preview",
+    "gpt-4o-2024-08-06",
+    "gpt-4.1-2025-04-14",
+    "claude-3-haiku-20240307",
+    "claude-3-5-sonnet-20240620",
+    "claude-4-sonnet-20250514",
+    "claude-3-opus-20240229",
+    "databricks/dbrx-instruct:nitro",
+    "nousresearch/nous-hermes-2-mixtral-8x7b-sft",
+)
 DEFAULT_NUM_URLS = 3
 DEFAULT_NUM_QUERIES = 3
 NUM_URLS_PER_QUERY = 5
@@ -341,12 +300,25 @@ HTTP_MAX_REDIRECTS = 5
 HTTP_MAX_RETIES = 2
 DOC_TOKEN_LIMIT = 7000  # Maximum tokens per document for embeddings
 RAG_PROMPT_LENGTH = 320
-DEFAULT_MAX_EMBEDDING_TOKENS = 8192
+DEFAULT_MAX_EMBEDDING_TOKENS = 8192  # Default maximum tokens for embeddings
+DEFAULT_MAX_TOKENS = 8192  # Default maximum tokens for LLMs
+DEFAULT_TEMPERATURE = 0
 MAX_PER_BATCH_TOKEN_LIMIT = 300_000  # Maximum tokens for the embeddings batch
 BUFFER = 15000  # Buffer for the total tokens in the embeddings batch
 MAX_NR_DOCS = 1000
 TOKENS_DISTANCE_TO_LIMIT = 200
 
+TOKEN_COSTS_PER_MODEL_ATTR = "TOKEN_PRICES"
+INPUT_KEY = "output"
+OUTPUT_KEY = "output"
+KEY_MAX_TOKENS = "max_tokens"
+KEY_PROMPT = "prompt"
+KEY_TEMPERATURE = "temperature"
+KEY_NUM_URLS = "num_urls"
+KEY_NUM_QUERIES = "num_queries"
+
+MAX_OUTPUT_TOKENS = "max_output_tokens"
+TEMPERATURE = 0
 
 PREDICTION_PROMPT = """
 You will be evaluating the likelihood of an event based on a user's question and additional information from search results.
@@ -432,30 +404,6 @@ def truncate_text(text: str, model: str, max_tokens: int) -> str:
     return enc.decode(token_ids[:max_tokens])
 
 
-def get_max_embeddings_tokens(
-    model: str, consider_prompt_and_buffer: Optional[bool] = True
-) -> int:
-    """Get the maximum number of tokens for embeddings based on the model."""
-
-    if model in LLM_SETTINGS:
-        # Maximum tokens for the embeddings batch
-        # there are models with values under 300000
-        limit_max_tokens = min(
-            LLM_SETTINGS[model]["limit_max_tokens"], MAX_PER_BATCH_TOKEN_LIMIT
-        )
-        if not consider_prompt_and_buffer:
-            return limit_max_tokens
-        max_embeddings_tokens = limit_max_tokens - RAG_PROMPT_LENGTH - BUFFER
-        if max_embeddings_tokens <= 0:
-            raise ValueError(
-                f"Model {model} has a limit_max_tokens that is too low for embeddings."
-            )
-        return max_embeddings_tokens
-    if not consider_prompt_and_buffer:
-        return DEFAULT_MAX_EMBEDDING_TOKENS
-    return DEFAULT_MAX_EMBEDDING_TOKENS - RAG_PROMPT_LENGTH - BUFFER
-
-
 # Utility: count tokens using model-specific tokenizer
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
@@ -486,8 +434,8 @@ def multi_queries(
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
-    temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
-    max_tokens: int = LLM_SETTINGS["claude-4-sonnet-20250514"]["default_max_tokens"],
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Tuple[List[str], Optional[Callable]]:
     """Generate multiple queries for fetching information from the web."""
     if not client:
@@ -735,15 +683,14 @@ def find_similar_chunks(
 
 
 def get_embeddings(
-    split_docs: List[ExtendedDocument], embedding_model: str
+    split_docs: List[ExtendedDocument],
+    embedding_model: str,
+    embedding_max_tokens: int,
 ) -> List[ExtendedDocument]:
     """Get embeddings for the split documents: clean, truncate, then batch by token count."""
     # Preprocess each document: clean and truncate to DOC_TOKEN_LIMIT
     filtered_docs = []
     total_tokens_count = 0
-    max_embeddings_tokens = get_max_embeddings_tokens(
-        embedding_model, consider_prompt_and_buffer=False
-    )
     for doc in split_docs:
         cleaned = clean_text(doc.text)
         # TODO we could summarize instead of truncating
@@ -751,7 +698,7 @@ def get_embeddings(
         # filter empty strings
         doc.text = doc.text.strip()
         doc.tokens = count_tokens(doc.text, embedding_model)
-        if total_tokens_count + doc.tokens > max_embeddings_tokens:
+        if total_tokens_count + doc.tokens > embedding_max_tokens:
             continue
         if doc.text:
             filtered_docs.append(doc)
@@ -769,7 +716,7 @@ def get_embeddings(
             if doc.tokens == 0:
                 doc.tokens = count_tokens(doc.text, embedding_model)
 
-            if current_batch_tokens + doc.tokens > max_embeddings_tokens:
+            if current_batch_tokens + doc.tokens > embedding_max_tokens:
                 break
 
             current_batch_docs.append(doc)
@@ -815,8 +762,9 @@ def fetch_additional_information(
     source_links: Optional[Dict] = None,
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
-    temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
-    max_tokens: int = LLM_SETTINGS["claude-4-sonnet-20250514"]["default_max_tokens"],
+    temperature: float = DEFAULT_TEMPERATURE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    embedding_max_tokens: int = DEFAULT_MAX_EMBEDDING_TOKENS,
 ) -> Tuple[str, Optional[Callable[..., None]]]:
     """Fetch additional information to help answer the user prompt."""
     if not google_api_key:
@@ -891,7 +839,9 @@ def fetch_additional_information(
         # truncate the split_docs to the first MAX_NR_DOCS documents
         split_docs = split_docs[:MAX_NR_DOCS]
     # Embed the documents
-    docs_with_embeddings = get_embeddings(split_docs, EMBEDDING_MODEL)
+    docs_with_embeddings = get_embeddings(
+        split_docs, EMBEDDING_MODEL, embedding_max_tokens
+    )
 
     # Find similar chunks
     similar_chunks = find_similar_chunks(
@@ -975,13 +925,23 @@ def run(
         model = "claude-4-sonnet-20250514"
     print(f"MODEL for prediction request rag: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider="openai"):
-        prompt = extract_question(kwargs["prompt"])
-        max_tokens = kwargs.get("max_tokens", LLM_SETTINGS[model]["default_max_tokens"])
-        temperature = kwargs.get("temperature", LLM_SETTINGS[model]["temperature"])
-        num_urls = kwargs.get("num_urls", DEFAULT_NUM_URLS)
-        num_queries = kwargs.get("num_queries", DEFAULT_NUM_QUERIES)
+        prompt = extract_question(kwargs[KEY_PROMPT])
+        temperature = kwargs.get(KEY_TEMPERATURE, DEFAULT_TEMPERATURE)
+        num_urls = kwargs.get(KEY_NUM_URLS, DEFAULT_NUM_URLS)
+        num_queries = kwargs.get(KEY_NUM_QUERIES, DEFAULT_NUM_QUERIES)
 
-        api_keys = kwargs.get("api_keys", {})
+        token_prices = getattr(counter_callback, TOKEN_COSTS_PER_MODEL_ATTR, {})
+        embedding_tokens_config: dict = token_prices.get(EMBEDDING_MODEL, {})
+        tokens_config: dict = token_prices.get(model, {})
+        if not embedding_tokens_config:
+            raise ValueError("The tool cannot run without models' configurations.")
+
+        embedding_max_tokens = embedding_tokens_config.get(
+            KEY_MAX_TOKENS, DEFAULT_MAX_EMBEDDING_TOKENS
+        )
+        max_tokens = tokens_config.get(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+
+        api_keys: dict = kwargs.get("api_keys", {})
         google_api_key = api_keys.get("google_api_key", None)
         google_engine_id = api_keys.get("google_engine_id", None)
         if not client:
@@ -1006,6 +966,7 @@ def run(
             num_queries=num_queries,
             temperature=temperature,
             max_tokens=max_tokens,
+            embedding_max_tokens=embedding_max_tokens,
         )
 
         # Generate the prediction prompt

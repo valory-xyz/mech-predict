@@ -557,8 +557,7 @@ def get_urls_from_queries(
                     f"Rate limit exceeded for query: {query}. Trying to rotate API key."
                 )
                 raise e
-            else:
-                print(f"HTTP error for query {query}: {e}")
+            print(f"HTTP error for query {query}: {e}")
 
     unique_results = list(set(results))
     return unique_results

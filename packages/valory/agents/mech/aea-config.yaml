@@ -11,7 +11,7 @@ connections:
 - valory/http_client:0.23.0:bafybeib34a2ukancj5524tz64smczju2q2njscgufmtml6dcjb3bjyaocy
 - valory/http_server:0.22.0:bafybeicmy3phyy3ckvlfumioiadwlmlt5dijkp3mhezkxgx7kigigwe3rm
 - valory/ipfs:0.1.0:bafybeif7exoq2viwhfgfcjplxq73hnxvgpsx7pwshhntx6aekza25mdwli
-- valory/ledger:0.19.0:bafybeifdsep5suryfufmto4j5fyvjhmlgypyg6zvvwqsm4edlwfbfsav5y
+- valory/ledger:0.19.0:bafybeihxixxqiuu3sb6cvu3x2hjthcunlvyhkkj7wo354nw4qi3ooikc6y
 - valory/p2p_libp2p_client:0.1.0:bafybeihezztwiiismlbblbv67i4zibp7w6xzpqadt67mcdjaoauibjqii4
 - valory/websocket_client:0.1.0:bafybeicdavar2qg2s2h7qp2ugzab6zf2jzehvu4zgxjjrfucjqeac575iu
 contracts:
@@ -38,16 +38,16 @@ protocols:
 - valory/websocket_client:0.1.0:bafybeig6omutaqt5rbvidju4zc7pwwdi6tkagwu3dwiirosadyoo534v3q
 skills:
 - valory/abstract_abci:0.1.0:bafybeihbstfafzdk4ecb4nkuo3vz3incrvgibljaqf5khtm3yxqswklj5i
-- valory/abstract_round_abci:0.1.0:bafybeib4xpcpuiryyfnkuyhypdvqi5ebbl7ugavv6ig6yp4nzk3fxosntm
+- valory/abstract_round_abci:0.1.0:bafybeiczffiaobfxawsnh2gtjspqmwtbojxhmpkuma7xhmovkuyviv3nga
 - valory/contract_subscription:0.1.0:bafybeicrkrifwefmfd3d25cx7fwlq2ttqfhycrkply7dxrplhvoldgtdau
-- valory/mech_abci:0.1.0:bafybeidkt6vg5bh5rgbitf2ek2lkybkh45vwnti7zp64higii7sv5fdydu
-- valory/registration_abci:0.1.0:bafybeibf5nhislatztx2q3u46v7d36vmm7dnxpmuhrbxqxkz4lvdgifwha
-- valory/reset_pause_abci:0.1.0:bafybeihuxdetmcyqoqr7iatqsddufolzoebdxsxb4lxd2uiyvuwhb52ttq
-- valory/delivery_rate_abci:0.1.0:bafybeib3y46tseqlty5ux3bmweoajmcl4eeyiwnofiidushnmqms7fjsl4
-- valory/task_execution:0.1.0:bafybeigseirkbfhpm2eql4grcnu3aevnndp46fvrsfwfsjxvq4grhbnrjy
-- valory/task_submission_abci:0.1.0:bafybeifevg75n4td74aac2zkffdml7fmf3fu2gxtbcce52zbebie5y4e2e
-- valory/termination_abci:0.1.0:bafybeigysvgr5m6zj5b6ofadeddzpxxlhxzn2hyxfilcybhcpp252vdft4
-- valory/transaction_settlement_abci:0.1.0:bafybeids5bopaujr5bh2jfhvysl6fzf7zexsbdifaurf4nerp24hv5uqnm
+- valory/mech_abci:0.1.0:bafybeicke7wkytpe7wbehecbbzqpkvktst7elkv7sia3eiq5looj3flpma
+- valory/registration_abci:0.1.0:bafybeif4ezrzcwdewbcc24o6qz5uihb65dd5to6zent4kpp7jshu2f7dji
+- valory/reset_pause_abci:0.1.0:bafybeiekv5uyilqkbfxvmmzoquhnnbg2eoo5rmaqbdq2d3ezei47if2pba
+- valory/delivery_rate_abci:0.1.0:bafybeiadwe2bgvnf46eceuqk7cpguzh72cpr7xe4r2ksexgwzem7co5ehy
+- valory/task_execution:0.1.0:bafybeignmeri6npnodcqrcm5mkedlyyao6dqnvwrghhb7dtoerssx6quce
+- valory/task_submission_abci:0.1.0:bafybeid4zpxkm4q7t7sbzi6446gv4kxbprptaruridf5rllfuahy6kdiby
+- valory/termination_abci:0.1.0:bafybeidzbx6tmfjvg37gnc5rxs5g6rcat2suh3nxul2ufy2ioduntbdbiq
+- valory/transaction_settlement_abci:0.1.0:bafybeicwjtemc56o5a54td2mpdcq7i2tbeih5d4cx62f4r7faqqwsbgpne
 - valory/websocket_client:0.1.0:bafybeidbcdcvyy2svob6p52akdx4ezsqpxdh4kphhqgf6hbageneu7unwi
 customs:
 - valory/openai_request:0.1.0:bafybeig7cuzmlkyo6afsldpkry6qlra76kie3ln6jyqmyud2vbrzdy25ji
@@ -290,6 +290,11 @@ config:
       chain_id: ${int:100}
       poa_chain: ${bool:false}
       default_gas_price_strategy: ${str:eip1559}
+    polygon:
+      address: ${str:http://localhost:8545}
+      chain_id: ${int:137}
+      poa_chain: ${bool:true}
+      default_gas_price_strategy: ${str:eip1559_polygon}
 ---
 public_id: valory/http_server:0.22.0:bafybeicblltx7ha3ulthg7bzfccuqqyjmihhrvfeztlgrlcoxhr7kf6nbq
 type: connection

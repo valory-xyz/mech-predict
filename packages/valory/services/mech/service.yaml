@@ -7,7 +7,7 @@ license: Apache-2.0
 fingerprint:
   README.md: bafybeif7ia4jdlazy6745ke2k2x5yoqlwsgwr6sbztbgqtwvs3ndm2p7ba
 fingerprint_ignore_patterns: []
-agent: valory/mech:0.1.0:bafybeibvflxodhzcdxy7fluc2cs7r42empvvvxj7csv6iueckztbv2npnu
+agent: valory/mech:0.1.0:bafybeihbxmpwyeweshxpypim57d3aho7cujdtulbycv4aby65grq2uv6zq
 number_of_agents: 1
 deployment:
   agent:
@@ -282,10 +282,24 @@ type: connection
         poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
       polygon:
-        address: ${POLYGON_LEDGER_RPC_0:str:http://host.docker.internal:8545}
-        chain_id: ${POLYGON_LEDGER_CHAIN_ID:int:137}
-        poa_chain: ${POLYGON_LEDGER_IS_POA_CHAIN:bool:true}
-        default_gas_price_strategy: ${POLYGON_LEDGER_PRICING:str:eip1559_polygon}
+        address: ${POLYGON_LEDGER_RPC_0:str:https://1rpc.io/matic}
+        chain_id: ${int:137}
+        poa_chain: ${bool:true}
+        default_gas_price_strategy: ${str:eip1559}
+        gas_price_strategies:
+          gas_station:
+            gas_price_api_key: null
+            gas_price_strategy: fast
+          eip1559:
+            max_gas_fast: 3000
+            fee_history_blocks: 10
+            fee_history_percentile: 5
+            default_priority_fee: ${int:30000000000}
+            fallback_estimate:
+              maxFeePerGas: ${int:3000000000000}
+              maxPriorityFeePerGas: ${int:30000000000}
+              baseFee: null
+            priority_fee_increase_boundary: ${int:200}
 1:
   config:
     ledger_apis:
@@ -300,10 +314,24 @@ type: connection
         poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
       polygon:
-        address: ${POLYGON_LEDGER_RPC_1:str:http://host.docker.internal:8545}
-        chain_id: ${POLYGON_LEDGER_CHAIN_ID:int:137}
-        poa_chain: ${POLYGON_LEDGER_IS_POA_CHAIN:bool:true}
-        default_gas_price_strategy: ${POLYGON_LEDGER_PRICING:str:eip1559_polygon}
+        address: ${POLYGON_LEDGER_RPC_1:str:https://1rpc.io/matic}
+        chain_id: ${int:137}
+        poa_chain: ${bool:true}
+        default_gas_price_strategy: ${str:eip1559}
+        gas_price_strategies:
+          gas_station:
+            gas_price_api_key: null
+            gas_price_strategy: fast
+          eip1559:
+            max_gas_fast: 3000
+            fee_history_blocks: 10
+            fee_history_percentile: 5
+            default_priority_fee: ${int:30000000000}
+            fallback_estimate:
+              maxFeePerGas: ${int:3000000000000}
+              maxPriorityFeePerGas: ${int:30000000000}
+              baseFee: null
+            priority_fee_increase_boundary: ${int:200}
 2:
   config:
     ledger_apis:
@@ -318,10 +346,24 @@ type: connection
         poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
       polygon:
-        address: ${POLYGON_LEDGER_RPC_2:str:http://host.docker.internal:8545}
-        chain_id: ${POLYGON_LEDGER_CHAIN_ID:int:137}
-        poa_chain: ${POLYGON_LEDGER_IS_POA_CHAIN:bool:true}
-        default_gas_price_strategy: ${POLYGON_LEDGER_PRICING:str:eip1559_polygon}
+        address: ${POLYGON_LEDGER_RPC_2:str:https://1rpc.io/matic}
+        chain_id: ${int:137}
+        poa_chain: ${bool:true}
+        default_gas_price_strategy: ${str:eip1559}
+        gas_price_strategies:
+          gas_station:
+            gas_price_api_key: null
+            gas_price_strategy: fast
+          eip1559:
+            max_gas_fast: 3000
+            fee_history_blocks: 10
+            fee_history_percentile: 5
+            default_priority_fee: ${int:30000000000}
+            fallback_estimate:
+              maxFeePerGas: ${int:3000000000000}
+              maxPriorityFeePerGas: ${int:30000000000}
+              baseFee: null
+            priority_fee_increase_boundary: ${int:200}
 3:
   config:
     ledger_apis:
@@ -336,10 +378,24 @@ type: connection
         poa_chain: ${GNOSIS_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${GNOSIS_LEDGER_PRICING:str:eip1559}
       polygon:
-        address: ${POLYGON_LEDGER_RPC_3:str:http://host.docker.internal:8545}
-        chain_id: ${POLYGON_LEDGER_CHAIN_ID:int:137}
-        poa_chain: ${POLYGON_LEDGER_IS_POA_CHAIN:bool:true}
-        default_gas_price_strategy: ${POLYGON_LEDGER_PRICING:str:eip1559_polygon}
+        address: ${POLYGON_LEDGER_RPC_3:str:https://1rpc.io/matic}
+        chain_id: ${int:137}
+        poa_chain: ${bool:true}
+        default_gas_price_strategy: ${str:eip1559}
+        gas_price_strategies:
+          gas_station:
+            gas_price_api_key: null
+            gas_price_strategy: fast
+          eip1559:
+            max_gas_fast: 3000
+            fee_history_blocks: 10
+            fee_history_percentile: 5
+            default_priority_fee: ${int:30000000000}
+            fallback_estimate:
+              maxFeePerGas: ${int:3000000000000}
+              maxPriorityFeePerGas: ${int:30000000000}
+              baseFee: null
+            priority_fee_increase_boundary: ${int:200}
 ---
 public_id: valory/p2p_libp2p_client:0.1.0
 type: connection

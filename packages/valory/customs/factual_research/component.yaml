@@ -9,7 +9,7 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
-  factual_research.py: bafybeibujutbukshqnxgyu46xmsoszdolb3zxzj4cyuz5apodd2s4ccsfm
+  factual_research.py: bafybeigt23bgjjcprqxbmpj43txnirouens34qmke643pjdcdcpffpzfcu
 fingerprint_ignore_patterns: []
 entry_point: factual_research.py
 callable: run

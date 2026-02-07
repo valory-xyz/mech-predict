@@ -57,8 +57,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 import requests
+from markdownify import markdownify as md
 from openai import OpenAI
 from pydantic import BaseModel, Field
+from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
 
@@ -361,10 +363,12 @@ ESTIMATE_SYSTEM = (
     "probabilities: 0.5%% and 5%% are very different, as are 90%% and 99%%."
 )
 
-ESTIMATE_USER = """Based ONLY on the factual briefing below, estimate the probability that the event in the original question occurs.
+ESTIMATE_USER = """Relying exclusively on the factual briefing provided below, assess the probability that the event in the original question will occur.
 
 ORIGINAL QUESTION:
 \"\"\"{question}\"\"\"
+
+Today's date: {today}`
 
 FACTUAL BRIEFING:
 {briefing}
@@ -518,13 +522,86 @@ def _search_serper(
     return results
 
 
+# Maximum words to keep per scraped page
+_MAX_PAGE_WORDS = 400
+# Image / junk patterns to strip from HTML before extraction
+_IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
+_SCRIPT_STYLE_PATTERN = re.compile(
+    r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+
+
+def _fetch_page_content(
+    url: str, max_words: int = _MAX_PAGE_WORDS, timeout: int = 10
+) -> Optional[str]:
+    """Fetch a URL and extract its main text content.
+
+    Uses ``readability-lxml`` to isolate the main article content, then
+    ``markdownify`` to convert it to clean Markdown text.
+
+    :param url: The URL to fetch.
+    :type url: str
+    :param max_words: Maximum number of words to keep.
+    :type max_words: int
+    :param timeout: Request timeout in seconds.
+    :type timeout: int
+
+    :return: Extracted text content, or None on failure.
+    :rtype: Optional[str]
+    """
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MechBot/1.0)"},
+        )
+        if resp.status_code != 200:
+            return None
+        # Skip non-HTML responses (PDFs, images, etc.)
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" not in content_type:
+            return None
+
+        html = resp.text
+        # Strip scripts/styles/images before readability
+        html = _SCRIPT_STYLE_PATTERN.sub("", html)
+        html = _IMG_TAG_PATTERN.sub("", html)
+
+        # Extract main content with readability
+        article_html = ReadabilityDocument(html).summary()
+        # Convert to clean markdown text
+        text = md(article_html, heading_style="ATX", strip=["img", "figure"])
+        if not text or not text.strip():
+            return None
+
+        # Truncate to max_words
+        words = text.split()
+        if len(words) > max_words:
+            text = " ".join(words[:max_words]) + " […]"
+
+        return text.strip()
+    except Exception as e:
+        print(f"[factual_research] Failed to fetch {url}: {e}")
+        return None
+
+
 def _format_evidence(all_results: List[Dict[str, str]]) -> str:
     """Turn search-result dicts into a numbered evidence block."""
     if not all_results:
         return "(no evidence gathered)"
     lines: List[str] = []
     for idx, item in enumerate(all_results, 1):
-        lines.append(f"{idx}. [{item['title']}]({item['link']})\n   {item['snippet']}")
+        content = item.get("content", "")
+        if content:
+            lines.append(
+                f"{idx}. [{item['title']}]({item['link']})\n"
+                f"   Snippet: {item['snippet']}\n"
+                f"   Content: {content}"
+            )
+        else:
+            lines.append(
+                f"{idx}. [{item['title']}]({item['link']})\n" f"   {item['snippet']}"
+            )
     return "\n\n".join(lines)
 
 
@@ -650,6 +727,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             except Exception as e:
                 print(f"[factual_research] Search failed for '{sq}': {e}")
 
+        # Scrape actual page content for the top results
+        MAX_PAGES_TO_SCRAPE = 6
+        scraped = 0
+        for item in all_evidence:
+            if scraped >= MAX_PAGES_TO_SCRAPE:
+                break
+            content = _fetch_page_content(item["link"])
+            if content:
+                item["content"] = content
+                scraped += 1
+        print(f"[factual_research] Scraped {scraped}/{len(all_evidence)} pages.")
+
         # Cap evidence so we don't blow the synthesis context window
         MAX_EVIDENCE_ITEMS = 20
         if len(all_evidence) > MAX_EVIDENCE_ITEMS:
@@ -719,7 +808,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {
                 "role": "user",
                 "content": ESTIMATE_USER.format(
-                    question=question, briefing=briefing_text
+                    question=question, today=today, briefing=briefing_text
                 ),
             },
         ]

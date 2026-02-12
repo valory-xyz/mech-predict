@@ -19,8 +19,8 @@
         "custom/valory/tee_openai_request/0.1.0": "bafybeigtbzt7qnzzcds33r6kz34jn6i57djh2mx7zrzcffq3vdkaik6uka",
         "custom/dvilela/corcel_request/0.1.0": "bafybeihy3635ggtioakl66mc3vqfqwr3jvxdvkden2tnktf6zfc3ipif6i",
         "custom/dvilela/gemini_prediction/0.1.0": "bafybeiakbuhuxa5zin3jb75domyltqc33gtzrcl5ucjgiuz5y5wbfigevy",
-        "agent/valory/mech/0.1.0": "bafybeiekehsssy4aro4cywmit4ea5sqnubfunpyesijhji67y67mpwrnti",
-        "service/valory/mech/0.1.0": "bafybeibslkq6bwp3y5diyrn6wgsk4f5yhjynfugs6wleclqhwzjgej5ds4"
+        "agent/valory/mech/0.1.0": "bafybeigvmtckegxjntrd2ocwodnwlc2nkvwjfemvrdhbydz5xd26g2ajvu",
+        "service/valory/mech/0.1.0": "bafybeigl7rvvbcksyyeyfhtoqrk6ps3gl2kjiwcltea2feyo2viydwwfza"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeib7p5as3obcdzseiwg5umj2piiqaodkxkto7qh7b552l5emwsmdzm",
@@ -57,9 +57,9 @@
         "skill/valory/registration_abci/0.1.0": "bafybeibf5nhislatztx2q3u46v7d36vmm7dnxpmuhrbxqxkz4lvdgifwha",
         "skill/valory/abstract_abci/0.1.0": "bafybeihbstfafzdk4ecb4nkuo3vz3incrvgibljaqf5khtm3yxqswklj5i",
         "skill/valory/contract_subscription/0.1.0": "bafybeicrkrifwefmfd3d25cx7fwlq2ttqfhycrkply7dxrplhvoldgtdau",
-        "skill/valory/mech_abci/0.1.0": "bafybeiawdpe7nmtyqwap3qqxq7jddvqixz6sbm3fgq74ubax3tzlke53oi",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeif5gn7xfsclxjor6uei2ijes6wcjowj2ck7gkeoarhusdcqu7rnbi",
-        "skill/valory/task_execution/0.1.0": "bafybeihsyy5byxpu3rdf3devix435bcynegvxj26csi3n7gveh2aqeitrq",
+        "skill/valory/mech_abci/0.1.0": "bafybeiaevkp3tf4mzun234ufixbfreoavejs3xojcxsfjbalmfnuuy2l4a",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeieg6fbsezy7k7zqmcqfvwa3ucau2ar6yjcdtg5uwz53tidmkkygw4",
+        "skill/valory/task_execution/0.1.0": "bafybeibvt2ix4vkqnfova4x2zrf5d37kshujmchqrlzfabgrwy4h3dxfxm",
         "skill/valory/websocket_client/0.1.0": "bafybeidbcdcvyy2svob6p52akdx4ezsqpxdh4kphhqgf6hbageneu7unwi",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeib3y46tseqlty5ux3bmweoajmcl4eeyiwnofiidushnmqms7fjsl4"
     }

@@ -1,0 +1,18 @@
+name: openai_latest_request
+author: valory
+version: 0.1.0
+type: custom
+description: A simple tool that runs a prompt against OpenAI with dynamic model support.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeiddm77mub7fsj7rbjah76wkd37rb6t543ucsnhfgch7vvxtr4eg6q
+  openai_latest_request.py: bafybeieq4w54lomzzt7fkjhffvpujodmds5wvlolvejueegn2mh2von3um
+fingerprint_ignore_patterns: []
+entry_point: openai_latest_request.py
+callable: run
+params:
+  default_model: gpt-5.2-chat-latest
+dependencies:
+  openai:
+    version: ==1.93.0

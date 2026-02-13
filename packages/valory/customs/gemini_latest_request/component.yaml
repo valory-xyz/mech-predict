@@ -1,0 +1,19 @@
+name: gemini_latest_request
+author: valory
+version: 0.1.0
+type: custom
+description: A simple tool that runs a prompt against Google Gemini with dynamic model
+  support.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeicgnyqp374atbkpfjxcv6ydw2wnrn7bnwi7sxyczjqgmpb27xabvm
+  gemini_latest_request.py: bafybeia7hw636n7mgclscz7l6eoqwx2pcy7fxsxlplanmymnov47hjcaxi
+fingerprint_ignore_patterns: []
+entry_point: gemini_latest_request.py
+callable: run
+params:
+  default_model: gemini-2.5-flash
+dependencies:
+  google-generativeai:
+    version: ==0.6.0

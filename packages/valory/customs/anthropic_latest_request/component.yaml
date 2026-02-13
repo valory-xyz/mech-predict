@@ -1,0 +1,19 @@
+name: anthropic_latest_request
+author: valory
+version: 0.1.0
+type: custom
+description: A simple tool that runs a prompt against Anthropic with dynamic model
+  support.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeifsgftrxh645uqigz47m3avlbgmcfndkukk33o77obizr6xihenya
+  anthropic_latest_request.py: bafybeie2frxichtgrwg5q6xe3rsqpq5zqweplpgb5awuo6pyc5qlaperti
+fingerprint_ignore_patterns: []
+entry_point: anthropic_latest_request.py
+callable: run
+params:
+  default_model: claude-opus-4-5-latest
+dependencies:
+  anthropic:
+    version: ==0.23.1

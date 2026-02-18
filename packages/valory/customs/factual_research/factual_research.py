@@ -347,45 +347,73 @@ EVIDENCE GATHERED:
 
 INSTRUCTIONS:
 1. For each sub-question, write a CONCISE factual answer (1-3 sentences max).
-   If the evidence is insufficient, say "Insufficient evidence" for that item.
-   Cite at most 2 sources per sub-answer.
-2. Write a Factual Summary (2-4 sentences) synthesising the key facts.
-   Do NOT predict an outcome — only report what is verifiably true right now.
+   - If evidence is insufficient, say "Insufficient evidence".
+   - Explicitly note when *expected evidence is missing* (e.g. no official filing, no confirmation, no action).
+   - Cite at most 2 sources per sub-answer.
+2. Write a Factual Summary (2-4 sentences) synthesising the key state-of-the-world facts.
+   - Report what is verifiably true *and what has not yet happened*.
+   - Do NOT predict outcomes or imply likelihood.
 3. List only the most relevant sources (max 6 total).
 4. Rate how useful the evidence was (info_utility, 0-1).
+   - High info_utility means the evidence is informative, not that it supports success.
 5. Be concise throughout — every token counts.
 """
 
-ESTIMATE_SYSTEM = (
-    "You are an expert probability estimator. You receive a factual briefing "
-    "about a question and must convert it into a calibrated probability estimate. "
-    "Your performance is evaluated by the Brier score. Be precise with tail "
-    "probabilities: 0.5%% and 5%% are very different, as are 90%% and 99%%."
-)
+ESTIMATE_SYSTEM = """You are an expert probability estimator. You receive a factual briefing and must convert it into a calibrated probability estimate.
+Your performance is evaluated by the Brier score.
+
+Calibration rules:
+• Absence of expected evidence is a NO signal, not neutral.
+• High info_utility does NOT imply high probability.
+• Multi-step processes involving institutions, politics, or coordination rarely justify extreme probabilities.
+
+Tail discipline:
+• Probabilities above 90% require evidence that major failure modes are effectively eliminated.
+• Probabilities above 80% require strong historical precedents under similar conditions.
+• When confidence is low, extreme probabilities are rarely justified.
+"""
 
 ESTIMATE_USER = """Relying exclusively on the factual briefing provided below, assess the probability that the event in the original question will occur.
 
 ORIGINAL QUESTION:
 \"\"\"{question}\"\"\"
 
-Today's date: {today}`
+Today's date: {today}
 
 FACTUAL BRIEFING:
 {briefing}
 
 INSTRUCTIONS:
-1. First, write your step-by-step reasoning in the `reasoning` field:
-   a. Identify the key YES signals (evidence favouring the event happening).
-   b. Identify the key NO signals (evidence against).
-   c. Consider historical base rates if available.
-   d. Weigh competing signals — which are stronger and why?
-   e. Note any important evidence gaps.
-2. Then provide your probability estimate:
-   - p_yes + p_no must equal 1.
-   - Do NOT default to 0.5 when uncertain — use the evidence to break the tie.
-   - Be precise with tail probabilities: 5%% and 15%% are very different.
-   - confidence reflects how well-supported the estimate is by the factual evidence.
-   - info_utility reflects how useful the gathered evidence was.
+
+STEP 1 — Base rate anchor (MANDATORY)
+a. Identify the event category (e.g. regulatory approval, election outcome, product launch, treaty, court decision).
+b. State an explicit base-rate probability for events of this type.
+   - Use historical data if available.
+   - If not, use a conservative implied base rate and justify it.
+c. This base rate is your starting point.
+
+STEP 2 — Evidence evaluation
+a. List the key YES signals (facts that materially increase probability).
+b. List the key NO signals, including:
+   - Explicit negative evidence
+   - Missing evidence that would normally be expected by this stage
+c. Weigh signal strength relative to the base rate.
+   - Weak, procedural, or intention-based evidence should cause only small updates.
+
+STEP 3 — Synthesis
+a. Update from the base rate to a final probability.
+b. If evidence is mixed or thin, remain close to the base rate.
+c. Do NOT default away from uncertainty without justification.
+
+STEP 4 — Output constraints
+• p_yes + p_no must equal 1.
+• If confidence < 0.5, probabilities above 70% or below 30% require strong justification.
+• If confidence < 0.3, probabilities should remain within [0.2, 0.8].
+• It is valid for info_utility to be high while p_yes is low.
+
+OUTPUT:
+1. Provide detailed reasoning (2-4 paragraphs).
+2. Then output p_yes, p_no, confidence, and info_utility.
 """
 
 

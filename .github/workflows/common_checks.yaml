@@ -139,37 +139,62 @@ jobs:
 
     strategy:
       matrix:
-        os: [ ubuntu-latest ]
-        python-version: [ "3.10" ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        python-version: [ "3.10", "3.11" ]
 
     timeout-minutes: 120
+    
+    env:
+      OPENAI_SECRET_KEY: ${{ secrets.OPENAI_API_KEY }}
+      STABILITY_API_KEY: ${{ secrets.STABILITY_AI_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      GOOGLE_ENGINE_ID: ${{ vars.GOOGLE_ENGINE_ID }}
+      CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+      REPLICATE_API_KEY: ${{ secrets.REPLICATE_API_KEY }}
+      NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPEN_ROUTER_API_KEY }}
+      GNOSIS_RPC_URL: ${{ secrets.GNOSIS_RPC_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
+    
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v3
+      - uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
+      - if: matrix.os == 'ubuntu-latest'
+        name: Install dependencies (ubuntu-latest)
         run: |
           sudo apt-get update --fix-missing
           sudo apt-get autoremove
           sudo apt-get autoclean
           pip install tomte[tox,cli]==0.4.0
           pip install --user --upgrade setuptools
-      - name: Tool unit tests
-        env:
-          OPENAI_SECRET_KEY: ${{ secrets.OPENAI_API_KEY }}
-          STABILITY_API_KEY: ${{ secrets.STABILITY_AI_KEY }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GOOGLE_ENGINE_ID: ${{ vars.GOOGLE_ENGINE_ID }}
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          REPLICATE_API_KEY: ${{ secrets.REPLICATE_API_KEY }}
-          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPEN_ROUTER_API_KEY }}
-          GNOSIS_RPC_URL: ${{ secrets.GNOSIS_RPC_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
+      - if: matrix.os == 'ubuntu-latest'
+        name: Tool unit tests ubuntu-latest
         run: |
           printenv
-          tox -e check-tools
+          tox -e py${{ matrix.python-version }}-linux
+      - if: matrix.os == 'macos-latest'
+        name: Install dependencies (macos-latest)
+        run: |
+          pip install tomte[tox,cli]==0.4.0
+          pip install --user --upgrade setuptools
+      - if: matrix.os == 'macos-latest'
+        name: Tool unit tests macos-latest
+        run: |
+          printenv
+          tox -e py${{ matrix.python-version }}-darwin
+      - if: matrix.os == 'windows-latest'
+        name: Install dependencies (windows-latest)
+        run: |
+          python -m pip install -U pip
+          pip install tomte[tox,cli]==0.4.0
+          pip install --upgrade setuptools
+      - if: matrix.os == 'windows-latest'
+        name: Tool unit tests windows-latest
+        run: |
+          printenv
+          tox -e py${{ matrix.python-version }}-win

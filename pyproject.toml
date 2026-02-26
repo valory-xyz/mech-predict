@@ -73,6 +73,7 @@ langgraph = "==0.0.55"
 google-generativeai = "==0.6.0"
 openfactverification-kongzii = "^0.1.0"
 multiaddr = "0.0.9"
+py-eth-sig-utils = "*"
 
 lxml = {extras = ["html-clean"], version = "^5.1.0"}
 google-api-core = "^2.20.0"

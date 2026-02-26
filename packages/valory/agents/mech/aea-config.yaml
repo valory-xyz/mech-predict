@@ -39,13 +39,13 @@ protocols:
 skills:
 - valory/abstract_abci:0.1.0:bafybeieoc35cjm3dlt2ayj6iidjfdgry6fmhnzniml5dqalmwu4so6vmme
 - valory/abstract_round_abci:0.1.0:bafybeico2i67lk5wkgyvmu5ska7phbugxbfh4ofnm57vwpypis5zmpjnim
-- valory/contract_subscription:0.1.0:bafybeicrkrifwefmfd3d25cx7fwlq2ttqfhycrkply7dxrplhvoldgtdau
-- valory/mech_abci:0.1.0:bafybeidblprulni3bdpyq2tfmut4oltsgdbugxsuuefbhxhnyy5wl666uq
+- valory/contract_subscription:0.1.0:bafybeic3ngmx5uw3b6wp5oe4efa22slgjrllf4irhwsulwefbbgwsiidxq
+- valory/mech_abci:0.1.0:bafybeiddh3jc52maiunhk6mg4gpnulb4zzk6qga3cazhwahhhlwngnjpgm
 - valory/registration_abci:0.1.0:bafybeiaur5o7xjf5jod2gzbhxa2m2l2m7z76rfs7gf2sfuf3ffjlqodaxy
 - valory/reset_pause_abci:0.1.0:bafybeibgbbt4yzd6amf2wuldrdvhyfqibjqx2uxhybqhrkumlp4jcfndia
-- valory/delivery_rate_abci:0.1.0:bafybeicnmr7zaul43tjfg7wdnzptbvve7y6a7aov5rk57sgdvldsxw47iq
-- valory/task_execution:0.1.0:bafybeif6yrbkmitaovrlmts3pbqgzaescqywungpfll62ycov6qgv545ri
-- valory/task_submission_abci:0.1.0:bafybeibeeu2bb4sn3s4phbpzi7adwrej4aiqldpek7umwhdcoabgfm3ote
+- valory/delivery_rate_abci:0.1.0:bafybeieh57p6suuaorcxcathquxzbioluv35bmqxxtu4cdykezoa7fpf5e
+- valory/task_execution:0.1.0:bafybeicz7fq3ladjvengj5mxg4agtqmvevn7oixoesgjzxmcwu26xueose
+- valory/task_submission_abci:0.1.0:bafybeiaagkperf6gqd2xh5gz5kt7bfhd3wjuvbmhtsqjuxjgg5kjrc4tci
 - valory/termination_abci:0.1.0:bafybeifjwbctocnxrtgyzn7z2ml2q6bxdxrd4sa7m5u43p7ts6hk6ujvce
 - valory/transaction_settlement_abci:0.1.0:bafybeidmg3beiqyubkze6wdiwhz4oqwvidhsjexjgcvso5bkrryqkbsgzu
 - valory/websocket_client:0.1.0:bafybeidbcdcvyy2svob6p52akdx4ezsqpxdh4kphhqgf6hbageneu7unwi

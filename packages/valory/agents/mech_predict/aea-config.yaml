@@ -1,8 +1,8 @@
-agent_name: mech
+agent_name: mech_predict
 author: valory
 version: 0.1.0
 license: Apache-2.0
-description: A mech agent
+description: A mech predict agent
 aea_version: '>=2.0.0, <3.0.0'
 fingerprint: {}
 fingerprint_ignore_patterns: []

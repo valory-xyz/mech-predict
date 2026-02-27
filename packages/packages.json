@@ -19,8 +19,8 @@
         "custom/valory/tee_openai_request/0.1.0": "bafybeigtbzt7qnzzcds33r6kz34jn6i57djh2mx7zrzcffq3vdkaik6uka",
         "custom/dvilela/corcel_request/0.1.0": "bafybeihy3635ggtioakl66mc3vqfqwr3jvxdvkden2tnktf6zfc3ipif6i",
         "custom/dvilela/gemini_prediction/0.1.0": "bafybeiakbuhuxa5zin3jb75domyltqc33gtzrcl5ucjgiuz5y5wbfigevy",
-        "agent/valory/mech/0.1.0": "bafybeibl7kppanytp2xvzipexj2cxe33dm6c6o52oyo3braq3tduh5cfey",
-        "service/valory/mech/0.1.0": "bafybeiczdizhfcolcfpbujv4fbvk4ba4ucnbgecnedwymmj45loq34kjba"
+        "agent/valory/mech_predict/0.1.0": "bafybeibxu72mh6xumpshsj7y7krkjgphocfdsakg46qu5vlzd5j7zy357e",
+        "service/valory/mech_predict/0.1.0": "bafybeifx6m3fik7ew6bpsc4c6qfrbjhz27uswf5fnamwkxolkmnlnwzudy"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeiei6h5suazzfta7n3uyq7bsz26zkmdiiylptu5i44p7s2wiygxt24",
@@ -37,12 +37,12 @@
         "contract/valory/gnosis_safe_proxy_factory/0.1.0": "bafybeihnuhz6n7quvmfi36owk3k2qse7unjeykrlmjecet5o6kcrrhtpsa",
         "contract/valory/gnosis_safe/0.1.0": "bafybeig666ryzt3bzavejkmk4jtspihzziq72qpxy4g2ta3d5j5sdwzv5i",
         "contract/valory/multisend/0.1.0": "bafybeidjdgi2kyexajirj3cnpzgse4y5u664b2blztt4flv6i7knlecyr4",
-        "contract/valory/agent_mech/0.1.0": "bafybeiaytfc6v6hjv6i6ixndca63jlreslgcye5vmouvhq4ylezoldo7ky",
         "contract/valory/complementary_service_metadata/0.1.0": "bafybeibjk5gdgc54wx5bz4fl2666urmfj6mx3ocqxyumqpj7wq5fdg4diu",
         "contract/valory/hash_checkpoint/0.1.0": "bafybeic7x3cqr46yw7wzbvfc7mc6l3vsilx7g7tltqsb3whzfyolukoev4",
-        "contract/valory/mech_marketplace/0.1.0": "bafybeicnxlb62tmpure2fppbsnhbmek4zur2cfaiyg4nujek4h35ijh72a",
         "contract/valory/balance_tracker/0.1.0": "bafybeif3ziyaqnx5lj4mambwf3nw7jjp2xng2ib2c3qewj3r653duxg7em",
-        "contract/valory/erc20/0.1.0": "bafybeieuh56e2ikru4g7jl6owsndxjebydplg7fb5rbrtqie6wronitdze",
+        "contract/valory/erc20/0.1.0": "bafybeieiqrhzaziniamxmldytitnuwou3ixt65wef5ikasrnch35rg7rbu",
+        "contract/valory/mech_marketplace/0.1.0": "bafybeifnabe3hqdizvdtc2q33sr6q7glmojid332irkhbmczev3wzvq5lq",
+        "contract/valory/olas_mech/0.1.0": "bafybeigo6cldicov4ce2yxjztk4spemxf3sreztmkucmywvty6c5luwbw4",
         "connection/valory/ledger/0.19.0": "bafybeigiipjmtjdivz2wd54c7bmbqxbayk5b5st7wcrsvsnqkfc2f2rbaa",
         "connection/valory/http_client/0.23.0": "bafybeigwzn4hkry3wy7nf2myk3h3pl5xrqkvvxp2ppdbwwffa4c2s2bkwy",
         "connection/valory/abci/0.1.0": "bafybeifvjaobfl2mwwrb6jb26havbz3pu5lbb4so7gkhnvv2ilfkdywq7y",
@@ -56,11 +56,11 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeibgbbt4yzd6amf2wuldrdvhyfqibjqx2uxhybqhrkumlp4jcfndia",
         "skill/valory/registration_abci/0.1.0": "bafybeiaur5o7xjf5jod2gzbhxa2m2l2m7z76rfs7gf2sfuf3ffjlqodaxy",
         "skill/valory/abstract_abci/0.1.0": "bafybeieoc35cjm3dlt2ayj6iidjfdgry6fmhnzniml5dqalmwu4so6vmme",
-        "skill/valory/contract_subscription/0.1.0": "bafybeicrkrifwefmfd3d25cx7fwlq2ttqfhycrkply7dxrplhvoldgtdau",
-        "skill/valory/mech_abci/0.1.0": "bafybeiezu5hipxa2ge7ue4yo3otcxzfklv3qlluju2yoglyb7tluff5yt4",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeieq4housqxrn4wetp7y7hmz3ukua3qujmo4hw7osl36vtf2dfksku",
-        "skill/valory/task_execution/0.1.0": "bafybeibrnln3wenuewv5nipwehtqbbr4jztf3pb6lrb7emsa7uffclnpaa",
         "skill/valory/websocket_client/0.1.0": "bafybeidbcdcvyy2svob6p52akdx4ezsqpxdh4kphhqgf6hbageneu7unwi",
-        "skill/valory/delivery_rate_abci/0.1.0": "bafybeifjwvcdom6c6y5uxam2ja44ola535kphs7v6qfwdw7bqk3a7sxxlq"
+        "skill/valory/contract_subscription/0.1.0": "bafybeic3ngmx5uw3b6wp5oe4efa22slgjrllf4irhwsulwefbbgwsiidxq",
+        "skill/valory/mech_abci/0.1.0": "bafybeig24b3hqcjpemibffqdfngfyiiyskqxmhzh2kzwchbdwnfxgjnoc4",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeibuxghmoiv6bha4rwjuh7aacju4dfcobth3ajvktciuwhhm5ghmbm",
+        "skill/valory/task_execution/0.1.0": "bafybeiaymneu7w4a5jrg3yfowsvv2bfos64yadeakmbmsidc66sirtqjsi",
+        "skill/valory/delivery_rate_abci/0.1.0": "bafybeifzw4okhzax55zuuusggfcyz2z2ulrto4fww2l36julte5ks7e7kq"
     }
 }

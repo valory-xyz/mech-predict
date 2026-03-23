@@ -11,7 +11,7 @@
 
 Three Python scripts — `bump.py`, `check_dependencies.py`, and `check_doc_ipfs_hashes.py` — are copy-pasted across **7 repositories** (6 mech repos + open-autonomy). These scripts are used exclusively in CI (via tox) for dependency bumping, dependency validation, and documentation hash checking.
 
-The copies have silently diverged over time, introducing real bugs (missing HTTP timeouts in mech-client and mech-server) and inconsistent behavior (hardcoded version hacks that differ per repo). Consolidating them into the `open-autonomy` CLI eliminates ~4,500 lines of duplicated code, fixes existing bugs by default, and ensures future improvements propagate automatically.
+The copies have silently diverged over time, introducing real bugs (missing HTTP timeouts in mech-client and mech-server) and inconsistent behavior (hardcoded version hacks that differ per repo). We propose consolidating them into a new **`aea-helpers`** plugin under `open-autonomy/plugins/`, installable as a standalone package. This eliminates ~4,500 lines of duplicated code, fixes existing bugs by default, and ensures future improvements propagate automatically.
 
 ---
 
@@ -108,37 +108,65 @@ Additionally, `scripts/` is included as a target in every linting tox environmen
 
 ## 4. Consolidation Recommendation
 
-### 4.1 Where to consolidate: `open-autonomy` CLI
+### 4.1 Where to consolidate: `aea-helpers` plugin
 
-All three scripts should be consolidated into the **open-autonomy CLI** as top-level commands.
+All three scripts should be consolidated into a new **`aea-helpers` plugin** under `open-autonomy/plugins/aea-helpers/`, following the same pattern as the existing `aea-test-autonomy` plugin.
 
-**Why not tomte (as previously suggested for `bump.py`)?**
+The plugin is:
+- A standalone pip-installable package (`pip install aea-helpers`)
+- Lives in the open-autonomy monorepo but has its own `setup.py`, version, and test suite
+- Depends only on `open-aea` (not `open-autonomy`) — keeping the dependency graph clean
+- Exposes CLI entry points: `aea-helpers bump-dependencies`, `aea-helpers check-dependencies`, `aea-helpers check-doc-hashes`
 
-| Consideration | Tomte | Open-Autonomy |
+**Why a plugin?**
+
+| Consideration | Plugin | Direct CLI in open-autonomy |
 |---|---|---|
-| Already depends on `aea` / `autonomy`? | No — would need new `[bump]` optional extra | Yes |
-| Current scope | Linter wrappers (black, isort, flake8, etc.) | Framework CLI (packages, deployment, analysis) |
-| All three scripts import from `aea`? | Yes — adding as dependency changes tomte's scope | Already available |
-| Repos using scripts already depend on? | open-autonomy (always) | open-autonomy (always) |
+| Release cycle | Independent — ship fixes without an open-autonomy release | Tied to open-autonomy releases |
+| `autonomy --help` pollution | No — helpers have their own entry point | Adds maintainer commands to user-facing CLI |
+| Dependency direction | Clean — depends on `aea` only, sits below `open-autonomy` | N/A |
+| Reusable beyond mech repos | Yes — any aea-based repo can use it | Only repos using `open-autonomy` |
+| Testing surface | Focused — changes don't trigger full open-autonomy CI | Full CI matrix |
+| Precedent | Follows `aea-test-autonomy` plugin pattern | N/A |
 
-Adding `open-aea` + `open-autonomy` as tomte dependencies (even as optionals) would change tomte from a lightweight linter wrapper to a framework-aware tool. All three scripts naturally belong in open-autonomy because they use core package management APIs (`PackageManagerV1`, `load_configuration`, `PackageId`).
+**Why not tomte?**
 
-**Why top-level commands (not an `autonomy dev` subgroup)?**
+Tomte is a linter wrapper. It doesn't depend on `aea` or `autonomy` and shouldn't start. All three scripts import from `aea` core APIs (`PackageManagerV1`, `load_configuration`, `PackageId`).
 
-- The `autonomy` CLI already mixes user-facing and CI/developer commands at the top level (e.g. `autonomy analyse handlers`, `autonomy packages lock --check` are CI-only).
-- A `dev` subgroup adds an extra word to every CI invocation for no functional benefit.
-- There is no existing precedent for a `dev` subgroup in the codebase.
-- The `check-*` naming pattern is already established with `autonomy check-packages`.
+### 4.2 Dropping the `autonomy` import from `bump.py`
 
-### 4.2 Proposed CLI Commands
+The only `autonomy` import across all three scripts is in `bump.py`:
+
+```python
+from autonomy.cli.helpers.ipfs_hash import load_configuration
+```
+
+This is a thin wrapper (~10 lines) around `aea.configurations.loader.load_configuration_object` that adds `Service` package type support. It's used in one place:
+
+```python
+pm = PackageManagerV1.from_dir(
+    Path.cwd() / PACKAGES, config_loader=load_configuration
+)
+```
+
+The refactor: remove the `config_loader` parameter. The default aea loader handles all standard package types. `check_dependencies.py` already uses `PackageManagerV1.from_dir()` without a config_loader and works fine — services are naturally skipped during dependency iteration.
+
+After this refactor, all three scripts depend only on `open-aea` — no `open-autonomy` dependency required. This makes the plugin dependency graph clean.
+
+### 4.3 Proposed CLI Commands
 
 | Current script | Proposed command | Key options |
 |---|---|---|
-| `bump.py` | `autonomy bump-dependencies` | `--sync`, `--no-cache`, `--source SOURCE` |
-| `check_dependencies.py` | `autonomy check-dependencies` | `--check` (validate-only), `--update`, `--exclude PACKAGE` (repeatable), `--pipfile PATH`, `--pyproject PATH` |
-| `check_doc_ipfs_hashes.py` | `autonomy check-doc-hashes` | `--fix`, `--skip-hash HASH` (repeatable), `--paths GLOB` |
+| `bump.py` | `aea-helpers bump-dependencies` | `--sync`, `--no-cache`, `--source SOURCE` |
+| `check_dependencies.py` | `aea-helpers check-dependencies` | `--check` (validate-only), `--update`, `--exclude PACKAGE` (repeatable), `--pipfile PATH`, `--pyproject PATH` |
+| `check_doc_ipfs_hashes.py` | `aea-helpers check-doc-hashes` | `--fix`, `--skip-hash HASH` (repeatable), `--paths GLOB` |
 
-### 4.3 Migration per repo (after commands are available)
+### 4.4 Migration per repo (after plugin is available)
+
+**Add plugin dependency** to `pyproject.toml` or `Pipfile`:
+```
+aea-helpers>=0.1.0
+```
 
 **tox.ini changes:**
 
@@ -150,7 +178,7 @@ commands = {toxinidir}/scripts/check_dependencies.py
 
 # AFTER
 [testenv:check-dependencies]
-commands = autonomy check-dependencies --check
+commands = aea-helpers check-dependencies --check
 ```
 
 ```ini
@@ -161,23 +189,10 @@ commands = {toxinidir}/scripts/check_doc_ipfs_hashes.py
 
 # AFTER
 [testenv:check-doc-hashes]
-commands = autonomy check-doc-hashes
+commands = aea-helpers check-doc-hashes
 ```
 
-**Linting cleanup — remove `scripts` from all linting targets:**
-
-```ini
-# BEFORE (repeated across bandit, black, isort, flake8, mypy, pylint, darglint)
-commands = bandit -s B101 -r scripts
-commands = black {env:SERVICE_SPECIFIC_PACKAGES} scripts
-commands = mypy scripts --disallow-untyped-defs --config-file tox.ini
-# etc.
-
-# AFTER — remove "scripts" from each command if no repo-specific scripts remain
-commands = bandit -s B101 -r {env:SERVICE_SPECIFIC_PACKAGES}
-commands = black {env:SERVICE_SPECIFIC_PACKAGES}
-# etc.
-```
+**Linting cleanup — remove `scripts` from all linting targets** where no repo-specific scripts remain.
 
 **Delete files:**
 - Remove `bump.py`, `check_dependencies.py`, `check_doc_ipfs_hashes.py`, `__init__.py` from `scripts/` (or `utils/` for mech-server)
@@ -187,46 +202,7 @@ commands = black {env:SERVICE_SPECIFIC_PACKAGES}
 
 ## 5. Implementation Plan
 
-### Phase 1: `check_doc_ipfs_hashes.py` → `autonomy check-doc-hashes`
-
-**Risk: Low** — open-autonomy's version is already the superset; downstream repos use fewer features.
-
-| Step | Detail |
-|---|---|
-| Starting point | open-autonomy's 496-line version |
-| Changes needed | Replace hardcoded `HASH_SKIPS` with `--skip-hash` CLI option; add `--paths` for configurable doc directories |
-| Wire into CLI | Add to `autonomy` CLI |
-| Test | Existing CI in open-autonomy validates this already |
-
-### Phase 2: `check_dependencies.py` → `autonomy check-dependencies`
-
-**Risk: Medium** — the copies have meaningfully diverged. The mech-interact version is the best starting point.
-
-| Step | Detail |
-|---|---|
-| Starting point | mech-interact's 652-line version (has `Pipfile`, `ToxFile`, `PyProjectToml` classes, Click CLI, `--check` flag) |
-| Changes needed | Add `--exclude PACKAGE` option to replace hardcoded hacks; auto-detect Pipfile vs pyproject.toml; merge open-autonomy's Pipfile extras/git handling |
-| Wire into CLI | Add to `autonomy` CLI |
-| Risk mitigation | Run consolidated version against all 7 repos in a test branch before merging |
-
-### Phase 3: `bump.py` → `autonomy bump-dependencies`
-
-**Risk: Low** — all copies are nearly identical; the timeout bug gets fixed automatically.
-
-| Step | Detail |
-|---|---|
-| Starting point | mech-predict's version (most up-to-date, has `TIMEOUT = 30.0`) |
-| Changes needed | Parameterize hardcoded GitHub repos; add CLI options matching current `sys.argv` usage |
-| Wire into CLI | Add to `autonomy` CLI |
-| Bonus | Fixes mech-client and mech-server timeout bug by default |
-
-### Phase 4: Repo-by-repo migration
-
-For each of the 6 mech repos + open-autonomy:
-1. Delete the duplicated scripts
-2. Update tox.ini to use `autonomy` CLI commands
-3. Remove `scripts` from linting targets
-4. Delete `scripts/` directory if empty (mech, mech-server)
+See [implementation-plan.md](./implementation-plan.md) for detailed step-by-step tasks.
 
 ---
 
@@ -234,12 +210,13 @@ For each of the 6 mech repos + open-autonomy:
 
 | Before | After |
 |---|---|
-| ~4,500 lines of duplicated code across 7 repos | 3 CLI commands in one place |
+| ~4,500 lines of duplicated code across 7 repos | 3 CLI commands in one plugin |
 | Bug: mech-client/mech-server `bump.py` missing HTTP timeouts | Fixed automatically |
 | 4 divergent variants of `check_dependencies.py` | One version supporting Pipfile + pyproject.toml |
 | Hardcoded package exclusions per repo (`requests==2.28.2`, popping `solders`) | Configurable `--exclude` flag |
-| Scripts linted as repo source code (bandit, black, isort, flake8, mypy, pylint on `scripts/`) | Eliminated — code lives in open-autonomy, linted there once |
-| Manual propagation of fixes | `pip install --upgrade open-autonomy` picks up fixes |
+| Scripts linted as repo source code (bandit, black, isort, flake8, mypy, pylint on `scripts/`) | Eliminated — code lives in plugin, linted there once |
+| Manual propagation of fixes | `pip install --upgrade aea-helpers` picks up fixes |
+| Tied to open-autonomy release cycle | Independent plugin releases |
 
 ---
 
@@ -249,7 +226,8 @@ For each of the 6 mech repos + open-autonomy:
 |---|---|---|---|
 | Consolidated `check_dependencies` fails on a repo due to format differences | Medium | CI breaks | Run against all 7 repos before merging; phase the rollout |
 | Extra features in open-autonomy's `check_doc_ipfs_hashes` surface new CI failures in downstream repos | Low | New warnings/errors in CI | Extra checks only activate for cross-repo package references, which downstream repos don't use |
-| Repos pinned to older open-autonomy version don't get new commands | Low | Migration blocked until version bump | Coordinate with next scheduled open-autonomy release |
+| Dropping `config_loader` from bump.py breaks Service package handling during sync | Low | Bump + sync fails | Test sync with repos containing Service packages; add fallback if needed |
+| New PyPI package to maintain (`aea-helpers`) | Low | Ongoing overhead | Versioned in sync with open-autonomy; release automated via existing bump tooling |
 | Breaking change in CLI interface if command signatures change later | Low | tox.ini needs updating | Semantic versioning; deprecation warnings before removing flags |
 
 ---
@@ -258,7 +236,8 @@ For each of the 6 mech repos + open-autonomy:
 
 | Previous claim | Actual finding |
 |---|---|
-| `bump.py` should go to tomte | All 3 scripts should go to open-autonomy — tomte doesn't depend on `aea`/`autonomy` and shouldn't start |
+| `bump.py` should go to tomte | All 3 scripts should go to an `aea-helpers` plugin — tomte doesn't depend on `aea`/`autonomy` and shouldn't start |
+| Scripts should be direct `autonomy` CLI commands | Plugin approach is cleaner — independent release cycle, no CLI pollution, depends only on `aea` |
 | mech-server has a `scripts/` directory | mech-server uses `utils/` |
 | 4–6 repos affected | **7 repos** — open-autonomy itself also has the same duplicated scripts |
 | mech-interact's `check_dependencies.py` was not highlighted | It's 652 lines with a full Click CLI — the best starting point for consolidation |
@@ -266,31 +245,31 @@ For each of the 6 mech repos + open-autonomy:
 
 ---
 
-## Appendix A: Dependency Graph of Duplicated Scripts
+## Appendix A: Dependency Graph
 
-All three scripts import from the same packages:
+After refactoring `bump.py` to drop the `autonomy` import, all three scripts depend only on `aea`:
 
 ```
-bump.py
-├── aea.cli.utils.click_utils (PackagesSource, PyPiDependency)
-├── aea.configurations.constants (PACKAGES, PACKAGE_TYPE_TO_CONFIG_FILE)
-├── aea.configurations.data_types (Dependency)
-├── aea.helpers.yaml_utils (yaml_dump, yaml_load, etc.)
-├── aea.package_manager.v1 (PackageManagerV1)
-└── autonomy.cli.helpers.ipfs_hash (load_configuration)
-
-check_dependencies.py
-├── aea.configurations.data_types (Dependency, PackageType)
-├── aea.package_manager.base (load_configuration)
-└── aea.package_manager.v1 (PackageManagerV1)
-
-check_doc_ipfs_hashes.py
-├── aea.cli.packages (get_package_manager)
-├── aea.configurations.data_types (PackageId)
-└── aea.helpers.base (IPFS_HASH_REGEX, SIMPLE_ID_REGEX)
+aea-helpers plugin
+├── depends on: open-aea (only)
+│
+├── bump_dependencies.py
+│   ├── aea.cli.utils.click_utils (PackagesSource, PyPiDependency)
+│   ├── aea.configurations.constants (PACKAGES, PACKAGE_TYPE_TO_CONFIG_FILE)
+│   ├── aea.configurations.data_types (Dependency)
+│   ├── aea.helpers.yaml_utils (yaml_dump, yaml_load, etc.)
+│   └── aea.package_manager.v1 (PackageManagerV1)
+│
+├── check_dependencies.py
+│   ├── aea.configurations.data_types (Dependency, PackageType)
+│   ├── aea.package_manager.base (load_configuration)
+│   └── aea.package_manager.v1 (PackageManagerV1)
+│
+└── check_doc_hashes.py
+    ├── aea.cli.packages (get_package_manager)
+    ├── aea.configurations.data_types (PackageId)
+    └── aea.helpers.base (IPFS_HASH_REGEX, SIMPLE_ID_REGEX)
 ```
-
-All imports are already available in any environment that has `open-autonomy` installed — which every repo in scope does.
 
 ## Appendix B: Repos After Migration
 

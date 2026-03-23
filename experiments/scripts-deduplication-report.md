@@ -230,18 +230,7 @@ For each of the 6 mech repos + open-autonomy:
 
 ---
 
-## 6. Effort Estimate
-
-| Task | Effort | Owner |
-|---|---|---|
-| Implement 3 commands in open-autonomy CLI | 2–3 days | TBD |
-| Test consolidated commands against all 7 repos | 0.5 day | TBD |
-| Migrate each repo (delete scripts, update tox.ini) | ~30 min × 7 repos = 0.5 day | TBD |
-| **Total** | **3–4 days** | |
-
----
-
-## 7. What This Fixes
+## 6. What This Fixes
 
 | Before | After |
 |---|---|
@@ -254,7 +243,7 @@ For each of the 6 mech repos + open-autonomy:
 
 ---
 
-## 8. Risks and Mitigations
+## 7. Risks and Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
@@ -265,7 +254,7 @@ For each of the 6 mech repos + open-autonomy:
 
 ---
 
-## 9. Corrections to Previous Report
+## 8. Corrections to Previous Report
 
 | Previous claim | Actual finding |
 |---|---|

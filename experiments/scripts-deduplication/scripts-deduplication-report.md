@@ -115,8 +115,17 @@ All three scripts should be consolidated into a new **`aea-helpers` plugin** und
 The plugin is:
 - A standalone pip-installable package (`pip install aea-helpers`)
 - Lives in the open-autonomy monorepo but has its own `setup.py`, version, and test suite
-- Depends only on `open-aea` (not `open-autonomy`) — keeping the dependency graph clean
+- Depends on `open-autonomy` (which in turn depends on `open-aea`)
 - Exposes CLI entry points: `aea-helpers bump-dependencies`, `aea-helpers check-dependencies`, `aea-helpers check-doc-hashes`
+
+**Why does the plugin depend on `open-autonomy` (not just `open-aea`)?**
+
+Two of the three scripts require `open-autonomy` because every mech repo contains Service packages, and only `open-autonomy` knows how to load them:
+
+- **`bump.py`** imports `autonomy.cli.helpers.ipfs_hash.load_configuration` — a wrapper that extends aea's config loader with `PackageType.SERVICE` support. Without it, `PackageManagerV1.update_package_hashes()` crashes with a `KeyError` when it encounters a Service package.
+- **`check_doc_ipfs_hashes.py`** uses `get_package_manager` from `aea.cli.packages`, but `open-autonomy` overrides this function to inject Service-aware config loading. Without `open-autonomy` installed, the override is missing and loading Service packages fails.
+
+This does not create circular dependencies — the direction is one-way: `aea-helpers → open-autonomy → open-aea`. The `open-autonomy` package never imports from `aea-helpers`.
 
 **Why a plugin?**
 
@@ -124,36 +133,15 @@ The plugin is:
 |---|---|---|
 | Release cycle | Independent — ship fixes without an open-autonomy release | Tied to open-autonomy releases |
 | `autonomy --help` pollution | No — helpers have their own entry point | Adds maintainer commands to user-facing CLI |
-| Dependency direction | Clean — depends on `aea` only, sits below `open-autonomy` | N/A |
-| Reusable beyond mech repos | Yes — any aea-based repo can use it | Only repos using `open-autonomy` |
 | Testing surface | Focused — changes don't trigger full open-autonomy CI | Full CI matrix |
+| Separation of concerns | CI/maintainer tooling isolated from framework CLI | Maintainer utilities mixed with user-facing commands |
 | Precedent | Follows `aea-test-autonomy` plugin pattern | N/A |
 
 **Why not tomte?**
 
-Tomte is a linter wrapper. It doesn't depend on `aea` or `autonomy` and shouldn't start. All three scripts import from `aea` core APIs (`PackageManagerV1`, `load_configuration`, `PackageId`).
+Tomte is a linter wrapper. It doesn't depend on `aea` or `autonomy` and shouldn't start. All three scripts import from `aea`/`autonomy` core APIs (`PackageManagerV1`, `load_configuration`, `PackageId`).
 
-### 4.2 Dropping the `autonomy` import from `bump.py`
-
-The only `autonomy` import across all three scripts is in `bump.py`:
-
-```python
-from autonomy.cli.helpers.ipfs_hash import load_configuration
-```
-
-This is a thin wrapper (~10 lines) around `aea.configurations.loader.load_configuration_object` that adds `Service` package type support. It's used in one place:
-
-```python
-pm = PackageManagerV1.from_dir(
-    Path.cwd() / PACKAGES, config_loader=load_configuration
-)
-```
-
-The refactor: remove the `config_loader` parameter. The default aea loader handles all standard package types. `check_dependencies.py` already uses `PackageManagerV1.from_dir()` without a config_loader and works fine — services are naturally skipped during dependency iteration.
-
-After this refactor, all three scripts depend only on `open-aea` — no `open-autonomy` dependency required. This makes the plugin dependency graph clean.
-
-### 4.3 Proposed CLI Commands
+### 4.2 Proposed CLI Commands
 
 | Current script | Proposed command | Key options |
 |---|---|---|
@@ -161,12 +149,21 @@ After this refactor, all three scripts depend only on `open-aea` — no `open-au
 | `check_dependencies.py` | `aea-helpers check-dependencies` | `--check` (validate-only), `--update`, `--exclude PACKAGE` (repeatable), `--pipfile PATH`, `--pyproject PATH` |
 | `check_doc_ipfs_hashes.py` | `aea-helpers check-doc-hashes` | `--fix`, `--skip-hash HASH` (repeatable), `--paths GLOB` |
 
-### 4.4 Migration per repo (after plugin is available)
+### 4.3 Migration per repo (after plugin is available)
 
-**Add plugin dependency** to `pyproject.toml` or `Pipfile`:
+**Add plugin dependency** in two places:
+
+`pyproject.toml` (or `Pipfile`):
 ```
 aea-helpers>=0.1.0
 ```
+
+`tox.ini` `[deps-packages]` section:
+```ini
+aea-helpers>=0.1.0
+```
+
+Both are required — `pyproject.toml` defines the project dependency, `tox.ini` ensures the tox environments can access it. The `check_dependencies.py` script validates consistency between these files.
 
 **tox.ini changes:**
 
@@ -226,7 +223,6 @@ See [implementation-plan.md](./implementation-plan.md) for detailed step-by-step
 |---|---|---|---|
 | Consolidated `check_dependencies` fails on a repo due to format differences | Medium | CI breaks | Run against all 7 repos before merging; phase the rollout |
 | Extra features in open-autonomy's `check_doc_ipfs_hashes` surface new CI failures in downstream repos | Low | New warnings/errors in CI | Extra checks only activate for cross-repo package references, which downstream repos don't use |
-| Dropping `config_loader` from bump.py breaks Service package handling during sync | Low | Bump + sync fails | Test sync with repos containing Service packages; add fallback if needed |
 | New PyPI package to maintain (`aea-helpers`) | Low | Ongoing overhead | Versioned in sync with open-autonomy; release automated via existing bump tooling |
 | Breaking change in CLI interface if command signatures change later | Low | tox.ini needs updating | Semantic versioning; deprecation warnings before removing flags |
 
@@ -237,7 +233,8 @@ See [implementation-plan.md](./implementation-plan.md) for detailed step-by-step
 | Previous claim | Actual finding |
 |---|---|
 | `bump.py` should go to tomte | All 3 scripts should go to an `aea-helpers` plugin — tomte doesn't depend on `aea`/`autonomy` and shouldn't start |
-| Scripts should be direct `autonomy` CLI commands | Plugin approach is cleaner — independent release cycle, no CLI pollution, depends only on `aea` |
+| Scripts should be direct `autonomy` CLI commands | Plugin approach is cleaner — independent release cycle, no CLI pollution, proper separation of concerns |
+| Plugin can depend on `open-aea` only | Verified false — `bump.py` and `check_doc_ipfs_hashes.py` require `open-autonomy` for Service package type support. Plugin depends on `open-autonomy`. No circular dependency issues. |
 | mech-server has a `scripts/` directory | mech-server uses `utils/` |
 | 4–6 repos affected | **7 repos** — open-autonomy itself also has the same duplicated scripts |
 | mech-interact's `check_dependencies.py` was not highlighted | It's 652 lines with a full Click CLI — the best starting point for consolidation |
@@ -247,18 +244,19 @@ See [implementation-plan.md](./implementation-plan.md) for detailed step-by-step
 
 ## Appendix A: Dependency Graph
 
-After refactoring `bump.py` to drop the `autonomy` import, all three scripts depend only on `aea`:
-
 ```
 aea-helpers plugin
-├── depends on: open-aea (only)
+├── depends on: open-autonomy (which depends on open-aea)
+│   └── Reason: bump.py and check_doc_ipfs_hashes.py need Service package support
+│       which only open-autonomy provides
 │
 ├── bump_dependencies.py
 │   ├── aea.cli.utils.click_utils (PackagesSource, PyPiDependency)
 │   ├── aea.configurations.constants (PACKAGES, PACKAGE_TYPE_TO_CONFIG_FILE)
 │   ├── aea.configurations.data_types (Dependency)
 │   ├── aea.helpers.yaml_utils (yaml_dump, yaml_load, etc.)
-│   └── aea.package_manager.v1 (PackageManagerV1)
+│   ├── aea.package_manager.v1 (PackageManagerV1)
+│   └── autonomy.cli.helpers.ipfs_hash (load_configuration)  ← requires open-autonomy
 │
 ├── check_dependencies.py
 │   ├── aea.configurations.data_types (Dependency, PackageType)
@@ -266,10 +264,12 @@ aea-helpers plugin
 │   └── aea.package_manager.v1 (PackageManagerV1)
 │
 └── check_doc_hashes.py
-    ├── aea.cli.packages (get_package_manager)
+    ├── aea.cli.packages (get_package_manager)  ← overridden by open-autonomy at runtime
     ├── aea.configurations.data_types (PackageId)
     └── aea.helpers.base (IPFS_HASH_REGEX, SIMPLE_ID_REGEX)
 ```
+
+No circular dependencies: `aea-helpers → open-autonomy → open-aea` (one-way).
 
 ## Appendix B: Repos After Migration
 

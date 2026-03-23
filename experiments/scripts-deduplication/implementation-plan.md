@@ -79,7 +79,7 @@ setup(
         ],
     },
     install_requires=[
-        "open-aea[all]>=2.1.0,<3.0.0",
+        "open-autonomy>=0.21.0,<1.0.0",
         "click>=8.1.0,<9",
         "requests>=2.28.0,<3",
         "toml>=0.10,<1",
@@ -89,7 +89,8 @@ setup(
 ```
 
 Key points:
-- **Depends on `open-aea` only** — no `open-autonomy` dependency
+- **Depends on `open-autonomy`** — required because `bump.py` needs `autonomy.cli.helpers.ipfs_hash.load_configuration` and `check_doc_ipfs_hashes.py` needs autonomy's overridden `get_package_manager`, both for Service package type support
+- No circular dependency: `aea-helpers → open-autonomy → open-aea` (one-way)
 - Exposes `aea-helpers` as a console script entry point
 - Follows the same license and author conventions as `aea-test-autonomy`
 
@@ -263,22 +264,7 @@ aea-helpers check-dependencies --check --exclude <repo-specific-excludes>
 Create `plugins/aea-helpers/aea_helpers/bump_dependencies.py`:
 
 - Move script logic into this module
-- **Refactor: drop the `autonomy` import.** Remove:
-  ```python
-  from autonomy.cli.helpers.ipfs_hash import load_configuration
-  ```
-  Change:
-  ```python
-  pm = PackageManagerV1.from_dir(
-      Path.cwd() / PACKAGES, config_loader=load_configuration
-  )
-  ```
-  To:
-  ```python
-  pm = PackageManagerV1.from_dir(Path.cwd() / PACKAGES)
-  ```
-  The default aea loader handles all standard package types. `check_dependencies.py` already uses `PackageManagerV1.from_dir()` without a `config_loader` and works fine.
-
+- **Keep the `autonomy` import** — `load_configuration` from `autonomy.cli.helpers.ipfs_hash` is required because `PackageManagerV1.update_package_hashes()` iterates all packages including Service types, and only autonomy's loader supports `PackageType.SERVICE`. Dropping it causes a `KeyError`.
 - Wrap with Click decorators:
   ```python
   @click.command(name="bump-dependencies")
@@ -337,19 +323,21 @@ Create `plugins/aea-helpers/tests/test_bump_dependencies.py`:
 
 #### Step A — Add `aea-helpers` dependency
 
-Add to `pyproject.toml`:
+Must be added in **two places** (the `check_dependencies` script validates consistency between them):
+
+`pyproject.toml`:
 ```toml
 [tool.poetry.dependencies]
 aea-helpers = ">=0.1.0"
 ```
 
-Or to `Pipfile`:
+Or `Pipfile` (for open-autonomy):
 ```
 [dev-packages]
 aea-helpers = ">=0.1.0"
 ```
 
-And to `tox.ini` deps if needed:
+**AND** `tox.ini` `[deps-packages]` section:
 ```ini
 [deps-packages]
 deps =
@@ -553,7 +541,7 @@ Run the full tox suite to confirm nothing breaks.
     [ ] 1.0  Scaffold plugin package structure
     [ ] 1.1  Implement aea-helpers check-doc-hashes + tests
     [ ] 1.2  Implement aea-helpers check-dependencies + tests
-    [ ] 1.3  Implement aea-helpers bump-dependencies + tests (refactor: drop autonomy import)
+    [ ] 1.3  Implement aea-helpers bump-dependencies + tests (keeps autonomy import for Service support)
     [ ] 1.x  Validate: run plugin commands against open-autonomy's own repo
 
 [ ] Phase 2 — Release

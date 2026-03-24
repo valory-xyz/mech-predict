@@ -40,12 +40,12 @@ skills:
 - valory/abstract_abci:0.1.0:bafybeidp7fs4t2vjkrgmtyx4djwgme5rfodx3arl47jlpd4plho37henhy
 - valory/abstract_round_abci:0.1.0:bafybeigzfvbwdm7b3y7s6ft7rwdqmzrafltz7imvczcptfgwah7lfsyupe
 - valory/contract_subscription:0.1.0:bafybeibtcbtgm5ptzn6srfts3lxts5722sygmkypcknv5ocmydqwcvgeem
-- valory/mech_abci:0.1.0:bafybeihg33wtr2yt324ca4iumisf4xdnzkulpyns5c5rwta7u3di3fqbmm
+- valory/mech_abci:0.1.0:bafybeiahir5arfpn6zovdm7uzcncnpf2pprsleapu5bhufh4jitof4w6p4
 - valory/registration_abci:0.1.0:bafybeiggcghpx2nncrvofqpu6khhqcu3irigu3jangd3e7dzv6aw6jtse4
 - valory/reset_pause_abci:0.1.0:bafybeidxfy3gyjjahke7gftbakecdlwr5gng5ccnvlshjpgppp7b6pu2ea
 - valory/delivery_rate_abci:0.1.0:bafybeiadifqzv7jtcnwqfqyd3ulmr5fnu2igv5niahea32cvuxsmv22fbu
-- valory/task_execution:0.1.0:bafybeicjdisoustpstsj4gowyury4me6vf6ueaekfqho7jm6qfhkq2jzrm
-- valory/task_submission_abci:0.1.0:bafybeifhn7iwa2lmm5txmod3o2qzy4ja3ov7hv73v4pjvqbylz23yjpxf4
+- valory/task_execution:0.1.0:bafybeigjblars4xxeovcikd76en4zjhzrt3hfxx5h6g4xzzxgsodxpgqnm
+- valory/task_submission_abci:0.1.0:bafybeiadyetfub5fp45wkbqbkyrapht2izvibzscekbx4bsoitqdmteufq
 - valory/termination_abci:0.1.0:bafybeif43h3yc4e6cqieqi2dj7oa55lrircamorkcrgt2kjofua7y2vcgu
 - valory/transaction_settlement_abci:0.1.0:bafybeiezf3kh5f4jmxnwoylc4krghzrkfknkc2r6vve3rgb5eumloco33e
 - valory/websocket_client:0.1.0:bafybeie63j65ffblz6g6oiaynjpz4ae5mgyjz2w6o5ovqitzdbnvqzlhzu
@@ -60,9 +60,9 @@ customs:
 - valory/prediction_langchain:0.1.0:bafybeifiw6rdeigls4pbaqwd3hbb3tq5y6psoacnezydjz2udioxullk4e
 - victorpolisetty/gemini_request:0.1.0:bafybeiarvmrz7674nmsvcf6lkbw4rvmhorckq5wvydmw3zczvvd5uomlyy
 - victorpolisetty/dalle_request:0.1.0:bafybeiamxolrtxyprdia64un5w53c5tdj4cnx3dxksog42oukz47tjvp3a
-- valory/superforcaster:0.1.0:bafybeicr4ob5mzvacgqb3nx2g25k4ml3wdyar4nfovqmhe2ownmevvh6pm
+- valory/superforcaster:0.1.0:bafybeiavrv5xdo2ysmps3oaurmztkimo7ccvecvyapjkw6k6ok4mrsku6i
 - dvilela/corcel_request:0.1.0:bafybeifpareiesif37wt4gxe2e5ojplegskfemnb3nmcsj4qph74tyfcqy
-- dvilela/gemini_prediction:0.1.0:bafybeifd5rfdp73qwibjcmgf732yryefa7aukse3ql3iunty3ho5ojuhnu
+- dvilela/gemini_prediction:0.1.0:bafybeieabntbuqudwmo5kfz7gmaxylgpwnkyww7z3wgyy4ydxufnurydzq
 - nickcom007/prediction_request_sme:0.1.0:bafybeieqakllioqvpjuhja3r3iacsaxvnfdxqu5l4qtjwvboaik3vggfga
 default_ledger: ethereum
 required_ledgers:

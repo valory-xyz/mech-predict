@@ -93,6 +93,7 @@ USER_PROMPT:
 
 ADDITIONAL_INFORMATION:
 ```
+{additional_information}
 ```
 
 OUTPUT_FORMAT
@@ -175,7 +176,18 @@ def run(  # pylint: disable=too-many-return-statements
         return error_response("No prompt has been given.")
 
     if tool_name == "gemini-prediction":
-        prompt = PREDICTION_OFFLINE_PROMPT.format(user_prompt=prompt)
+        source_links = kwargs.get("source_links", None)
+        if source_links:
+            additional_info = "\n".join(
+                f"ARTICLE {i}, URL: {url}, CONTENT: {content}"
+                for i, (url, content) in enumerate(list(source_links.items())[:5])
+            )
+        else:
+            additional_info = ""
+        prompt = PREDICTION_OFFLINE_PROMPT.format(
+            user_prompt=prompt,
+            additional_information=additional_info,
+        )
 
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model)

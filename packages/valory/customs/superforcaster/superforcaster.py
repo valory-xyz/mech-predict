@@ -18,19 +18,41 @@
 # ------------------------------------------------------------------------------
 """Contains the job definitions"""
 
+import base64
 import functools
 import json
+import os
 import re
+import tempfile
 import time
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 import requests
-from openai import OpenAI
 from tiktoken import encoding_for_model
 
-client: Optional[OpenAI] = None
+
+def _ensure_tiktoken_cache() -> None:
+    """Decode bundled tiktoken data to a temp cache dir if not already present."""
+    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+    try:
+        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return
+    for name, data in [
+        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
+        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
+    ]:
+        path = os.path.join(cache_dir, name)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data))
+
+
+_ensure_tiktoken_cache()
 MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
 MaxCostResponse = float
@@ -84,20 +106,18 @@ class OpenAIClientManager:
     def __init__(self, api_key: str):
         """Initializes with API keys"""
         self.api_key = api_key
+        self._client: Optional["OpenAIClient"] = None
 
-    def __enter__(self) -> OpenAI:
+    def __enter__(self) -> "OpenAIClient":
         """Initializes and returns LLM client."""
-        global client
-        if client is None:
-            client = OpenAIClient(api_key=self.api_key)
-        return client
+        self._client = OpenAIClient(api_key=self.api_key)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
-        global client
-        if client is not None:
-            client.client.close()
-            client = None
+        if self._client is not None:
+            self._client.client.close()
+            self._client = None
 
 
 class Usage:
@@ -255,6 +275,7 @@ OUTPUT_FORMAT
 
 
 def generate_prediction_with_retry(
+    client: "OpenAIClient",
     model: str,
     messages: List[Dict[str, str]],
     temperature: float,
@@ -264,9 +285,6 @@ def generate_prediction_with_retry(
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
-    if not client:
-        raise Exception("Client not initialized")
-
     attempt = 0
     while attempt < retries:
         try:
@@ -292,7 +310,8 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            return response.content, counter_callback
+            content = response.content if response else None
+            return content, counter_callback
         except Exception as e:
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
@@ -388,7 +407,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     openai_api_key = kwargs["api_keys"]["openai"]
     serper_api_key = kwargs["api_keys"]["serperapi"]
-    with OpenAIClientManager(openai_api_key):
+    with OpenAIClientManager(openai_api_key) as llm_client:
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
@@ -419,6 +438,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         ]
         print("Getting prompt response...")
         extracted_block, counter_callback = generate_prediction_with_retry(
+            client=llm_client,
             model=model,
             messages=messages,
             temperature=temperature,

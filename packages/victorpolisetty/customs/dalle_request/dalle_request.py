@@ -18,14 +18,37 @@
 # ------------------------------------------------------------------------------
 """Contains the job definitions"""
 
+import base64
 import functools
+import os
+import tempfile
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import openai
 from openai import OpenAI
 from tiktoken import encoding_for_model
 
-client: Optional[OpenAI] = None
+
+def _ensure_tiktoken_cache() -> None:
+    """Decode bundled tiktoken data to a temp cache dir if not already present."""
+    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+    try:
+        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return
+    for name, data in [
+        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
+        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
+    ]:
+        path = os.path.join(cache_dir, name)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data))
+
+
+_ensure_tiktoken_cache()
 MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
 
@@ -76,20 +99,18 @@ class OpenAIClientManager:
     def __init__(self, api_key: str):
         """Initializes with API keys"""
         self.api_key = api_key
+        self._client: Optional[OpenAI] = None
 
     def __enter__(self) -> OpenAI:
         """Initializes and returns LLM client."""
-        global client
-        if client is None:
-            client = OpenAI(api_key=self.api_key)
-        return client
+        self._client = OpenAI(api_key=self.api_key)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
-        global client
-        if client is not None:
-            client.close()
-            client = None
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
 
 def count_tokens(text: str, model: str) -> int:
@@ -116,15 +137,13 @@ ALLOWED_QUALITY = ["standard", "hd"]
 @with_key_rotation
 def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
     """Run the task"""
-    with OpenAIClientManager(kwargs["api_keys"]["openai"]):
+    with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         tool = kwargs["tool"]
         prompt = kwargs["prompt"]
         size = kwargs.get("size", DEFAULT_DALLE_SETTINGS["size"])
         quality = kwargs.get("quality", DEFAULT_DALLE_SETTINGS["quality"])
         n = kwargs.get("n", DEFAULT_DALLE_SETTINGS["n"])
         counter_callback = kwargs.get("counter_callback", None)
-        if not client:
-            raise RuntimeError("Client not initialized")
 
         if tool not in ALLOWED_TOOLS:
             return (
@@ -148,7 +167,7 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
                 None,
             )
 
-        response = client.images.generate(
+        response = llm_client.images.generate(
             model=tool,
             prompt=prompt,
             size=size,

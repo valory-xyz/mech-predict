@@ -19,8 +19,11 @@
 
 """This module implements a Mech tool for binary predictions."""
 
+import base64
 import functools
 import json
+import os
+import tempfile
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
@@ -37,8 +40,27 @@ from openai import OpenAI
 from readability import Document
 from tiktoken import encoding_for_model
 
-client: Optional[OpenAI] = None
 
+def _ensure_tiktoken_cache() -> None:
+    """Decode bundled tiktoken data to a temp cache dir if not already present."""
+    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+    try:
+        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return
+    for name, data in [
+        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
+        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
+    ]:
+        path = os.path.join(cache_dir, name)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data))
+
+
+_ensure_tiktoken_cache()
 
 N_MODEL_CALLS = 2
 USER_AGENT_HEADER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -52,20 +74,18 @@ class OpenAIClientManager:
     def __init__(self, api_key: str):
         """Initializes with API keys"""
         self.api_key = api_key
+        self._client: Optional["OpenAI"] = None
 
     def __enter__(self) -> OpenAI:
         """Initializes and returns LLM client."""
-        global client
-        if client is None:
-            client = OpenAI(api_key=self.api_key)
-        return client
+        self._client = OpenAI(api_key=self.api_key)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
-        global client
-        if client is not None:
-            client.close()
-            client = None
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
 
 def count_tokens(text: str, model: str) -> int:
@@ -415,6 +435,7 @@ def extract_texts(urls: List[str], num_words: int = 300) -> List[Dict]:
 
 
 def fetch_additional_information(
+    client: OpenAI,
     prompt: str,
     engine: str,
     temperature: float,
@@ -429,8 +450,6 @@ def fetch_additional_information(
     source_links: Optional[Dict] = None,
 ) -> Tuple[str, Optional[Callable[[int, int, str], None]]]:
     """Fetch additional information."""
-    if not client:
-        raise RuntimeError("Client not initialized")
 
     url_query_prompt = URL_QUERY_PROMPT.format(user_prompt=prompt)
     moderation_result = client.moderations.create(input=url_query_prompt)
@@ -501,6 +520,7 @@ def fetch_additional_information(
 
 
 def get_sme_role(
+    client: OpenAI,
     engine: str,
     temperature: float,
     max_tokens: int,
@@ -508,8 +528,6 @@ def get_sme_role(
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[str, str, Optional[Callable]]:
     """Get SME title and introduction"""
-    if not client:
-        raise RuntimeError("Client not initialized")
 
     market_question = SME_GENERATION_MARKET_PROMPT.format(question=prompt)
     system_prompt = SME_GENERATION_SYSTEM_PROMPT
@@ -596,7 +614,7 @@ def run(
         )
         return max_cost
 
-    with OpenAIClientManager(kwargs["api_keys"]["openai"]):
+    with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         prompt = kwargs["prompt"]
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
@@ -609,11 +627,9 @@ def run(
         serper_api_key = api_keys.get("serperapi", None)
         search_provider = api_keys.get("search_provider", "google")
 
-        if not client:
-            raise RuntimeError("Client not initialized")
-
         try:
             _, sme_introduction, counter_callback = get_sme_role(
+                llm_client,
                 engine,
                 temperature,
                 max_tokens,
@@ -627,6 +643,7 @@ def run(
 
         if tool.startswith("prediction-online"):
             additional_information, counter_callback = fetch_additional_information(
+                llm_client,
                 prompt=prompt,
                 engine=engine,
                 temperature=temperature,
@@ -652,7 +669,7 @@ def run(
         prediction_prompt = PREDICTION_PROMPT.format(
             user_prompt=prompt, additional_information=additional_information
         )
-        moderation_result = client.moderations.create(input=prediction_prompt)
+        moderation_result = llm_client.moderations.create(input=prediction_prompt)
         if moderation_result.results[0].flagged:
             return (
                 "Moderation flagged the prompt as in violation of terms.",
@@ -664,7 +681,7 @@ def run(
             {"role": "system", "content": sme_introduction},
             {"role": "user", "content": prediction_prompt},
         ]
-        response = client.chat.completions.create(
+        response = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=temperature,

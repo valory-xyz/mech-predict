@@ -20,9 +20,12 @@
 
 # pylint: disable=too-many-arguments,too-many-locals
 
+import base64
 import functools
 import json
+import os
 import re
+import tempfile
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
@@ -43,6 +46,28 @@ from pydantic import BaseModel, Field
 from readability import Document as ReadabilityDocument
 from tiktoken import Encoding, encoding_for_model, get_encoding
 
+
+def _ensure_tiktoken_cache() -> None:
+    """Decode bundled tiktoken data to a temp cache dir if not already present."""
+    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
+    try:
+        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return
+    for name, data in [
+        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
+        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
+    ]:
+        path = os.path.join(cache_dir, name)
+        if not os.path.exists(path):
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(data))
+
+
+_ensure_tiktoken_cache()
+
 TOKENS_DISTANCE_TO_LIMIT = 200
 DOC_TOKEN_LIMIT = 7000  # Maximum tokens per document for embeddings
 BUFFER = 500  # Buffer for the total tokens in the embeddings batch
@@ -51,8 +76,6 @@ N_MODEL_CALLS = 6
 GOOGLE_RATE_LIMIT_EXCEEDED_CODE = 429
 DEFAULT_DELIVERY_RATE = 100
 
-
-client: Optional[OpenAI] = None
 
 MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
@@ -177,20 +200,18 @@ class OpenAIClientManager:
     def __init__(self, api_key: str):
         """Initializes with API keys"""
         self.api_key = api_key
+        self._client: Optional["OpenAI"] = None
 
     def __enter__(self) -> OpenAI:
         """Initializes and returns LLM client."""
-        global client
-        if client is None:
-            client = OpenAI(api_key=self.api_key)
-        return client
+        self._client = OpenAI(api_key=self.api_key)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
-        global client
-        if client is not None:
-            client.close()
-            client = None
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
 
 DEFAULT_OPENAI_SETTINGS = {
@@ -733,7 +754,7 @@ def recursive_character_text_splitter(
     return [text[i : i + max_tokens] for i in range(0, len(text), max_tokens - overlap)]
 
 
-def get_embeddings(split_docs: List[Document]) -> List[Document]:
+def get_embeddings(client: OpenAI, split_docs: List[Document]) -> List[Document]:
     """Get embeddings for the split documents: clean, truncate, then batch by token count."""
     # Preprocess each document: clean and truncate to DOC_TOKEN_LIMIT
     # Filter out any documents that exceed the maximum token limit individually
@@ -795,7 +816,7 @@ def get_embeddings(split_docs: List[Document]) -> List[Document]:
 
 
 def find_similar_chunks(
-    query: str, docs_with_embeddings: List[Document], k: int = 4
+    client: OpenAI, query: str, docs_with_embeddings: List[Document], k: int = 4
 ) -> List:
     """Similarity search to find similar chunks to a query"""
     if not client:
@@ -840,7 +861,7 @@ def fetch_additional_information(
 
     # generate multiple queries for fetching information from the web
     queries, counter_callback = multi_queries(
-        client_=client,
+        client_=client_,
         prompt=prompt,
         engine=engine,
         num_queries=NUM_QUERIES,
@@ -898,11 +919,12 @@ def fetch_additional_information(
     split_docs = [doc for doc in split_docs if doc]
 
     # Embed the documents
-    docs_with_embeddings = get_embeddings(split_docs)
+    docs_with_embeddings = get_embeddings(client_, split_docs)
     print(f"Docs with embeddings: {len(docs_with_embeddings)}")
 
     # Find similar chunks
     similar_chunks = find_similar_chunks(
+        client=client_,
         query=prompt,
         docs_with_embeddings=docs_with_embeddings,
         k=NUM_NEIGHBORS,
@@ -971,7 +993,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         return max_cost
 
-    with OpenAIClientManager(kwargs["api_keys"]["openai"]):
+    with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         prompt = kwargs["prompt"]
         counter_callback = kwargs.get("counter_callback", None)
         api_keys = kwargs.get("api_keys", {})
@@ -981,8 +1003,6 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         if tool not in ALLOWED_TOOLS:
             raise ValueError(f"Tool {tool} is not supported.")
-        if not client:
-            raise RuntimeError("Client not initialized")
 
         max_tokens = OPEN_AI_SETTINGS.get(engine, {}).get(
             "max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"]
@@ -997,7 +1017,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             },
         ]
 
-        response_valid = client.chat.completions.create(
+        response_valid = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=DEFAULT_OPENAI_SETTINGS["temperature"],
@@ -1020,7 +1040,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             _,
             counter_callback,
         ) = fetch_additional_information(
-            client_=client,
+            client_=llm_client,
             prompt=prompt,
             engine=engine,
             google_api_key=google_api_key,
@@ -1047,7 +1067,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             },
         ]
 
-        response_reasoning = client.chat.completions.create(
+        response_reasoning = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=DEFAULT_OPENAI_SETTINGS["temperature"],
@@ -1070,7 +1090,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             },
         ]
 
-        response_determinable = client.chat.completions.create(
+        response_determinable = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=DEFAULT_OPENAI_SETTINGS["temperature"],
@@ -1099,7 +1119,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             },
         ]
 
-        response_prediction = client.chat.completions.create(
+        response_prediction = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=DEFAULT_OPENAI_SETTINGS["temperature"],
@@ -1125,7 +1145,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             },
         ]
 
-        response_prediction = client.chat.completions.create(
+        response_prediction = llm_client.chat.completions.create(
             model=engine,
             messages=messages,
             temperature=DEFAULT_OPENAI_SETTINGS["temperature"],

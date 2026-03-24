@@ -1,0 +1,116 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+
+"""Unit tests for resolve_market_reasoning: thread-safe client and offline tiktoken."""
+
+import inspect
+import os
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+from tiktoken import get_encoding
+
+import packages.napthaai.customs.resolve_market_reasoning.resolve_market_reasoning as module
+from packages.napthaai.customs.resolve_market_reasoning import tiktoken_data
+from packages.napthaai.customs.resolve_market_reasoning.resolve_market_reasoning import (
+    OpenAIClientManager,
+    _ensure_tiktoken_cache,
+    fetch_additional_information,
+    get_embeddings,
+    multi_queries,
+)
+
+
+class TestOpenAIClientManager:
+    """Verify OpenAIClientManager creates per-context clients without globals."""
+
+    def test_context_manager_returns_client_instance(self) -> None:
+        """__enter__ returns a fresh OpenAI client, __exit__ closes it."""
+        mgr = OpenAIClientManager(api_key="sk-test")
+        with patch(
+            "packages.napthaai.customs.resolve_market_reasoning.resolve_market_reasoning.OpenAI"
+        ) as MockOpenAI:
+            mock_instance = MagicMock()
+            MockOpenAI.return_value = mock_instance
+
+            with mgr as client:
+                assert client is mock_instance
+
+            mock_instance.close.assert_called_once()
+
+    def test_no_global_client_variable(self) -> None:
+        """The module must not define a module-level 'client' variable."""
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for i, line in enumerate(source.split("\n"), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("client:") or stripped.startswith("client ="):
+                if not line.startswith(" ") and not line.startswith("\t"):
+                    pytest.fail(
+                        f"Module-level 'client' variable found at line {i}: {line}"
+                    )
+
+
+class TestFunctionsAcceptClient:
+    """Verify refactored functions accept client as an explicit parameter."""
+
+    def test_multi_queries_requires_client_param(self) -> None:
+        """multi_queries requires client_ as first param."""
+        params = list(inspect.signature(multi_queries).parameters)
+        assert params[0] == "client_"
+
+    def test_fetch_additional_information_requires_client_param(self) -> None:
+        """fetch_additional_information requires client_ as first param."""
+        params = list(inspect.signature(fetch_additional_information).parameters)
+        assert params[0] == "client_"
+
+    def test_get_embeddings_requires_client_param(self) -> None:
+        """get_embeddings requires client as first param."""
+        params = list(inspect.signature(get_embeddings).parameters)
+        assert params[0] == "client"
+
+
+class TestTiktokenOfflineCache:
+    """Verify tiktoken data is bundled and decodable."""
+
+    def test_ensure_tiktoken_cache_creates_files(self) -> None:
+        """_ensure_tiktoken_cache writes decoded BPE files to cache dir."""
+        _ensure_tiktoken_cache()
+        cache_dir = os.environ.get("TIKTOKEN_CACHE_DIR", "")
+        assert cache_dir != "", "TIKTOKEN_CACHE_DIR should be set"
+        assert Path(cache_dir).is_dir()
+        files = list(Path(cache_dir).iterdir())
+        assert len(files) >= 2
+
+    def test_tiktoken_loads_from_decoded_cache(self) -> None:
+        """Tiktoken can load encodings after _ensure_tiktoken_cache runs."""
+        _ensure_tiktoken_cache()
+        enc = get_encoding("cl100k_base")
+        assert len(enc.encode("hello world")) > 0
+        enc2 = get_encoding("o200k_base")
+        assert len(enc2.encode("hello world")) > 0
+
+    def test_tiktoken_data_module_exists(self) -> None:
+        """tiktoken_data.py has the expected constants."""
+        assert hasattr(tiktoken_data, "CL100K_BASE")
+        assert hasattr(tiktoken_data, "O200K_BASE")
+        assert hasattr(tiktoken_data, "CL100K_CACHE_NAME")
+        assert hasattr(tiktoken_data, "O200K_CACHE_NAME")
+        assert len(tiktoken_data.CL100K_BASE) > 0
+        assert len(tiktoken_data.O200K_BASE) > 0

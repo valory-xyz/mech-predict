@@ -69,7 +69,7 @@ All market-related metadata goes in a dedicated `market_context` object. Tools c
 - `market_liquidity_usd`: needed for stratification (beating a $500k market is meaningful, beating a $500 market might be noise). Cheaper to embed at request time than to fetch retroactively for thousands of predictions.
 - `market_close_at`: needed to calculate prediction lead time (how far before resolution was the prediction made). Static field the trader already knows.
 
-### Response payload — add `execution`, `source_content`, `tool_hash`
+### Response payload — add `source_content`, `tool_hash`, `execution_latency_ms`
 
 ```json
 {
@@ -90,10 +90,8 @@ All market-related metadata goes in a dedicated `market_context` object. Tools c
     "model": "gpt-4.1-2025-04-14",
     "tool": "prediction-online",
     "tool_hash": "bafybei...",
+    "execution_latency_ms": 12300,
     "params": {}
-  },
-  "execution": {
-    "latency_ms": 12300
   },
   "source_content": {
     "https://reuters.com/btc-forecast": "Bitcoin analysts predict...",
@@ -105,13 +103,11 @@ All market-related metadata goes in a dedicated `market_context` object. Tools c
 
 **New fields explained:**
 
-`execution.latency_ms` — how long the `run()` function took end-to-end. Currently only in Prometheus as aggregates. Needed per-request for benchmark cost-performance analysis and production timeout parity.
-
-`source_content` — the web content the tool used, stored as a dict of URL → scraped text. Currently baked into the `prompt` field as formatted text (fragile to parse back out). Stored separately so cached replay can feed it directly to another tool/prompt variant. Optional — tools that don't do web search won't have this.
+`metadata.execution_latency_ms` — how long the `run()` function took end-to-end. Currently only in Prometheus as aggregates. Needed per-request for benchmark cost-performance analysis and production timeout parity.
 
 `metadata.tool_hash` — the IPFS hash of the tool package that was executed (from `TOOLS_TO_PACKAGE_HASH`). This is the version identifier — different hash means different code, different prompt template, different behavior. Without this in the response, you'd have to cross-reference the mech's deployment config at the time of prediction to know which version ran, which is unreliable since configs change between deployments.
 
-Note: `execution.status` and `execution.error_reason` are NOT included — the mech already pushes error responses to IPFS (e.g., "Invalid response"), so success/failure is derivable from the `result` field.
+`source_content` — the web content the tool used, stored as a dict of URL → scraped text. Currently baked into the `prompt` field as formatted text (fragile to parse back out). Stored separately so cached replay can feed it directly to another tool/prompt variant. Optional — tools that don't do web search won't have this.
 
 ---
 
@@ -132,7 +128,7 @@ Note: `execution.status` and `execution.error_reason` are NOT included — the m
 | `market_context.market_prob` | Edge-over-market calculation without expensive subgraph lookups |
 | `market_context.market_liquidity_usd` | Market efficiency stratification without subgraph lookups |
 | `market_context.market_close_at` | Prediction lead time calculation without API calls |
-| `execution.latency_ms` | Per-request latency for cost-performance analysis |
+| `metadata.execution_latency_ms` | Per-request latency for cost-performance analysis |
 | `source_content` | Clean cached replay without parsing the prompt field |
 | `metadata.tool_hash` | Know exactly which tool version produced each prediction |
 
@@ -143,6 +139,6 @@ Note: `execution.status` and `execution.error_reason` are NOT included — the m
 | Component | Change | Effort |
 |-----------|--------|--------|
 | **Trader** | Add `schema_version` + `market_context` to request payload | Medium — trader already has this data |
-| **Mech (`behaviours.py`)** | Add `schema_version`, `execution.latency_ms`, `metadata.tool_hash` to response | Small — data already available in code |
+| **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response | Small — data already available in code |
 | **Tools** | Return `source_content` separately (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |

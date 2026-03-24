@@ -187,3 +187,37 @@ The `platform` field indicates which platform-specific fields are present — `m
 | **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
 | **Tools** | Return `source_content` separately (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |
+
+---
+
+## Open Questions
+
+### A. Trust of trader-provided market data
+
+The benchmark scores tools using edge-over-market, which relies on `market_prob` from the trader. If a trader sends fake probabilities, scoring becomes meaningless — and since the benchmark drives which tools get promoted to production, bad data → bad promotion decisions → real impact.
+
+**Natural incentive alignment:** The trader pays for predictions and bets real money on the outcomes. Sending fake `market_prob` doesn't help them — it leads to worse predictions and losses. The incentives are already aligned.
+
+**Technical guarantee (suggestion):** The trader includes a signed API response hash alongside the `market_prob` value — a verifiable proof that the data came from Polymarket/Omen, not fabricated. The benchmark verifies the signature without re-querying the source. Cheap and cryptographically sound. No per-request subgraph lookups needed.
+
+**Status:** Needs team input — is natural incentive alignment sufficient, or do we need signed proofs?
+
+---
+
+### B. Non-predict mechs and schema generality
+
+The marketplace will serve non-prediction mechs (image generation, code execution, etc.). Should the request schema be designed for all mech types, not just prediction?
+
+**Suggestion:** Add a `type` field to the request (e.g., `"predict"`, `"generate"`). The `type` determines which context fields are relevant — prediction requests include `market_context`, other mech types could have their own context structure. Avoid renaming `market_context` to `metadata` since the response already has a `metadata` field — would get confusing. Alternatives: `request_context` or keeping `market_context` as a predict-specific object.
+
+**Status:** Needs team alignment on naming convention and whether to design for all mech types now or only predictions.
+
+---
+
+### C. Order book data in `market_context`
+
+Adding order book depth (beyond just spread) could be useful for Polymarket PnL analysis. However, order books are Polymarket-specific — Omen uses an AMM with no order book.
+
+The schema already supports this via the platform-specific fields pattern — any Polymarket-specific fields can be added without affecting Omen. The question is whether to include them now or defer.
+
+**Status:** Not blocking for initial implementation. Can add later without breaking the schema.

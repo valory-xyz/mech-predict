@@ -114,6 +114,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 {
   "schema_version": "2.0",
   "requestId": 12345,
+  "executed_at": "2026-03-15T14:23:00Z",
   "result": "p_yes: 0.72, p_no: 0.28, confidence: 0.8, ...",
   "tool": "prediction-online",
   "prompt": "You are an LLM... the full prompt sent to the model...",
@@ -148,6 +149,8 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 
 **New fields explained:**
 
+`executed_at` — ISO 8601 UTC timestamp of when the tool execution completed. Currently the only timing signal is the block timestamp of the on-chain Deliver event, which reflects *delivery* time (after consensus), not *execution* time. `executed_at` captures the precise moment the tool finished, enabling accurate prediction lead time calculation and temporal integrity verification.
+
 `metadata.execution_latency_ms` — how long the `run()` function took end-to-end. Currently only in Prometheus as aggregates. Needed per-request for benchmark cost-performance analysis and production timeout parity.
 
 `metadata.tool_hash` — the IPFS hash of the tool package that was executed (from `TOOLS_TO_PACKAGE_HASH`). This is the version identifier — different hash means different code, different prompt template, different behavior. Without this in the response, you'd have to cross-reference the mech's deployment config at the time of prediction to know which version ran, which is unreliable since configs change between deployments.
@@ -172,6 +175,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 
 | Field | What it unlocks |
 |-------|----------------|
+| `executed_at` | Precise execution timestamp for prediction lead time and temporal integrity |
 | `request_context.market_id` | Direct question-to-market matching (eliminates string prefix hack) |
 | `request_context.type` | Platform-aware evaluation and platform-specific field handling |
 | `request_context.market_prob` | Edge-over-market calculation without expensive subgraph lookups |
@@ -190,7 +194,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 | Component | Change | Effort |
 |-----------|--------|--------|
 | **Trader** | Add `schema_version`, `request_context` to request payload | Medium — trader already has this data |
-| **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
+| **Mech (`behaviours.py`)** | Add `schema_version`, `executed_at`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
 | **Tools** | Return `source_content` in metadata (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |
 

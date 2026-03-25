@@ -147,9 +147,9 @@ aea-helpers run-service \
 9. `autonomy deploy run` (with optional `--detach`)
 10. (if `--post-deploy-cmd`) Run post-deploy command
 
-**Unique per-repo steps via hooks:**
-- market-creator: `--pre-deploy-cmd "bash scripts/escape-prompt.sh"` (sed preprocessing)
-- meme-ooorr: `--post-deploy-cmd "bash scripts/backup-db.sh"` (database backup)
+**Repo-specific notes:**
+- market-creator: Prompt escaping is just an env var set before calling the command — no hook needed. The repo sets `MARKET_IDENTIFICATION_PROMPT` in its `.env` or wrapper and it flows through naturally.
+- meme-ooorr: Database backup via `--post-deploy-cmd "bash scripts/backup-db.sh"` (copies memeooorr.db to persistent_data)
 
 ### Task 1.4: `aea-helpers make-release`
 
@@ -227,13 +227,15 @@ Per repo:
 2. Update tox.ini: replace script invocations with `aea-helpers` commands
 3. Delete `bump.py`, `check_dependencies.py`, `check_doc_ipfs_hashes.py`
 
-### 4.2 Refactor optimus (prerequisite)
+### 4.2 Optimus-specific cleanup
 
-Before migrating optimus deployment scripts:
-1. Rewrite `aea-config-replace.py` to use PATH_TO_VAR dict pattern
-2. Change `autonomy fetch` to use `--alias agent`
-3. Move directory creation to `run_agent.sh`
-4. Extract PATH_TO_VAR into `config-mapping.json`
+Done in the same migration PR (no separate refactoring needed):
+1. Extract PATH_TO_VAR entries from `aea-config-replace.py` into `config-mapping.json` (trader's regex handles all optimus type coercions — `${list:...}`, `${str:...}`, `${dict:...}` etc.)
+2. Delete `aea-config-replace.py`
+3. Delete `run_merkle_api.py` (outdated test mock, no longer needed)
+4. `aea-helpers config-replace` uses `agent/` directory by default
+5. `aea-helpers run-agent` fetches with `--alias agent`
+6. Add `mkdir -p data` to `config-mapping.json` pre-step or as part of agent setup
 
 ### 4.3 Migrate deployment scripts
 
@@ -276,8 +278,8 @@ aea-helpers run-service --name valory/optimus --env-file .env
 # IEKit
 aea-helpers run-service --name valory/impact_evaluator --env-file .env
 
-# market-creator
-aea-helpers run-service --name valory/market_maker --env-file .env --pre-deploy-cmd "bash scripts/escape-prompt.sh"
+# market-creator (MARKET_IDENTIFICATION_PROMPT set in .env, flows through naturally)
+aea-helpers run-service --name valory/market_maker --env-file .env
 
 # meme-ooorr
 aea-helpers run-service --name dvilela/memeooorr --env-file .env --cpu-limit 4.0 --memory-limit 8192 --memory-request 1024 --detach --post-deploy-cmd "bash scripts/backup-db.sh"

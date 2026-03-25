@@ -165,9 +165,9 @@ After excluding mech repos (which should use `mech` CLI), 5 agent repos remain:
 | market-creator | 47 | `.env` + config-replace | Yes | 2 (agent + connection) | — |
 | trader | 47 | `.env` + config-replace | Yes | 2 (agent + connection) | Port management PR #874 |
 | meme-ooorr | 46 | `.env` + config-replace | Yes | 2 (agent + connection) | — |
-| optimus | 64 | `.env` + config-replace | Yes (custom) | 2 (agent + connection) | Test API startup, no make clean, no --alias |
+| optimus | 64 | `.env` + config-replace | Yes (custom) | 2 (agent + connection) | No make clean, no --alias, `run_merkle_api.py` (outdated test mock — delete) |
 
-After refactoring optimus to the standard pattern, all 5 follow the same flow:
+After migrating optimus to `--alias agent` and standard config-replace, all 5 follow the same flow:
 1. Cleanup trap → 2. Remove previous build → 3. `make clean` → 4. `autonomy packages lock` → 5. `autonomy fetch --local --agent <name> --alias agent` → 6. Source `.env` → 7. Run `aea-config-replace.py` → 8. `cd agent` → 9. Copy keys → 10. `add-key ethereum` + `add-key ethereum --connection` → 11. `issue-certificates` → 12. Start tendermint → 13. `aea -s run`
 
 **Action:** Consolidate into `aea-helpers run-agent`:
@@ -246,9 +246,9 @@ All 3 copies (mech, mech-agents-fun, mech-predict) are byte-for-byte identical. 
 | Repo | Migrate CI scripts | Migrate run scripts | Repo-specific actions |
 |---|---|---|---|
 | trader | bump, check-deps, check-doc-hashes | `run_agent.sh` → `aea-helpers run-agent`, `run_service.sh` → `aea-helpers run-service`, `aea-config-replace.py` → `config-mapping.json` | Close PR #874 (port management built into aea-helpers) |
-| optimus | bump, check-deps, check-doc-hashes | Same as trader | Refactor `aea-config-replace.py` to standard pattern first, use `--alias agent` in fetch |
+| optimus | bump, check-deps, check-doc-hashes | Same as trader. Delete `run_merkle_api.py` (outdated test mock) | Use `--alias agent` in fetch, standard config-replace |
 | IEKit | bump, check-deps, check-doc-hashes | Same as trader | — |
-| market-creator | bump, check-deps, check-doc-hashes | Same as trader, `--pre-deploy-cmd` for prompt file | — |
+| market-creator | bump, check-deps, check-doc-hashes | Same as trader. Prompt escaping stays as env var set before calling `aea-helpers run-service` | — |
 | meme-ooorr | bump, check-deps, check-doc-hashes | Same as trader, `--post-deploy-cmd` for db backup | — |
 
 ### Changes in Library Repos (CI scripts only)

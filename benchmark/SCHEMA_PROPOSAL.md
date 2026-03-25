@@ -161,7 +161,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
       "temperature": 0,
       "max_tokens": 500,
       "num_urls": 3,
-      "num_words": 300
+      "num_queries": 2
     },
     "source_content": {
       "https://reuters.com/btc-forecast": "Bitcoin analysts predict...",
@@ -180,7 +180,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 
 `metadata.tool_hash` — the IPFS hash of the tool package that was executed (from `TOOLS_TO_PACKAGE_HASH`). This is the version identifier — different hash means different code, different prompt template, different behavior. Without this in the response, you'd have to cross-reference the mech's deployment config at the time of prediction to know which version ran, which is unreliable since configs change between deployments.
 
-`metadata.params` — the actual runtime configuration used for this prediction. Currently `params` only stores static defaults from `component.yaml` (just `default_model`). Runtime values like `temperature`, `max_tokens`, `num_urls`, `num_words`, embedding model for RAG tools etc. are passed via kwargs but never recorded. Capturing the full runtime config lets the benchmark know exactly what configuration produced each prediction, which is essential for parameter sweeps and reproducibility.
+`metadata.params` — the actual runtime parameters used for this prediction. Currently `params` only stores static defaults from `component.yaml` (just `default_model`). Runtime values like `temperature`, `max_tokens`, `num_urls`, `num_queries` are passed via kwargs but never recorded. Capturing them lets the benchmark know exactly which configuration produced each prediction — essential for parameter sweep reproducibility (the sweep tests grids like `temperatures: [0.0, 0.2, 0.5]`, `num_urls: [3, 5, 10]`) and for computing the `config_hash` used in production audit. Tools record whichever kwargs they actually used — the set varies per tool.
 
 `metadata.source_content` — the web content the tool used, stored as a dict of URL → scraped text. Currently baked into the `prompt` field as formatted text (fragile to parse back out). Stored separately inside `metadata` (alongside other execution artifacts) so cached replay can feed it directly to another tool/prompt variant. Optional — tools that don't do web search won't have this.
 

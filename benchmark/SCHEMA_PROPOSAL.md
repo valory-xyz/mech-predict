@@ -222,27 +222,3 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 | **Mech (`behaviours.py`)** | Add `schema_version`, `executed_at`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
 | **Tools** | Return `source_content` in metadata (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |
-
----
-
-## Open Questions
-
-### A. Order book data in `request_context`
-
-Adding order book depth (beyond just spread) could be useful for Polymarket PnL analysis. However, order books are Polymarket-specific — Omen uses an AMM with no order book.
-
-The schema already supports this via the platform-specific fields pattern — any Polymarket-specific fields can be added without affecting Omen. The question is whether to include them now or defer.
-
-**Status:** Not blocking for initial implementation. Can add later without breaking the schema.
-
----
-
-### B. `extract_question` regex mismatch in superforcaster (pre-existing)
-
-Production prompts use `repr()` to format the question, which wraps it in **single quotes**: `With the given question 'Will BTC...'`. The `extract_question()` regex in superforcaster expects **double quotes** and fails to match. The fallback returns the full prompt as the question — works but makes Serper search queries less targeted.
-
-This is a pre-existing issue, not introduced by the `source_links` change. Affects both live and cached paths equally.
-
-**Suggestion:** Fix the regex to handle both quote styles: `r'question\s+["\'](.+?)["\']\s+and\s+the\s+` `` `yes` `` `'`
-
-**Status:** Low priority. Existing fallback works. Can fix separately.

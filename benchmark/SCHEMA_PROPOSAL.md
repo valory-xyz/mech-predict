@@ -91,14 +91,36 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 
 **Field reference:**
 
-| Field | Platforms | Description |
-|-------|----------|-------------|
-| `market_id` | All | Platform-specific market identifier (Polymarket condition ID, Omen FPMM contract address) |
-| `type` | All | `"polymarket"` or `"omen"` — discriminator that tells consumers which platform-specific fields to expect |
-| `market_prob` | All | Market price at request time (mid-price). Used for edge-over-market calculation. See timing note above |
-| `market_liquidity_usd` | All | Market liquidity in USD. Used for stratification (high-liquidity markets are harder to beat) |
-| `market_close_at` | All | Market close/resolution date. Used to calculate prediction lead time |
-| `market_spread` | Polymarket | Bid-ask spread from the CLOB order book. Not applicable to Omen (AMM has no order book) |
+| Field | Platforms | Source | Description |
+|-------|----------|--------|-------------|
+| `market_id` | All | Polymarket: `conditionId`. Omen: FPMM contract address | Platform-specific market identifier. Enables direct question-to-market matching (eliminates fragile string prefix hack) |
+| `type` | All | Trader knows which platform the market is on | `"polymarket"` or `"omen"` — discriminator that tells consumers which platform-specific fields to expect |
+| `market_prob` | All | Polymarket: mid-price `(bestBid + bestAsk) / 2` from CLOB. Omen: `outcomeTokenMarginalPrices[0]` from subgraph | Market consensus probability at request time. Used for **edge-over-market** (Stage 2) — measures prediction quality vs market consensus, not execution price. See notes below |
+| `market_liquidity_usd` | All | Polymarket: `liquidityNum` from Gamma API. Omen: `usdLiquidityParameter` from subgraph | Market liquidity in USD. Used for **market efficiency stratification** and as a **slippage proxy for PnL simulation** (Stage 5) |
+| `market_close_at` | All | Polymarket: `endDateIso` from Gamma API. Omen: `openingTimestamp` from subgraph | Market close/resolution date. Used to calculate **prediction lead time** and **time horizon stratification** |
+| `market_spread` | Polymarket | `spread` from Gamma API (or `bestAsk - bestBid` from CLOB) | Bid-ask spread from the CLOB order book. Used for **PnL simulation** (Stage 5) as transaction cost. Not applicable to Omen — AMM has no order book, friction comes from the AMM fee (~2%) which is a known constant the benchmark can hardcode |
+
+> **`market_prob` is mid-price, not execution price — by design.** Edge-over-market (the primary selection metric) measures whether the tool's prediction is better than the market's *consensus fair value*. Mid-price is the correct representation of consensus for both platforms. Execution realism (spread, slippage) is handled separately in PnL simulation (Stage 5) using `market_spread` + `market_liquidity_usd`.
+>
+> **Platform-specific friction costs.** Polymarket (CLOB): traders pay the bid-ask `market_spread`. Omen (AMM): traders pay a pool fee (~2%, a known constant) plus slippage determined by `market_liquidity_usd` and trade size. The AMM fee is not included in the request because it's a protocol-level constant, not a per-market variable — the benchmark hardcodes it.
+>
+> **Order book depth (deferred).** Full order book data (multiple price/size levels) would improve Polymarket PnL simulation precision but adds significant payload (20+ numbers per request). The `market_spread` + `market_liquidity_usd` proxy is sufficient for V1 — for typical trade sizes on markets with reasonable liquidity, the difference is negligible. Can be added as a Polymarket-specific field later if PnL simulation needs higher fidelity.
+
+**Which benchmark metric uses which field:**
+
+| Benchmark metric | Fields used from `request_context` |
+|-----------------|-----------------------------------|
+| Reliability (Stage 1) | None — uses tool output status only |
+| Edge over market (Stage 2) | `market_prob` |
+| Brier score (Stage 3) | None — uses tool output + resolution |
+| Calibration / ECE (Stage 4) | None — uses tool output + resolution |
+| PnL simulation (Stage 5 Tier 1) | `market_prob` + `market_spread` + `market_liquidity_usd` |
+| PnL realized (Stage 5 Tier 2) | None from request — uses trader execution data |
+| Platform stratification | `type` |
+| Market efficiency stratification | `market_liquidity_usd` |
+| Time horizon stratification | `market_close_at` |
+| Difficulty stratification | `market_prob` (via `abs(market_prob - 0.5)`) |
+| Market matching | `market_id` |
 
 **Design decisions:**
 - `request_context` is a separate object, not top-level fields — keeps it clean, tools don't need to know about it
@@ -106,7 +128,8 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 - `schema_version` at the top level so consumers know what to expect
 - All fields in `request_context` are optional — old requests without it still work, benchmark marks them as lower provenance grade
 - `type` inside `request_context` acts as a discriminator for platform-specific fields — this allows Polymarket-specific fields (like `market_spread`) without forcing them onto Omen
-- Common fields (`market_prob`, `market_liquidity_usd`, `market_close_at`) exist on both platforms. Cheaper to embed at request time than to fetch retroactively from subgraphs for thousands of predictions
+- Common fields (`market_id`, `market_prob`, `market_liquidity_usd`, `market_close_at`) exist on both platforms. Cheaper to embed at request time than to fetch retroactively from subgraphs for thousands of predictions
+- `market_spread` is Polymarket-only because Omen's AMM has no order book — Omen's friction (pool fee + slippage) is derivable from `market_liquidity_usd` and the protocol's constant fee rate
 - Platform-specific fields can be added over time without breaking the schema — just check `type` before reading them
 - All values are untrusted — see trust note above
 

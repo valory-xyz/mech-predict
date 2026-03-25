@@ -89,6 +89,53 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 }
 ```
 
+#### Agents-fun example (non-prediction mech)
+
+The schema is designed to accommodate non-prediction mechs. An image generation request has no market context — `request_context` is simply omitted. The `tool` field already identifies what kind of request this is.
+
+**Request:**
+
+```json
+{
+  "schema_version": "2.0",
+  "prompt": "Zoro in cyberpunk 2077 universe",
+  "tool": "google_image_gen"
+}
+```
+
+No `request_context` — there's no market, no probability, no liquidity. The schema doesn't force it. Old `"1.0"` prediction requests (which also lack `request_context`) are handled the same way.
+
+**Response:**
+
+```json
+{
+  "schema_version": "2.0",
+  "requestId": 67890,
+  "executed_at": "2026-03-20T09:15:00Z",
+  "result": "{\"image_hash\": \"QmXyz...\", \"prompt\": \"Zoro in cyberpunk 2077 universe\", \"model\": \"imagen-4.0-generate-001\"}",
+  "tool": "google_image_gen",
+  "prompt": "Zoro in cyberpunk 2077 universe",
+  "cost_dict": {
+    "input_tokens": 12,
+    "output_tokens": 0,
+    "total_tokens": 12,
+    "input_cost": 0.0001,
+    "output_cost": 0.0,
+    "total_cost": 0.0001
+  },
+  "metadata": {
+    "model": "imagen-4.0-generate-001",
+    "tool": "google_image_gen",
+    "tool_hash": "bafybei...",
+    "execution_latency_ms": 4200,
+    "params": {}
+  },
+  "is_offchain": false
+}
+```
+
+Note: `metadata.params` is empty (no tunable runtime params), `metadata.source_content` is absent (no web search), and `cost_dict` reflects image generation API costs, not LLM token costs. The schema handles all of this without special-casing — absent fields are simply absent.
+
 **Field reference:**
 
 | Field | Platforms | Source | Description |

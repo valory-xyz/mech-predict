@@ -108,7 +108,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 - Platform-specific fields can be added over time without breaking the schema — just check `type` before reading them
 - All values are untrusted — see trust note above
 
-### Response payload — add `source_content`, `tool_hash`, `execution_latency_ms`, runtime params
+### Response payload — add `tool_hash`, `execution_latency_ms`, `source_content`, runtime params to `metadata`
 
 ```json
 {
@@ -136,11 +136,11 @@ The `type` field inside `request_context` acts as a discriminator for which plat
       "max_tokens": 500,
       "num_urls": 3,
       "num_words": 300
+    },
+    "source_content": {
+      "https://reuters.com/btc-forecast": "Bitcoin analysts predict...",
+      "https://bbc.com/crypto-market": "Cryptocurrency markets showed..."
     }
-  },
-  "source_content": {
-    "https://reuters.com/btc-forecast": "Bitcoin analysts predict...",
-    "https://bbc.com/crypto-market": "Cryptocurrency markets showed..."
   },
   "is_offchain": false
 }
@@ -154,16 +154,16 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 
 `metadata.params` — the actual runtime configuration used for this prediction. Currently `params` only stores static defaults from `component.yaml` (just `default_model`). Runtime values like `temperature`, `max_tokens`, `num_urls`, `num_words`, embedding model for RAG tools etc. are passed via kwargs but never recorded. Capturing the full runtime config lets the benchmark know exactly what configuration produced each prediction, which is essential for parameter sweeps and reproducibility.
 
-`source_content` — the web content the tool used, stored as a dict of URL → scraped text. Currently baked into the `prompt` field as formatted text (fragile to parse back out). Stored separately so cached replay can feed it directly to another tool/prompt variant. Optional — tools that don't do web search won't have this.
+`metadata.source_content` — the web content the tool used, stored as a dict of URL → scraped text. Currently baked into the `prompt` field as formatted text (fragile to parse back out). Stored separately inside `metadata` (alongside other execution artifacts) so cached replay can feed it directly to another tool/prompt variant. Optional — tools that don't do web search won't have this.
 
 ---
 
 ## Backward Compatibility
 
 - `schema_version` field lets consumers distinguish old vs new payloads
-- All new fields are additive — old consumers that don't know about `request_context` or `source_content` just ignore them
+- All new fields are additive — old consumers that don't know about `request_context` or new `metadata` fields just ignore them
 - Old requests/responses without `schema_version` are treated as `"1.0"`
-- The `prompt` field continues to exist unchanged — `source_content` is an additional field, not a replacement
+- The `prompt` field continues to exist unchanged — `metadata.source_content` is an additional field, not a replacement
 - Platform-specific fields in `request_context` can be added over time — consumers check `type` before reading them
 
 ---
@@ -181,7 +181,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 | `metadata.execution_latency_ms` | Per-request latency for cost-performance analysis |
 | `metadata.tool_hash` | Know exactly which tool version produced each prediction |
 | `metadata.params` | Full runtime config for reproducibility and parameter sweep analysis |
-| `source_content` | Clean cached replay without parsing the prompt field |
+| `metadata.source_content` | Clean cached replay without parsing the prompt field |
 
 ---
 
@@ -191,7 +191,7 @@ The `type` field inside `request_context` acts as a discriminator for which plat
 |-----------|--------|--------|
 | **Trader** | Add `schema_version`, `request_context` to request payload | Medium — trader already has this data |
 | **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
-| **Tools** | Return `source_content` separately (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
+| **Tools** | Return `source_content` in metadata (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |
 
 ---

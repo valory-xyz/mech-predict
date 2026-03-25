@@ -16,6 +16,36 @@ Phase 2 consolidates all remaining duplicated scripts. The work is split by repo
 
 ---
 
+## Architecture: Python Click Wrappers + Shell Scripts
+
+Commands are split by nature:
+
+| Command | Implementation | Reason |
+|---|---|---|
+| `config-replace` | Python Click | YAML parsing, regex, env var resolution |
+| `run-agent` | Shell script + Python wrapper | Process orchestration, traps, signals, tendermint |
+| `run-service` | Shell script + Python wrapper | Process orchestration, Docker, deploy lifecycle |
+| `make-release` | Python Click | Git/GitHub API calls |
+
+Shell scripts live in `aea_helpers/scripts/` as package data. Thin Python wrappers (~10 lines each) parse Click flags and delegate to the shell scripts via `subprocess.run()`. Users see a single CLI: `aea-helpers run-agent --name valory/trader`.
+
+```
+plugins/aea-helpers/
+├── aea_helpers/
+│   ├── cli.py                      # Click group (all commands)
+│   ├── config_replace.py           # Python Click command
+│   ├── make_release.py             # Python Click command
+│   ├── run_agent.py                # Thin wrapper → scripts/run_agent.sh
+│   ├── run_service.py              # Thin wrapper → scripts/run_service.sh
+│   └── scripts/
+│       ├── run_agent.sh            # Shell: traps, tendermint, aea run
+│       └── run_service.sh          # Shell: build, deploy, Docker
+```
+
+`setup.py` declares `scripts/*.sh` as `package_data` so they're installed with the package.
+
+---
+
 ## Step 1: Plugin Development (Open Autonomy)
 
 > **Branch:** `fix/aea-helpers-customs-package` (extend this existing branch)

@@ -42,20 +42,25 @@ Minimal — just the question and which tool to use.
 
 ## Proposed Changes
 
-### Request payload — add `market_context`
+### Request payload — add `request_context`
 
-All market-related metadata goes in a dedicated `market_context` object. Tools can ignore it. Benchmark reads it.
+All request-related metadata goes in a dedicated `request_context` object. Tools can ignore it. Benchmark reads it. The naming is intentionally generic — `request_context` works for prediction mechs today and can accommodate other mech types (image generation, code execution, etc.) in the future via a `type` field.
 
-The `platform` field indicates which platform-specific fields are present — `market_context` contains both common fields (applicable to all platforms) and platform-specific fields (e.g., `market_spread` for Polymarket only). Consumers use `platform` to know which fields to expect.
+The `platform` field indicates which platform-specific fields are present — `request_context` contains both common fields (applicable to all platforms) and platform-specific fields (e.g., `market_spread` for Polymarket only). Consumers use `platform` to know which fields to expect.
+
+> **Trust note:** All values in `request_context` are provided by the trader and should be treated as **untrusted input**. The benchmark must not assume these values are accurate without verification. Currently, natural incentive alignment provides reasonable assurance (traders bet real money, so fake data hurts them), but the schema is designed to accommodate a `proof` or `attestation` field in the future if cryptographic verification is needed.
+
+> **Timing note:** `market_prob` is captured at request time by the trader. There can be a delay of 1-5 minutes before the mech executes the tool (polling interval + execution time). For most markets (political, long-horizon) this is negligible. For fast-moving markets, the benchmark can stratify by market volatility to account for staleness. Request time is still the correct anchor — it captures what the market thought *before* the mech was asked, which is the fair baseline to beat. Capturing at execution time would require coupling the mech to market-specific APIs.
 
 #### Polymarket example
 
 ```json
 {
   "schema_version": "2.0",
+  "type": "predict",
   "prompt": "Will BTC hit $100k by June?",
   "tool": "prediction-online",
-  "market_context": {
+  "request_context": {
     "market_id": "0xdef456...",
     "platform": "polymarket",
     "market_prob": 0.65,
@@ -71,9 +76,10 @@ The `platform` field indicates which platform-specific fields are present — `m
 ```json
 {
   "schema_version": "2.0",
+  "type": "predict",
   "prompt": "Will ETH hit $5k by March?",
   "tool": "prediction-online",
-  "market_context": {
+  "request_context": {
     "market_id": "0xabc123...",
     "platform": "omen",
     "market_prob": 0.40,
@@ -89,18 +95,21 @@ The `platform` field indicates which platform-specific fields are present — `m
 |-------|----------|-------------|
 | `market_id` | All | Platform-specific market identifier (Polymarket condition ID, Omen FPMM contract address) |
 | `platform` | All | `"polymarket"` or `"omen"` — tells consumers which fields to expect |
-| `market_prob` | All | Market price at request time (mid-price). Used for edge-over-market calculation |
+| `market_prob` | All | Market price at request time (mid-price). Used for edge-over-market calculation. See timing note above |
 | `market_liquidity_usd` | All | Market liquidity in USD. Used for stratification (high-liquidity markets are harder to beat) |
 | `market_close_at` | All | Market close/resolution date. Used to calculate prediction lead time |
 | `market_spread` | Polymarket | Bid-ask spread from the CLOB order book. Not applicable to Omen (AMM has no order book) |
 
 **Design decisions:**
-- `market_context` is a separate object, not top-level fields — keeps it clean, tools don't need to know about it
+- `request_context` is a separate object, not top-level fields — keeps it clean, tools don't need to know about it
+- Named `request_context` (not `market_context`) so it's generic enough for non-prediction mechs in the future
+- `type` field at top level (e.g., `"predict"`) allows the schema to support different mech types — each type defines which `request_context` fields are relevant
 - `schema_version` at the top level so consumers know what to expect
-- All fields in `market_context` are optional — old requests without it still work, benchmark marks them as lower provenance grade
+- All fields in `request_context` are optional — old requests without it still work, benchmark marks them as lower provenance grade
 - `platform` determines which platform-specific fields are present — this allows Polymarket-specific fields (like `market_spread`) without forcing them onto Omen
 - Common fields (`market_prob`, `market_liquidity_usd`, `market_close_at`) exist on both platforms. Cheaper to embed at request time than to fetch retroactively from subgraphs for thousands of predictions
 - Platform-specific fields can be added over time without breaking the schema — just check `platform` before reading them
+- All values are untrusted — see trust note above
 
 ### Response payload — add `source_content`, `tool_hash`, `execution_latency_ms`, runtime params
 
@@ -155,10 +164,10 @@ The `platform` field indicates which platform-specific fields are present — `m
 ## Backward Compatibility
 
 - `schema_version` field lets consumers distinguish old vs new payloads
-- All new fields are additive — old consumers that don't know about `market_context` or `source_content` just ignore them
+- All new fields are additive — old consumers that don't know about `request_context` or `source_content` just ignore them
 - Old requests/responses without `schema_version` are treated as `"1.0"`
 - The `prompt` field continues to exist unchanged — `source_content` is an additional field, not a replacement
-- Platform-specific fields in `market_context` can be added over time — consumers check `platform` before reading them
+- Platform-specific fields in `request_context` can be added over time — consumers check `platform` before reading them
 
 ---
 
@@ -166,12 +175,13 @@ The `platform` field indicates which platform-specific fields are present — `m
 
 | Field | What it unlocks |
 |-------|----------------|
-| `market_context.market_id` | Direct question-to-market matching (eliminates string prefix hack) |
-| `market_context.platform` | Platform-aware evaluation and platform-specific field handling |
-| `market_context.market_prob` | Edge-over-market calculation without expensive subgraph lookups |
-| `market_context.market_liquidity_usd` | Market efficiency stratification without subgraph lookups |
-| `market_context.market_close_at` | Prediction lead time calculation without API calls |
-| `market_context.market_spread` | Polymarket spread analysis for PnL simulation |
+| `request_context.market_id` | Direct question-to-market matching (eliminates string prefix hack) |
+| `request_context.platform` | Platform-aware evaluation and platform-specific field handling |
+| `request_context.market_prob` | Edge-over-market calculation without expensive subgraph lookups |
+| `request_context.market_liquidity_usd` | Market efficiency stratification without subgraph lookups |
+| `request_context.market_close_at` | Prediction lead time calculation without API calls |
+| `request_context.market_spread` | Polymarket spread analysis for PnL simulation |
+| `type` | Supports non-prediction mechs without schema changes |
 | `metadata.execution_latency_ms` | Per-request latency for cost-performance analysis |
 | `metadata.tool_hash` | Know exactly which tool version produced each prediction |
 | `metadata.params` | Full runtime config for reproducibility and parameter sweep analysis |
@@ -183,7 +193,7 @@ The `platform` field indicates which platform-specific fields are present — `m
 
 | Component | Change | Effort |
 |-----------|--------|--------|
-| **Trader** | Add `schema_version` + `market_context` to request payload | Medium — trader already has this data |
+| **Trader** | Add `schema_version`, `type`, `request_context` to request payload | Medium — trader already has this data |
 | **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
 | **Tools** | Return `source_content` separately (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |
@@ -192,32 +202,22 @@ The `platform` field indicates which platform-specific fields are present — `m
 
 ## Open Questions
 
-### A. Trust of trader-provided market data
-
-The benchmark scores tools using edge-over-market, which relies on `market_prob` from the trader. If a trader sends fake probabilities, scoring becomes meaningless — and since the benchmark drives which tools get promoted to production, bad data → bad promotion decisions → real impact.
-
-**Natural incentive alignment:** The trader pays for predictions and bets real money on the outcomes. Sending fake `market_prob` doesn't help them — it leads to worse predictions and losses. The incentives are already aligned.
-
-**Technical guarantee (suggestion):** The trader includes a signed API response hash alongside the `market_prob` value — a verifiable proof that the data came from Polymarket/Omen, not fabricated. The benchmark verifies the signature without re-querying the source. Cheap and cryptographically sound. No per-request subgraph lookups needed.
-
-**Status:** Needs team input — is natural incentive alignment sufficient, or do we need signed proofs?
-
----
-
-### B. Non-predict mechs and schema generality
-
-The marketplace will serve non-prediction mechs (image generation, code execution, etc.). Should the request schema be designed for all mech types, not just prediction?
-
-**Suggestion:** Add a `type` field to the request (e.g., `"predict"`, `"generate"`). The `type` determines which context fields are relevant — prediction requests include `market_context`, other mech types could have their own context structure. Avoid renaming `market_context` to `metadata` since the response already has a `metadata` field — would get confusing. Alternatives: `request_context` or keeping `market_context` as a predict-specific object.
-
-**Status:** Needs team alignment on naming convention and whether to design for all mech types now or only predictions.
-
----
-
-### C. Order book data in `market_context`
+### A. Order book data in `request_context`
 
 Adding order book depth (beyond just spread) could be useful for Polymarket PnL analysis. However, order books are Polymarket-specific — Omen uses an AMM with no order book.
 
 The schema already supports this via the platform-specific fields pattern — any Polymarket-specific fields can be added without affecting Omen. The question is whether to include them now or defer.
 
 **Status:** Not blocking for initial implementation. Can add later without breaking the schema.
+
+---
+
+### B. `extract_question` regex mismatch in superforcaster (pre-existing)
+
+Production prompts use `repr()` to format the question, which wraps it in **single quotes**: `With the given question 'Will BTC...'`. The `extract_question()` regex in superforcaster expects **double quotes** and fails to match. The fallback returns the full prompt as the question — works but makes Serper search queries less targeted.
+
+This is a pre-existing issue, not introduced by the `source_links` change. Affects both live and cached paths equally.
+
+**Suggestion:** Fix the regex to handle both quote styles: `r'question\s+["\'](.+?)["\']\s+and\s+the\s+` `` `yes` `` `'`
+
+**Status:** Low priority. Existing fallback works. Can fix separately.

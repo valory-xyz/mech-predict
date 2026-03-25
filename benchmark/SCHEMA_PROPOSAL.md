@@ -44,7 +44,7 @@ Minimal — just the question and which tool to use.
 
 ### Request payload — add `request_context`
 
-All request-related metadata goes in a dedicated `request_context` object. Tools can ignore it. Benchmark reads it. The naming is intentionally generic — `request_context` works for prediction mechs today and can accommodate other mech types (image generation, code execution, etc.) in the future via a `type` field.
+All request-related metadata goes in a dedicated `request_context` object. Tools can ignore it. Benchmark reads it. The naming is intentionally generic — `request_context` works for prediction mechs today and can accommodate other mech types (image generation, code execution, etc.) in the future.
 
 The `platform` field indicates which platform-specific fields are present — `request_context` contains both common fields (applicable to all platforms) and platform-specific fields (e.g., `market_spread` for Polymarket only). Consumers use `platform` to know which fields to expect.
 
@@ -57,7 +57,6 @@ The `platform` field indicates which platform-specific fields are present — `r
 ```json
 {
   "schema_version": "2.0",
-  "type": "predict",
   "prompt": "Will BTC hit $100k by June?",
   "tool": "prediction-online",
   "request_context": {
@@ -76,7 +75,6 @@ The `platform` field indicates which platform-specific fields are present — `r
 ```json
 {
   "schema_version": "2.0",
-  "type": "predict",
   "prompt": "Will ETH hit $5k by March?",
   "tool": "prediction-online",
   "request_context": {
@@ -103,7 +101,6 @@ The `platform` field indicates which platform-specific fields are present — `r
 **Design decisions:**
 - `request_context` is a separate object, not top-level fields — keeps it clean, tools don't need to know about it
 - Named `request_context` (not `market_context`) so it's generic enough for non-prediction mechs in the future
-- `type` field at top level (e.g., `"predict"`) allows the schema to support different mech types — each type defines which `request_context` fields are relevant
 - `schema_version` at the top level so consumers know what to expect
 - All fields in `request_context` are optional — old requests without it still work, benchmark marks them as lower provenance grade
 - `platform` determines which platform-specific fields are present — this allows Polymarket-specific fields (like `market_spread`) without forcing them onto Omen
@@ -181,7 +178,6 @@ The `platform` field indicates which platform-specific fields are present — `r
 | `request_context.market_liquidity_usd` | Market efficiency stratification without subgraph lookups |
 | `request_context.market_close_at` | Prediction lead time calculation without API calls |
 | `request_context.market_spread` | Polymarket spread analysis for PnL simulation |
-| `type` | Supports non-prediction mechs without schema changes |
 | `metadata.execution_latency_ms` | Per-request latency for cost-performance analysis |
 | `metadata.tool_hash` | Know exactly which tool version produced each prediction |
 | `metadata.params` | Full runtime config for reproducibility and parameter sweep analysis |
@@ -193,7 +189,7 @@ The `platform` field indicates which platform-specific fields are present — `r
 
 | Component | Change | Effort |
 |-----------|--------|--------|
-| **Trader** | Add `schema_version`, `type`, `request_context` to request payload | Medium — trader already has this data |
+| **Trader** | Add `schema_version`, `request_context` to request payload | Medium — trader already has this data |
 | **Mech (`behaviours.py`)** | Add `schema_version`, `metadata.execution_latency_ms`, `metadata.tool_hash` to response. Populate `metadata.params` with runtime config | Small — data already available in code |
 | **Tools** | Return `source_content` separately (in addition to current behavior) | Medium — each tool needs to return scraped content alongside the result |
 | **Benchmark** | Read new fields from IPFS, fall back gracefully for old `"1.0"` payloads | Built into benchmark code from the start |

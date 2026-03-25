@@ -46,7 +46,7 @@ Minimal — just the question and which tool to use.
 
 All request-related metadata goes in a dedicated `request_context` object. Tools can ignore it. Benchmark reads it. The naming is intentionally generic — `request_context` works for prediction mechs today and can accommodate other mech types (image generation, code execution, etc.) in the future.
 
-The `platform` field indicates which platform-specific fields are present — `request_context` contains both common fields (applicable to all platforms) and platform-specific fields (e.g., `market_spread` for Polymarket only). Consumers use `platform` to know which fields to expect.
+The `type` field inside `request_context` acts as a discriminator for which platform-specific fields are present — `request_context` contains both common fields (applicable to all platforms) and platform-specific fields (e.g., `market_spread` for Polymarket only). Consumers use `type` to know which fields to expect.
 
 > **Trust note:** All values in `request_context` are provided by the trader and should be treated as **untrusted input**. The benchmark must not assume these values are accurate without verification. Currently, natural incentive alignment provides reasonable assurance (traders bet real money, so fake data hurts them), but the schema is designed to accommodate a `proof` or `attestation` field in the future if cryptographic verification is needed.
 
@@ -61,7 +61,7 @@ The `platform` field indicates which platform-specific fields are present — `r
   "tool": "prediction-online",
   "request_context": {
     "market_id": "0xdef456...",
-    "platform": "polymarket",
+    "type": "polymarket",
     "market_prob": 0.65,
     "market_liquidity_usd": 450000,
     "market_close_at": "2026-06-30T00:00:00Z",
@@ -79,7 +79,7 @@ The `platform` field indicates which platform-specific fields are present — `r
   "tool": "prediction-online",
   "request_context": {
     "market_id": "0xabc123...",
-    "platform": "omen",
+    "type": "omen",
     "market_prob": 0.40,
     "market_liquidity_usd": 12000,
     "market_close_at": "2026-03-31T00:00:00Z"
@@ -92,7 +92,7 @@ The `platform` field indicates which platform-specific fields are present — `r
 | Field | Platforms | Description |
 |-------|----------|-------------|
 | `market_id` | All | Platform-specific market identifier (Polymarket condition ID, Omen FPMM contract address) |
-| `platform` | All | `"polymarket"` or `"omen"` — tells consumers which fields to expect |
+| `type` | All | `"polymarket"` or `"omen"` — discriminator that tells consumers which platform-specific fields to expect |
 | `market_prob` | All | Market price at request time (mid-price). Used for edge-over-market calculation. See timing note above |
 | `market_liquidity_usd` | All | Market liquidity in USD. Used for stratification (high-liquidity markets are harder to beat) |
 | `market_close_at` | All | Market close/resolution date. Used to calculate prediction lead time |
@@ -103,9 +103,9 @@ The `platform` field indicates which platform-specific fields are present — `r
 - Named `request_context` (not `market_context`) so it's generic enough for non-prediction mechs in the future
 - `schema_version` at the top level so consumers know what to expect
 - All fields in `request_context` are optional — old requests without it still work, benchmark marks them as lower provenance grade
-- `platform` determines which platform-specific fields are present — this allows Polymarket-specific fields (like `market_spread`) without forcing them onto Omen
+- `type` inside `request_context` acts as a discriminator for platform-specific fields — this allows Polymarket-specific fields (like `market_spread`) without forcing them onto Omen
 - Common fields (`market_prob`, `market_liquidity_usd`, `market_close_at`) exist on both platforms. Cheaper to embed at request time than to fetch retroactively from subgraphs for thousands of predictions
-- Platform-specific fields can be added over time without breaking the schema — just check `platform` before reading them
+- Platform-specific fields can be added over time without breaking the schema — just check `type` before reading them
 - All values are untrusted — see trust note above
 
 ### Response payload — add `source_content`, `tool_hash`, `execution_latency_ms`, runtime params
@@ -164,7 +164,7 @@ The `platform` field indicates which platform-specific fields are present — `r
 - All new fields are additive — old consumers that don't know about `request_context` or `source_content` just ignore them
 - Old requests/responses without `schema_version` are treated as `"1.0"`
 - The `prompt` field continues to exist unchanged — `source_content` is an additional field, not a replacement
-- Platform-specific fields in `request_context` can be added over time — consumers check `platform` before reading them
+- Platform-specific fields in `request_context` can be added over time — consumers check `type` before reading them
 
 ---
 
@@ -173,7 +173,7 @@ The `platform` field indicates which platform-specific fields are present — `r
 | Field | What it unlocks |
 |-------|----------------|
 | `request_context.market_id` | Direct question-to-market matching (eliminates string prefix hack) |
-| `request_context.platform` | Platform-aware evaluation and platform-specific field handling |
+| `request_context.type` | Platform-aware evaluation and platform-specific field handling |
 | `request_context.market_prob` | Edge-over-market calculation without expensive subgraph lookups |
 | `request_context.market_liquidity_usd` | Market efficiency stratification without subgraph lookups |
 | `request_context.market_close_at` | Prediction lead time calculation without API calls |

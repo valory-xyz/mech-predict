@@ -153,10 +153,13 @@ Each is a vulture dead-code whitelist unique to its codebase. Cannot be shared.
 aea-helpers run-agent \
   --name valory/trader \
   --env-file .env \
-  --config-replace           # calls aea-helpers config-replace internally
+  --config-replace \
+  --free-ports               # auto-find free ports (from trader#874)
 ```
 
-Flags cover all variations: `--name` (agent name), `--env-file` (`.env` vs `.agentenv`), `--config-replace` (whether to run config substitution), `--extra-key-add` (for repos needing a second key-add call).
+Flags cover all variations: `--name` (agent name), `--env-file` (`.env` vs `.agentenv`), `--config-replace` (whether to run config substitution), `--free-ports` (auto-find available ports for running multiple agents).
+
+**Port management (from [trader#874](https://github.com/valory-xyz/trader/pull/874)):** The trader repo has an open PR adding `scripts/generate_port_env.py` (412 lines) for automatic port resolution when running multiple agents. Instead of merging this as a per-repo script, the port management logic should be built into `aea-helpers run-agent`. This gives all repos the feature for free and avoids yet another duplicated script. The `--free-ports` flag auto-finds available ports starting from 50000, with optional explicit overrides via `--abci-port`, `--rpc-port`, etc.
 
 ### 4.2 `run_service.sh` — 8 repos, all unique but same core pattern
 

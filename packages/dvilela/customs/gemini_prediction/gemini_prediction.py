@@ -69,6 +69,21 @@ def with_key_rotation(func: Callable) -> Callable:
     return wrapper
 
 
+MAX_SOURCES = 5
+
+
+def _build_additional_info(
+    source_links: Optional[Dict[str, str]],
+) -> str:
+    """Build additional information string from source links."""
+    if not source_links:
+        return ""
+    return "\n".join(
+        f"ARTICLE {i}, URL: {url}, CONTENT: {content}"
+        for i, (url, content) in enumerate(list(source_links.items())[:MAX_SOURCES])
+    )
+
+
 PREDICTION_OFFLINE_PROMPT = """
 You are an LLM inside a multi-agent system that takes in a prompt of a user requesting a probability estimation
 for a given event. You are provided with an input under the label "USER_PROMPT". You must follow the instructions
@@ -176,14 +191,8 @@ def run(  # pylint: disable=too-many-return-statements
         return error_response("No prompt has been given.")
 
     if tool_name == "gemini-prediction":
-        source_links = kwargs.get("source_links", None)
-        if source_links:
-            additional_info = "\n".join(
-                f"ARTICLE {i}, URL: {url}, CONTENT: {content}"
-                for i, (url, content) in enumerate(list(source_links.items())[:5])
-            )
-        else:
-            additional_info = ""
+        source_links = kwargs.get("source_links")
+        additional_info = _build_additional_info(source_links)
         prompt = PREDICTION_OFFLINE_PROMPT.format(
             user_prompt=prompt,
             additional_information=additional_info,

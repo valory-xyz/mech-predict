@@ -9,26 +9,36 @@
 
 ## Executive Summary
 
-Following the successful Phase 1 consolidation of `bump.py`, `check_dependencies.py`, and `check_doc_ipfs_hashes.py` into the `aea-helpers` plugin, this report analyses remaining duplicated scripts across 16 Valory repositories. We identify additional consolidation candidates — both Python CI scripts and shell deployment scripts — and recommend which should be added to `aea-helpers` and which should remain per-repo.
+Following the successful Phase 1 consolidation of `bump.py`, `check_dependencies.py`, and `check_doc_ipfs_hashes.py` into the `aea-helpers` plugin, this report analyses remaining duplicated scripts across 16 Valory repositories.
+
+Key finding: **mech repos' run scripts (`run_agent.sh`, `run_service.sh`) are outdated** — the `mech-server` package now provides the `mech` CLI (`mech run`, `mech stop`, `mech setup`) which is the proper way to run mech services. These scripts should be deleted, not consolidated.
+
+For **agent repos** (trader, optimus, IEKit, market-creator, meme-ooorr), the deployment scripts (`run_agent.sh`, `run_service.sh`, `aea-config-replace.py`) share ~80% logic and should be consolidated into `aea-helpers` commands.
 
 ---
 
 ## 1. Repos Analysed
 
-### Agent repos (downstream consumers)
+### Mech repos (use `mech` CLI from mech-server)
+
+| Repo | URL |
+|---|---|
+| Mech | https://github.com/valory-xyz/mech |
+| Mech Agents Fun | https://github.com/valory-xyz/mech-agents-fun |
+| Mech Predict | https://github.com/valory-xyz/mech-predict |
+| Mech Client | https://github.com/valory-xyz/mech-client |
+| Mech Server | https://github.com/valory-xyz/mech-server |
+| Mech Interact | https://github.com/valory-xyz/mech-interact |
+
+### Agent repos (need `aea-helpers` run commands)
 
 | Repo | URL |
 |---|---|
 | Trader | https://github.com/valory-xyz/trader |
 | Optimus | https://github.com/valory-xyz/optimus |
 | Agents Fun (Meme-ooorr) | https://github.com/valory-xyz/meme-ooorr |
-| Mech Agents Fun | https://github.com/valory-xyz/mech-agents-fun |
-| Mech Predict | https://github.com/valory-xyz/mech-predict |
-| Mech Client | https://github.com/valory-xyz/mech-client |
-| Mech Server | https://github.com/valory-xyz/mech-server |
-| Mech Interact | https://github.com/valory-xyz/mech-interact |
-| Mech | https://github.com/valory-xyz/mech |
 | Market Creator | https://github.com/valory-xyz/market-creator |
+| IE Kit | https://github.com/valory-xyz/IEKit |
 
 ### Upstream repos (frameworks/libraries)
 
@@ -36,7 +46,6 @@ Following the successful Phase 1 consolidation of `bump.py`, `check_dependencies
 |---|---|
 | Open AEA | https://github.com/valory-xyz/open-aea |
 | Open Autonomy | https://github.com/valory-xyz/open-autonomy |
-| IE Kit | https://github.com/valory-xyz/IEKit |
 | Gen AI | https://github.com/valory-xyz/genai |
 | Funds Manager | https://github.com/valory-xyz/funds-manager |
 | KV Store | https://github.com/valory-xyz/kv-store |
@@ -45,7 +54,7 @@ Following the successful Phase 1 consolidation of `bump.py`, `check_dependencies
 
 ## 2. Phase 1 Status (Already Completed)
 
-The following scripts have already been consolidated into the `aea-helpers` plugin (`open-autonomy/plugins/aea-helpers/`):
+The following scripts have already been consolidated into the `aea-helpers` plugin:
 
 | Script | Plugin command | Status |
 |---|---|---|
@@ -57,9 +66,40 @@ The following scripts have already been consolidated into the `aea-helpers` plug
 
 ---
 
-## 3. Duplicated Python Scripts (New Findings)
+## 3. Mech Repos: Outdated Run Scripts
 
-### 3.1 `bump.py` — 8 repos still have local copies
+### 3.1 The `mech` CLI (from mech-server)
+
+The `mech-server` package provides a proper CLI via `mech` command:
+
+| Command | What it does |
+|---|---|
+| `mech setup -c gnosis` | Configure service, deploy metadata |
+| `mech run -c gnosis` | Run service via Docker (production) |
+| `mech run -c gnosis --dev` | Run on host — pushes packages, starts tendermint + agent |
+| `mech stop -c gnosis` | Stop service |
+| `mech add-tool` | Scaffold new tools |
+| `mech prepare-metadata` | Generate and publish metadata to IPFS |
+| `mech update-metadata` | Update metadata hash on-chain |
+
+`mech run --dev` internally does everything that `run_agent.sh` + `run_service.sh` do: pushes packages, resolves service hash, builds deployment, and runs.
+
+### 3.2 Outdated scripts in mech repos
+
+| Script | mech | mech-agents-fun | mech-predict | Action |
+|---|---|---|---|---|
+| `run_agent.sh` | Yes (44 lines) | Yes (44 lines) | Yes (44 lines) | **Delete** — use `mech run --dev` |
+| `run_service.sh` | Yes (31 lines) | Yes (60 lines) | Yes (33 lines) | **Delete** — use `mech run` |
+| `run_tm.sh` | Yes (2 lines) | Yes (2 lines) | No | **Delete** — tendermint managed by `mech run` |
+| `make_release.sh` | Yes (29 lines) | Yes (29 lines) | Yes (29 lines) | **Consolidate** into `aea-helpers make-release` |
+
+All three `run_agent.sh` files are identical (only agent name differs). All `run_tm.sh` files are identical (2 lines). All `make_release.sh` files are byte-for-byte identical (29 lines).
+
+---
+
+## 4. Duplicated CI Scripts (8 repos still need migration)
+
+### 4.1 `bump.py` — 8 repos still have local copies
 
 | Repo | Lines | Timeout | Auth method |
 |---|---|---|---|
@@ -72,166 +112,160 @@ The following scripts have already been consolidated into the `aea-helpers` plug
 | optimus | 320 | 30s (constant) | `os.environ.get()` |
 | trader | 319 | 30s | `os.environ.get()` |
 
-Same drift pattern as Phase 1 — inconsistent timeouts, mixed auth methods. The `aea-helpers bump-dependencies` command fixes all of these.
-
 **Action:** Migrate all 8 repos to `aea-helpers bump-dependencies`.
 
-### 3.2 `check_dependencies.py` — 8 repos, all identical (653 lines)
-
-All 8 repos (funds-manager, genai, IEKit, kv-store, market-creator, meme-ooorr, optimus, trader) have identical copies of the mech-interact version with Click CLI, `Pipfile`/`ToxFile`/`PyProjectToml` classes.
+### 4.2 `check_dependencies.py` — 8 repos, all identical (653 lines)
 
 **Action:** Migrate all 8 repos to `aea-helpers check-dependencies`.
 
-### 3.3 `check_doc_ipfs_hashes.py` — 8 repos, minor drift
-
-| Group | Repos | Lines |
-|---|---|---|
-| Group 1 | funds-manager, genai, kv-store, market-creator, trader | 373 |
-| Group 2 | IEKit | 372 |
-| Group 3 | meme-ooorr, optimus | 369 |
-
-Minor string formatting differences. All subsets of the OA version.
+### 4.3 `check_doc_ipfs_hashes.py` — 8 repos, minor drift
 
 **Action:** Migrate all 8 repos to `aea-helpers check-doc-hashes`.
 
-### 3.4 `aea-config-replace.py` — 5 repos, REPO-SPECIFIC
-
-| Repo | Lines | Config entries |
-|---|---|---|
-| IEKit | 146 | 35 (Twitter, OpenAI, Ceramic) |
-| market-creator | 140 | 70 (News API, Omen subgraph) |
-| meme-ooorr | 152 | 82 (Base chain, memecoin, x402) |
-| optimus | 145 | Different structure entirely |
-| trader | 164 | 94 (Polygon, multi-chain, Polymarket) |
-
-Each repo has completely different environment variable mappings specific to its service. However, the **core logic is identical**: read a `.env` file, iterate over a path→env_var mapping, and substitute values into agent YAML config files. Only the mapping dict differs per repo.
-
-**Action:** Extract the shared logic into `aea-helpers config-replace --mapping <file>`. Each repo keeps a `config-mapping.json` (or YAML) file defining its specific variable mappings. The script logic (~100 lines) is consolidated; the per-repo config (~50-90 entries) stays local.
-
-### 3.5 `propel.py` — 2 repos, shared core classes
-
-| Repo | Lines | Service |
-|---|---|---|
-| IEKit | 352 | impact_evaluator (4 agents) |
-| trader | 320 | trader_pearl (variable agents) |
-
-The `Agent`, `Service`, and `Propel` classes are ~90% identical. The deployment-specific logic (service names, variables, agent counts) differs.
-
-**Action:** Keep per-repo for now. Low ROI to extract — only 2 repos use it.
-
-### 3.6 `whitelist.py` — 3 repos, REPO-SPECIFIC
-
-Each is a vulture dead-code whitelist unique to its codebase. Cannot be shared.
-
-**Action:** Keep per-repo.
-
 ---
 
-## 4. Duplicated Shell Scripts (New Findings)
+## 5. Agent Repo Deployment Scripts
 
-### 4.1 `run_agent.sh` — 8 repos
+### 5.1 `aea-config-replace.py` — 5 agent repos
 
-| Group | Repos | Lines | Notes |
+**Deep analysis findings:**
+
+| Repo | Lines | Entries | Structure |
 |---|---|---|---|
-| Identical | mech, mech-agents-fun, mech-predict | 44 | Same script, only agent name differs |
-| Similar | IEKit, market-creator, trader | 47 | Same pattern + `aea-config-replace.py` call |
-| Similar | meme-ooorr | 46 | Same pattern + `aea-config-replace.py` call |
-| Unique | optimus | 64 | Different structure, test API support |
+| IEKit | 146 | 41 | Generic: PATH_TO_VAR dict + regex replace |
+| market-creator | 140 | 21 | Generic: PATH_TO_VAR dict + regex replace |
+| meme-ooorr | 152 | 40 | Generic: PATH_TO_VAR dict + regex replace |
+| trader | 164 | 51 | Generic: PATH_TO_VAR dict + regex replace |
+| optimus | 145 | ~15 | **Different**: hardcoded logic, dir creation, type coercions |
 
-**Core pattern (shared across all):**
-1. Cleanup trap for tendermint
-2. Remove previous build, clean directories
-3. `autonomy packages lock` + `autonomy fetch --local --agent <name>`
-4. Copy keys/env, add ethereum key, issue certificates
-5. Start tendermint + `aea -s run`
+**4 repos are structurally identical** — only the PATH_TO_VAR mapping differs. The core logic (trader's version, ~50 lines):
+1. `load_dotenv(override=True)`
+2. Load `aea-config.yaml` with `yaml.safe_load_all()`
+3. For each path/var in PATH_TO_VAR: find section by path traversal, extract old value via regex `${type:value}`, replace with env var
+4. Write back with `yaml.dump_all()`
 
-**Differences:** Agent name, env file handling (`.agentenv` vs `.env` + `aea-config-replace.py`), number of key-add calls.
+**Optimus is genuinely different:**
+- Hardcoded logic instead of dict iteration
+- Creates `data/` directory (side effect)
+- Type coercions: `${list:...}`, `${str:...}` explicit in code
+- Searches config by `public_id` and `type` instead of path traversal
+- Uses hardcoded "optimus" directory instead of "agent"
 
-**Action:** Extract into `aea-helpers run-agent` command. Differences are parameterizable:
+**Action:**
+- Refactor optimus to use the standard PATH_TO_VAR pattern (move dir creation to run script, use `--alias agent` in fetch)
+- Then consolidate all 5 into `aea-helpers config-replace --mapping config-mapping.json`
 
+### 5.2 `run_agent.sh` — 5 agent repos
+
+After excluding mech repos (which should use `mech` CLI), 5 agent repos remain:
+
+| Repo | Lines | Env handling | Config replace | Keys | Unique features |
+|---|---|---|---|---|---|
+| IEKit | 47 | `.env` + config-replace | Yes | 2 (agent + connection) | — |
+| market-creator | 47 | `.env` + config-replace | Yes | 2 (agent + connection) | — |
+| trader | 47 | `.env` + config-replace | Yes | 2 (agent + connection) | Port management PR #874 |
+| meme-ooorr | 46 | `.env` + config-replace | Yes | 2 (agent + connection) | — |
+| optimus | 64 | `.env` + config-replace | Yes (custom) | 2 (agent + connection) | Test API startup, no make clean, no --alias |
+
+After refactoring optimus to the standard pattern, all 5 follow the same flow:
+1. Cleanup trap → 2. Remove previous build → 3. `make clean` → 4. `autonomy packages lock` → 5. `autonomy fetch --local --agent <name> --alias agent` → 6. Source `.env` → 7. Run `aea-config-replace.py` → 8. `cd agent` → 9. Copy keys → 10. `add-key ethereum` + `add-key ethereum --connection` → 11. `issue-certificates` → 12. Start tendermint → 13. `aea -s run`
+
+**Action:** Consolidate into `aea-helpers run-agent`:
 ```
 aea-helpers run-agent \
   --name valory/trader \
   --env-file .env \
   --config-replace \
-  --free-ports               # auto-find free ports (from trader#874)
+  --config-mapping config-mapping.json \
+  --connection-key
 ```
 
-Flags cover all variations: `--name` (agent name), `--env-file` (`.env` vs `.agentenv`), `--config-replace` (whether to run config substitution), `--free-ports` (auto-find available ports for running multiple agents).
+**Port management from [trader#874](https://github.com/valory-xyz/trader/pull/874):** Built into the command via `--free-ports` flag, giving all repos automatic port resolution without a separate 412-line script.
 
-**Port management (from [trader#874](https://github.com/valory-xyz/trader/pull/874)):** The trader repo has an open PR adding `scripts/generate_port_env.py` (412 lines) for automatic port resolution when running multiple agents. Instead of merging this as a per-repo script, the port management logic should be built into `aea-helpers run-agent`. This gives all repos the feature for free and avoids yet another duplicated script. The `--free-ports` flag auto-finds available ports starting from 50000, with optional explicit overrides via `--abci-port`, `--rpc-port`, etc.
+### 5.3 `run_service.sh` — 5 agent repos
 
-### 4.2 `run_service.sh` — 8 repos, all unique but same core pattern
+| Repo | Lines | Service name | Agents | Deploy flags | Unique steps |
+|---|---|---|---|---|---|
+| IEKit | 31 | valory/impact_evaluator | default | `-ltm` | Sources .env after build |
+| market-creator | 48 | valory/market_maker | default | `-ltm` | Prompt file sed preprocessing |
+| trader | 32 | valory/trader | default | `-ltm` | — |
+| meme-ooorr | 42 | dvilela/memeooorr | default | `-ltm --agent-cpu-limit 4.0 --agent-memory-limit 8192 --agent-memory-request 1024` | Database backup |
+| optimus | 30 | valory/optimus | default | `-ltm` | — |
 
-All 8 scripts follow the same pattern with repo-specific flags:
-1. Clean previous builds
-2. `autonomy push-all` + `autonomy fetch --local --service <name>`
-3. Build Docker image
-4. Copy keys/env, build deployment, run deployment
+Core pattern: clean → `autonomy init` → `autonomy push-all` → `autonomy fetch --local --service <name>` → `autonomy build-image` → copy keys → `autonomy deploy build -ltm` → `autonomy deploy run`
 
-**Differences are all parameterizable:**
-- Service name → `--name` flag
-- Agent count → `--agents` flag
-- Deploy flags (CPU/memory limits) → `--cpu-limit`, `--memory-limit` flags
-- Env file sourcing → `--env-file` flag
-- Docker cleanup → `--docker-cleanup` flag
-- Build directory discovery → standardize to one approach
+**Truly unique steps that need hooks:**
+- market-creator: reads `market_identification_prompt.txt` and escapes it with `sed` before deploy
+- meme-ooorr: copies `memeooorr.db` to `persistent_data/logs` for database persistence
 
-**Action:** Extract into `aea-helpers run-service` command:
-
+**Action:** Consolidate into `aea-helpers run-service`:
 ```
 aea-helpers run-service \
   --name valory/trader \
-  --agents 4 \
   --env-file .env \
+  --agents 4 \
   --cpu-limit 4.0 \
   --memory-limit 8192
 ```
 
-Some repos have truly unique steps (meme-ooorr has database backup, mech-agents-fun has Docker container cleanup). These can be handled with pre/post hooks or kept as small wrapper scripts that call `aea-helpers run-service` internally.
+With `--pre-deploy-cmd` / `--post-deploy-cmd` for unique steps.
 
-### 4.3 `run_tm.sh` — 2 repos, identical (2 lines)
+### 5.4 `make_release.sh` — 3 mech repos (identical)
 
-mech and mech-agents-fun have identical 2-line tendermint startup scripts.
+All 3 copies (mech, mech-agents-fun, mech-predict) are byte-for-byte identical. Creates git tag + GitHub release.
 
-**Action:** Trivial — can be removed if `run_agent.sh` is consolidated (it starts tendermint internally).
-
-### 4.4 `make_release.sh` — 3 repos, identical (29 lines)
-
-mech, mech-agents-fun, mech-predict have identical release scripts that create git tags and GitHub releases.
-
-**Action:** Could be added to `aea-helpers` as `aea-helpers make-release` or moved to a shared GitHub Actions workflow.
+**Action:** Consolidate into `aea-helpers make-release`.
 
 ---
 
-## 5. Consolidation Summary
+## 6. Consolidation Summary
 
-### Immediate action (add to `aea-helpers` plugin)
+### Changes in Open Autonomy (`aea-helpers` plugin)
 
-These are already implemented in `aea-helpers` — just need migration in the 8 remaining repos:
+| Task | Description |
+|---|---|
+| Fix customs package | Handle `customs` type in check-doc-hashes (already on branch) |
+| `aea-helpers config-replace` | New command — generic YAML config substitution with mapping file |
+| `aea-helpers run-agent` | New command — fetch, configure, and run agent with port management |
+| `aea-helpers run-service` | New command — build and deploy service with resource limits |
+| `aea-helpers make-release` | New command — create git tag + GitHub release |
 
-| Script | Repos to migrate | Plugin command |
-|---|---|---|
-| `bump.py` | funds-manager, genai, IEKit, kv-store, market-creator, meme-ooorr, optimus, trader | `aea-helpers bump-dependencies` |
-| `check_dependencies.py` | Same 8 repos | `aea-helpers check-dependencies` |
-| `check_doc_ipfs_hashes.py` | Same 8 repos | `aea-helpers check-doc-hashes` |
+### Changes in Mech Repos
 
-### New `aea-helpers` commands to implement
-
-| Script | Repos | Proposed command | Key flags |
+| Repo | Delete | Keep | Notes |
 |---|---|---|---|
-| `aea-config-replace.py` | 5 repos | `aea-helpers config-replace` | `--mapping <file>`, `--env-file <path>` |
-| `run_agent.sh` | 8 repos | `aea-helpers run-agent` | `--name <agent>`, `--env-file <path>`, `--config-replace` |
-| `run_service.sh` | 8 repos | `aea-helpers run-service` | `--name <service>`, `--agents <n>`, `--env-file <path>`, `--cpu-limit`, `--memory-limit` |
-| `make_release.sh` | 3 mech repos | `aea-helpers make-release` | `--version`, `--env`, `--description` |
+| mech | `run_agent.sh`, `run_service.sh`, `run_tm.sh`, `make_release.sh` | — | Use `mech` CLI instead; `make_release.sh` → `aea-helpers make-release` |
+| mech-agents-fun | `run_agent.sh`, `run_service.sh`, `run_tm.sh`, `make_release.sh` | test scripts | Same as above |
+| mech-predict | `run_agent.sh`, `run_service.sh`, `make_release.sh` | metadata scripts, test scripts | Same as above |
+| mech-client | — | `whitelist.py`, `benchmark.sh` | No run scripts to delete |
+| mech-server | — | — | Provides the `mech` CLI, no scripts to change |
+| mech-interact | — | — | No scripts |
 
-### Keep per-repo (not candidates for consolidation)
+### Changes in Agent Repos
+
+| Repo | Migrate CI scripts | Migrate run scripts | Repo-specific actions |
+|---|---|---|---|
+| trader | bump, check-deps, check-doc-hashes | `run_agent.sh` → `aea-helpers run-agent`, `run_service.sh` → `aea-helpers run-service`, `aea-config-replace.py` → `config-mapping.json` | Close PR #874 (port management built into aea-helpers) |
+| optimus | bump, check-deps, check-doc-hashes | Same as trader | Refactor `aea-config-replace.py` to standard pattern first, use `--alias agent` in fetch |
+| IEKit | bump, check-deps, check-doc-hashes | Same as trader | — |
+| market-creator | bump, check-deps, check-doc-hashes | Same as trader, `--pre-deploy-cmd` for prompt file | — |
+| meme-ooorr | bump, check-deps, check-doc-hashes | Same as trader, `--post-deploy-cmd` for db backup | — |
+
+### Changes in Library Repos (CI scripts only)
+
+| Repo | Migrate | Notes |
+|---|---|---|
+| funds-manager | bump, check-deps, check-doc-hashes | Delete `scripts/` entirely after |
+| genai | bump, check-deps, check-doc-hashes | Delete `scripts/` entirely after |
+| kv-store | bump, check-deps, check-doc-hashes | Delete `scripts/` entirely after |
+
+### Keep per-repo (not consolidation candidates)
 
 | Script | Reason |
 |---|---|
 | `whitelist.py` | Vulture config, inherently repo-specific |
 | `propel.py` | Only 2 repos, different deployment targets |
-| `config-mapping.json` (per-repo) | Variable mappings for `config-replace`, inherently service-specific |
+| `config-mapping.json` (per-repo) | Variable mappings for config-replace |
 | IEKit ceramic/staking scripts | Domain-specific utilities |
 | meme-ooorr analytics/test scripts | Domain-specific utilities |
 | mech-predict metadata scripts | Domain-specific utilities |
@@ -241,49 +275,49 @@ These are already implemented in `aea-helpers` — just need migration in the 8 
 
 ---
 
-## 6. Repos After Phase 2 Migration
+## Appendix A: `aea-config-replace.py` Core Logic (from trader)
 
-After migrating the 8 remaining repos to `aea-helpers`:
+```python
+PATH_TO_VAR = {
+    "config/ledger_apis/gnosis/address": "GNOSIS_LEDGER_RPC",
+    "models/params/args/setup/all_participants": "ALL_PARTICIPANTS",
+    # ... 51 entries
+}
+CONFIG_REGEX = r"\${.*?:(.*)}"
 
-| Repo | Scripts remaining | Action |
-|---|---|---|
-| funds-manager | `__init__.py` only | Delete `scripts/` entirely |
-| genai | `__init__.py` only | Delete `scripts/` entirely |
-| kv-store | `__init__.py` only | Delete `scripts/` entirely |
-| IEKit | 15+ repo-specific scripts | Keep `scripts/`, remove 3 duplicated files |
-| market-creator | `aea-config-replace.py`, `list_markets.py` | Keep `scripts/`, remove 3 duplicated files |
-| meme-ooorr | 25+ repo-specific scripts | Keep `scripts/`, remove 3 duplicated files |
-| optimus | `aea-config-replace.py`, `run_merkle_api.py` | Keep `scripts/`, remove 3 duplicated files |
-| trader | `aea-config-replace.py`, `propel.py` | Keep `scripts/`, remove 3 duplicated files |
-
----
-
-## Appendix: Deployment Script Patterns
-
-### `run_agent.sh` common template
-
-```bash
-#!/bin/bash
-# Cleanup
-trap 'kill $PPID' EXIT
-# Fetch and configure agent
-autonomy packages lock
-autonomy fetch --local --agent <AGENT_NAME> --alias agent
-# Keys and certificates
-aea -s add-key ethereum
-aea -s issue-certificates
-# Start tendermint and agent
-tendermint init && tendermint node &
-aea -s run
+def find_and_replace(config, path, new_value):
+    for i, section in enumerate(config):
+        value = section
+        try:
+            for part in path:
+                value = value[part]
+        except KeyError:
+            continue
+        sub_dic = config[i]
+        for part in path[:-1]:
+            sub_dic = sub_dic[part]
+        old_str_value = sub_dic[path[-1]]
+        match = re.match(CONFIG_REGEX, old_str_value)
+        old_var_value = match.groups()[0]
+        sub_dic[path[-1]] = old_str_value.replace(old_var_value, new_value)
+    return config
 ```
 
-### `make_release.sh` (identical across 3 repos)
+This handles `${str:value}`, `${list:value}`, `${bool:value}` etc. because it does string replacement within the existing template — the type prefix is preserved.
 
-```bash
-#!/bin/bash
-VERSION=$1; ENV=$2; DESCRIPTION=$3
-TAG="release_${VERSION}_${ENV}"
-git tag -a "$TAG" -m "$DESCRIPTION"
-git push origin "$TAG"
-gh release create "$TAG" --title "$TAG" --notes "$DESCRIPTION"
+## Appendix B: `mech` CLI (from mech-server)
+
 ```
+$ mech --help
+CLI to create, deploy and manage Mechs on the Olas Marketplace.
+
+Commands:
+  add-tool          Scaffold new mech tools
+  prepare-metadata  Generate and publish metadata to IPFS
+  run               Run the mech AI agent (--dev for host mode)
+  setup             Configure service and deploy metadata
+  stop              Stop the mech agent service
+  update-metadata   Update metadata hash on-chain
+```
+
+`mech run -c gnosis --dev` replaces both `run_agent.sh` and `run_service.sh` for mech repos.

@@ -233,8 +233,8 @@ task question: "Will the air strike conflict in Sudan be resolved by 13 Septembe
 """
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -286,7 +286,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -676,6 +676,7 @@ def run(
                 prediction_prompt,
                 None,
                 counter_callback,
+                None,
             )
         messages = [
             {"role": "system", "content": sme_introduction},
@@ -698,9 +699,16 @@ def run(
                 token_counter=count_tokens,
             )
 
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+        }
         return (
             response.choices[0].message.content,
             prediction_prompt,
             None,
             counter_callback,
+            used_params,
         )

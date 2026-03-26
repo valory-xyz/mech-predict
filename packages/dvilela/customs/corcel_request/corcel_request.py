@@ -32,8 +32,8 @@ class CorcelAPIException(Exception):
     """Corcel API Exception"""
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -68,7 +68,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -150,9 +150,9 @@ def send_corcel_request(api_key: str, prompt: str, **kwargs: Any) -> str:
     return response.text
 
 
-def error_response(msg: str) -> Tuple[str, None, None, None]:
+def error_response(msg: str) -> Tuple[str, None, None, None, None]:
     """Return an error mech response."""
-    return msg, None, None, None
+    return msg, None, None, None, None
 
 
 def response_post_process(response: str, tool_name: str) -> str:
@@ -215,4 +215,9 @@ def run(
 
     response = response_post_process(response, tool_name)
 
-    return response, prompt, None, None
+    used_params = {
+        "model": kwargs.get("model", DEFAULT_VALUES["model"]),
+        "temperature": kwargs.get("temperature", DEFAULT_VALUES["temperature"]),
+        "max_tokens": kwargs.get("max_tokens", DEFAULT_VALUES["max_tokens"]),
+    }
+    return response, prompt, None, None, used_params

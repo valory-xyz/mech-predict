@@ -144,8 +144,8 @@ STOP_WORDS = STOP_WORDS.union(punctuation)
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 WORD_RE = re.compile(r"\w+")
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 MaxCostResponse = float
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -231,7 +231,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -1189,4 +1189,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             counter_callback=counter_callback,
         )
 
-        return extracted_block, prediction_prompt, None, counter_callback
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_words": num_words,
+        }
+        return extracted_block, prediction_prompt, None, counter_callback, used_params

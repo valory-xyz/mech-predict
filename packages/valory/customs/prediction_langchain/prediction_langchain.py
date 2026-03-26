@@ -50,8 +50,8 @@ from langgraph.prebuilt import ToolNode
 from openai import OpenAI
 from typing_extensions import TypedDict
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 
 
 MODEL = "gpt-4-1106-preview"
@@ -200,7 +200,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -394,9 +394,9 @@ def run_langgraph(topic: str, timeframe: str, question: str) -> Tuple[str, str]:
     return response, prompt
 
 
-def error_response(msg: str) -> Tuple[str, None, None, None]:
+def error_response(msg: str) -> Tuple[str, None, None, None, None]:
     """Return an error mech response."""
-    return msg, None, None, None
+    return msg, None, None, None, None
 
 
 @with_key_rotation
@@ -453,5 +453,6 @@ def run(**kwargs: Any) -> Union[float, Tuple[Optional[str], Optional[str], None,
     # Run the tool
     response, prompt = run_langgraph(topic, timeframe, question)
 
-    # The expected output is: response, prompt, irrelevant, irrelevant
-    return response, prompt, None, None
+    used_params = {"model": MODEL}
+    # The expected output is: response, prompt, irrelevant, irrelevant, used_params
+    return response, prompt, None, None, used_params

@@ -32,8 +32,8 @@ import googleapiclient
 import openai
 from openai import OpenAI
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 MaxCostResponse = float
 
 
@@ -90,7 +90,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -200,9 +200,9 @@ AVAILABLE_TOOLS = {
 }
 
 
-def error_response(msg: str) -> Tuple[str, None, None, None]:
+def error_response(msg: str) -> Tuple[str, None, None, None, None]:
     """Return an error mech response."""
-    return msg, None, None, None
+    return msg, None, None, None, None
 
 
 @with_key_rotation
@@ -233,4 +233,5 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return error_response("No api key has been given.")
 
     with OpenAIClientManager(api_key) as llm_client:
-        return transaction_builder(prompt, llm_client=llm_client)
+        response, prompt_out, tx, cb = transaction_builder(prompt, llm_client=llm_client)
+        return response, prompt_out, tx, cb, {}

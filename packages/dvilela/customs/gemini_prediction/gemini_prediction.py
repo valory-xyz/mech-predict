@@ -25,8 +25,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import google.generativeai as genai
 from google.api_core.exceptions import GoogleAPIError
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -61,7 +61,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -132,9 +132,9 @@ AVAILABLE_TOOLS = ["gemini-prediction", "gemini-completion"]
 AVAILABLE_MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"]
 
 
-def error_response(msg: str) -> Tuple[str, None, None, None]:
+def error_response(msg: str) -> Tuple[str, None, None, None, None]:
     """Return an error mech response."""
-    return msg, None, None, None
+    return msg, None, None, None, None
 
 
 def response_post_process(response: str) -> str:
@@ -199,6 +199,7 @@ def run(  # pylint: disable=too-many-return-statements
         )
 
     genai.configure(api_key=api_key)
+    model_name = model
     model = genai.GenerativeModel(model)
     response = model.generate_content(prompt)
     response = response.text
@@ -206,4 +207,5 @@ def run(  # pylint: disable=too-many-return-statements
     if tool_name == "gemini-prediction":
         response = response_post_process(response)
 
-    return response, prompt, None, None  # type: ignore
+    used_params = {"model": model_name}
+    return response, prompt, None, None, used_params  # type: ignore

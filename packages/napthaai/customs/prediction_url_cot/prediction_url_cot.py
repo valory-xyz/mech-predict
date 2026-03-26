@@ -64,8 +64,8 @@ def _ensure_tiktoken_cache() -> None:
 
 _ensure_tiktoken_cache()
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
 
 
 N_MODEL_CALLS = 2
@@ -123,7 +123,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -998,7 +998,7 @@ def run(
         )
 
         if not response or response.content is None:
-            return "Response Not Valid", prediction_prompt, None, counter_callback
+            return "Response Not Valid", prediction_prompt, None, counter_callback, None
 
         if counter_callback:
             counter_callback(
@@ -1010,4 +1010,11 @@ def run(
 
         results = parser_prediction_response(response.content)
 
-        return results, prediction_prompt, None, counter_callback
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_queries": num_queries,
+        }
+        return results, prediction_prompt, None, counter_callback, used_params

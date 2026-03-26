@@ -116,45 +116,28 @@ Now, you have two options to run the worker: as a standalone agent or as a servi
    autonomy generate-key ethereum
    ```
 
-3. Run the agent:
+3. Install the mech CLI from [mech-server](https://github.com/valory-xyz/mech-server):
 
     ```bash
-    bash run_agent.sh
+    pip install mech-server
     ```
 
-    `run_agent.sh` starts Tendermint internally, so no separate `run_tm.sh` step is required.
-
-### Option 2: Run the Mech as an agent service
-
-1. Configure the service environment file:
+4. Set up and run the mech:
 
     ```bash
-    # Copy the prefilled template
-    cp .example.env .1env
-
-    # Edit values in ".1env", for example API_KEYS
-
-    # Source the env file
-    source .1env
+    mech setup -c gnosis
+    mech run -c gnosis          # production (Docker deployment)
+    mech run -c gnosis --dev    # development (host, Tendermint + agent)
     ```
 
-2. Ensure you have a file with the agent address and private key (`keys.json`). You can generate a new private key file using the Open Autonomy CLI:
+### Releases
 
-    ```bash
-    autonomy generate-key ethereum -n 1
-    ```
+To create a release, use the `aea-helpers` CLI:
 
-3. Ensure that the variable `ALL_PARTICIPANTS` in the file `.1env` contains the agent address from `keys.json`:
-
-   ```bash
-   ALL_PARTICIPANTS='["your_agent_address"]'
-   ```
-
-4. Run the service:
-
-    ```bash
-    bash run_service.sh
-    ```
+```bash
+pip install aea-helpers
+aea-helpers make-release --version <VERSION> --env <ENV> --description "<DESCRIPTION>"
+```
 
 ## Included tools
 

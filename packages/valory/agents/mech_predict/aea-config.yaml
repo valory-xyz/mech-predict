@@ -60,9 +60,9 @@ customs:
 - valory/prediction_langchain:0.1.0:bafybeifiw6rdeigls4pbaqwd3hbb3tq5y6psoacnezydjz2udioxullk4e
 - victorpolisetty/gemini_request:0.1.0:bafybeiarvmrz7674nmsvcf6lkbw4rvmhorckq5wvydmw3zczvvd5uomlyy
 - victorpolisetty/dalle_request:0.1.0:bafybeiamxolrtxyprdia64un5w53c5tdj4cnx3dxksog42oukz47tjvp3a
-- valory/superforcaster:0.1.0:bafybeicr4ob5mzvacgqb3nx2g25k4ml3wdyar4nfovqmhe2ownmevvh6pm
+- valory/superforcaster:0.1.0:bafybeideo7jbhmzs3htboq27vfuwpys7yz42pgjo2dnuo47yh6kiuyuprm
 - dvilela/corcel_request:0.1.0:bafybeifpareiesif37wt4gxe2e5ojplegskfemnb3nmcsj4qph74tyfcqy
-- dvilela/gemini_prediction:0.1.0:bafybeifd5rfdp73qwibjcmgf732yryefa7aukse3ql3iunty3ho5ojuhnu
+- dvilela/gemini_prediction:0.1.0:bafybeihhkxazvbj7q6amaawdiryt7yotwwaeod6hk6oplxihdclrkhstly
 - nickcom007/prediction_request_sme:0.1.0:bafybeieqakllioqvpjuhja3r3iacsaxvnfdxqu5l4qtjwvboaik3vggfga
 default_ledger: ethereum
 required_ledgers:

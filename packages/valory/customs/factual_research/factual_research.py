@@ -52,6 +52,7 @@ import functools
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -745,26 +746,39 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         all_evidence: List[Dict[str, str]] = []
         seen_links: set = set()
 
-        for sq in sub_questions:
-            try:
-                results = _search_serper(sq, serper_api_key, num_results=3)
-                for r in results:
-                    if r["link"] not in seen_links:
-                        seen_links.add(r["link"])
-                        all_evidence.append(r)
-            except Exception as e:
-                print(f"[factual_research] Search failed for '{sq}': {e}")
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {
+                pool.submit(_search_serper, sq, serper_api_key, num_results=3): sq
+                for sq in sub_questions
+            }
+            for fut in as_completed(futures):
+                sq = futures[fut]
+                try:
+                    for r in fut.result():
+                        if r["link"] not in seen_links:
+                            seen_links.add(r["link"])
+                            all_evidence.append(r)
+                except Exception as e:
+                    print(f"[factual_research] Search failed for '{sq}': {e}")
 
         # Scrape actual page content for the top results
         MAX_PAGES_TO_SCRAPE = 6
-        scraped = 0
-        for item in all_evidence:
-            if scraped >= MAX_PAGES_TO_SCRAPE:
-                break
-            content = _fetch_page_content(item["link"])
-            if content:
-                item["content"] = content
-                scraped += 1
+        items_to_scrape = all_evidence[:MAX_PAGES_TO_SCRAPE]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            future_to_item = {
+                pool.submit(_fetch_page_content, item["link"]): item
+                for item in items_to_scrape
+            }
+            scraped = 0
+            for fut in as_completed(future_to_item):
+                item = future_to_item[fut]
+                try:
+                    content = fut.result()
+                    if content:
+                        item["content"] = content
+                        scraped += 1
+                except Exception as e:
+                    print(f"[factual_research] Scrape failed for '{item['link']}': {e}")
         print(f"[factual_research] Scraped {scraped}/{len(all_evidence)} pages.")
 
         # Cap evidence so we don't blow the synthesis context window
@@ -815,7 +829,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             messages=synthesis_messages,
             response_format=FactualBriefing,
             temperature=temperature,
-            max_tokens=3000,
+            max_tokens=1500,
             counter_callback=counter_callback,
         )
 

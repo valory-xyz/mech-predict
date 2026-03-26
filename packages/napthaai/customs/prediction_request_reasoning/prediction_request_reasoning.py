@@ -68,8 +68,12 @@ def _ensure_tiktoken_cache() -> None:
 
 _ensure_tiktoken_cache()
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 
@@ -1316,7 +1320,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         prediction = parser_prediction_response(response_prediction.content)
         if not prediction:
-            return "Prediction Not Valid", prediction_prompt, None, counter_callback, None
+            return (
+                "Prediction Not Valid",
+                prediction_prompt,
+                None,
+                counter_callback,
+                None,
+            )
 
         if counter_callback:
             counter_callback(

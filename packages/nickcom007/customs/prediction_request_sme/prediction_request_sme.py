@@ -233,8 +233,12 @@ task question: "Will the air strike conflict in Sudan be resolved by 13 Septembe
 """
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -592,7 +596,7 @@ def adjust_additional_information(
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:

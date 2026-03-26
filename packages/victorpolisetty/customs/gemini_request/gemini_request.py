@@ -24,8 +24,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import google.generativeai as genai
 import openai
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -82,7 +86,7 @@ ALLOWED_TOOLS = [PREFIX + value for value in ENGINES["chat"]]
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
+def run(**kwargs: Any) -> MechResponse:
     """Run the task"""
 
     api_key = kwargs["api_keys"]["gemini"]

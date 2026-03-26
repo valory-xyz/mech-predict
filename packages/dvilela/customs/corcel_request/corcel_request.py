@@ -32,8 +32,12 @@ class CorcelAPIException(Exception):
     """Corcel API Exception"""
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -183,7 +187,7 @@ def response_post_process(response: str, tool_name: str) -> str:
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
 
     delivery_rate = int(kwargs.get("delivery_rate", 0))

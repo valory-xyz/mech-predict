@@ -50,8 +50,12 @@ from langgraph.prebuilt import ToolNode
 from openai import OpenAI
 from typing_extensions import TypedDict
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 MODEL = "gpt-4-1106-preview"
@@ -400,7 +404,7 @@ def error_response(msg: str) -> Tuple[str, None, None, None, None]:
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Union[float, Tuple[Optional[str], Optional[str], None, None]]:
+def run(**kwargs: Any) -> Union[float, MechResponse]:
     """Run the langchain example."""
 
     delivery_rate = int(kwargs.get("delivery_rate", 0))

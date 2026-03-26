@@ -32,8 +32,12 @@ import googleapiclient
 import openai
 from openai import OpenAI
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 
@@ -176,7 +180,7 @@ def make_request_openai_request(
 def native_transfer(
     prompt: str,
     llm_client: OpenAI,
-) -> MechResponse:
+) -> Tuple[str, Optional[str], None, None]:
     """Perform native transfer."""
     tool_prompt = NATIVE_TRANSFER_PROMPT.format(user_prompt=prompt)
     response = make_request_openai_request(prompt=tool_prompt, llm_client=llm_client)
@@ -233,5 +237,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return error_response("No api key has been given.")
 
     with OpenAIClientManager(api_key) as llm_client:
-        response, prompt_out, tx, cb = transaction_builder(prompt, llm_client=llm_client)
+        response, prompt_out, tx, cb = transaction_builder(
+            prompt, llm_client=llm_client
+        )
         return response, prompt_out, tx, cb, {}

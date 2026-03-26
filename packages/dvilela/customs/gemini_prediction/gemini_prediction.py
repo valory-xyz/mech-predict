@@ -25,8 +25,12 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import google.generativeai as genai
 from google.api_core.exceptions import GoogleAPIError
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -150,7 +154,7 @@ def response_post_process(response: str) -> str:
 @with_key_rotation
 def run(  # pylint: disable=too-many-return-statements
     **kwargs: Any,
-) -> Union[float, Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
 
     model = kwargs.get("model", "gemini-2.0-flash")

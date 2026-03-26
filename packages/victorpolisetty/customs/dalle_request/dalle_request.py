@@ -49,8 +49,12 @@ def _ensure_tiktoken_cache() -> None:
 
 
 _ensure_tiktoken_cache()
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -132,7 +136,7 @@ ALLOWED_QUALITY = ["standard", "hd"]
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
+def run(**kwargs: Any) -> MechResponse:
     """Run the task"""
     with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         tool = kwargs["tool"]

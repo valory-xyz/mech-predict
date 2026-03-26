@@ -65,8 +65,12 @@ def _ensure_tiktoken_cache() -> None:
 
 _ensure_tiktoken_cache()
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -980,7 +984,7 @@ def parser_prediction_response(response: str) -> str:
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[Optional[str], Any, Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     model = kwargs.get("model")
@@ -1073,6 +1077,7 @@ def run(
                 prediction_prompt,
                 None,
                 counter_callback,
+                None,
             )
 
         if counter_callback:

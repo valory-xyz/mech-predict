@@ -703,6 +703,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     # -- API keys --
     openai_api_key = kwargs["api_keys"]["openai"]
     serper_api_key = kwargs["api_keys"]["serperapi"]
+    source_links: Optional[Dict[str, str]] = kwargs.get("source_links", None)
 
     with OpenAIClientManager(openai_api_key):
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
@@ -746,40 +747,57 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         all_evidence: List[Dict[str, str]] = []
         seen_links: set = set()
 
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {
-                pool.submit(_search_serper, sq, serper_api_key, num_results=3): sq
-                for sq in sub_questions
-            }
-            for fut in as_completed(futures):
-                sq = futures[fut]
-                try:
-                    for r in fut.result():
-                        if r["link"] not in seen_links:
-                            seen_links.add(r["link"])
-                            all_evidence.append(r)
-                except Exception as e:
-                    print(f"[factual_research] Search failed for '{sq}': {e}")
+        if source_links:
+            # Cached replay mode: use pre-fetched content instead of live search
+            print("[factual_research] Using provided source_links (cached replay).")
+            for url, content in source_links.items():
+                all_evidence.append(
+                    {
+                        "title": url,
+                        "link": url,
+                        "snippet": "",
+                        "content": content,
+                    }
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futures = {
+                    pool.submit(
+                        _search_serper, sq, serper_api_key, num_results=3
+                    ): sq
+                    for sq in sub_questions
+                }
+                for fut in as_completed(futures):
+                    sq = futures[fut]
+                    try:
+                        for r in fut.result():
+                            if r["link"] not in seen_links:
+                                seen_links.add(r["link"])
+                                all_evidence.append(r)
+                    except Exception as e:
+                        print(f"[factual_research] Search failed for '{sq}': {e}")
 
-        # Scrape actual page content for the top results
-        MAX_PAGES_TO_SCRAPE = 6
-        items_to_scrape = all_evidence[:MAX_PAGES_TO_SCRAPE]
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            future_to_item = {
-                pool.submit(_fetch_page_content, item["link"]): item
-                for item in items_to_scrape
-            }
-            scraped = 0
-            for fut in as_completed(future_to_item):
-                item = future_to_item[fut]
-                try:
-                    content = fut.result()
-                    if content:
-                        item["content"] = content
-                        scraped += 1
-                except Exception as e:
-                    print(f"[factual_research] Scrape failed for '{item['link']}': {e}")
-        print(f"[factual_research] Scraped {scraped}/{len(all_evidence)} pages.")
+            # Scrape actual page content for the top results
+            MAX_PAGES_TO_SCRAPE = 6
+            items_to_scrape = all_evidence[:MAX_PAGES_TO_SCRAPE]
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                future_to_item = {
+                    pool.submit(_fetch_page_content, item["link"]): item
+                    for item in items_to_scrape
+                }
+                scraped = 0
+                for fut in as_completed(future_to_item):
+                    item = future_to_item[fut]
+                    try:
+                        content = fut.result()
+                        if content:
+                            item["content"] = content
+                            scraped += 1
+                    except Exception as e:
+                        print(
+                            f"[factual_research] Scrape failed for '{item['link']}': {e}"
+                        )
+            print(f"[factual_research] Scraped {scraped}/{len(all_evidence)} pages.")
 
         # Cap evidence so we don't blow the synthesis context window
         MAX_EVIDENCE_ITEMS = 20

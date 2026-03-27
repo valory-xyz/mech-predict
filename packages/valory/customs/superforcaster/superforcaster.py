@@ -421,7 +421,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return max_cost
 
     openai_api_key = kwargs["api_keys"]["openai"]
-    serper_api_key = kwargs["api_keys"]["serperapi"]
+    source_content: Optional[Dict[str, str]] = kwargs.get("source_content", None)
     with OpenAIClientManager(openai_api_key) as llm_client:
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
@@ -432,26 +432,34 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         question = extract_question(prompt)
 
-        print("[superforcaster] Fetching additional sources...")
-        serper_response = fetch_additional_sources(question, serper_api_key)
-        sources_data = serper_response.json()
-        organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
-        print(f"[superforcaster] Scraping {len(organic_data)} pages...")
-        with ThreadPoolExecutor(max_workers=MAX_SOURCES) as pool:
-            future_to_item = {
-                pool.submit(_fetch_page_content, item["link"]): item
-                for item in organic_data
-            }
-            for fut in as_completed(future_to_item):
-                item = future_to_item[fut]
-                try:
-                    content = fut.result()
-                    if content:
-                        item["content"] = content
-                except Exception as e:
-                    print(
-                        f"[superforcaster] Scrape failed for '{item['link']}': {e}"
-                    )
+        if source_content:
+            print("[superforcaster] Using provided source_content (cached replay).")
+            organic_data: List[Dict[str, Any]] = [
+                {"link": url, "content": content}
+                for url, content in source_content.items()
+            ][:MAX_SOURCES]
+        else:
+            serper_api_key = kwargs["api_keys"]["serperapi"]
+            print("[superforcaster] Fetching additional sources...")
+            serper_response = fetch_additional_sources(question, serper_api_key)
+            sources_data = serper_response.json()
+            organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
+            print(f"[superforcaster] Scraping {len(organic_data)} pages...")
+            with ThreadPoolExecutor(max_workers=MAX_SOURCES) as pool:
+                future_to_item = {
+                    pool.submit(_fetch_page_content, item["link"]): item
+                    for item in organic_data
+                }
+                for fut in as_completed(future_to_item):
+                    item = future_to_item[fut]
+                    try:
+                        content = fut.result()
+                        if content:
+                            item["content"] = content
+                    except Exception as e:
+                        print(
+                            f"[superforcaster] Scrape failed for '{item['link']}': {e}"
+                        )
         sources = _format_sources(organic_data)
 
         print("Updating prompt...")

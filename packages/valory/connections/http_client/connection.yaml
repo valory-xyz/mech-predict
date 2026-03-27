@@ -1,0 +1,32 @@
+name: http_client
+author: valory
+version: 0.23.0
+type: connection
+description: The HTTP_client connection that wraps a web-based client connecting to
+  a RESTful API specification.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  README.md: bafybeigqhgnqpgi22gfxqvsgbmrjdkrklpgu2m4px6zwb7bhvy3gkkyetu
+  __init__.py: bafybeieh7rjtg22qukaznxzhadreuxhyfeamj3lcluxtcbfiexktue2nim
+  connection.py: bafybeidn524cess6a2m72vfjjdbl6qb7ezb3utkros4stfsu4ks4tkbxry
+  tests/__init__.py: bafybeiak7fbussk7n5zl2o4trefz7whvc3ae3k2vrryhb6cettb2qskjau
+  tests/test_http_client.py: bafybeiajypgxf25xdm4hfkuu3huiiu6p7ojk4heshzl7tiorxszzo23lwa
+fingerprint_ignore_patterns: []
+connections: []
+protocols:
+- valory/http:1.0.0:bafybeidxkp3vga7t6x2pbt2tpkgyaxa5bgpdgryao54py7w3yxyzr7neoy
+class_name: HTTPClientConnection
+config:
+  host: 127.0.0.1
+  port: 8000
+  timeout: 300
+excluded_protocols: []
+restricted_to_protocols:
+- valory/http:1.0.0
+dependencies:
+  aiohttp:
+    version: <4.0.0,>=3.8.5
+  certifi: {}
+  multidict: {}
+is_abstract: false

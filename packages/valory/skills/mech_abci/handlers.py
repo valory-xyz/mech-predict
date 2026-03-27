@@ -1,0 +1,536 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2023-2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+
+"""This module contains the handlers for the skill of AutonomousFundAbciApp."""
+
+import json
+import re
+import time
+from datetime import datetime
+from enum import Enum
+from typing import Callable, Dict, List, Optional, Sized, Tuple, Union, cast
+from urllib.parse import urlparse
+
+from aea.protocols.base import Message
+
+from packages.valory.connections.http_server.connection import (
+    PUBLIC_ID as HTTP_SERVER_PUBLIC_ID,
+)
+from packages.valory.protocols.http.message import HttpMessage
+from packages.valory.skills.abstract_round_abci.handlers import (
+    ABCIRoundHandler as BaseABCIRoundHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    ContractApiHandler as BaseContractApiHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    HttpHandler as BaseHttpHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    IpfsHandler as BaseIpfsHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    LedgerApiHandler as BaseLedgerApiHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    SigningHandler as BaseSigningHandler,
+)
+from packages.valory.skills.abstract_round_abci.handlers import (
+    TendermintHandler as BaseTendermintHandler,
+)
+from packages.valory.skills.mech_abci.dialogues import HttpDialogue, HttpDialogues
+from packages.valory.skills.task_submission_abci.models import (
+    SharedState as BaseSharedState,
+)
+from packages.valory.skills.task_submission_abci.rounds import SynchronizedData
+
+ABCIRoundHandler = BaseABCIRoundHandler
+SigningHandler = BaseSigningHandler
+LedgerApiHandler = BaseLedgerApiHandler
+ContractApiHandler = BaseContractApiHandler
+TendermintHandler = BaseTendermintHandler
+IpfsHandler = BaseIpfsHandler
+
+FSM_REPR_MAX_DEPTH = 25
+DEFAULT_GRACE = 120.0
+LAST_SUCCESSFUL_READ = "last_successful_read"
+LAST_SUCCESSFUL_EXECUTED_TASK = "last_successful_executed_task"
+WAS_LAST_READ_SUCCESSFUL = "was_last_read_successful"
+LAST_TX = "last_tx"
+PENDING_TASKS = "pending_tasks"
+DONE_TASKS = "ready_tasks"
+IPFS_TASKS = "ipfs_tasks"
+TIMED_OUT_TASKS = "timed_out_tasks"
+WAIT_FOR_TIMEOUT = "wait_for_timeout"
+LAST_READ_ATTEMPT_TS = "last_read_attempt_ts"
+INFLIGHT_READ_TS = "inflight_read_ts"
+TRANSITION_TOLERANCE_FACTOR = (
+    2.0  # allow up to 2× the expected pause before calling it “slow”
+)
+LIVENESS_STALL_FACTOR = (
+    3.0  # allow up to 3× the expected pause before calling it “stuck”
+)
+
+
+class HttpCode(Enum):
+    """Http codes"""
+
+    OK_CODE = 200
+    NOT_FOUND_CODE = 404
+    BAD_REQUEST_CODE = 400
+
+
+class HttpMethod(Enum):
+    """Http methods"""
+
+    GET = "get"
+    HEAD = "head"
+    POST = "post"
+
+
+class HttpHandler(BaseHttpHandler):
+    """This implements the HTTP handler."""
+
+    SUPPORTED_PROTOCOL = HttpMessage.protocol_id
+
+    def setup(self) -> None:
+        """Implement the setup."""
+
+        # Custom hostname (set via params)
+        service_endpoint_base = urlparse(
+            self.context.params.service_endpoint_base
+        ).hostname
+
+        # Propel hostname regex
+        propel_uri_base_hostname = (
+            r"https?:\/\/[a-zA-Z0-9]{16}.agent\.propel\.(staging\.)?autonolas\.tech"
+        )
+
+        # Route regexes
+        hostname_regex = rf".*({service_endpoint_base}|{propel_uri_base_hostname}|localhost|127.0.0.1|0.0.0.0)(:\d+)?"
+        self.handler_url_regex = rf"{hostname_regex}\/.*"
+        health_url_regex = rf"{hostname_regex}\/healthcheck"
+
+        # update the route for mech http handler
+        routes_data = self.context.shared_state["routes_info"]
+        routes = list(routes_data.keys())
+        funcs = list(routes_data.values())
+
+        send_signed_url = rf"{hostname_regex}\/{routes[0]}"
+        fetch_offchain_info = rf"{hostname_regex}\/{routes[1]}"
+
+        # Routes
+        self.routes = {
+            (HttpMethod.GET.value, HttpMethod.HEAD.value): [
+                (health_url_regex, self._handle_get_health),
+                (fetch_offchain_info, funcs[1]),
+            ],
+            (HttpMethod.POST.value,): [(send_signed_url, funcs[0])],
+        }
+
+        self.json_content_header = "Content-Type: application/json\n"
+
+    @property
+    def last_successful_read(self) -> Optional[Tuple[int, float]]:
+        """Get the last successful read."""
+        return cast(
+            Optional[Tuple[int, float]],
+            self.context.shared_state.get(LAST_SUCCESSFUL_READ),
+        )
+
+    @property
+    def last_attempt_ts(self) -> Optional[float]:
+        """Get the last attempted read."""
+        return self.context.shared_state.get(LAST_READ_ATTEMPT_TS)
+
+    @property
+    def inflight_ts(self) -> Optional[float]:
+        """Get the last inflight timestamp read."""
+        return cast(Optional[float], self.context.shared_state.get(INFLIGHT_READ_TS))
+
+    @property
+    def last_successful_executed_task(self) -> Optional[Tuple[int, float]]:
+        """Get the last successful executed task."""
+        return cast(
+            Optional[Tuple[int, float]],
+            self.context.shared_state.get(LAST_SUCCESSFUL_EXECUTED_TASK),
+        )
+
+    @property
+    def was_last_read_successful(self) -> bool:
+        """Get the last read status."""
+        return self.context.shared_state.get(WAS_LAST_READ_SUCCESSFUL) is not False
+
+    @property
+    def last_tx(self) -> Optional[Tuple[str, float]]:
+        """Get the last transaction."""
+        return cast(Optional[Tuple[str, float]], self.context.shared_state.get(LAST_TX))
+
+    @property
+    def synchronized_data(self) -> SynchronizedData:
+        """Return the synchronized data."""
+        return SynchronizedData(
+            db=self.context.state.round_sequence.latest_synchronized_data.db
+        )
+
+    def _get_handler(self, url: str, method: str) -> Tuple[Optional[Callable], Dict]:
+        """Check if an url is meant to be handled in this handler
+
+        We expect url to match the pattern {hostname}/.*,
+        where hostname is allowed to be localhost, 127.0.0.1 or the token_uri_base's hostname.
+        Examples:
+            localhost:8000/0
+            127.0.0.1:8000/100
+            https://pfp.staging.autonolas.tech/45
+            http://pfp.staging.autonolas.tech/120
+
+        :param url: the url to check
+        :param method: the http method
+        :returns: the handling method if the message is intended to be handled by this handler, None otherwise, and the regex captures
+        """
+        # Check base url
+        if not re.match(self.handler_url_regex, url):
+            self.context.logger.info(
+                f"The url {url} does not match the HttpHandler's pattern"
+            )
+            return None, {}
+
+        # Check if there is a route for this request
+        for methods, routes in self.routes.items():
+            if method not in methods:
+                continue
+
+            for route in routes:  # type: ignore
+                # Routes are tuples like (route_regex, handle_method)
+                m = re.match(route[0], url)
+                if m:
+                    return route[1], m.groupdict()
+
+        # No route found
+        self.context.logger.info(
+            f"The message [{method}] {url} is intended for the HttpHandler but did not match any valid pattern"
+        )
+        return self._handle_bad_request, {}
+
+    def handle(self, message: Message) -> None:
+        """
+        Implement the reaction to an envelope.
+
+        :param message: the message
+        """
+        http_msg = cast(HttpMessage, message)
+
+        # Check if this is a request sent from the http_server skill
+        if (
+            http_msg.performative != HttpMessage.Performative.REQUEST
+            or message.sender != str(HTTP_SERVER_PUBLIC_ID.without_hash())
+        ):
+            super().handle(message)
+            return
+
+        # Check if this message is for this skill. If not, send to super()
+        handler, kwargs = self._get_handler(http_msg.url, http_msg.method)
+        if not handler:
+            super().handle(message)
+            return
+
+        # Retrieve dialogues
+        http_dialogues = cast(HttpDialogues, self.context.http_dialogues)
+        http_dialogue = cast(HttpDialogue, http_dialogues.update(http_msg))
+
+        # Invalid message
+        if http_dialogue is None:
+            self.context.logger.info(
+                "Received invalid http message={}, unidentified dialogue.".format(
+                    http_msg
+                )
+            )
+            return
+
+        # Handle message
+        self.context.logger.info(
+            "Received http request with method={}, url={} and body={!r}".format(
+                http_msg.method,
+                http_msg.url,
+                http_msg.body,
+            )
+        )
+        handler(http_msg, http_dialogue, **kwargs)
+
+    def _handle_bad_request(
+        self, http_msg: HttpMessage, http_dialogue: HttpDialogue
+    ) -> None:
+        """
+        Handle a Http bad request.
+
+        :param http_msg: the http message
+        :param http_dialogue: the http dialogue
+        """
+        http_response = http_dialogue.reply(
+            performative=HttpMessage.Performative.RESPONSE,
+            target_message=http_msg,
+            version=http_msg.version,
+            status_code=HttpCode.BAD_REQUEST_CODE.value,
+            status_text="Bad request",
+            headers=http_msg.headers,
+            body=b"",
+        )
+
+        # Send response
+        self.context.logger.info("Responding with: {}".format(http_response))
+        self.context.outbox.put_message(message=http_response)
+
+    def _send_ok_response(
+        self,
+        http_msg: HttpMessage,
+        http_dialogue: HttpDialogue,
+        data: Union[Dict, List],
+    ) -> None:
+        """Send an OK response with the provided data"""
+        http_response = http_dialogue.reply(
+            performative=HttpMessage.Performative.RESPONSE,
+            target_message=http_msg,
+            version=http_msg.version,
+            status_code=HttpCode.OK_CODE.value,
+            status_text="Success",
+            headers=f"{self.json_content_header}{http_msg.headers}",
+            body=json.dumps(data).encode("utf-8"),
+        )
+
+        # Send response
+        self.context.logger.info("Responding with: {}".format(http_response))
+        self.context.outbox.put_message(message=http_response)
+
+    def _send_not_found_response(
+        self, http_msg: HttpMessage, http_dialogue: HttpDialogue
+    ) -> None:
+        """Send an not found response"""
+        http_response = http_dialogue.reply(
+            performative=HttpMessage.Performative.RESPONSE,
+            target_message=http_msg,
+            version=http_msg.version,
+            status_code=HttpCode.NOT_FOUND_CODE.value,
+            status_text="Not found",
+            headers=http_msg.headers,
+            body=b"",
+        )
+        # Send response
+        self.context.logger.info("Responding with: {}".format(http_response))
+        self.context.outbox.put_message(message=http_response)
+
+    def _handle_get_health(
+        self, http_msg: HttpMessage, http_dialogue: HttpDialogue
+    ) -> None:
+        """
+        Handle GET /healthcheck and compute the agent's health metrics.
+
+        The function assesses the health of the agent in three dimensions:
+
+        - **Liveness**: Whether the FSM (Finite State Machine) is actively transitioning and
+          Tendermint is not in a stalled state.
+        - **Readiness**: Whether the agent is capable of accepting new work.
+          When idle (no backlog), readiness is considered true.
+        - **Progress**: Whether the agent is making progress when there is work in its backlog.
+
+        The endpoint returns a composite health object, where `is_healthy` is true only if
+        all three dimensions (liveness, readiness, progress) are satisfied.
+
+        :param http_msg: the http message
+        :param http_dialogue: the http dialogue
+        """
+
+        # --------- Gather FSM/round info (used by liveness/progress and for observability) ---------
+        seconds_since_last_transition: Optional[float] = None
+        is_tm_unhealthy: Optional[bool] = None
+        current_round: Optional[str] = None
+        rounds: Optional[list[str]] = None
+        is_transitioning_fast: Optional[bool] = None
+
+        round_sequence = cast(BaseSharedState, self.context.state).round_sequence
+
+        if round_sequence._last_round_transition_timestamp:
+            # Tendermint node stall indicator exposed by the framework
+            is_tm_unhealthy = cast(
+                BaseSharedState, self.context.state
+            ).round_sequence.block_stall_deadline_expired
+
+            # NOTE: wall time is OK for coarse health, but monotonic() is better for deltas.
+            current_time = datetime.now().timestamp()
+            seconds_since_last_transition = current_time - datetime.timestamp(
+                round_sequence._last_round_transition_timestamp
+            )
+
+            # Informational: “moving faster than ~2× the expected pause”
+            is_transitioning_fast = (
+                (is_tm_unhealthy is False)
+                and seconds_since_last_transition
+                < TRANSITION_TOLERANCE_FACTOR * self.context.params.reset_pause_duration
+            )
+
+        if round_sequence._abci_app:
+            current_round = round_sequence._abci_app.current_round.round_id
+            rounds = [
+                r.round_id for r in round_sequence._abci_app._previous_rounds[-10:]
+            ]
+
+        # --------- Observations pulled from shared state (timestamps in epoch seconds) --------------
+        last_executed_task_ts: Optional[float] = (
+            self.last_successful_executed_task[1]
+            if self.last_successful_executed_task
+            else None
+        )
+        last_successful_read_ts: Optional[float] = (
+            self.last_successful_read[1] if self.last_successful_read else None
+        )
+
+        # --------- Backlog awareness ---------------------------------------------------------------
+        # Health should not flip “unhealthy” just because we’re idle.
+        def _len_or_zero(v: Optional[Union[int, Sized]]) -> int:
+            """Return an integer size for counters/collections; tolerate None/missing."""
+            if v is None:
+                return 0
+            if isinstance(v, int):
+                return v
+            try:
+                return len(v)  # type: ignore[arg-type]
+            except Exception:
+                return 0
+
+        pending = _len_or_zero(self.context.shared_state.get(PENDING_TASKS))
+        ipfsq = _len_or_zero(self.context.shared_state.get(IPFS_TASKS))
+        waiting = _len_or_zero(self.context.shared_state.get(WAIT_FOR_TIMEOUT))
+        backlog_size = pending + ipfsq + waiting
+        expected_work = backlog_size > 0
+
+        # --------- Thresholds & clocks --------------------------------------------------------------
+        reset_pause = float(self.context.params.reset_pause_duration)
+        # Readiness/progress grace: allow short dependency blips without flapping.
+        grace = max(2 * reset_pause, DEFAULT_GRACE)
+        now = time.time()
+
+        # ---------- Helper function to get the max ts (Type Safe) -----------------------------------
+        def _max_ts(*vals: Optional[float]) -> Optional[float]:
+            """Return the maximum timestamp from a list, ignoring None."""
+            present = [v for v in vals if v is not None]
+            return max(present) if present else None
+
+        last_dependency_heartbeat_ts = _max_ts(
+            last_successful_read_ts, self.last_attempt_ts
+        )
+        is_dependency_heartbeat_recent = bool(
+            last_dependency_heartbeat_ts
+            and (now - last_dependency_heartbeat_ts) <= grace
+        )
+        inflight_recent = bool(
+            self.inflight_ts and (now - self.inflight_ts) <= min(grace, 2 * reset_pause)
+        )
+
+        # --------- Liveness: am I alive and not stuck? ----------------------------------------------
+        # Uses FSM movement and Tendermint stall flag. If we lack FSM data, treat as unknown → not live.
+        if seconds_since_last_transition is None or is_tm_unhealthy is None:
+            liveness_ok, live_reason = False, "no-fsm-data"
+        else:
+            liveness_ok = (not is_tm_unhealthy) and (
+                seconds_since_last_transition <= LIVENESS_STALL_FACTOR * reset_pause
+            )
+            live_reason = (
+                "ok"
+                if liveness_ok
+                else ("tm-unhealthy" if is_tm_unhealthy else "stuck-no-transition")
+            )
+
+        # --------- Readiness: can I accept work right now? ------------------------------------------
+        # Idle → ready; if work exists, require a fresh dependency read.
+
+        if not expected_work:
+            readiness_ok, ready_reason = True, "idle-ok"
+        else:
+            if is_dependency_heartbeat_recent or inflight_recent:
+                readiness_ok, ready_reason = True, (
+                    "deps-ok" if is_dependency_heartbeat_recent else "deps-inflight"
+                )
+            else:
+                readiness_ok, ready_reason = False, "stale-read"
+
+        # --------- Progress: if there’s backlog, are we actually advancing? -------------------------
+        # Accept progress if either the FSM is transitioning at pace, or a task executed recently.
+        if expected_work:
+            if last_executed_task_ts is None:
+                progress_ok = (
+                    seconds_since_last_transition is not None
+                    and seconds_since_last_transition
+                    <= TRANSITION_TOLERANCE_FACTOR * reset_pause
+                )
+            else:
+                progress_ok = (
+                    seconds_since_last_transition is not None
+                    and seconds_since_last_transition
+                    <= TRANSITION_TOLERANCE_FACTOR * reset_pause
+                ) or ((now - last_executed_task_ts) <= grace)
+            prog_reason = "progress" if progress_ok else "no-progress-with-backlog"
+        else:
+            progress_ok, prog_reason = True, "idle-ok"
+
+        # --------- Canonical health flag for alerts -------------------------------------------------
+        is_healthy = bool(liveness_ok and readiness_ok and progress_ok)
+
+        # --------- Response payload -----------------------------------------------------------------
+        data = {
+            "is_healthy": is_healthy,
+            "liveness": {"ok": liveness_ok, "reason": live_reason},
+            "readiness": {"ok": readiness_ok, "reason": ready_reason},
+            "progress": {
+                "ok": progress_ok,
+                "reason": prog_reason,
+                "backlog_size": backlog_size,
+                "expected_work": expected_work,
+            },
+            "seconds_since_last_transition": seconds_since_last_transition,
+            # Three-state: True (healthy), False (unhealthy), None (unknown/no data yet)
+            "is_tm_healthy": (None if is_tm_unhealthy is None else not is_tm_unhealthy),
+            "period": self.synchronized_data.period_count,
+            "reset_pause_duration": reset_pause,
+            "current_round": current_round,
+            "rounds": rounds,
+            "is_transitioning_fast": is_transitioning_fast,
+            "last_successful_read": (
+                {
+                    "block_number": self.last_successful_read[0],
+                    "timestamp": self.last_successful_read[1],
+                }
+                if self.last_successful_read
+                else None
+            ),
+            "last_successful_executed_task": (
+                {
+                    "request_id": self.last_successful_executed_task[0],
+                    "timestamp": self.last_successful_executed_task[1],
+                }
+                if self.last_successful_executed_task
+                else None
+            ),
+            "last_tx": (
+                {"tx_hash": self.last_tx[0], "timestamp": self.last_tx[1]}
+                if self.last_tx
+                else None
+            ),
+            "health_version": 2,
+        }
+
+        self._send_ok_response(http_msg, http_dialogue, data)

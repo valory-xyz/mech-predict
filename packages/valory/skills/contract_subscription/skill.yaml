@@ -1,0 +1,47 @@
+name: contract_subscription
+author: valory
+version: 0.1.0
+type: skill
+description: A simple skill to subscribe to events on a particular contract using
+  the websocket connection.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  __init__.py: bafybeifmvtpeq7ksqq262e2lupzv54sfdzygg2qxiygyztq7f2sujg4cwi
+  behaviours.py: bafybeidul5bhhn63k4gu4ipbnucdziszfjkvakwi4tz5ydvcbou37rek7m
+  dialogues.py: bafybeibqpn4xfrhjhh5nlhhks3rced3cfca6wvlzimsa37gfsa5kjzfsme
+  handlers.py: bafybeihlkjw2p4pt73bl37scdfssvoys2rxr6mpihwl6q2dwr4hop7756i
+  models.py: bafybeibrvcmamdis6n57ivrtl7l45544bhrl6nz26iiz7ehq2idwmrd4v4
+fingerprint_ignore_patterns: []
+connections:
+- valory/websocket_client:0.1.0:bafybeid4cnbjpmzcsw3usg7umufgqyod2u3xfw5uso3vukt3n5hfuxvdea
+contracts: []
+protocols:
+- valory/websocket_client:0.1.0:bafybeig6omutaqt5rbvidju4zc7pwwdi6tkagwu3dwiirosadyoo534v3q
+skills:
+- valory/websocket_client:0.1.0:bafybeie63j65ffblz6g6oiaynjpz4ae5mgyjz2w6o5ovqitzdbnvqzlhzu
+behaviours:
+  contract_subscriptions:
+    args: {}
+    class_name: ContractSubscriptionBehaviour
+handlers:
+  new_event:
+    args:
+      contract_to_monitor: '0xFf82123dFB52ab75C417195c5fDB87630145ae81'
+      websocket_provider: https://rpc.gnosischain.com
+    class_name: WebSocketHandler
+models:
+  websocket_client_dialogues:
+    args: {}
+    class_name: WebsocketClientDialogues
+  params:
+    args:
+      use_polling: false
+      websocket_provider: ws://localhost:8001
+      contract_address: '0xFf82123dFB52ab75C417195c5fDB87630145ae81'
+      subscription_id: mech-contract-subscription
+    class_name: Params
+dependencies:
+  web3:
+    version: <8,>=7.0.0
+is_abstract: false

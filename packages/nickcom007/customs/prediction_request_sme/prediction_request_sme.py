@@ -19,11 +19,8 @@
 
 """This module implements a Mech tool for binary predictions."""
 
-import base64
 import functools
 import json
-import os
-import tempfile
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
@@ -39,28 +36,6 @@ from markdownify import markdownify as md
 from openai import OpenAI
 from readability import Document
 from tiktoken import encoding_for_model
-
-
-def _ensure_tiktoken_cache() -> None:
-    """Decode bundled tiktoken data to a temp cache dir if not already present."""
-    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
-    try:
-        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return
-    for name, data in [
-        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
-        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
-    ]:
-        path = os.path.join(cache_dir, name)
-        if not os.path.exists(path):
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(data))
-
-
-_ensure_tiktoken_cache()
 
 N_MODEL_CALLS = 2
 USER_AGENT_HEADER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -233,8 +208,12 @@ task question: "Will the air strike conflict in Sudan be resolved by 13 Septembe
 """
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -286,7 +265,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -592,7 +571,7 @@ def adjust_additional_information(
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:
@@ -676,6 +655,7 @@ def run(
                 prediction_prompt,
                 None,
                 counter_callback,
+                None,
             )
         messages = [
             {"role": "system", "content": sme_introduction},
@@ -698,9 +678,16 @@ def run(
                 token_counter=count_tokens,
             )
 
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+        }
         return (
             response.choices[0].message.content,
             prediction_prompt,
             None,
             counter_callback,
+            used_params,
         )

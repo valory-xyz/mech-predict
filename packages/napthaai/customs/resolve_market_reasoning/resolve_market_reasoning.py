@@ -20,12 +20,9 @@
 
 # pylint: disable=too-many-arguments,too-many-locals
 
-import base64
 import functools
 import json
-import os
 import re
-import tempfile
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
@@ -46,28 +43,6 @@ from pydantic import BaseModel, Field
 from readability import Document as ReadabilityDocument
 from tiktoken import Encoding, encoding_for_model, get_encoding
 
-
-def _ensure_tiktoken_cache() -> None:
-    """Decode bundled tiktoken data to a temp cache dir if not already present."""
-    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
-    try:
-        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return
-    for name, data in [
-        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
-        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
-    ]:
-        path = os.path.join(cache_dir, name)
-        if not os.path.exists(path):
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(data))
-
-
-_ensure_tiktoken_cache()
-
 TOKENS_DISTANCE_TO_LIMIT = 200
 DOC_TOKEN_LIMIT = 7000  # Maximum tokens per document for embeddings
 BUFFER = 500  # Buffer for the total tokens in the embeddings batch
@@ -77,8 +52,12 @@ GOOGLE_RATE_LIMIT_EXCEEDED_CODE = 429
 DEFAULT_DELIVERY_RATE = 100
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 
@@ -171,7 +150,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:  # pylint: disable=broad-except
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -1033,7 +1012,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         print(f"Valid: {valid_results}")
 
         if not valid_results.is_valid:
-            return valid_results.json(), None, None, None
+            return valid_results.json(), None, None, None, None
 
         (
             additional_information,
@@ -1106,7 +1085,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         print(f"Determinable: {determinable_results}")
 
         if not determinable_results.is_determinable:
-            return determinable_results.json(), reasoning, None, None
+            return determinable_results.json(), reasoning, None, None, None
 
         # Make the prediction
         messages = [
@@ -1168,4 +1147,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 model=engine,
                 token_counter=count_tokens,
             )
-        return results.json(), reasoning, None, counter_callback
+        used_params = {
+            "model": engine,
+            "temperature": DEFAULT_OPENAI_SETTINGS["temperature"],
+            "max_tokens": max_tokens,
+        }
+        return results.json(), reasoning, None, counter_callback, used_params

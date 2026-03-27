@@ -1,0 +1,165 @@
+name: delivery_rate_abci
+author: valory
+version: 0.1.0
+type: skill
+description: An abci skill that implements logic for updating the delivery rates for
+  the mech.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  __init__.py: bafybeichkazmroftew6ifqoe4tud2faoo24hza5sgfghapmlp4l2rqjwee
+  behaviours.py: bafybeibj2xcgfyrvw3dqrizejv6c3id3a3d2z3vbd7te7htp5d4cez4yna
+  dialogues.py: bafybeicpmnp6nf4rautp2246dk3rj54k6kcjbbkekc7hvanh2um3y3ckdm
+  fsm_specification.yaml: bafybeifurkk2plflg3p5rgh7bn3nf2z3tf6pamnha76lvz7vfmu36gpony
+  handlers.py: bafybeibl2xi6ikicoamazml6uh2tiqhni7tgekmtwt672c43utdlbbyi34
+  models.py: bafybeibgzaawtuk45ivbjccnwnt3hoit52m324icfhrclke62xqw7wsegm
+  payloads.py: bafybeifpjamx7ii5vh25vbqpiw4xdx7rnphh5xbbsrs6dxpovhjkhgfuq4
+  rounds.py: bafybeihwqthwavbxookhkq53fy2oj5zui526fpnvcdteiv6k4wjcyey27q
+  tests/__init__.py: bafybeih37qbhmo2pojtefignkuuhnbrkho5tdy3zchprgiynzpijqqbhui
+  tests/test_behaviours.py: bafybeib75tjemgnu3s66v2sug5pk4266yxqlll6il6dvwgztlb46hvohcy
+fingerprint_ignore_patterns: []
+connections: []
+contracts:
+- valory/olas_mech:0.1.0:bafybeibraj4uypb5pafavzrbeyfdlnbcchm5vefpuev5dhiypqb7av25om
+- valory/gnosis_safe:0.1.0:bafybeigvdzcxzbkxutlslmfswnvic4u6nhrq24naeqsivcg6obrwwe4jde
+- valory/multisend:0.1.0:bafybeihx7c3xj6c5v4tgvu3ipnj7seyc4dkmovoyzu4isgbwdrhj2oo6uq
+protocols:
+- valory/acn_data_share:0.1.0:bafybeieqisfr6lhaaesq37lk7vyaxza2h6nucshksgyo2djqfyf2saqo4i
+- valory/contract_api:1.0.0:bafybeibld2xb5m7kyluiptkamp4nrt6oeomkohz7a3yppbv2oo7qw2e4la
+skills:
+- valory/abstract_round_abci:0.1.0:bafybeibxobgu6jkq24e6csed5kzbbgghjyaun5wbv3ldnhrxoedqbezbsu
+- valory/transaction_settlement_abci:0.1.0:bafybeifnen24ae4i3nprgyt3dlqklco26cwnlx7phu2bcusrewv6haxumm
+behaviours:
+  main:
+    args: {}
+    class_name: UpdateDeliveryRateRoundBehaviour
+handlers:
+  abci:
+    args: {}
+    class_name: ABCIHandler
+  contract_api:
+    args: {}
+    class_name: ContractApiHandler
+  http:
+    args: {}
+    class_name: HttpHandler
+  ipfs:
+    args: {}
+    class_name: IpfsHandler
+  ledger_api:
+    args: {}
+    class_name: LedgerApiHandler
+  signing:
+    args: {}
+    class_name: SigningHandler
+  tendermint:
+    args: {}
+    class_name: TendermintHandler
+models:
+  abci_dialogues:
+    args: {}
+    class_name: AbciDialogues
+  acn_data_share_dialogues:
+    args: {}
+    class_name: AcnDataShareDialogue
+  benchmark_tool:
+    args:
+      log_dir: /logs
+    class_name: BenchmarkTool
+  contract_api_dialogues:
+    args: {}
+    class_name: ContractApiDialogues
+  http_dialogues:
+    args: {}
+    class_name: HttpDialogues
+  ipfs_dialogues:
+    args: {}
+    class_name: IpfsDialogues
+  ledger_api_dialogues:
+    args: {}
+    class_name: LedgerApiDialogues
+  params:
+    args:
+      cleanup_history_depth_current: null
+      drand_public_key: 868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31
+      finalize_timeout: 60.0
+      genesis_config:
+        chain_id: chain-c4daS1
+        consensus_params:
+          block:
+            max_bytes: '22020096'
+            max_gas: '-1'
+            time_iota_ms: '1000'
+          evidence:
+            max_age_duration: '172800000000000'
+            max_age_num_blocks: '100000'
+            max_bytes: '1048576'
+          validator:
+            pub_key_types:
+            - ed25519
+          version: {}
+        genesis_time: '2022-05-20T16:00:21.735122717Z'
+        voting_power: '10'
+      history_check_timeout: 1205
+      ipfs_domain_name: null
+      ipfs_fetch_timeout: 15.0
+      keeper_allowed_retries: 3
+      keeper_timeout: 30.0
+      max_attempts: 10
+      max_healthcheck: 120
+      on_chain_service_id: null
+      request_retry_delay: 1.0
+      request_timeout: 10.0
+      reset_pause_duration: 10
+      reset_tendermint_after: 2
+      retry_attempts: 400
+      retry_timeout: 3
+      round_timeout_seconds: 30.0
+      service_id: task_execution
+      service_registry_address: null
+      setup:
+        all_participants:
+        - '0x0000000000000000000000000000000000000000'
+        consensus_threshold: null
+        safe_contract_address: '0x0000000000000000000000000000000000000000'
+      share_tm_config_on_startup: false
+      sleep_time: 1
+      task_wait_timeout: 15
+      tendermint_check_sleep_delay: 3
+      tendermint_com_url: http://localhost:8080
+      tendermint_max_retries: 5
+      tendermint_p2p_url: localhost:26656
+      tendermint_url: http://localhost:26657
+      tx_timeout: 10.0
+      use_termination: false
+      manual_gas_limit: 1000000
+      validate_timeout: 1205
+      use_slashing: false
+      service_owner_share: 1000
+      profit_split_balance: 1000
+      slash_cooldown_hours: 3
+      slash_threshold_amount: 10000000000000000
+      light_slash_unit_amount: 5000000000000000
+      serious_slash_unit_amount: 8000000000000000
+      mech_to_max_delivery_rate: {}
+      service_endpoint_base: https://dummy_service.autonolas.tech/
+      default_chain_id: gnosis
+    class_name: Params
+  requests:
+    args: {}
+    class_name: Requests
+  signing_dialogues:
+    args: {}
+    class_name: SigningDialogues
+  state:
+    args: {}
+    class_name: SharedState
+  tendermint_dialogues:
+    args: {}
+    class_name: TendermintDialogues
+dependencies:
+  py-multibase:
+    version: ==1.0.3
+  py-multicodec:
+    version: ==0.2.1
+is_abstract: true

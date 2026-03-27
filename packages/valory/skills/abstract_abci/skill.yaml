@@ -1,0 +1,34 @@
+name: abstract_abci
+author: valory
+version: 0.1.0
+type: skill
+description: The abci skill provides a template of an ABCI application.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  README.md: bafybeiezmhsokdhxat2gzxgau2zotd5nqjepg5lb2y7ypijuuq75xnxxrq
+  __init__.py: bafybeibmtpz3dsvydkozqnwususpefmhuep5kblkcz3xwd7hditws6b2m4
+  dialogues.py: bafybeibbrdfh3cle5uyo5wtoljrbvedyol2qcmzdwo2edqkgsudffzj3ua
+  handlers.py: bafybeidl3srpifqa7tixsinxdojttmq5zjwf33i4bph5b7s3xyye34hmhy
+  tests/__init__.py: bafybeicnx4gezk2zrgz23mco2kv7ws3yd5yspku5e3ng4cb5tw7s2zexsu
+  tests/test_dialogues.py: bafybeifljyjzhvnahrnwe77bfvt5gkkwpzlqudkjr4feqongwfyvclo3ga
+  tests/test_handlers.py: bafybeiaokr7y6i24qvheu6jftzrt6w7vqqldrxi5mvletp5mg3ciir6r2u
+fingerprint_ignore_patterns: []
+connections:
+- valory/abci:0.1.0:bafybeiflprynadnvhpqy5blaew7bcn7pj7x5bl2ze5uesdykt7pipqyelu
+contracts: []
+protocols:
+- valory/abci:0.1.0:bafybeiak4pwac3pwjtd7weskxdhkrcopckr32vtazfbuteu6yqjkwarpte
+skills: []
+behaviours: {}
+handlers:
+  abci:
+    args: {}
+    class_name: ABCIHandler
+models:
+  abci_dialogues:
+    args: {}
+    class_name: AbciDialogues
+dependencies: {}
+is_abstract: true
+customs: []

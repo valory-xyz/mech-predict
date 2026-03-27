@@ -1,0 +1,271 @@
+name: ledger
+author: valory
+version: 0.19.0
+type: connection
+description: A connection to interact with any ledger API and contract API.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  README.md: bafybeihkgodu7o7v6pfazm7u6orlspsfrae3cyz36yc46x67phfmw3l57e
+  __init__.py: bafybeia3purd7y4b7tkdt2fcaxkdazos32criq5hx6fhufaislrdefe674
+  base.py: bafybeidenzu6nltrvltcsvhorbyrk3ki5xsyby3f24qye37qjinwzfkfwm
+  connection.py: bafybeicz37uto2qojuxni3uph6dwbce5fwqjx6jfhtbqvmqynssuhkambe
+  contract_dispatcher.py: bafybeicnsfw2lvsx73f3bvc44sd7p3q2imhxt3yg5tvuw36ktjfgd7lxpm
+  ledger_dispatcher.py: bafybeiehqptlnjwzeuhhczcei4anbbl2ykpfik5wz2f3kjl2ondopexkkq
+  tests/__init__.py: bafybeifku7ttsmbj4gfx6dkgjvwypx7v5ysfqlzof6vh4p7gujakjtuwhe
+  tests/conftest.py: bafybeibvvorlz3xqgyq2htiazeygbcytvyn2cqkscg54lgylnqk2d5d4mm
+  tests/test_contract_dispatcher.py: bafybeih6qu32kqj2enq3poc4i2capp4lipxwgsiv7d5amdyyx6brggrtby
+  tests/test_ledger.py: bafybeifb5wqoxlvcxfylr5vzgyoxjorqphmclm53ezhpkxbpwvrerlo2we
+  tests/test_ledger_api.py: bafybeiah4oj5vas4oxj7d6kf577eldo5yf4bac75jm2ln2r2q3zstxxtfa
+fingerprint_ignore_patterns: []
+connections: []
+protocols:
+- valory/contract_api:1.0.0:bafybeibld2xb5m7kyluiptkamp4nrt6oeomkohz7a3yppbv2oo7qw2e4la
+- valory/ledger_api:1.0.0:bafybeiecq56phjfws36rgrefw6niyo4ezesloodsfis647mpm5ygqo4ysi
+class_name: LedgerConnection
+config:
+  ledger_apis:
+    ethereum:
+      address: http://127.0.0.1:8545
+      chain_id: 1
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: &id001
+          gas_price_api_key: null
+          gas_price_strategy: fast
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    ethereum_flashbots:
+      address: http://127.0.0.1:8545
+      chain_id: 1
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      authentication_private_key: null
+      flashbots_builders: []
+      timeout: 10
+    solana:
+      address: http://127.0.0.1:8545
+      chain_id: 1
+    arbitrum:
+      address: http://127.0.0.1:8545
+      chain_id: 42161
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    zksync:
+      address: http://127.0.0.1:8545
+      chain_id: 324
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    bnb:
+      address: http://127.0.0.1:8545
+      chain_id: 56
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: true
+      timeout: 10
+    gnosis:
+      address: http://127.0.0.1:8545
+      chain_id: 100
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1000000000
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    celo:
+      address: http://127.0.0.1:8545
+      chain_id: 42220
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: true
+      timeout: 10
+    optimism:
+      address: http://127.0.0.1:8545
+      chain_id: 10
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    base:
+      address: http://127.0.0.1:8545
+      chain_id: 8453
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    mode:
+      address: http://127.0.0.1:8545
+      chain_id: 34443
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 20
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 2000000000
+            maxPriorityFeePerGas: 300000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    polygon:
+      address: http://127.0.0.1:8545
+      chain_id: 137
+      default_gas_price_strategy: eip1559_polygon
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+    fraxtal:
+      address: http://127.0.0.1:8545
+      chain_id: 252
+      default_gas_price_strategy: eip1559
+      gas_price_strategies:
+        gas_station: *id001
+        eip1559:
+          max_gas_fast: 1500
+          fee_history_blocks: 10
+          fee_history_percentile: 5
+          min_allowed_tip: 1
+          default_priority_fee: null
+          fallback_estimate:
+            maxFeePerGas: 20000000000
+            maxPriorityFeePerGas: 3000000000
+          priority_fee_increase_boundary: 200
+      is_gas_estimation_enabled: true
+      poa_chain: false
+      timeout: 10
+  retry_attempts: 240
+  retry_timeout: 3
+excluded_protocols: []
+restricted_to_protocols:
+- valory/contract_api:1.0.0
+- valory/ledger_api:1.0.0
+dependencies:
+  pytest-asyncio: {}
+is_abstract: false

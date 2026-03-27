@@ -18,39 +18,19 @@
 # ------------------------------------------------------------------------------
 """Contains the job definitions"""
 
-import base64
 import functools
-import os
-import tempfile
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import openai
 from openai import OpenAI
 from tiktoken import encoding_for_model
 
-
-def _ensure_tiktoken_cache() -> None:
-    """Decode bundled tiktoken data to a temp cache dir if not already present."""
-    cache_dir = os.path.join(tempfile.gettempdir(), "tiktoken_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    os.environ.setdefault("TIKTOKEN_CACHE_DIR", cache_dir)
-    try:
-        from . import tiktoken_data  # pylint: disable=import-outside-toplevel
-    except ImportError:
-        return
-    for name, data in [
-        (tiktoken_data.CL100K_CACHE_NAME, tiktoken_data.CL100K_BASE),
-        (tiktoken_data.O200K_CACHE_NAME, tiktoken_data.O200K_BASE),
-    ]:
-        path = os.path.join(cache_dir, name)
-        if not os.path.exists(path):
-            with open(path, "wb") as f:
-                f.write(base64.b64decode(data))
-
-
-_ensure_tiktoken_cache()
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -85,7 +65,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -135,7 +115,7 @@ ALLOWED_QUALITY = ["standard", "hd"]
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
+def run(**kwargs: Any) -> MechResponse:
     """Run the task"""
     with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         tool = kwargs["tool"]
@@ -151,6 +131,7 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
                 None,
                 None,
                 None,
+                None,
             )
         if size not in ALLOWED_SIZE:
             return (
@@ -158,10 +139,12 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
                 None,
                 None,
                 None,
+                None,
             )
         if quality not in ALLOWED_QUALITY:
             return (
                 f"Quality {quality} is not in the list of supported qualities.",
+                None,
                 None,
                 None,
                 None,
@@ -174,4 +157,5 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
             quality=quality,
             n=n,
         )
-        return response.data[0].url, prompt, None, counter_callback
+        used_params = {"size": size, "quality": quality, "n": n}
+        return response.data[0].url, prompt, None, counter_callback, used_params

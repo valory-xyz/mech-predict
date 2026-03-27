@@ -1,0 +1,201 @@
+name: mech_abci
+author: valory
+version: 0.1.0
+type: skill
+description: The chained abci skill for the mech.
+license: Apache-2.0
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint:
+  __init__.py: bafybeigawvaywwgbr4fhxir2fpwze3wp7pctvwtp5gpkjritknqoecxfz4
+  behaviours.py: bafybeibnqxq3le55hn3s3wdlf7wwyzn5y3df4ta5d3ikdb53ypfbl5myjq
+  composition.py: bafybeiflvcnopyly2h2vx4p25jicylwzxvyxbqbqc62ssqdnbh2hrusk4m
+  dialogues.py: bafybeigph4dbt75rpfjoxp5zzplb4m5izwblbpt6qssnrvvl2joj6o5cke
+  fsm_specification.yaml: bafybeibac4bsjjhmxljzptuus3xlkufsiaofgg77g7nq7qgeju7fa6lh3u
+  handlers.py: bafybeihnzh6rkrsn6xvmio4c3borzothkj5u62qcbjnzr5gt6hcy6iudsu
+  models.py: bafybeid2dmqyfe4pinh6glewhas24zvjntc4z3rtrkp3ji7z2bkq5sudhu
+  tests/__init__.py: bafybeicswkogdqefhafjpbl2afcwtruegtmkumlk5mbapauys2od7rt7di
+  tests/conftest.py: bafybeiaqouyzclh4wvnf36jgcmgzm7k4snfghnm3v4yowb4pomyn6qvezu
+  tests/test_behaviours.py: bafybeibjw3tusfxxmr3byy6sdmu7gefotya4xvhd7ia43ll7fgyqggx7ye
+  tests/test_composition.py: bafybeig7xdwuz7hqjfakrry2c4suzoq3ap3iyufk6zmqnc6p63urkzptrm
+  tests/test_dialogues.py: bafybeiaicu6h4d3rppxbjhkifwlrfpjmxd6y4sdqnlskdjqijkct2tvhci
+  tests/test_handlers.py: bafybeicekjso4qfxaiqpaapgosxkvr4tbce6evnxguhzunug4subrikgci
+  tests/test_models.py: bafybeif4iuuknrtx3tc72y2ii237dqtl6nlqgpdywy227sfqbvxkk6mugy
+fingerprint_ignore_patterns: []
+connections:
+- valory/http_server:0.22.0:bafybeid4oqsfkqo36lryoecymjnq4whme3tgupqfq6m4l7lbr5r4yxtswu
+contracts: []
+protocols:
+- valory/http:1.0.0:bafybeidxkp3vga7t6x2pbt2tpkgyaxa5bgpdgryao54py7w3yxyzr7neoy
+skills:
+- valory/abstract_round_abci:0.1.0:bafybeibxobgu6jkq24e6csed5kzbbgghjyaun5wbv3ldnhrxoedqbezbsu
+- valory/registration_abci:0.1.0:bafybeia46nwj7ds7smswndja6gnuoj34u72g5kaq7sswcr4oe3j3xuoy7m
+- valory/reset_pause_abci:0.1.0:bafybeid35mffukkufu3f6hwicm62iifu75kebyieo5unm4rnw2bqgnjgoi
+- valory/task_submission_abci:0.1.0:bafybeihbt7ic7mfidsb6nr5gkjo7umvzjq4dzftcupaky6lgctzov46rje
+- valory/termination_abci:0.1.0:bafybeifefmtcjp3mrjj5qs4yrzsxikhg5u3jnsrwataoxm2wxtm6uzatym
+- valory/transaction_settlement_abci:0.1.0:bafybeifnen24ae4i3nprgyt3dlqklco26cwnlx7phu2bcusrewv6haxumm
+- valory/delivery_rate_abci:0.1.0:bafybeigizvgqcjrq25lrbsd6edlz6q4sohzsvbq73gnr3zpjbppxsuveva
+- valory/task_execution:0.1.0:bafybeifwxzc53csqyupa6frifgnhkiaxqyyw3xfqwvwww6itx4p63ar5le
+behaviours:
+  main:
+    args: {}
+    class_name: MechConsensusBehaviour
+handlers:
+  abci:
+    args: {}
+    class_name: ABCIRoundHandler
+  contract_api:
+    args: {}
+    class_name: ContractApiHandler
+  http:
+    args: {}
+    class_name: HttpHandler
+  ipfs:
+    args: {}
+    class_name: IpfsHandler
+  ledger_api:
+    args: {}
+    class_name: LedgerApiHandler
+  signing:
+    args: {}
+    class_name: SigningHandler
+  tendermint:
+    args: {}
+    class_name: TendermintHandler
+models:
+  abci_dialogues:
+    args: {}
+    class_name: AbciDialogues
+  acn_data_share_dialogues:
+    args: {}
+    class_name: AcnDataShareDialogues
+  benchmark_tool:
+    args:
+      log_dir: /logs
+    class_name: BenchmarkTool
+  contract_api_dialogues:
+    args: {}
+    class_name: ContractApiDialogues
+  http_dialogues:
+    args: {}
+    class_name: HttpDialogues
+  ipfs_dialogues:
+    args: {}
+    class_name: IpfsDialogues
+  ledger_api_dialogues:
+    args: {}
+    class_name: LedgerApiDialogues
+  params:
+    args:
+      mech_to_config: {}
+      api_keys: {}
+      cleanup_history_depth: 1
+      cleanup_history_depth_current: null
+      drand_public_key: 868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31
+      tools_to_package_hash: {}
+      finalize_timeout: 60.0
+      genesis_config:
+        genesis_time: '2022-09-26T00:00:00.000000000Z'
+        chain_id: chain-c4daS1
+        consensus_params:
+          block:
+            max_bytes: '22020096'
+            max_gas: '-1'
+            time_iota_ms: '1000'
+          evidence:
+            max_age_num_blocks: '100000'
+            max_age_duration: '172800000000000'
+            max_bytes: '1048576'
+          validator:
+            pub_key_types:
+            - ed25519
+          version: {}
+        voting_power: '10'
+      history_check_timeout: 1205
+      init_fallback_gas: 0
+      keeper_allowed_retries: 3
+      keeper_timeout: 30.0
+      max_attempts: 10
+      max_healthcheck: 120
+      multisend_address: '0x0000000000000000000000000000000000000000'
+      on_chain_service_id: null
+      polling_interval: 25
+      request_retry_delay: 1.0
+      request_timeout: 10.0
+      reset_pause_duration: 10
+      reset_period_count: 100
+      gas_params:
+        gas_price: null
+        max_fee_per_gas: null
+        max_priority_fee_per_gas: null
+      reset_tendermint_after: 100
+      retry_attempts: 400
+      retry_timeout: 3
+      round_timeout_seconds: 30.0
+      ipfs_fetch_timeout: 15.0
+      service_id: mech
+      service_registry_address: null
+      setup:
+        all_participants: []
+        safe_contract_address: '0x0000000000000000000000000000000000000000'
+        consensus_threshold: null
+      share_tm_config_on_startup: false
+      sleep_time: 1
+      tendermint_check_sleep_delay: 3
+      tendermint_com_url: http://localhost:8080
+      tendermint_max_retries: 5
+      tendermint_p2p_url: localhost:26656
+      tendermint_url: http://localhost:26657
+      termination_sleep: 900
+      tx_timeout: 10.0
+      use_polling: false
+      use_termination: false
+      validate_timeout: 1205
+      task_wait_timeout: 15.0
+      use_slashing: false
+      manual_gas_limit: 1000000
+      mech_staking_instance_address: '0x0000000000000000000000000000000000000000'
+      mech_marketplace_address: '0x0000000000000000000000000000000000000000'
+      complementary_service_metadata_address: '0x0000000000000000000000000000000000000000'
+      metadata_hash: '00000000000000000000000000000000000000000000000000'
+      slash_cooldown_hours: 3
+      hash_checkpoint_address: '0x0000000000000000000000000000000000000000'
+      slash_threshold_amount: 10000000000000000
+      termination_from_block: 0
+      light_slash_unit_amount: 5000000000000000
+      service_owner_share: 1000
+      profit_split_balance: 100
+      serious_slash_unit_amount: 8000000000000000
+      agent_funding_amount: 200000000000000000
+      minimum_agent_balance: 100000000000000000
+      mech_to_max_delivery_rate: {}
+      tools_to_pricing: {}
+      service_endpoint_base: https://dummy_service.autonolas.tech/
+      default_chain_id: gnosis
+    class_name: Params
+  randomness_api:
+    args:
+      api_id: cloudflare
+      headers: {}
+      method: GET
+      parameters: {}
+      response_key: null
+      response_type: dict
+      retries: 5
+      url: https://api.drand.sh/public/latest
+    class_name: RandomnessApi
+  requests:
+    args: {}
+    class_name: Requests
+  signing_dialogues:
+    args: {}
+    class_name: SigningDialogues
+  state:
+    args: {}
+    class_name: SharedState
+  tendermint_dialogues:
+    args: {}
+    class_name: TendermintDialogues
+dependencies:
+  open-aea-cli-ipfs:
+    version: ==2.1.0
+is_abstract: false

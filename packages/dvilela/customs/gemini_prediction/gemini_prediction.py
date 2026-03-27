@@ -203,7 +203,7 @@ def run(  # pylint: disable=too-many-return-statements
         )
 
     genai.configure(api_key=api_key)
-    model_name = model
+    used_params = {"model": model}
     model = genai.GenerativeModel(model)
     response = model.generate_content(prompt)
     response = response.text
@@ -211,5 +211,4 @@ def run(  # pylint: disable=too-many-return-statements
     if tool_name == "gemini-prediction":
         response = response_post_process(response)
 
-    used_params = {"model": model_name}
     return response, prompt, None, None, used_params  # type: ignore

@@ -25,8 +25,12 @@ import openai
 from openai import OpenAI
 from tiktoken import encoding_for_model
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -61,7 +65,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -111,7 +115,7 @@ ALLOWED_QUALITY = ["standard", "hd"]
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
+def run(**kwargs: Any) -> MechResponse:
     """Run the task"""
     with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         tool = kwargs["tool"]
@@ -127,6 +131,7 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
                 None,
                 None,
                 None,
+                None,
             )
         if size not in ALLOWED_SIZE:
             return (
@@ -134,10 +139,12 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
                 None,
                 None,
                 None,
+                None,
             )
         if quality not in ALLOWED_QUALITY:
             return (
                 f"Quality {quality} is not in the list of supported qualities.",
+                None,
                 None,
                 None,
                 None,
@@ -150,4 +157,5 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
             quality=quality,
             n=n,
         )
-        return response.data[0].url, prompt, None, counter_callback
+        used_params = {"size": size, "quality": quality, "n": n}
+        return response.data[0].url, prompt, None, counter_callback, used_params

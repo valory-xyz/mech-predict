@@ -18,9 +18,18 @@
 # ------------------------------------------------------------------------------
 """Contains the job definitions"""
 
-from typing import Any, Dict, Optional, Tuple
+import functools
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import google.generativeai as genai
+import openai
+
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 DEFAULT_GEMINI_SETTINGS = {
     "candidate_count": 1,
@@ -36,7 +45,55 @@ ENGINES = {
 ALLOWED_TOOLS = [PREFIX + value for value in ENGINES["chat"]]
 
 
-def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
+def with_key_rotation(func: Callable) -> Callable:
+    """
+    Decorator that retries a function with API key rotation on failure.
+
+    :param func: The function to be decorated.
+    :type func: Callable
+    :returns: Callable -- the wrapped function that handles retries with key rotation.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+        # this is expected to be a KeyChain object,
+        # although it is not explicitly typed as such
+        api_keys = kwargs["api_keys"]
+        retries_left: Dict[str, int] = api_keys.max_retries()
+
+        def execute() -> MechResponseWithKeys:
+            """Retry the function with a new key."""
+            try:
+                result: MechResponse = func(*args, **kwargs)
+                return result + (api_keys,)
+            except openai.RateLimitError as e:
+                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                    raise e
+                retries_left["openai"] -= 1
+                retries_left["openrouter"] -= 1
+                api_keys.rotate("openai")
+                api_keys.rotate("openrouter")
+                return execute()
+            except openai.RateLimitError as e:
+                # try with a new key again
+                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                    raise e
+                retries_left["openai"] -= 1
+                retries_left["openrouter"] -= 1
+                api_keys.rotate("openai")
+                api_keys.rotate("openrouter")
+                return execute()
+            except Exception as e:
+                return str(e), "", None, None, None, api_keys
+
+        mech_response = execute()
+        return mech_response
+
+    return wrapper
+
+
+@with_key_rotation
+def run(**kwargs: Any) -> MechResponse:
     """Run the task"""
 
     api_key = kwargs["api_keys"]["gemini"]
@@ -46,6 +103,7 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
     if tool not in ALLOWED_TOOLS:
         return (
             f"Model {tool} is not in the list of supported models.",
+            None,
             None,
             None,
             None,
@@ -84,6 +142,11 @@ def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, An
         )
 
     except Exception as e:
-        return f"An error occurred: {str(e)}", None, None, None
+        return f"An error occurred: {str(e)}", None, None, None, None
 
-    return response.text, prompt, None, counter_callback
+    used_params = {
+        "model": tool,
+        "temperature": temperature,
+        "max_output_tokens": max_output_tokens,
+    }
+    return response.text, prompt, None, counter_callback, used_params

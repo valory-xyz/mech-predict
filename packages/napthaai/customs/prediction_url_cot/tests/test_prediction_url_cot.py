@@ -1,0 +1,99 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+
+"""Unit tests for prediction_url_cot: thread-safe client and offline tiktoken."""
+
+import inspect
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import packages.napthaai.customs.prediction_url_cot.prediction_url_cot as module
+from packages.napthaai.customs.prediction_url_cot.prediction_url_cot import (
+    LLMClientManager,
+    count_tokens,
+    fetch_additional_information,
+    multi_queries,
+)
+
+
+class TestLLMClientManager:
+    """Verify LLMClientManager creates per-context clients without globals."""
+
+    def test_context_manager_returns_client_tuple(self) -> None:
+        """__enter__ returns a (client, client_embedding) tuple."""
+        mock_keys = {"openai": "sk-test"}
+        mgr = LLMClientManager(
+            api_keys=mock_keys, model="gpt-4o-2024-08-06", embedding_provider="openai"
+        )
+        with patch(
+            "packages.napthaai.customs.prediction_url_cot.prediction_url_cot.LLMClient"
+        ) as MockClient:
+            mock_llm = MagicMock(name="llm")
+            mock_embed = MagicMock(name="embed")
+            MockClient.side_effect = [mock_llm, mock_embed]
+
+            with mgr as (llm_client, embedding_client):
+                assert llm_client is mock_llm
+                assert embedding_client is mock_embed
+
+    def test_no_global_client_variable(self) -> None:
+        """The module must not define module-level client variables."""
+        source = Path(module.__file__).read_text(encoding="utf-8")
+        for i, line in enumerate(source.split("\n"), 1):
+            stripped = line.lstrip()
+            if stripped.startswith("client:") or stripped.startswith("client ="):
+                if not line.startswith(" ") and not line.startswith("\t"):
+                    pytest.fail(
+                        f"Module-level 'client' variable found at line {i}: {line}"
+                    )
+            if stripped.startswith("client_embedding:") or stripped.startswith(
+                "client_embedding ="
+            ):
+                if not line.startswith(" ") and not line.startswith("\t"):
+                    pytest.fail(
+                        f"Module-level 'client_embedding' variable found at line {i}: {line}"
+                    )
+
+
+class TestFunctionsAcceptClient:
+    """Verify refactored functions accept client as an explicit parameter."""
+
+    def test_count_tokens_without_client_uses_tiktoken(self) -> None:
+        """count_tokens falls back to tiktoken when client is None."""
+        token_count = count_tokens("hello world", "gpt-4o-2024-08-06")
+        assert isinstance(token_count, int)
+        assert token_count > 0
+
+    def test_count_tokens_claude_without_client_uses_fallback(self) -> None:
+        """count_tokens for Claude models without client uses cl100k_base fallback."""
+        token_count = count_tokens("hello world", "claude-4-sonnet-20250514")
+        assert isinstance(token_count, int)
+        assert token_count > 0
+
+    def test_multi_queries_requires_client_param(self) -> None:
+        """multi_queries requires client as first param."""
+        params = list(inspect.signature(multi_queries).parameters)
+        assert params[0] == "client"
+
+    def test_fetch_additional_information_requires_client_param(self) -> None:
+        """fetch_additional_information requires client as first param."""
+        params = list(inspect.signature(fetch_additional_information).parameters)
+        assert params[0] == "client"

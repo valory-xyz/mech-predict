@@ -7,7 +7,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibbn67pnrrm4qm3n3kbelvbs3v7fjlrjniywmw2vbizarippidtvi
-  prediction_request.py: bafybeid3t2ss54b5t7h6p5tf6awicng3qsowlmpkhnivhyihofqznkyqyi
+  prediction_request.py: bafybeift4uh64hvwnua3yc4z3parmrb45s6hdr6xijvxeytcykxidg6vnq
+  tests/__init__.py: bafybeib7h3aalw6bzylqazc3mefunk3n3d65pyzfck4qb33slesscud25m
+  tests/test_prediction_request.py: bafybeid65o7zy3a6oh3rdbgfkqpmdnwqrotbbuwluw3tupwexvvj5lbvom
 fingerprint_ignore_patterns: []
 entry_point: prediction_request.py
 callable: run
@@ -18,26 +20,29 @@ dependencies:
     version: ==2.95.0
   googlesearch-python:
     version: ==1.2.3
-  requests: {}
+  requests:
+    version: ==2.32.5
+  httpx:
+    version: ==0.25.2
   pydantic:
     version: '>=1.9.0,<3'
   faiss-cpu:
-    version: ==1.7.4
+    version: ==1.13.2
   tiktoken:
-    version: ==0.9.0
+    version: ==0.12.0
   markdownify:
     version: ==0.11.6
   openai:
-    version: ==1.93.0
+    version: ==1.30.2
   docstring-parser:
-    version: ==0.15
+    version: ==0.17.0
   readability-lxml:
     version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
   pypdf2:
     version: ==3.0.1
   numpy:
     version: '>=1.19.0'
-  spacy:
-    version: ==3.7.2
   anthropic:
-    version: ==0.21.3
+    version: ==0.23.1

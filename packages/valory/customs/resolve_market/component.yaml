@@ -7,15 +7,18 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeigiijf3cqbpr42srzgpro3rvyvb47fnikcbsii6rjr2uwp3x764hi
-  resolve_market.py: bafybeidv7qikpr2gvqmu3dyugdymnmmqaddicmmccar2erccv6dsaqse4a
+  resolve_market.py: bafybeiae7kozygrhckrum7spqtd4srovwmzihuwcttccbltwyiqqrythaq
 fingerprint_ignore_patterns: []
 entry_point: resolve_market.py
 callable: run
 dependencies:
   openai:
-    version: ==1.93.0
-  requests: {}
+    version: ==1.30.2
+  requests:
+    version: ==2.32.5
+  httpx:
+    version: ==0.25.2
   anthropic:
-    version: ==0.21.3
+    version: ==0.23.1
   google-api-python-client:
     version: ==2.95.0

@@ -7,7 +7,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibt7f7crtwvmkg7spy3jhscmlqltvyblzp32g6gj44v7tlo5lycuq
-  prediction_request_rag.py: bafybeieg5ofo7htg5ezwjhio5x7xepazzzt2cunnphck3bilz5syfsc3ou
+  prediction_request_rag.py: bafybeihq45zlxibwzk4t326t2vkrkfm5vcj7mfyanihygj5bl3p7mhgfzq
+  tests/__init__.py: bafybeifcgilmgfwx7kaap67cfnuokrhfrabi6bnvqiudyzgf2idu64dvxq
+  tests/test_prediction_request_rag.py: bafybeied7hmyjn27hqhbyksjxplmrdwq6ey7dcxi5sglttnbqj2a3tigrq
 fingerprint_ignore_patterns: []
 entry_point: prediction_request_rag.py
 callable: run
@@ -18,23 +20,28 @@ dependencies:
     version: ==2.95.0
   googlesearch-python:
     version: ==1.2.3
-  requests: {}
+  requests:
+    version: ==2.32.5
   markdownify:
     version: ==0.11.6
   readability-lxml:
     version: ==0.8.1
+  httpx:
+    version: ==0.25.2
+  lxml_html_clean:
+    version: ==0.4.4
   anthropic:
-    version: ==0.21.3
+    version: ==0.23.1
   tiktoken:
-    version: ==0.9.0
+    version: ==0.12.0
   pydantic:
     version: '>=1.9.0,<3'
   faiss-cpu:
-    version: ==1.7.4
+    version: ==1.13.2
   openai:
-    version: ==1.93.0
+    version: ==1.30.2
   docstring-parser:
-    version: ==0.15
+    version: ==0.17.0
   pypdf2:
     version: ==3.0.1
   numpy:

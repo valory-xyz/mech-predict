@@ -1,0 +1,323 @@
+agent_name: mech_predict
+author: valory
+version: 0.1.0
+license: Apache-2.0
+description: A mech predict agent
+aea_version: '>=2.0.0, <3.0.0'
+fingerprint: {}
+fingerprint_ignore_patterns: []
+connections:
+- valory/abci:0.1.0:bafybeigjmetusztbj3ikgsimj55rc3nn6m2j6ns6ciew5twjtgip2axdme
+- valory/http_client:0.23.0:bafybeihel6sg2yayxu7lqygaswdgciaxpqrgsbl5rwx74c6znu5qz2edd4
+- valory/http_server:0.22.0:bafybeid4oqsfkqo36lryoecymjnq4whme3tgupqfq6m4l7lbr5r4yxtswu
+- valory/ipfs:0.1.0:bafybeib44s5rdz5xwzwuncm2gwo6zvqsy6yefvbf5znmjc4mw3goql23ha
+- valory/ledger:0.19.0:bafybeid5uwx4uqxkiibw6kazr7my5mk5kcqg2dx2owtcf7kcpbs2jrns2e
+- valory/p2p_libp2p_client:0.1.0:bafybeielj3jso3wvrarp5n5rq7llpw4vgxybqiyensgjalb5ubfiawwhhu
+- valory/websocket_client:0.1.0:bafybeid4cnbjpmzcsw3usg7umufgqyod2u3xfw5uso3vukt3n5hfuxvdea
+contracts:
+- valory/olas_mech:0.1.0:bafybeibraj4uypb5pafavzrbeyfdlnbcchm5vefpuev5dhiypqb7av25om
+- valory/complementary_service_metadata:0.1.0:bafybeibjk5gdgc54wx5bz4fl2666urmfj6mx3ocqxyumqpj7wq5fdg4diu
+- valory/gnosis_safe:0.1.0:bafybeice337zvg3ol4cwpw2iikxcukmthwmw32ytwtdnkcju222qfc323y
+- valory/gnosis_safe_proxy_factory:0.1.0:bafybeieonbkuskzg2rwgbqwmouusnfdd4npow2pzasimetiebo3jhwjh7m
+- valory/hash_checkpoint:0.1.0:bafybeihpds2kkr5okehfa4ohbalur3fihzyk5xz3we7thshsoh5jbgn7jy
+- valory/multisend:0.1.0:bafybeihx7c3xj6c5v4tgvu3ipnj7seyc4dkmovoyzu4isgbwdrhj2oo6uq
+- valory/service_registry:0.1.0:bafybeigefenwg3lj4nvwc3cs5zxyhv4nvwnwbw5x7afwyijkjbbgbf2l7e
+- valory/mech_marketplace:0.1.0:bafybeiapnlzimazvfivnrxxiy4syd77xqeswn5un24isa7m3562ozqsgn4
+- valory/balance_tracker:0.1.0:bafybeigitc6tsfopaib7vtk5gsvozbnwiuwryvpweqj6kjrmijtnvzqkzi
+- valory/erc20:0.1.0:bafybeifq6zn2p5nafi6bmtf4xo3ctgymazr2udtlwyiwjf5g5mpndsthfy
+protocols:
+- open_aea/signing:1.0.0:bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye
+- valory/abci:0.1.0:bafybeiak4pwac3pwjtd7weskxdhkrcopckr32vtazfbuteu6yqjkwarpte
+- valory/acn:1.1.0:bafybeiea66z4k6cgcazxd6qzvnkllulyjzbnxufkoenge7qzh4qfogrvoa
+- valory/acn_data_share:0.1.0:bafybeieqisfr6lhaaesq37lk7vyaxza2h6nucshksgyo2djqfyf2saqo4i
+- valory/contract_api:1.0.0:bafybeibld2xb5m7kyluiptkamp4nrt6oeomkohz7a3yppbv2oo7qw2e4la
+- valory/http:1.0.0:bafybeidxkp3vga7t6x2pbt2tpkgyaxa5bgpdgryao54py7w3yxyzr7neoy
+- valory/ipfs:0.1.0:bafybeibz5xqhxdbuvba7nuw2w6ardjermtcoqercopnypdplnaekf3joam
+- valory/ledger_api:1.0.0:bafybeiecq56phjfws36rgrefw6niyo4ezesloodsfis647mpm5ygqo4ysi
+- valory/tendermint:0.1.0:bafybeihzb7e32f7jcrzvubilqaxzmyk7ea6ss3pg3tliatdlrr76qeknyq
+- valory/websocket_client:0.1.0:bafybeig6omutaqt5rbvidju4zc7pwwdi6tkagwu3dwiirosadyoo534v3q
+skills:
+- valory/abstract_abci:0.1.0:bafybeict6h3wfmddpvam5gmmanqzuokup6ppoev3t4j5uyl7xxahjaols4
+- valory/abstract_round_abci:0.1.0:bafybeihygetmlgnhawrbyswvpvv3wpztr2hlhxkljmohp4r7qcmvglpwdq
+- valory/contract_subscription:0.1.0:bafybeibtcbtgm5ptzn6srfts3lxts5722sygmkypcknv5ocmydqwcvgeem
+- valory/mech_abci:0.1.0:bafybeifkutq4zmcd7xfdyoisqy74zfko6obxhvkfscqkeuymsnorq7ydb4
+- valory/registration_abci:0.1.0:bafybeif3gpewppz5wr5mmgyvaowsamjufyons3oif7cb4x5ubvvfb6rtda
+- valory/reset_pause_abci:0.1.0:bafybeidcnf77bc3o7pssa5zesilpbm4ley2k45taii5j5rrvvty7uhu3lq
+- valory/delivery_rate_abci:0.1.0:bafybeifpoqkcdwpyq4lijumyt3gzj3vs3pfxxm4xefqxagd4b5pg6x3vty
+- valory/task_execution:0.1.0:bafybeih6dsrn2v4ftizcl2tdpp6ftx2d4hpfqvqascfx3ggmufczhofyty
+- valory/task_submission_abci:0.1.0:bafybeid3bjxx6a4p7fqryk4tveu7epy4oh7aw52ieaairojxmpu5xlb7qe
+- valory/termination_abci:0.1.0:bafybeia33hlouukdpwaxctunauudv5gpfdxndimra7yqiof4a3skcwdqkq
+- valory/transaction_settlement_abci:0.1.0:bafybeiajyrszyyo6z4lxogutv4ougiaeoxak6xkq5gtrbey32gbgnirznq
+- valory/websocket_client:0.1.0:bafybeie63j65ffblz6g6oiaynjpz4ae5mgyjz2w6o5ovqitzdbnvqzlhzu
+customs:
+- valory/resolve_market:0.1.0:bafybeifefym253bznqivjk3ailiuxyzm5dqyfcwcr6ytmfybmbw2w6ttpm
+- valory/prediction_request:0.1.0:bafybeihatfaalkmuavus2qzozjyjiqgjkzz7q56tv3sx6qzhvozwneuyli
+- napthaai/resolve_market_reasoning:0.1.0:bafybeiddqmdvttu6d5z5reuhan6yxteirzecjsz5su5tqph6z4wibendp4
+- napthaai/prediction_request_rag:0.1.0:bafybeihqpsw2bew76pem47avq5ktk4umch4jhquphoczypih2mfjaqzteu
+- napthaai/prediction_request_reasoning:0.1.0:bafybeibaji2g4u4gbiuhorsl73o2iamtar3yahiejjl6jx3d7tngbityge
+- valory/prepare_tx:0.1.0:bafybeifhfervmgwtoiiyzvqc2wdetzvp4bmlwys5bk3vuef6ggclhbvwua
+- napthaai/prediction_url_cot:0.1.0:bafybeidfgrsazo5ey5ajg6anbetud4mxyv43rioguhfxmuqfoxfog2bnhe
+- valory/prediction_langchain:0.1.0:bafybeifiw6rdeigls4pbaqwd3hbb3tq5y6psoacnezydjz2udioxullk4e
+- victorpolisetty/gemini_request:0.1.0:bafybeiarvmrz7674nmsvcf6lkbw4rvmhorckq5wvydmw3zczvvd5uomlyy
+- victorpolisetty/dalle_request:0.1.0:bafybeienobnlvdrnot5trsz5r6xnryxrveajkjkzpxckn3gweswdakwaiu
+- valory/superforcaster:0.1.0:bafybeic4zhpu3f4gu6cevpvntl77bshdn2qa4sy6ddogsnmqoefnfzjyxy
+- dvilela/corcel_request:0.1.0:bafybeifpareiesif37wt4gxe2e5ojplegskfemnb3nmcsj4qph74tyfcqy
+- dvilela/gemini_prediction:0.1.0:bafybeifd5rfdp73qwibjcmgf732yryefa7aukse3ql3iunty3ho5ojuhnu
+- nickcom007/prediction_request_sme:0.1.0:bafybeicvhedq6jvluraeee5374j42hwqgzznq5lzrza7iyxunkd7shwuvi
+default_ledger: ethereum
+required_ledgers:
+- ethereum
+- cosmos
+default_routing: {}
+connection_private_key_paths: {}
+private_key_paths: {}
+logging_config:
+  version: 1
+  disable_existing_loggers: false
+  formatters:
+    standard:
+      format: '[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s'
+  handlers:
+    logfile:
+      class: logging.FileHandler
+      formatter: standard
+      filename: ${LOG_FILE:str:log.txt}
+      level: ${LOG_LEVEL:str:INFO}
+    console:
+      class: logging.StreamHandler
+      formatter: standard
+      stream: ext://sys.stdout
+  loggers:
+    aea:
+      handlers:
+      - logfile
+      - console
+      propagate: true
+dependencies:
+  aiohttp:
+    version: <4.0.0,>=3.8.5
+  anthropic:
+    version: ==0.23.1
+  beautifulsoup4:
+    version: ==4.12.2
+  docstring-parser:
+    version: ==0.17.0
+  faiss-cpu:
+    version: ==1.13.2
+  fastapi:
+    version: ==0.110.3
+  google-api-python-client:
+    version: ==2.95.0
+  googlesearch-python:
+    version: ==1.2.3
+  hypothesis:
+    version: ==6.151.9
+  langchain:
+    version: ==1.2.10
+  langchain-core:
+    version: ==1.2.17
+  langchain-tavily:
+    version: ==0.2.17
+  langgraph-prebuilt:
+    version: ==1.0.8
+  langgraph:
+    version: ==1.0.10
+  lxml:
+    version: ==6.0.2
+  markdownify:
+    version: ==0.11.6
+  moviepy:
+    version: ==1.0.3
+  open-aea-ledger-ethereum:
+    version: ==2.1.0
+  pandas:
+    version: ==2.3.3
+  pypdf2:
+    version: ==3.0.1
+  python-dateutil:
+    version: ==2.9.0
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  requests:
+    version: ==2.32.5
+  replicate:
+    version: ==0.15.7
+  tavily-python:
+    version: ==0.3.3
+  tiktoken:
+    version: ==0.12.0
+  typer:
+    version: ==0.9.4
+  google-generativeai:
+    version: ==0.8.6
+  openai:
+    version: ==1.30.2
+  openfactverification-kongzii:
+    version: ==0.1.0
+  httpx:
+    version: ==0.25.2
+  tqdm:
+    version: ==4.67.1
+  typing_extensions:
+    version: ==4.12.2
+default_connection: null
+---
+public_id: valory/websocket_client:0.1.0:bafybeiexove4oqyhoae5xmk2hilskthosov5imdp65olpgj3cfrepbouyy
+type: connection
+config:
+  endpoint: ${str:wss://rpc.gnosischain.com/wss}
+  target_skill_id: valory/contract_subscription:0.1.0
+is_abstract: true
+---
+public_id: valory/contract_subscription:0.1.0:bafybeiby5ajjc7a3m2uq73d2pprx6enqt4ghfcq2gkmrtsr75e4d4napi4
+type: skill
+behaviours:
+  contract_subscriptions:
+    args: {}
+handlers:
+  new_event:
+    args:
+      contract_to_monitor: ${str:0x5AE9c87F8789842DED5cab0F33923DeB2260Dd75}
+      websocket_provider: ${str:https://rpc.gnosischain.com}
+models:
+  params:
+    args:
+      use_polling: ${bool:false}
+is_abstract: true
+---
+public_id: valory/abci:0.1.0
+type: connection
+config:
+  target_skill_id: valory/mech_abci:0.1.0
+  host: ${str:localhost}
+  port: ${int:26658}
+  use_tendermint: ${bool:false}
+---
+public_id: valory/p2p_libp2p_client:0.1.0
+type: connection
+config:
+  nodes:
+  - uri: ${str:acn.staging.autonolas.tech:9005}
+    public_key: ${str:02d3a830c9d6ea1ae91936951430dee11f4662f33118b02190693be835359a9d77}
+cert_requests:
+- identifier: acn
+  ledger_id: ethereum
+  message_format: '{public_key}'
+  not_after: '2024-01-01'
+  not_before: '2023-01-01'
+  public_key: ${str:02d3a830c9d6ea1ae91936951430dee11f4662f33118b02190693be835359a9d77}
+  save_path: .certs/acn_cosmos_9005.txt
+is_abstract: false
+---
+public_id: valory/mech_abci:0.1.0
+type: skill
+models:
+  benchmark_tool:
+    args:
+      log_dir: ${str:/logs}
+  params:
+    args:
+      sleep_time: ${int:1}
+      ipfs_fetch_timeout: ${float:15.0}
+      tendermint_check_sleep_delay: ${int:3}
+      tendermint_p2p_url: ${str:localhost:26656}
+      tendermint_com_url: ${str:http://localhost:8080}
+      tendermint_max_retries: ${int:5}
+      tendermint_url: ${str:http://localhost:26657}
+      use_termination: ${bool:false}
+      round_timeout_seconds: ${float:30.0}
+      reset_period_count: ${int:1000}
+      on_chain_service_id: ${int:1}
+      mech_staking_instance_address: ${str:0x0000000000000000000000000000000000000000}
+      mech_marketplace_address: ${str:0x0000000000000000000000000000000000000000}
+      complementary_service_metadata_address: ${str:0x0000000000000000000000000000000000000000}
+      metadata_hash: ${str:0000000000000000000000000000000000000000000000000000000000000000}
+      share_tm_config_on_startup: ${bool:false}
+      multisend_address: ${str:0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761}
+      service_registry_address: ${str:0x9338b5153AE39BB89f50468E608eD9d764B755fD}
+      service_endpoint_base: ${str:https://dummy_service.autonolas.tech/}
+      gas_params: ${dict:{"gas_price":null, "max_fee_per_gas":null, "max_priority_fee_per_gas":null}}
+      init_fallback_gas: ${int:500000}
+      manual_gas_limit: ${int:1000000}
+      service_owner_share: ${int:1000}
+      profit_split_balance: ${int:1000000000000000000}
+      agent_funding_amount: ${int:200000000000000000}
+      minimum_agent_balance: ${int:100000000000000000}
+      termination_from_block: ${int:0}
+      mech_to_max_delivery_rate: ${dict:{}}
+      mech_to_config: ${dict:{}}
+      hash_checkpoint_address: ${str:0x694e62BDF7Ff510A4EE66662cf4866A961a31653}
+      setup:
+        all_participants: ${list:["0x7a1De622c62c6e985fEDd4919FfA8e9997B9547f"]}
+        safe_contract_address: ${str:0x9e9d95A2a3dF7CF20a8ac1422a6D1A2DB3B15565}
+        consensus_threshold: ${int:null}
+      default_chain_id: ${str:gnosis}
+  randomness_api:
+    args:
+      method: ${str:GET}
+      response_key: ${str:null}
+      response_type: ${str:dict}
+      retries: ${int:5}
+      url: ${str:https://drand.cloudflare.com/public/latest}
+---
+public_id: valory/task_execution:0.1.0
+type: skill
+models:
+  params:
+    args:
+      task_deadline: ${float:240.0}
+      tools_to_package_hash: ${dict:{}}
+      api_keys: ${dict:{}}
+      polling_interval: ${float:10}
+      agent_index: ${int:0}
+      num_agents: ${int:4}
+      from_block_range: ${int:50000}
+      mech_marketplace_address: ${str:0x0000000000000000000000000000000000000000}
+      step_in_list_size: ${int:20}
+      mech_to_config: ${dict:{}}
+      tools_to_pricing: ${dict:{}}
+      mech_to_max_delivery_rate: ${dict:{}}
+      timeout_limit: ${int:3}
+      max_block_window: ${int:500}
+      default_chain_id: ${str:gnosis}
+      gnosis_ledger_rpc: ${str:http://localhost:8545}
+      polygon_ledger_rpc: ${str:http://localhost:8545}
+      base_ledger_rpc: ${str:http://localhost:8545}
+---
+public_id: valory/ledger:0.19.0
+type: connection
+config:
+  ledger_apis:
+    base:
+      address: ${str:http://localhost:8545}
+      chain_id: ${int:8453}
+      poa_chain: ${bool:false}
+      default_gas_price_strategy: ${str:eip1559}
+    gnosis:
+      address: ${str:http://localhost:8545}
+      chain_id: ${int:100}
+      poa_chain: ${bool:false}
+      default_gas_price_strategy: ${str:eip1559}
+    polygon:
+      address: ${str:https://1rpc.io/matic}
+      chain_id: ${int:137}
+      poa_chain: ${bool:true}
+      default_gas_price_strategy: ${str:eip1559}
+      gas_price_strategies:
+        eip1559:
+          max_gas_fast: ${int:1500}
+          fee_history_blocks: ${int:10}
+          fee_history_percentile: ${int:5}
+          fallback_estimate:
+            maxFeePerGas: ${int:20000000000}
+            maxPriorityFeePerGas: ${int:3000000000}
+          priority_fee_increase_boundary: ${int:200}
+---
+public_id: valory/http_server:0.22.0:bafybeicblltx7ha3ulthg7bzfccuqqyjmihhrvfeztlgrlcoxhr7kf6nbq
+type: connection
+config:
+  host: ${str:0.0.0.0}
+  target_skill_id: valory/mech_abci:0.1.0
+is_abstract: false

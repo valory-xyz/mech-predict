@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2023-2025 Valory AG
+#   Copyright 2023-2026 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -36,17 +36,88 @@ import anthropic
 import googleapiclient
 import openai
 import requests
-import spacy
 from googleapiclient.discovery import build
 from markdownify import markdownify as md
 from pydantic import BaseModel, PositiveInt
 from readability import Document
-from spacy import Language
-from spacy.cli import download
-from spacy.lang.en import STOP_WORDS
-from spacy.tokens import Doc, Span
 from tiktoken import encoding_for_model, get_encoding
 
+# `STOP_WORDS` retrieved from https://github.com/explosion/spaCy/blob/v3.7.5/spacy/lang/en/stop_words.py
+STOP_WORDS = set("""
+a about above across after afterwards again against all almost alone along
+already also although always am among amongst amount an and another any anyhow
+anyone anything anyway anywhere are around as at
+
+back be became because become becomes becoming been before beforehand behind
+being below beside besides between beyond both bottom but by
+
+call can cannot ca could
+
+did do does doing done down due during
+
+each eight either eleven else elsewhere empty enough even ever every
+everyone everything everywhere except
+
+few fifteen fifty first five for former formerly forty four from front full
+further
+
+get give go
+
+had has have he hence her here hereafter hereby herein hereupon hers herself
+him himself his how however hundred
+
+i if in indeed into is it its itself
+
+keep
+
+last latter latterly least less
+
+just
+
+made make many may me meanwhile might mine more moreover most mostly move much
+must my myself
+
+name namely neither never nevertheless next nine no nobody none noone nor not
+nothing now nowhere
+
+of off often on once one only onto or other others otherwise our ours ourselves
+out over own
+
+part per perhaps please put
+
+quite
+
+rather re really regarding
+
+same say see seem seemed seeming seems serious several she should show side
+since six sixty so some somehow someone something sometime sometimes somewhere
+still such
+
+take ten than that the their them themselves then thence there thereafter
+thereby therefore therein thereupon these they third this those though three
+through throughout thru thus to together too top toward towards twelve twenty
+two
+
+under until up unless upon us used using
+
+various very very via was we well were what whatever when whence whenever where
+whereafter whereas whereby wherein whereupon wherever whether which while
+whither who whoever whole whom whose why will with within without would
+
+yet you your yours yourself yourselves
+""".split())
+
+contractions = ["n't", "'d", "'ll", "'m", "'re", "'s", "'ve"]
+STOP_WORDS.update(contractions)
+
+for apostrophe in ["‘", "’"]:
+    for stopword in contractions:
+        STOP_WORDS.add(stopword.replace("'", apostrophe))
+
+STOP_WORDS = STOP_WORDS.union(punctuation)
+
+SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+WORD_RE = re.compile(r"\w+")
 
 MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
 MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
@@ -149,6 +220,7 @@ class LLMClientManager:
     def __init__(self, api_keys: List, model: str):
         """Initializes with API keys and llm provider"""
         self.api_keys = api_keys
+        self._client: Optional["LLMClient"] = None
         if "gpt" in model:
             self.llm_provider = "openai"
         elif "claude" in model:
@@ -156,19 +228,16 @@ class LLMClientManager:
         else:
             self.llm_provider = "openrouter"
 
-    def __enter__(self) -> Any:
+    def __enter__(self) -> "LLMClient":
         """Initializes and returns LLM client."""
-        global client
-        if client is None:
-            client = LLMClient(self.api_keys, self.llm_provider)
-        return client
+        self._client = LLMClient(self.api_keys, self.llm_provider)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
-        global client
-        if client is not None:
-            client.client.close()
-            client = None
+        if self._client is not None:
+            self._client.client.close()
+            self._client = None
 
 
 class Usage:
@@ -280,9 +349,6 @@ class ExtendedDocument(BaseModel):
     embedding: Optional[List[float]] = None
 
 
-client: Optional[LLMClient] = None
-
-
 # Clean text by removing emojis and non-printable characters.
 def clean_text(text: str) -> str:
     """Remove emojis and non-printable characters, collapse whitespace."""
@@ -316,7 +382,7 @@ def clean_text(text: str) -> str:
     return text
 
 
-def count_tokens(text: str, model: str) -> int:
+def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) -> int:
     """Count the number of tokens in a text."""
     # Check if we're using a Claude model and we have an active client
     if "claude" in model.lower() and client and client.llm_provider == "anthropic":
@@ -340,9 +406,15 @@ def count_tokens(text: str, model: str) -> int:
                 f"Unexpected error with Anthropic tokenizer: {type(e).__name__}: {e}, using fallback encoding"
             )
 
-        # Fallback encoding
+        # Fallback encoding for Claude
         enc = get_encoding("cl100k_base")
         return len(enc.encode(text))
+
+    # Claude models without a client still need a fallback encoding
+    if "claude" in model.lower():
+        enc = get_encoding("cl100k_base")
+        return len(enc.encode(text))
+
     # Workaround since tiktoken does not have support yet for gpt4.1
     # https://github.com/openai/tiktoken/issues/395
     if model == "gpt-4.1-2025-04-14":
@@ -353,18 +425,13 @@ def count_tokens(text: str, model: str) -> int:
 
 
 FrequenciesType = Dict[str, float]
-ScoresType = Dict[Span, float]
+ScoresType = Dict[str, float]
 
 
 LLM_SETTINGS = {
     "gpt-3.5-turbo-0125": {
         "default_max_tokens": 500,
         "limit_max_tokens": 4096,
-        "temperature": 0,
-    },
-    "gpt-4-0125-preview": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 8192,
         "temperature": 0,
     },
     "gpt-4o-2024-08-06": {
@@ -382,34 +449,9 @@ LLM_SETTINGS = {
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
-    "claude-3-5-sonnet-20240620": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
     "claude-4-sonnet-20250514": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "claude-3-opus-20240229": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
-    "databricks/dbrx-instruct:nitro": {
-        "default_max_tokens": 500,
-        "limit_max_tokens": 32_768,
-        "temperature": 0,
-    },
-    "nousresearch/nous-hermes-2-mixtral-8x7b-sft": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 32_000,
-        "temperature": 0,
-    },
-    "deepseek/deepseek-r1:free": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 65_336,
         "temperature": 0,
     },
 }
@@ -431,7 +473,6 @@ DEFAULT_NUM_WORDS["prediction-online-summarized-info"] = None
 # how much of the initial content will be kept during summarization
 DEFAULT_COMPRESSION_FACTOR = 0.05
 # the vocabulary to use for the summarization
-DEFAULT_VOCAB = "en_core_web_sm"
 # number of retries and delay for completion
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
@@ -752,6 +793,7 @@ def extract_multi_queries(text: str) -> Any:
 
 
 def fetch_multi_queries_with_retry(
+    client: "LLMClient",
     model: str,
     messages: List[Dict[str, str]],
     temperature: float,
@@ -760,10 +802,6 @@ def fetch_multi_queries_with_retry(
     delay: int = COMPLETION_DELAY,
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[dict, Optional[Callable]]:
-    """Attempt to fetch multi-queries with retries on failure."""
-    if not client:
-        raise RuntimeError("Client not initialized")
-
     """Attempt to fetch multi-queries with retries on failure."""
     attempt = 0
     while attempt < retries:
@@ -787,7 +825,7 @@ def fetch_multi_queries_with_retry(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
                     model=model,
-                    token_counter=count_tokens,
+                    token_counter=functools.partial(count_tokens, client=client),
                 )
             return json_data, counter_callback
         except Exception as e:
@@ -798,6 +836,7 @@ def fetch_multi_queries_with_retry(
 
 
 def generate_prediction_with_retry(
+    client: "LLMClient",
     model: str,
     messages: List[Dict[str, str]],
     temperature: float,
@@ -807,8 +846,6 @@ def generate_prediction_with_retry(
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
-    if not client:
-        raise Exception("Client not initialized")
     attempt = 0
     tool_errors = []
     while attempt < retries:
@@ -834,7 +871,7 @@ def generate_prediction_with_retry(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
                     model=model,
-                    token_counter=count_tokens,
+                    token_counter=functools.partial(count_tokens, client=client),
                 )
             return extracted_block, counter_callback
         except Exception as e:
@@ -850,6 +887,7 @@ def generate_prediction_with_retry(
 
 
 def fetch_additional_information(
+    client: "LLMClient",
     user_prompt: str,
     engine: str,
     temperature: float,
@@ -864,9 +902,6 @@ def fetch_additional_information(
     source_links: Optional[Dict] = None,
 ) -> Tuple[str, Any]:
     """Fetch additional information."""
-    if not client:
-        raise RuntimeError("Client not initialized")
-
     url_query_prompt = URL_QUERY_PROMPT.format(
         user_prompt=user_prompt, num_queries=DEFAULT_NUM_QUERIES
     )
@@ -876,6 +911,7 @@ def fetch_additional_information(
     ]
     try:
         json_data, counter_callback = fetch_multi_queries_with_retry(
+            client=client,
             model=engine,
             messages=messages,
             temperature=temperature,
@@ -938,23 +974,22 @@ def fetch_additional_information(
     return additional_information, counter_callback
 
 
-def load_model(vocab: str) -> Language:
-    """Utilize spaCy to load the model and download it if it is not already available."""
-    try:
-        return spacy.load(vocab)
-    except OSError:
-        print("Downloading language model...")
-        download(vocab)
-        return spacy.load(vocab)
+def _tokenize_words(text: str) -> List[str]:
+    """Tokenize text into lowercase words."""
+    return WORD_RE.findall(text)
 
 
-def calc_word_frequencies(doc: Doc) -> FrequenciesType:
+def _split_sentences(text: str) -> List[str]:
+    """Split text into sentences."""
+    return [s.strip() for s in SENTENCE_BOUNDARY_RE.split(text) if s.strip()]
+
+
+def calc_word_frequencies(words: List[str]) -> FrequenciesType:
     """Get the frequency of each word in the given text, excluding stop words and punctuations."""
-    word_frequencies: Dict = defaultdict(lambda: 0)
-    for token in doc:
-        word = token.text
+    word_frequencies: Dict[str, int] = defaultdict(lambda: 0)
+    for word in words:
         lower = word.lower()
-        if lower not in STOP_WORDS.union(punctuation):
+        if lower not in STOP_WORDS:
             word_frequencies[lower] += 1
 
     max_frequency = max(word_frequencies.values())
@@ -969,36 +1004,38 @@ def calc_word_frequencies(doc: Doc) -> FrequenciesType:
 
 
 def calc_sentence_scores(
-    sentence_tokens: List[Span], word_frequencies: FrequenciesType
+    sentences: List[str], word_frequencies: FrequenciesType
 ) -> ScoresType:
     """Calculate the sentence scores."""
-    sentence_scores: Dict = defaultdict(lambda: 0)
-    for sentence in sentence_tokens:
-        for token in sentence:
-            sentence_scores[sentence] += word_frequencies[token.text.lower()]
+    sentence_scores: ScoresType = defaultdict(lambda: 0)
+    for sentence in sentences:
+        for word in _tokenize_words(sentence):
+            sentence_scores[sentence] += word_frequencies[word.lower()]
 
     return sentence_scores
 
 
-def summarize(text: str, compression_factor: float, vocab: str) -> str:
+def summarize(text: str, compression_factor: float) -> str:
     """Summarize the given text, retaining the given compression factor."""
     if not text:
         raise ValueError("Cannot summarize empty text!")
 
-    nlp = load_model(vocab)
-    doc = nlp(text)
-    word_frequencies = calc_word_frequencies(doc)
-    sentence_tokens = list(doc.sents)
-    sentence_scores = calc_sentence_scores(sentence_tokens, word_frequencies)
-    n = int(len(sentence_tokens) * compression_factor)
+    words = _tokenize_words(text)
+    word_frequencies = calc_word_frequencies(words)
+    sentences = _split_sentences(text)
+    sentence_scores = calc_sentence_scores(sentences, word_frequencies)
+    n = max(1, int(len(sentences) * compression_factor))
     summary = nlargest(n, sentence_scores, key=lambda k: sentence_scores[k])
-    summary_words = [word.text for word in summary]
-    summary_text = "".join(summary_words)
+    summary_text = " ".join(summary)
     return summary_text
 
 
 def adjust_additional_information(
-    user_prompt: str, prompt_template: str, additional_information: str, model: str
+    user_prompt: str,
+    prompt_template: str,
+    additional_information: str,
+    model: str,
+    client: Optional["LLMClient"] = None,
 ) -> str:
     """Adjust the additional_information to fit within the token budget"""
 
@@ -1006,7 +1043,7 @@ def adjust_additional_information(
     final_prompt = prompt_template.format(
         user_prompt=user_prompt, additional_information=""
     )
-    prompt_tokens = count_tokens(text=final_prompt, model=model)
+    prompt_tokens = count_tokens(text=final_prompt, model=model, client=client)
 
     # Calculate available tokens for additional_information
     MAX_PREDICTION_PROMPT_TOKENS = (
@@ -1016,7 +1053,9 @@ def adjust_additional_information(
     available_tokens = cast(int, MAX_PREDICTION_PROMPT_TOKENS) - prompt_tokens - BUFFER
 
     # Encode the additional_information
-    additional_info_tokens = count_tokens(text=additional_information, model=model)
+    additional_info_tokens = count_tokens(
+        text=additional_information, model=model, client=client
+    )
 
     # If additional_information exceeds available tokens, truncate it
     if additional_info_tokens > available_tokens:
@@ -1050,7 +1089,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if "claude" in tool:  # maintain backwards compatibility
         engine = "claude-4-sonnet-20250514"
     print(f"ENGINE used for {tool}: {engine}")
-    with LLMClientManager(kwargs["api_keys"], engine):
+    with LLMClientManager(kwargs["api_keys"], engine) as llm_client:
         user_prompt = kwargs["prompt"]  # question
         max_tokens = kwargs.get(
             "max_tokens", LLM_SETTINGS[engine]["default_max_tokens"]
@@ -1061,7 +1100,6 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         compression_factor = kwargs.get(
             "compression_factor", DEFAULT_COMPRESSION_FACTOR
         )
-        vocab = kwargs.get("vocab", DEFAULT_VOCAB)
         counter_callback = kwargs.get("counter_callback", None)
         api_keys = kwargs.get("api_keys", {})
         google_api_key = api_keys.get("google_api_key", None)
@@ -1076,6 +1114,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         additional_information = ""
         if tool in ["prediction-online", "claude-prediction-online"]:
             additional_information, counter_callback = fetch_additional_information(
+                llm_client,
                 user_prompt,
                 engine,
                 temperature,
@@ -1095,12 +1134,16 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         if additional_information and tool == "prediction-online-summarized-info":
             additional_information = summarize(
-                additional_information, compression_factor, vocab
+                additional_information, compression_factor
             )
         if additional_information:
             # check the limit of tokens
             additional_information = adjust_additional_information(
-                user_prompt, active_prompt, additional_information, engine
+                user_prompt,
+                active_prompt,
+                additional_information,
+                engine,
+                client=llm_client,
             )
         prediction_prompt = active_prompt.format(
             user_prompt=user_prompt, additional_information=additional_information
@@ -1111,6 +1154,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         ]
 
         extracted_block, counter_callback = generate_prediction_with_retry(
+            client=llm_client,
             model=engine,
             messages=messages,
             temperature=temperature,

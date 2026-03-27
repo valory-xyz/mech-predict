@@ -7,7 +7,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeib36ew6vbztldut5xayk5553rylrq7yv4cpqyhwc5ktvd4cx67vwu
-  prediction_request_reasoning.py: bafybeibugvvstq34e74uhdrdgxja6remwfnnjp4hcxt42ajsvqu4vebwm4
+  prediction_request_reasoning.py: bafybeie4uc64k3npqzoxjgpipsdlotvf72bwc55tal6j3tm4rmrvranwua
+  tests/__init__.py: bafybeieu3toasuyaehkqounrtylk5bjer7qgvnt6ccjcsi6jlfig7wfrka
+  tests/test_prediction_request_reasoning.py: bafybeigwbe5nai62pdl4nxb2lxgrrxmj5vnt4kumcl2pwp6ylwvvba35ua
 fingerprint_ignore_patterns: []
 entry_point: prediction_request_reasoning.py
 callable: run
@@ -18,15 +20,20 @@ dependencies:
     version: ==2.95.0
   googlesearch-python:
     version: ==1.2.3
-  requests: {}
+  requests:
+    version: ==2.32.5
+  httpx:
+    version: ==0.25.2
   markdownify:
     version: ==0.11.6
   readability-lxml:
     version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
   openai:
-    version: ==1.93.0
+    version: ==1.30.2
   tiktoken:
-    version: ==0.9.0
+    version: ==0.12.0
   pypdf2:
     version: ==3.0.1
   numpy:
@@ -34,8 +41,8 @@ dependencies:
   pydantic:
     version: '>=1.9.0,<3'
   faiss-cpu:
-    version: ==1.7.4
+    version: ==1.13.2
   docstring-parser:
-    version: ==0.15
+    version: ==0.17.0
   anthropic:
-    version: ==0.21.3
+    version: ==0.23.1

@@ -458,5 +458,5 @@ def run(**kwargs: Any) -> Union[float, MechResponse]:
     response, prompt = run_langgraph(topic, timeframe, question)
 
     used_params = {"model": MODEL}
-    # The expected output is: response, prompt, irrelevant, irrelevant
+    # The expected output is: response, prompt, irrelevant, irrelevant, used_params
     return response, prompt, None, None, used_params

@@ -180,7 +180,7 @@ def make_request_openai_request(
 def native_transfer(
     prompt: str,
     llm_client: OpenAI,
-) -> MechResponse:
+) -> Tuple[str, Optional[str], None, None]:
     """Perform native transfer."""
     tool_prompt = NATIVE_TRANSFER_PROMPT.format(user_prompt=prompt)
     response = make_request_openai_request(prompt=tool_prompt, llm_client=llm_client)
@@ -189,14 +189,14 @@ def native_transfer(
         # parse the response to get the transaction object string itself
         parsed_txs = ast.literal_eval(response)
     except SyntaxError:
-        return response, None, None, None, None
+        return response, None, None, None
 
     # build the transaction object, unknowns are referenced from parsed_txs
     transaction = {  # noqa: F841
         "to_address": str(parsed_txs["to_address"]),
         "value": int(parsed_txs["wei_value"]),
     }
-    return response, prompt, None, None, None
+    return response, prompt, None, None
 
 
 AVAILABLE_TOOLS = {
@@ -237,7 +237,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return error_response("No api key has been given.")
 
     with OpenAIClientManager(api_key) as llm_client:
-        response, prompt_out, tx, cb, _ = transaction_builder(
+        response, prompt_out, tx, cb = transaction_builder(
             prompt, llm_client=llm_client
         )
         return response, prompt_out, tx, cb, {}

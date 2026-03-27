@@ -181,9 +181,7 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 )
 _IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
 _DATA_URI_IMG_PATTERN = re.compile(r'data:image/[^;]*;base64,[^"]*')
-_MARKDOWN_IMG_PATTERN = re.compile(
-    r"!\[.*?\]\((?:data:image/[^;]*;base64,[^)]*|.*?)\)"
-)
+_MARKDOWN_IMG_PATTERN = re.compile(r"!\[.*?\]\((?:data:image/[^;]*;base64,[^)]*|.*?)\)")
 _MARKDOWN_LINK_PATTERN = re.compile(r"\[.*?\]\(.*?\)")
 _PHOTO_CREDIT_PATTERN = re.compile(r"Photo:.*?\n")
 _IMAGE_CREDIT_PATTERN = re.compile(r"Image:.*?\n")

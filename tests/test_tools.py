@@ -66,17 +66,22 @@ def _module_path_from_config(component_yaml: str) -> str:
 
 # Component configs (component.yaml paths)
 PREDICTION_REQUEST_CONFIG = _component_config("valory/customs/prediction_request")
-PREDICTION_REQUEST_RAG_CONFIG = _component_config("napthaai/customs/prediction_request_rag")
-PREDICTION_REQUEST_REASONING_CONFIG = _component_config("napthaai/customs/prediction_request_reasoning")
+PREDICTION_REQUEST_RAG_CONFIG = _component_config(
+    "napthaai/customs/prediction_request_rag"
+)
+PREDICTION_REQUEST_REASONING_CONFIG = _component_config(
+    "napthaai/customs/prediction_request_reasoning"
+)
 PREDICTION_URL_COT_CONFIG = _component_config("napthaai/customs/prediction_url_cot")
 DALLE_REQUEST_CONFIG = _component_config("victorpolisetty/customs/dalle_request")
 SUPERFORCASTER_CONFIG = _component_config("valory/customs/superforcaster")
+FACTUAL_RESEARCH_CONFIG = _component_config("valory/customs/factual_research")
 
 # Prompts
 PREDICTION_PROMPT = (
-    'Please take over the role of a Data Scientist to evaluate the given question. '
+    "Please take over the role of a Data Scientist to evaluate the given question. "
     'With the given question "Will Apple release iPhone 17 by March 2025?" '
-    'and the `yes` option represented by `Yes` and the `no` option represented by `No`, '
+    "and the `yes` option represented by `Yes` and the `no` option represented by `No`, "
     "what are the respective probabilities of `p_yes` and `p_no` occurring?"
 )
 PREDICTION_RAG_PROMPT = (
@@ -170,4 +175,11 @@ class TestSuperforcaster(BaseIsolatedToolTest):
     """Test Superforcaster."""
 
     component_yaml = SUPERFORCASTER_CONFIG
+    prompts = [PREDICTION_PROMPT]
+
+
+class TestFactualResearch(BaseIsolatedToolTest):
+    """Test Factual Research."""
+
+    component_yaml = FACTUAL_RESEARCH_CONFIG
     prompts = [PREDICTION_PROMPT]

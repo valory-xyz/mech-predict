@@ -74,15 +74,6 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openai")
                 api_keys.rotate("openrouter")
                 return execute()
-            except openai.RateLimitError as e:
-                # try with a new key again
-                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
-                retries_left["openai"] -= 1
-                retries_left["openrouter"] -= 1
-                api_keys.rotate("openai")
-                api_keys.rotate("openrouter")
-                return execute()
             except Exception as e:
                 return str(e), "", None, None, None, api_keys
 

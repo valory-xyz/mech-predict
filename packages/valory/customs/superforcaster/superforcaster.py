@@ -180,6 +180,13 @@ _SCRIPT_STYLE_PATTERN = re.compile(
     r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
 )
 _IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
+_DATA_URI_IMG_PATTERN = re.compile(r'data:image/[^;]*;base64,[^"]*')
+_MARKDOWN_IMG_PATTERN = re.compile(
+    r"!\[.*?\]\((?:data:image/[^;]*;base64,[^)]*|.*?)\)"
+)
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[.*?\]\(.*?\)")
+_PHOTO_CREDIT_PATTERN = re.compile(r"Photo:.*?\n")
+_IMAGE_CREDIT_PATTERN = re.compile(r"Image:.*?\n")
 
 
 PREDICTION_PROMPT = """
@@ -348,12 +355,19 @@ def _fetch_page_content(
 
         html = resp.text
         html = _SCRIPT_STYLE_PATTERN.sub("", html)
+        html = _DATA_URI_IMG_PATTERN.sub("", html)
+        html = _MARKDOWN_IMG_PATTERN.sub("", html)
         html = _IMG_TAG_PATTERN.sub("", html)
 
         article_html = ReadabilityDocument(html).summary()
         text = md(article_html, heading_style="ATX", strip=["img", "figure"])
         if not text or not text.strip():
             return None
+
+        text = _MARKDOWN_IMG_PATTERN.sub("", text)
+        text = _MARKDOWN_LINK_PATTERN.sub("", text)
+        text = _PHOTO_CREDIT_PATTERN.sub("", text)
+        text = _IMAGE_CREDIT_PATTERN.sub("", text)
 
         words = text.split()
         if len(words) > max_words:

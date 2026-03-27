@@ -7,7 +7,7 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeifvbuxt54l5jsxextf6ru5yvimkfdg4gfkcsnmyvsyqcsgclg7vey
-  superforcaster.py: bafybeibnc4epxzokmdnjztebffowe6w3zlhwcvk5zaqifikf7pi4rnbfm4
+  superforcaster.py: bafybeidffylroywvrdlmdww4jywjpg24s72hcszooajey5nqjihstqai4a
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
   tests/test_superforcaster.py: bafybeidioqrlw4berbk4xeie6qqtpqxwdzdbub3w27okx6uebnszg3fn7y
 fingerprint_ignore_patterns: []
@@ -24,3 +24,9 @@ dependencies:
     version: ==0.12.0
   requests:
     version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==0.11.6

@@ -25,11 +25,14 @@ import os
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 import requests
+from markdownify import markdownify as md
+from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
 
@@ -200,6 +203,12 @@ MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
 
+_MAX_PAGE_WORDS = 400
+_SCRIPT_STYLE_PATTERN = re.compile(
+    r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+_IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
+
 
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
@@ -212,7 +221,7 @@ Question:
 {question}
 
 Today's date: {today}
-Your pretraining knowledge cutoff: October 2023
+Your pretraining knowledge cutoff: June 2024
 
 We have retrieved the following information for this question:
 <background>{sources}</background>
@@ -338,37 +347,66 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
     return response
 
 
-def format_sources_data(organic_data: Any, misc_data: Any) -> str:
-    """Formats organic search results and "People Also Ask" data into a human-readable string."""
-    sources = ""
+def _fetch_page_content(
+    url: str, max_words: int = _MAX_PAGE_WORDS, timeout: int = 10
+) -> Optional[str]:
+    """Fetch a URL and extract its main text content as clean Markdown.
 
-    if len(organic_data) > 0:
-        print("Adding organic data...")
+    :param url: The URL to fetch.
+    :type url: str
+    :param max_words: Maximum number of words to keep.
+    :type max_words: int
+    :param timeout: Request timeout in seconds.
+    :type timeout: int
 
-        sources = """
-        Organic Results:
-        """
+    :return: Extracted text content, or None on failure.
+    :rtype: Optional[str]
+    """
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MechBot/1.0)"},
+        )
+        if resp.status_code != 200:
+            return None
+        content_type = resp.headers.get("Content-Type", "")
+        if "text/html" not in content_type:
+            return None
 
-        for item in organic_data:
-            sources += f"""{item.get('position', 'N/A')}. **Title:** {item.get("title", 'N/A')}
-            - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
-            - **Snippet:** {item.get("snippet", 'N/A')}
-            """
+        html = resp.text
+        html = _SCRIPT_STYLE_PATTERN.sub("", html)
+        html = _IMG_TAG_PATTERN.sub("", html)
 
-    if len(misc_data) > 0:
-        print("Adding misc data...")
+        article_html = ReadabilityDocument(html).summary()
+        text = md(article_html, heading_style="ATX", strip=["img", "figure"])
+        if not text or not text.strip():
+            return None
 
-        sources += "People Also Ask:\n"
+        words = text.split()
+        if len(words) > max_words:
+            text = " ".join(words[:max_words]) + " […]"
 
-        counter = 1
-        for item in misc_data:
-            sources += f"""{counter}. **Question:** {item.get("question", 'N/A')}
-            - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
-            - **Snippet:** {item.get("snippet", 'N/A')}
-            """
-            counter += 1
+        return text.strip()
+    except Exception as e:
+        print(f"[superforcaster] Failed to fetch {url}: {e}")
+        return None
 
-    return sources
+
+def _format_sources(items: List[Dict[str, Any]]) -> str:
+    """Format a list of source dicts into ARTICLE-style blocks for the prompt.
+
+    :param items: List of dicts with at least 'link' and one of 'content'/'snippet'.
+    :type items: List[Dict[str, Any]]
+
+    :return: Formatted sources string.
+    :rtype: str
+    """
+    lines = []
+    for i, item in enumerate(items):
+        content = item.get("content") or item.get("snippet", "")
+        lines.append(f"ARTICLE {i}, URL: {item.get('link', '')}, CONTENT: {content}")
+    return "\n\n".join(lines)
 
 
 def extract_question(prompt: str) -> str:
@@ -423,24 +461,35 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         question = extract_question(prompt)
 
         if source_links:
-            print("Using provided source content (cached replay)...")
+            print("[superforcaster] Using provided source content (cached replay)...")
             organic_data = [
-                {"position": i, "title": url, "link": url, "snippet": content}
-                for i, (url, content) in enumerate(
-                    list(source_links.items())[:MAX_SOURCES], start=1
-                )
+                {"link": url, "snippet": content}
+                for url, content in list(source_links.items())[:MAX_SOURCES]
             ]
-            sources = format_sources_data(organic_data, [])
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
-            print("Fetching additional sources...")
+            print("[superforcaster] Fetching additional sources...")
             serper_response = fetch_additional_sources(question, serper_api_key)
             sources_data = serper_response.json()
-            print(f"Additional sources fetched: {sources_data}")
             organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
-            misc_data = sources_data.get("peopleAlsoAsk", [])
-            print("Formating sources...")
-            sources = format_sources_data(organic_data, misc_data)
+            print(f"[superforcaster] Scraping {len(organic_data)} pages...")
+            with ThreadPoolExecutor(max_workers=MAX_SOURCES) as pool:
+                future_to_item = {
+                    pool.submit(_fetch_page_content, item["link"]): item
+                    for item in organic_data
+                }
+                for fut in as_completed(future_to_item):
+                    item = future_to_item[fut]
+                    try:
+                        content = fut.result()
+                        if content:
+                            item["content"] = content
+                    except Exception as e:
+                        print(
+                            f"[superforcaster] Scrape failed for '{item['link']}': {e}"
+                        )
+
+        sources = _format_sources(organic_data)
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(

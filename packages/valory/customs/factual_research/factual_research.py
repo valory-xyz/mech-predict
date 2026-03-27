@@ -48,6 +48,7 @@ Hard guardrails (enforced in every system prompt for steps 1-3):
     • Never search Polymarket, Twitter/X, or prediction sites.
     • Only report verifiable, cited facts.
 """
+
 import functools
 import json
 import re
@@ -63,7 +64,6 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
-
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for OpenAI Structured Outputs
@@ -762,9 +762,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         else:
             with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = {
-                    pool.submit(
-                        _search_serper, sq, serper_api_key, num_results=3
-                    ): sq
+                    pool.submit(_search_serper, sq, serper_api_key, num_results=3): sq
                     for sq in sub_questions
                 }
                 for fut in as_completed(futures):
@@ -786,12 +784,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     for item in items_to_scrape
                 }
                 scraped = 0
-                for fut in as_completed(future_to_item):
-                    item = future_to_item[fut]
+                for scrape_fut in as_completed(future_to_item):
+                    item = future_to_item[scrape_fut]
                     try:
-                        content = fut.result()
-                        if content:
-                            item["content"] = content
+                        page_text = scrape_fut.result()
+                        if page_text:
+                            item["content"] = page_text
                             scraped += 1
                     except Exception as e:
                         print(

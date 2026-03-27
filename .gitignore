@@ -31,6 +31,10 @@ backup_mech/
 .tool_venvs/
 log
 .benchmark-cache
+benchmark/datasets/open_markets.jsonl
+benchmark/datasets/snapshots/
+benchmark/datasets/*.log
+benchmark/results/
 
 mech/
 mech_service/

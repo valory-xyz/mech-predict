@@ -1071,25 +1071,34 @@ def main() -> None:
 
     totals = {"skipped": 0, "errors": 0, "serper_calls": 0, "llm_calls": 0, "pages_scraped": 0}
 
-    for i, market in enumerate(markets, 1):
-        snapshot_id = market["id"]
-        snap_dir = output_dir / "snapshots" / snapshot_id
-
-        # Skip if snapshot already exists with all requested groups
+    # Pre-scan for existing snapshots
+    requested_groups = {f"group_{g}" for g in groups}
+    to_process = []
+    for market in markets:
+        snap_dir = output_dir / "snapshots" / market["id"]
+        skip = False
         if (snap_dir / "metadata.json").exists():
             try:
                 existing = json.loads((snap_dir / "metadata.json").read_text())
                 existing_groups = set(existing.get("groups", []))
-                requested_groups = {f"group_{g}" for g in groups}
                 if requested_groups <= existing_groups:
-                    print(
-                        f"[{i}/{len(markets)}] Skipping {snapshot_id} "
-                        f"(snapshot exists with groups {existing_groups})"
-                    )
+                    skip = True
                     totals["skipped"] += 1
-                    continue
             except (json.JSONDecodeError, KeyError):
-                pass  # re-fetch if metadata is corrupt
+                pass
+        to_process.append((market, skip))
+
+    n_skip = totals["skipped"]
+    n_todo = len(markets) - n_skip
+    if n_skip:
+        print(f"  Skipping {n_skip} markets with existing snapshots.")
+    print(f"  Processing {n_todo} markets.\n")
+
+    for i, (market, skip) in enumerate(to_process, 1):
+        snapshot_id = market["id"]
+
+        if skip:
+            continue
 
         print(f"[{i}/{len(markets)}] {market['question'][:80]}...")
 

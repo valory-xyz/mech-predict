@@ -49,12 +49,8 @@ def _ensure_tiktoken_cache() -> None:
 
 
 _ensure_tiktoken_cache()
-MechResponseWithKeys = Tuple[
-    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
-]
-MechResponse = Tuple[
-    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
-]
+MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
+MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -75,7 +71,10 @@ def with_key_rotation(func: Callable) -> Callable:
             """Retry the function with a new key."""
             try:
                 result: MechResponse = func(*args, **kwargs)
-                return result + (api_keys,)
+                # Ensure the result is a tuple and has the correct length
+                if isinstance(result, tuple) and len(result) == 4:
+                    return result + (api_keys,)
+                raise ValueError("Function did not return a valid MechResponse tuple.")
             except openai.RateLimitError as e:
                 # try with a new key again
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
@@ -86,7 +85,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, None, api_keys
+                return str(e), "", None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -136,7 +135,7 @@ ALLOWED_QUALITY = ["standard", "hd"]
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> MechResponse:
+def run(**kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]], Any, Any]:
     """Run the task"""
     with OpenAIClientManager(kwargs["api_keys"]["openai"]) as llm_client:
         tool = kwargs["tool"]
@@ -152,7 +151,6 @@ def run(**kwargs: Any) -> MechResponse:
                 None,
                 None,
                 None,
-                None,
             )
         if size not in ALLOWED_SIZE:
             return (
@@ -160,12 +158,10 @@ def run(**kwargs: Any) -> MechResponse:
                 None,
                 None,
                 None,
-                None,
             )
         if quality not in ALLOWED_QUALITY:
             return (
                 f"Quality {quality} is not in the list of supported qualities.",
-                None,
                 None,
                 None,
                 None,
@@ -178,5 +174,4 @@ def run(**kwargs: Any) -> MechResponse:
             quality=quality,
             n=n,
         )
-        used_params = {"size": size, "quality": quality, "n": n}
-        return response.data[0].url, prompt, None, counter_callback, used_params
+        return response.data[0].url, prompt, None, counter_callback

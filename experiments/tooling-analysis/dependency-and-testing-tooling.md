@@ -249,7 +249,7 @@ tox -e py3.10-linux  # Same tox.ini, uv creates venvs and installs deps
 | uv is young (v0.x) | Low — backed by Astral, production-proven at Rippling/LlamaIndex scale | Start with `tox-uv` plugin (zero risk), convert gradually |
 | `uv.lock` format changes | Low — format is stabilizing | Lock to specific uv version in CI |
 | nox learning curve | Low — Python is more familiar than tox INI | Port one repo first as proof of concept |
-| tomte (Valory's linter wrapper) depends on tox | Medium | `tox-uv` keeps tox compatibility; or update tomte to support uv |
+| tomte (Valory's linter wrapper) depends on tox | Medium | tomte pins `tox==4.46.0` as an optional dep via `[cli]` and `[tox]` extras. Core CLI commands (check-doc-links, check-copyright) don't use tox at runtime. Options: (1) `tox-uv` keeps full compatibility, (2) update tomte to drop tox dep or replace with tox-uv, (3) repos can use `tomte[tests]` without `[cli]` to avoid the tox dep |
 | aea CLI tools assume pip/poetry | Medium | Test thoroughly before removing poetry |
 
 ---

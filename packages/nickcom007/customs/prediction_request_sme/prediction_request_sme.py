@@ -208,8 +208,12 @@ task question: "Will the air strike conflict in Sudan be resolved by 13 Septembe
 """
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -261,7 +265,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -422,7 +426,7 @@ def fetch_additional_information(
     num_urls: int,
     num_words: int,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
+    source_content: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Optional[Callable[[int, int, str], None]]]:
     """Fetch additional information."""
 
@@ -445,7 +449,7 @@ def fetch_additional_information(
     )
     json_data = json.loads(response.choices[0].message.content)
 
-    if not source_links:
+    if source_content is None:
         # Determine which search provider to use
         if search_provider == "serper":
             if not serper_api_key:
@@ -467,7 +471,7 @@ def fetch_additional_information(
         texts = extract_texts(urls, num_words)
     else:
         texts = []
-        for url, content in islice(source_links.items(), 3):
+        for url, content in islice(source_content.items(), 3):
             doc: dict = {}
             text = (
                 extract_text(html=content, num_words=num_words),
@@ -567,7 +571,7 @@ def adjust_additional_information(
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:
@@ -593,7 +597,7 @@ def run(
         prompt = kwargs["prompt"]
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
-        source_links = kwargs.get("source_links", None)
+        source_content = kwargs.get("source_content", None)
         num_urls = kwargs.get("num_urls", NUM_URLS_EXTRACT)
         num_words = kwargs.get("num_words", DEFAULT_NUM_WORDS)
         api_keys = kwargs.get("api_keys", {})
@@ -630,7 +634,7 @@ def run(
                 num_urls=num_urls,
                 num_words=num_words,
                 counter_callback=counter_callback,
-                source_links=source_links,
+                source_content=source_content,
             )
         else:
             additional_information = None
@@ -645,12 +649,19 @@ def run(
             user_prompt=prompt, additional_information=additional_information
         )
         moderation_result = llm_client.moderations.create(input=prediction_prompt)
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+        }
         if moderation_result.results[0].flagged:
             return (
                 "Moderation flagged the prompt as in violation of terms.",
                 prediction_prompt,
                 None,
                 counter_callback,
+                used_params,
             )
         messages = [
             {"role": "system", "content": sme_introduction},
@@ -678,4 +689,5 @@ def run(
             prediction_prompt,
             None,
             counter_callback,
+            used_params,
         )

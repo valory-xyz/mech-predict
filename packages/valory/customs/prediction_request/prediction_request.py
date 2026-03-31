@@ -119,8 +119,12 @@ STOP_WORDS = STOP_WORDS.union(punctuation)
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 WORD_RE = re.compile(r"\w+")
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -206,7 +210,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -899,7 +903,7 @@ def fetch_additional_information(
     num_urls: int,
     num_words: int,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
+    source_content: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, Any]:
     """Fetch additional information."""
     url_query_prompt = URL_QUERY_PROMPT.format(
@@ -924,7 +928,7 @@ def fetch_additional_information(
         print(f"Fetch multi queries with retry failed with exception: {e}")
         json_data = {"queries": [user_prompt]}
 
-    if not source_links:
+    if source_content is None:
         # remove empty queries, including ""
         queries = json_data["queries"]
         queries = [query for query in queries if query.strip() != ""]
@@ -955,7 +959,7 @@ def fetch_additional_information(
         docs = extract_texts(urls, num_words)
     else:
         docs = []
-        for url, content in islice(source_links.items(), 3):
+        for url, content in islice(source_content.items(), 3):
             doc = extract_text(html=content, num_words=num_words)
             if doc and doc.text != "":
                 doc.url = url
@@ -1126,7 +1130,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 num_urls,
                 num_words,  # type: ignore
                 counter_callback=counter_callback,
-                source_links=kwargs.get("source_links", None),
+                source_content=kwargs.get("source_content", None),
             )
         elif "claude" not in engine:
             # used improved prompt in all models except the Claude ones
@@ -1164,4 +1168,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             counter_callback=counter_callback,
         )
 
-        return extracted_block, prediction_prompt, None, counter_callback
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_words": num_words,
+        }
+        return extracted_block, prediction_prompt, None, counter_callback, used_params

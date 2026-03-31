@@ -40,8 +40,12 @@ from readability import Document as ReadabilityDocument
 from requests.exceptions import RequestException, TooManyRedirects
 from tiktoken import encoding_for_model, get_encoding
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -115,7 +119,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -804,7 +808,7 @@ def fetch_additional_information(
     serper_api_key: Optional[str],
     search_provider: str,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
+    source_content: Optional[Dict[str, str]] = None,
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
     temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
@@ -829,7 +833,7 @@ def fetch_additional_information(
         queries = [prompt]
 
     # get the top URLs for the queries
-    if not source_links:
+    if source_content is None:
         # Determine which search provider to use
         if search_provider == "serper":
             if not serper_api_key:
@@ -860,7 +864,9 @@ def fetch_additional_information(
         )
     else:
         docs = []
-        for url, content in islice(source_links.items(), num_urls or len(source_links)):
+        for url, content in islice(
+            source_content.items(), num_urls or len(source_content)
+        ):
             doc = extract_text(html=content)
             if doc:
                 doc.url = url
@@ -955,7 +961,7 @@ def parser_prediction_response(response: str) -> str:
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[Optional[str], Any, Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     model = kwargs.get("model")
@@ -1017,7 +1023,7 @@ def run(
             serper_api_key=serper_api_key,
             search_provider=search_provider,
             counter_callback=counter_callback,
-            source_links=kwargs.get("source_links", None),
+            source_content=kwargs.get("source_content", None),
             num_urls=num_urls,
             num_queries=num_queries,
             temperature=temperature,
@@ -1042,12 +1048,21 @@ def run(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_queries": num_queries,
+        }
+
         if not response or response.content is None:
             return (
                 "Response Not Valid",
                 prediction_prompt,
                 None,
                 counter_callback,
+                used_params,
             )
 
         if counter_callback:
@@ -1059,4 +1074,4 @@ def run(
             )
 
         results = parser_prediction_response(response.content)
-        return results, prediction_prompt, None, counter_callback
+        return results, prediction_prompt, None, counter_callback, used_params

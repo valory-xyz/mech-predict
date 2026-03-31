@@ -1,34 +1,50 @@
-# MVP Benchmark Pipeline — Implementation Plan
+# Production Replay Benchmark Pipeline — MVP Plan
+
+## Goal
+
+Build a first Production Replay Benchmark Pipeline focused on:
+- **Forecasting metrics**, starting with Brier score
+  - For a binary outcome, Brier = `(p_yes - final_outcome)²`
+  - Measures how close the predicted probability was to what actually happened
+  - Lower is better (0 = perfect, 0.25 = random guessing)
+- **Per-tool and per-platform aggregates**
+
+## Why This Approach
+
+We are starting with a narrower production replay benchmark because:
+- It is already feasible with the current on-chain data and gives us useful signal quickly
+- This lets us deliver a reliable first benchmark layer before expanding into the broader replay/search/promotion loop proposed in the full benchmark proposal
+- We removed the focus on cached replay for now because we need better planning given the concerns raised around content storage, trust model, and schema changes
+
+After this work, we can define how to feed the report back into AI-assisted improvement loops.
+
+---
 
 ## What We're Building
 
 ```
 Daily (automated via GitHub Actions):
   fetch_production.py → production_log.jsonl → scorer.py → scores.json → analyze.py → report.md
-
-On-demand (human triggers when there's a fix to test):
-  runner.py (replay with fix) → scorer.py (compare) → did the fix help?
 ```
+
+Three scripts, one GitHub Actions workflow. All automated, no manual runs.
 
 ---
 
 ## Scripts
 
-### 1. `fetch_production.py` (~2 hours)
+### 1. `benchmark/datasets/fetch_production.py`
 
-Incremental production data fetcher. Runs daily, appends new rows.
+Associates request → delivery → market → final outcome.
 
 **What it does:**
-- Queries predict-omen + predict-polymarket-agents subgraphs (adapts existing queries from `tool_accruacy.py` and `get_polymarket_agents_accuracy_and_roi.py`)
-- For each bet on a resolved market, finds the last mech request before the bet (existing attribution logic from both platforms)
+- Queries predict-omen + predict-polymarket-agents subgraphs (adapts existing queries from `mech-interact/tool_accruacy.py` and `random-valory-scripts/polymarket/get_polymarket_agents_accuracy_and_roi.py`)
+- For each bet on a resolved market, finds the last mech request before the bet (existing "last mech request before bet placement" attribution logic used by both platforms)
 - Downloads mech response from IPFS gateway, parses `result` field for `p_yes`, `p_no`
-- Extracts URLs and source content from the `prompt` field:
-  - For tools using `ARTICLE N, URL: ..., CONTENT: ...` format → extracts URL + article text
-  - For superforcaster using `**Title:** ... **Snippet:** ...` format → extracts Serper-style snippets
 - Extracts `tool`, `model`, `cost_dict` from response metadata
 - Records block timestamp as `predicted_at`
-- Classifies question category via keyword matching (see below)
-- Tracks state in `.fetch_state.json` (last processed bet ID per platform)
+- Classifies question category via keyword matching
+- Tracks state in `.fetch_state.json` (last processed bet ID per platform) for incremental runs
 - Appends new rows to `production_log.jsonl`
 
 **Row schema:**
@@ -50,9 +66,7 @@ Incremental production data fetcher. Runs daily, appends new rows.
   "input_tokens": 4200,
   "output_tokens": 850,
   "cost_usd": 0.042,
-  "match_confidence": 0.95,
-  "source_urls": ["https://reuters.com/...", "https://bbc.com/..."],
-  "source_format": "article" | "serper_snippet"
+  "match_confidence": 0.95
 }
 ```
 
@@ -76,12 +90,12 @@ CATEGORY_KEYWORDS = {
 
 ---
 
-### 2. `scorer.py` (~1 hour)
+### 2. `benchmark/scorer.py`
 
-Reads `production_log.jsonl`, computes metrics, outputs `scores.json`.
+Reads the joined data and computes the score for each row.
 
 **Metrics:**
-- Brier score: `mean((p_yes - outcome)²)` — lower is better
+- Brier score: `mean((p_yes - outcome)²)` — lower is better, 0.25 = random guessing
 - Reliability: `valid_outputs / total_rows` — hard gate at 80%
 - Per-tool breakdown
 - Per-platform breakdown (Polymarket vs Omen)
@@ -89,7 +103,7 @@ Reads `production_log.jsonl`, computes metrics, outputs `scores.json`.
 - Per-time-horizon breakdown (short <7d, medium 7-30d, long >30d)
 - Trend: Brier score over time (monthly buckets)
 
-**Output:**
+**Output (`scores.json`):**
 ```json
 {
   "generated_at": "2026-03-31T06:00:00Z",
@@ -100,30 +114,41 @@ Reads `production_log.jsonl`, computes metrics, outputs `scores.json`.
     "prediction-online": {"brier": 0.228, "reliability": 0.95, "n": 200},
     "superforcaster": {"brier": 0.218, "reliability": 0.96, "n": 150}
   },
-  "by_platform": { ... },
-  "by_category": { ... },
-  "by_horizon": { ... },
-  "trend": [ ... ]
+  "by_platform": {
+    "omen": {"brier": 0.240, "reliability": 0.93, "n": 300},
+    "polymarket": {"brier": 0.221, "reliability": 0.95, "n": 170}
+  },
+  "by_category": { "...": "..." },
+  "by_horizon": {
+    "short_lt_7d": {"brier": 0.142, "n": 45},
+    "medium_7_30d": {"brier": 0.201, "n": 89},
+    "long_gt_30d": {"brier": 0.247, "n": 66}
+  },
+  "trend": [
+    {"month": "2026-01", "brier": 0.225, "n": 65},
+    {"month": "2026-02", "brier": 0.229, "n": 78},
+    {"month": "2026-03", "brier": 0.238, "n": 92}
+  ]
 }
 ```
 
 ---
 
-### 3. `analyze.py` (~1 hour)
+### 3. `benchmark/analyze.py`
 
-Reads `scores.json` + `production_log.jsonl`, generates human-readable `report.md`.
+Generates a report of the results. Human-readable markdown.
 
 **What it highlights:**
 - Overall health: reliability, Brier, sample size
-- Top 10 worst predictions (highest Brier) with question text, tool, and what went wrong
-- Top 10 best predictions where tool got it right and market was uncertain
 - Tool ranking: which tool is best overall, per platform, per category
-- Weak spots: categories or platforms where Brier > 0.30 (worse than random)
+- Top 10 worst predictions (highest Brier) with question text, tool, what was predicted vs what happened
+- Top 10 best predictions where tool got it right
+- Weak spots: categories or platforms where Brier > 0.30 (worse than random guessing)
 - Reliability issues: tools with >10% malformed/timeout/error rate
 - Trend alerts: if Brier worsened by >0.02 in the last month vs prior month
 - Sample size warnings: categories with <20 questions flagged as low-confidence
 
-**Output format** (`report.md`):
+**Output (`report.md`):**
 ```markdown
 # Benchmark Report — 2026-03-31
 
@@ -137,8 +162,8 @@ Reads `scores.json` + `production_log.jsonl`, generates human-readable `report.m
 3. prediction-rag — Brier: 0.235 (n=120)
 
 ## Weak Spots
-⚠ politics: Brier 0.312 (n=73) — all tools struggle here
-⚠ prediction-online on omen: Brier 0.289 (n=45)
+- politics: Brier 0.312 (n=73) — all tools struggle here
+- prediction-online on omen: Brier 0.289 (n=45)
 
 ## Worst Predictions
 1. "Will X happen?" — prediction-online predicted 0.85, outcome: No (Brier: 0.72)
@@ -146,46 +171,14 @@ Reads `scores.json` + `production_log.jsonl`, generates human-readable `report.m
 2. ...
 
 ## Trend
-- Jan 2026: 0.225 → Feb 2026: 0.229 → Mar 2026: 0.238 ↑ (degrading)
+- Jan 2026: 0.225 → Feb 2026: 0.229 → Mar 2026: 0.238 (degrading)
 ```
 
 ---
 
-### 4. `runner.py` — Replay (~1.5 hours)
+### 4. GitHub Actions Workflow
 
-Replays a subset of production questions with a different tool/prompt/model config. Uses `source_links` to inject cached content so tools don't hit the live web.
-
-**What it does:**
-- Takes a config file (tool, model, temperature, prompt template, etc.)
-- Takes a subset of questions from `production_log.jsonl` (or all of them)
-- For each question:
-  - If `source_format == "article"`: re-fetches the `source_urls`, builds `source_links = {url: html_content}`
-  - If `source_format == "serper_snippet"`: parses stored snippets from original prompt, builds `source_links` in Serper format
-  - Runs the tool with `source_links` injected
-  - Enforces 240s timeout (matching production `TASK_DEADLINE`)
-- Records new `p_yes`, `p_no`, latency, cost
-- Outputs `replay_results.jsonl`
-- Runs `scorer.py` on replay results
-- Prints side-by-side comparison: production baseline vs replay
-
-**Usage:**
-```bash
-# Test a new prompt template
-python benchmark/runner.py \
-  --config '{"tool": "prediction-online", "model": "gpt-4.1", "temperature": 0.2}' \
-  --dataset benchmark/datasets/production_log.jsonl \
-  --limit 50
-
-# Output:
-#                  Production    Replay      Delta
-# Brier            0.228         0.195       -0.033 ↓ (better)
-# Reliability      95%           96%         +1%
-# n                50            50
-```
-
----
-
-### 5. GitHub Actions Workflow (~30 min)
+Embedded in CI, runs daily.
 
 ```yaml
 # .github/workflows/benchmark_flywheel.yaml
@@ -234,17 +227,14 @@ benchmark/
 │   └── production_log.jsonl       # gitignored — append-only prediction log
 ├── scorer.py
 ├── analyze.py
-├── runner.py
 ├── results/                       # gitignored
 │   ├── scores.json
 │   └── report.md
-└── prompts/
-    └── templates.py               # prompt variants for replay testing
 ```
 
 ---
 
-## Known Shortcomings We're Accepting
+## Known Shortcomings
 
 ### 1. No edge-over-market metric
 
@@ -254,17 +244,7 @@ Can't calculate "does our tool beat the market consensus" because the trader doe
 
 **When it's fixed:** When trader request schema changes land (`request_context.market_prob`).
 
-### 2. Replay uses re-fetched URLs, not original content
-
-~10-20% of URLs may return different content than what the tool originally saw. Some will be dead links.
-
-**Impact:** Replay comparisons have noise. A tool might score differently because the content changed, not because the config is better/worse.
-
-**Mitigation built in:** `runner.py` tracks URL fetch success rate per question. Questions where >30% of URLs fail are flagged in results. Scorer can filter them out.
-
-**When it's fixed:** When `source_content` is added to the IPFS response schema (stores the actual scraped content at prediction time).
-
-### 3. Question-to-market matching is fragile for Omen
+### 2. Question-to-market matching is fragile for Omen
 
 String prefix matching between mech subgraph (truncated titles) and predict-omen subgraph (full titles). Can produce false matches.
 
@@ -274,46 +254,38 @@ String prefix matching between mech subgraph (truncated titles) and predict-omen
 
 **When it's fixed:** When trader sends `market_id` in request payload.
 
-### 4. No statistical significance testing
-
-When comparing replay vs baseline, we just compare numbers. Small improvements might be noise.
-
-**Impact:** Risk of promoting a change that isn't actually better.
-
-**Mitigation:** Report sample size alongside every number. With 200+ predictions, improvements >0.03 Brier are likely real. Below that, treat with caution.
-
-**When it's fixed:** Add `compare.py` with paired bootstrap testing (proposal Part 5).
-
-### 5. IPFS response parsing may fail for old formats
+### 3. IPFS response parsing may fail for old formats
 
 Older mech responses may have different JSON structure or unparseable result strings.
 
 **Impact:** Some historical predictions can't be scored — reduces dataset size.
 
-**Mitigation built in:** Classify parse status: `valid` / `malformed` / `missing_fields`. Malformed rows count against reliability. Log parse failure rate.
+**Mitigation built in:** Classify parse status: `valid` / `malformed` / `missing_fields`. Malformed rows count against reliability. Parse failure rate is logged.
 
 **When it's fixed:** `schema_version` in responses (landing in current PR).
 
+### 4. No statistical significance testing
+
+When comparing numbers across tools, small differences might be noise.
+
+**Impact:** Risk of drawing conclusions from random variation.
+
+**Mitigation:** Report sample size alongside every number. With 200+ predictions, differences >0.03 Brier are likely real. Below that, treat with caution.
+
+**When it's fixed:** Add `compare.py` with paired bootstrap testing.
+
 ---
 
-## Build Order
+## What Comes Next (After MVP)
 
-1. `fetch_production.py` — the data foundation, everything depends on this
-2. `scorer.py` — produces the numbers
-3. `analyze.py` — makes numbers human-readable, highlights issues
-4. GitHub Actions workflow — automates steps 1-3 daily
-5. `runner.py` — replay for testing fixes (can come a few days later)
+Once the production replay pipeline is running and producing daily reports, the next steps are:
 
----
+1. **Cached replay for testing fixes** — replay production questions with a different tool/prompt/model config using cached web content, compare Brier against baseline. Requires resolving the content storage approach (push scraped content to IPFS at prediction time, reference by CID at replay time).
 
-## What's NOT in MVP (Proposal Parts Deferred)
+2. **Tournament** — forward-looking predictions on open markets. No content storage problem (tools hit live web, markets haven't resolved yet). Gives temporally clean out-of-sample evaluation.
 
-| Proposal Part | What | Why deferred |
-|--------------|------|-------------|
-| Part 2: Tournament | Forward-looking predictions on open markets | Requires waiting for resolution. Add in week 2. |
-| Part 5: Statistical testing | Bootstrap significance tests | Manual number comparison is fine for MVP |
-| Part 7: Automated search | Parameter sweeps, prompt evolution | Needs replay working first |
-| Part 8: Ablation testing | Component-by-component testing | Needs search working first |
-| Part 9: Human review tool | Structured review sets with cause taxonomy | `analyze.py` report covers 80% of this |
-| Part 10: Promotion pipeline | Canary deployment, rollback gates | Way downstream |
-| Part 12: IPFS accuracy publication | Publish accuracy hashes for traders | After pipeline is proven |
+3. **AI-assisted improvement loops** — feed the analyze.py report into automated search (parameter sweeps, prompt evolution). The report highlights where tools are weakest, the search loop tries to fix those weaknesses.
+
+4. **Edge-over-market** — once the trader sends `market_prob` in requests, add edge calculation to the scorer. This is the most important metric for trading value.
+
+5. **Promotion pipeline** — canary deployment, rollback gates, production monitoring. Requires all of the above working first.

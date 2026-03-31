@@ -1,0 +1,1470 @@
+{
+  "generated_at": "2026-03-31T19:07:46Z",
+  "total_rows": 22755,
+  "valid_rows": 22456,
+  "overall": {
+    "brier": 0.2406,
+    "accuracy": 0.6882,
+    "sharpness": 0.3659,
+    "reliability": 0.9869,
+    "n": 22755,
+    "valid_n": 22456,
+    "decision_worthy": true
+  },
+  "by_tool": {
+    "prediction-request-reasoning-claude": {
+      "brier": 0.2,
+      "accuracy": 0.7017,
+      "sharpness": 0.3044,
+      "reliability": 0.9917,
+      "n": 960,
+      "valid_n": 952,
+      "decision_worthy": true
+    },
+    "superforcaster": {
+      "brier": 0.2265,
+      "accuracy": 0.7325,
+      "sharpness": 0.4138,
+      "reliability": 0.974,
+      "n": 10113,
+      "valid_n": 9850,
+      "decision_worthy": true
+    },
+    "prediction-request-reasoning": {
+      "brier": 0.258,
+      "accuracy": 0.6608,
+      "sharpness": 0.3764,
+      "reliability": 0.9993,
+      "n": 6685,
+      "valid_n": 6680,
+      "decision_worthy": true
+    },
+    "claude-prediction-offline": {
+      "brier": 0.2432,
+      "accuracy": 0.6265,
+      "sharpness": 0.2795,
+      "reliability": 1.0,
+      "n": 980,
+      "valid_n": 980,
+      "decision_worthy": true
+    },
+    "prediction-offline": {
+      "brier": 0.2049,
+      "accuracy": 0.7006,
+      "sharpness": 0.2511,
+      "reliability": 1.0,
+      "n": 2094,
+      "valid_n": 2094,
+      "decision_worthy": true
+    },
+    "prediction-request-rag": {
+      "brier": 0.3181,
+      "accuracy": 0.5631,
+      "sharpness": 0.3045,
+      "reliability": 1.0,
+      "n": 888,
+      "valid_n": 888,
+      "decision_worthy": true
+    },
+    "prediction-online": {
+      "brier": 0.3096,
+      "accuracy": 0.5637,
+      "sharpness": 0.2663,
+      "reliability": 1.0,
+      "n": 926,
+      "valid_n": 926,
+      "decision_worthy": true
+    },
+    "prediction-request-rag-claude": {
+      "brier": 0.2397,
+      "accuracy": 0.6429,
+      "sharpness": 0.2512,
+      "reliability": 1.0,
+      "n": 28,
+      "valid_n": 28,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning-claude": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 8,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 6,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning-5.2.mini": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 7,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "claude-prediction-online": {
+      "brier": 0.2301,
+      "accuracy": 0.6757,
+      "sharpness": 0.235,
+      "reliability": 1.0,
+      "n": 37,
+      "valid_n": 37,
+      "decision_worthy": true
+    },
+    "prediction-online-sme": {
+      "brier": 0.2745,
+      "accuracy": 0.5238,
+      "sharpness": 0.2095,
+      "reliability": 0.913,
+      "n": 23,
+      "valid_n": 21,
+      "decision_worthy": false
+    }
+  },
+  "by_platform": {
+    "omen": {
+      "brier": 0.2398,
+      "accuracy": 0.6903,
+      "sharpness": 0.3708,
+      "reliability": 0.9884,
+      "n": 20996,
+      "valid_n": 20752,
+      "decision_worthy": true
+    },
+    "polymarket": {
+      "brier": 0.2502,
+      "accuracy": 0.6626,
+      "sharpness": 0.307,
+      "reliability": 0.9687,
+      "n": 1759,
+      "valid_n": 1704,
+      "decision_worthy": true
+    }
+  },
+  "by_category": {
+    "social": {
+      "brier": 0.0367,
+      "accuracy": 0.9648,
+      "sharpness": 0.4064,
+      "reliability": 0.9845,
+      "n": 837,
+      "valid_n": 824,
+      "decision_worthy": true
+    },
+    "health": {
+      "brier": 0.1406,
+      "accuracy": 0.8125,
+      "sharpness": 0.3932,
+      "reliability": 0.9897,
+      "n": 97,
+      "valid_n": 96,
+      "decision_worthy": true
+    },
+    "tech": {
+      "brier": 0.2585,
+      "accuracy": 0.6921,
+      "sharpness": 0.3353,
+      "reliability": 0.9797,
+      "n": 2171,
+      "valid_n": 2127,
+      "decision_worthy": true
+    },
+    "business": {
+      "brier": 0.275,
+      "accuracy": 0.6243,
+      "sharpness": 0.3648,
+      "reliability": 0.9908,
+      "n": 7584,
+      "valid_n": 7514,
+      "decision_worthy": true
+    },
+    "politics": {
+      "brier": 0.1807,
+      "accuracy": 0.7437,
+      "sharpness": 0.3583,
+      "reliability": 0.9887,
+      "n": 3110,
+      "valid_n": 3075,
+      "decision_worthy": true
+    },
+    "science": {
+      "brier": 0.2378,
+      "accuracy": 0.7023,
+      "sharpness": 0.3668,
+      "reliability": 0.9925,
+      "n": 1469,
+      "valid_n": 1458,
+      "decision_worthy": true
+    },
+    "other": {
+      "brier": 0.2838,
+      "accuracy": 0.6591,
+      "sharpness": 0.3908,
+      "reliability": 0.9875,
+      "n": 4405,
+      "valid_n": 4350,
+      "decision_worthy": true
+    },
+    "finance": {
+      "brier": 0.1167,
+      "accuracy": 0.8505,
+      "sharpness": 0.3601,
+      "reliability": 0.9669,
+      "n": 906,
+      "valid_n": 876,
+      "decision_worthy": true
+    },
+    "internet": {
+      "brier": 0.8106,
+      "accuracy": 0.1556,
+      "sharpness": 0.4418,
+      "reliability": 0.989,
+      "n": 91,
+      "valid_n": 90,
+      "decision_worthy": true
+    },
+    "international": {
+      "brier": 0.0603,
+      "accuracy": 0.941,
+      "sharpness": 0.3744,
+      "reliability": 1.0,
+      "n": 271,
+      "valid_n": 271,
+      "decision_worthy": true
+    },
+    "sustainability": {
+      "brier": 0.1512,
+      "accuracy": 0.7566,
+      "sharpness": 0.3008,
+      "reliability": 0.9863,
+      "n": 729,
+      "valid_n": 719,
+      "decision_worthy": true
+    },
+    "food": {
+      "brier": 0.0443,
+      "accuracy": 0.9832,
+      "sharpness": 0.337,
+      "reliability": 0.9781,
+      "n": 183,
+      "valid_n": 179,
+      "decision_worthy": true
+    },
+    "entertainment": {
+      "brier": 0.1913,
+      "accuracy": 0.7619,
+      "sharpness": 0.2955,
+      "reliability": 0.9545,
+      "n": 88,
+      "valid_n": 84,
+      "decision_worthy": true
+    },
+    "music": {
+      "brier": 0.8199,
+      "accuracy": 0.0863,
+      "sharpness": 0.4384,
+      "reliability": 0.9929,
+      "n": 140,
+      "valid_n": 139,
+      "decision_worthy": true
+    },
+    "weather": {
+      "brier": 0.3059,
+      "accuracy": 0.5988,
+      "sharpness": 0.3387,
+      "reliability": 0.9675,
+      "n": 523,
+      "valid_n": 506,
+      "decision_worthy": true
+    },
+    "economics": {
+      "brier": 0.1016,
+      "accuracy": 0.8333,
+      "sharpness": 0.4435,
+      "reliability": 0.9836,
+      "n": 122,
+      "valid_n": 120,
+      "decision_worthy": true
+    },
+    "pets": {
+      "brier": 0.0071,
+      "accuracy": 1.0,
+      "sharpness": 0.4463,
+      "reliability": 0.95,
+      "n": 20,
+      "valid_n": 19,
+      "decision_worthy": false
+    },
+    "crypto": {
+      "brier": 0.1653,
+      "accuracy": 0.8889,
+      "sharpness": 0.1733,
+      "reliability": 1.0,
+      "n": 9,
+      "valid_n": 9,
+      "decision_worthy": false
+    }
+  },
+  "by_horizon": {
+    "short_lt_7d": {
+      "brier": 0.2406,
+      "accuracy": 0.6882,
+      "sharpness": 0.3659,
+      "reliability": 0.9869,
+      "n": 22755,
+      "valid_n": 22456,
+      "decision_worthy": true
+    }
+  },
+  "by_tool_platform": {
+    "prediction-request-reasoning-claude | omen": {
+      "brier": 0.1974,
+      "accuracy": 0.707,
+      "sharpness": 0.3094,
+      "reliability": 0.9912,
+      "n": 909,
+      "valid_n": 901,
+      "decision_worthy": true
+    },
+    "superforcaster | omen": {
+      "brier": 0.2217,
+      "accuracy": 0.743,
+      "sharpness": 0.4271,
+      "reliability": 0.9762,
+      "n": 8834,
+      "valid_n": 8624,
+      "decision_worthy": true
+    },
+    "prediction-request-reasoning | omen": {
+      "brier": 0.2595,
+      "accuracy": 0.6593,
+      "sharpness": 0.3795,
+      "reliability": 0.9992,
+      "n": 6482,
+      "valid_n": 6477,
+      "decision_worthy": true
+    },
+    "claude-prediction-offline | omen": {
+      "brier": 0.247,
+      "accuracy": 0.6234,
+      "sharpness": 0.2793,
+      "reliability": 1.0,
+      "n": 932,
+      "valid_n": 932,
+      "decision_worthy": true
+    },
+    "prediction-offline | omen": {
+      "brier": 0.2037,
+      "accuracy": 0.7014,
+      "sharpness": 0.2492,
+      "reliability": 1.0,
+      "n": 2066,
+      "valid_n": 2066,
+      "decision_worthy": true
+    },
+    "prediction-request-rag | omen": {
+      "brier": 0.3229,
+      "accuracy": 0.5593,
+      "sharpness": 0.308,
+      "reliability": 1.0,
+      "n": 851,
+      "valid_n": 851,
+      "decision_worthy": true
+    },
+    "prediction-online | omen": {
+      "brier": 0.3112,
+      "accuracy": 0.56,
+      "sharpness": 0.2626,
+      "reliability": 1.0,
+      "n": 900,
+      "valid_n": 900,
+      "decision_worthy": true
+    },
+    "prediction-request-rag-claude | omen": {
+      "brier": 0.5625,
+      "accuracy": 0.0,
+      "sharpness": 0.25,
+      "reliability": 1.0,
+      "n": 1,
+      "valid_n": 1,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning-claude | omen": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 8,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning | omen": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 6,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "prediction_request_reasoning-5.2.mini | omen": {
+      "brier": null,
+      "accuracy": null,
+      "sharpness": null,
+      "reliability": 0.0,
+      "n": 7,
+      "valid_n": 0,
+      "decision_worthy": false
+    },
+    "superforcaster | polymarket": {
+      "brier": 0.2608,
+      "accuracy": 0.6582,
+      "sharpness": 0.32,
+      "reliability": 0.9586,
+      "n": 1279,
+      "valid_n": 1226,
+      "decision_worthy": true
+    },
+    "prediction-offline | polymarket": {
+      "brier": 0.2914,
+      "accuracy": 0.6429,
+      "sharpness": 0.3939,
+      "reliability": 1.0,
+      "n": 28,
+      "valid_n": 28,
+      "decision_worthy": false
+    },
+    "prediction-online | polymarket": {
+      "brier": 0.2526,
+      "accuracy": 0.6923,
+      "sharpness": 0.3962,
+      "reliability": 1.0,
+      "n": 26,
+      "valid_n": 26,
+      "decision_worthy": false
+    },
+    "prediction-request-reasoning | polymarket": {
+      "brier": 0.2116,
+      "accuracy": 0.7094,
+      "sharpness": 0.2799,
+      "reliability": 1.0,
+      "n": 203,
+      "valid_n": 203,
+      "decision_worthy": true
+    },
+    "claude-prediction-offline | polymarket": {
+      "brier": 0.1688,
+      "accuracy": 0.6875,
+      "sharpness": 0.2835,
+      "reliability": 1.0,
+      "n": 48,
+      "valid_n": 48,
+      "decision_worthy": true
+    },
+    "prediction-request-rag | polymarket": {
+      "brier": 0.2074,
+      "accuracy": 0.6486,
+      "sharpness": 0.2239,
+      "reliability": 1.0,
+      "n": 37,
+      "valid_n": 37,
+      "decision_worthy": true
+    },
+    "claude-prediction-online | polymarket": {
+      "brier": 0.2301,
+      "accuracy": 0.6757,
+      "sharpness": 0.235,
+      "reliability": 1.0,
+      "n": 37,
+      "valid_n": 37,
+      "decision_worthy": true
+    },
+    "prediction-request-reasoning-claude | polymarket": {
+      "brier": 0.2477,
+      "accuracy": 0.6078,
+      "sharpness": 0.2151,
+      "reliability": 1.0,
+      "n": 51,
+      "valid_n": 51,
+      "decision_worthy": true
+    },
+    "prediction-request-rag-claude | polymarket": {
+      "brier": 0.2277,
+      "accuracy": 0.6667,
+      "sharpness": 0.2513,
+      "reliability": 1.0,
+      "n": 27,
+      "valid_n": 27,
+      "decision_worthy": false
+    },
+    "prediction-online-sme | polymarket": {
+      "brier": 0.2745,
+      "accuracy": 0.5238,
+      "sharpness": 0.2095,
+      "reliability": 0.913,
+      "n": 23,
+      "valid_n": 21,
+      "decision_worthy": false
+    }
+  },
+  "by_tool_platform_horizon": {
+    "prediction-request-reasoning-claude | omen": {
+      "short_lt_7d": {
+        "brier": 0.1974,
+        "accuracy": 0.707,
+        "sharpness": 0.3094,
+        "reliability": 0.9912,
+        "n": 909,
+        "valid_n": 901,
+        "decision_worthy": true
+      }
+    },
+    "superforcaster | omen": {
+      "short_lt_7d": {
+        "brier": 0.2217,
+        "accuracy": 0.743,
+        "sharpness": 0.4271,
+        "reliability": 0.9762,
+        "n": 8834,
+        "valid_n": 8624,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-reasoning | omen": {
+      "short_lt_7d": {
+        "brier": 0.2595,
+        "accuracy": 0.6593,
+        "sharpness": 0.3795,
+        "reliability": 0.9992,
+        "n": 6482,
+        "valid_n": 6477,
+        "decision_worthy": true
+      }
+    },
+    "claude-prediction-offline | omen": {
+      "short_lt_7d": {
+        "brier": 0.247,
+        "accuracy": 0.6234,
+        "sharpness": 0.2793,
+        "reliability": 1.0,
+        "n": 932,
+        "valid_n": 932,
+        "decision_worthy": true
+      }
+    },
+    "prediction-offline | omen": {
+      "short_lt_7d": {
+        "brier": 0.2037,
+        "accuracy": 0.7014,
+        "sharpness": 0.2492,
+        "reliability": 1.0,
+        "n": 2066,
+        "valid_n": 2066,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-rag | omen": {
+      "short_lt_7d": {
+        "brier": 0.3229,
+        "accuracy": 0.5593,
+        "sharpness": 0.308,
+        "reliability": 1.0,
+        "n": 851,
+        "valid_n": 851,
+        "decision_worthy": true
+      }
+    },
+    "prediction-online | omen": {
+      "short_lt_7d": {
+        "brier": 0.3112,
+        "accuracy": 0.56,
+        "sharpness": 0.2626,
+        "reliability": 1.0,
+        "n": 900,
+        "valid_n": 900,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-rag-claude | omen": {
+      "short_lt_7d": {
+        "brier": 0.5625,
+        "accuracy": 0.0,
+        "sharpness": 0.25,
+        "reliability": 1.0,
+        "n": 1,
+        "valid_n": 1,
+        "decision_worthy": false
+      }
+    },
+    "prediction_request_reasoning-claude | omen": {
+      "short_lt_7d": {
+        "brier": null,
+        "accuracy": null,
+        "sharpness": null,
+        "reliability": 0.0,
+        "n": 8,
+        "valid_n": 0,
+        "decision_worthy": false
+      }
+    },
+    "prediction_request_reasoning | omen": {
+      "short_lt_7d": {
+        "brier": null,
+        "accuracy": null,
+        "sharpness": null,
+        "reliability": 0.0,
+        "n": 6,
+        "valid_n": 0,
+        "decision_worthy": false
+      }
+    },
+    "prediction_request_reasoning-5.2.mini | omen": {
+      "short_lt_7d": {
+        "brier": null,
+        "accuracy": null,
+        "sharpness": null,
+        "reliability": 0.0,
+        "n": 7,
+        "valid_n": 0,
+        "decision_worthy": false
+      }
+    },
+    "superforcaster | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2608,
+        "accuracy": 0.6582,
+        "sharpness": 0.32,
+        "reliability": 0.9586,
+        "n": 1279,
+        "valid_n": 1226,
+        "decision_worthy": true
+      }
+    },
+    "prediction-offline | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2914,
+        "accuracy": 0.6429,
+        "sharpness": 0.3939,
+        "reliability": 1.0,
+        "n": 28,
+        "valid_n": 28,
+        "decision_worthy": false
+      }
+    },
+    "prediction-online | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2526,
+        "accuracy": 0.6923,
+        "sharpness": 0.3962,
+        "reliability": 1.0,
+        "n": 26,
+        "valid_n": 26,
+        "decision_worthy": false
+      }
+    },
+    "prediction-request-reasoning | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2116,
+        "accuracy": 0.7094,
+        "sharpness": 0.2799,
+        "reliability": 1.0,
+        "n": 203,
+        "valid_n": 203,
+        "decision_worthy": true
+      }
+    },
+    "claude-prediction-offline | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.1688,
+        "accuracy": 0.6875,
+        "sharpness": 0.2835,
+        "reliability": 1.0,
+        "n": 48,
+        "valid_n": 48,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-rag | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2074,
+        "accuracy": 0.6486,
+        "sharpness": 0.2239,
+        "reliability": 1.0,
+        "n": 37,
+        "valid_n": 37,
+        "decision_worthy": true
+      }
+    },
+    "claude-prediction-online | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2301,
+        "accuracy": 0.6757,
+        "sharpness": 0.235,
+        "reliability": 1.0,
+        "n": 37,
+        "valid_n": 37,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-reasoning-claude | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2477,
+        "accuracy": 0.6078,
+        "sharpness": 0.2151,
+        "reliability": 1.0,
+        "n": 51,
+        "valid_n": 51,
+        "decision_worthy": true
+      }
+    },
+    "prediction-request-rag-claude | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2277,
+        "accuracy": 0.6667,
+        "sharpness": 0.2513,
+        "reliability": 1.0,
+        "n": 27,
+        "valid_n": 27,
+        "decision_worthy": false
+      }
+    },
+    "prediction-online-sme | polymarket": {
+      "short_lt_7d": {
+        "brier": 0.2745,
+        "accuracy": 0.5238,
+        "sharpness": 0.2095,
+        "reliability": 0.913,
+        "n": 23,
+        "valid_n": 21,
+        "decision_worthy": false
+      }
+    }
+  },
+  "trend": [
+    {
+      "brier": 0.2406,
+      "accuracy": 0.6882,
+      "sharpness": 0.3659,
+      "reliability": 0.9869,
+      "n": 22755,
+      "valid_n": 22456,
+      "decision_worthy": true,
+      "month": "2026-03"
+    }
+  ],
+  "calibration": [
+    {
+      "bin": "0.0-0.1",
+      "avg_predicted": 0.0403,
+      "realized_rate": 0.0449,
+      "n": 7042,
+      "gap": -0.0046
+    },
+    {
+      "bin": "0.1-0.2",
+      "avg_predicted": 0.1381,
+      "realized_rate": 0.1025,
+      "n": 4860,
+      "gap": 0.0356
+    },
+    {
+      "bin": "0.2-0.3",
+      "avg_predicted": 0.2511,
+      "realized_rate": 0.1209,
+      "n": 1480,
+      "gap": 0.1301
+    },
+    {
+      "bin": "0.3-0.4",
+      "avg_predicted": 0.3443,
+      "realized_rate": 0.1184,
+      "n": 1419,
+      "gap": 0.2259
+    },
+    {
+      "bin": "0.4-0.5",
+      "avg_predicted": 0.4231,
+      "realized_rate": 0.2,
+      "n": 115,
+      "gap": 0.2231
+    },
+    {
+      "bin": "0.5-0.6",
+      "avg_predicted": 0.5455,
+      "realized_rate": 0.1034,
+      "n": 145,
+      "gap": 0.4421
+    },
+    {
+      "bin": "0.6-0.7",
+      "avg_predicted": 0.6532,
+      "realized_rate": 0.1486,
+      "n": 1252,
+      "gap": 0.5046
+    },
+    {
+      "bin": "0.7-0.8",
+      "avg_predicted": 0.7436,
+      "realized_rate": 0.1514,
+      "n": 1149,
+      "gap": 0.5921
+    },
+    {
+      "bin": "0.8-0.9",
+      "avg_predicted": 0.8369,
+      "realized_rate": 0.2018,
+      "n": 1303,
+      "gap": 0.6351
+    },
+    {
+      "bin": "0.9-1.0",
+      "avg_predicted": 0.9621,
+      "realized_rate": 0.2937,
+      "n": 3691,
+      "gap": 0.6684
+    }
+  ],
+  "calibration_by_tool": {
+    "prediction-request-reasoning-claude": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0437,
+        "realized_rate": 0.0706,
+        "n": 255,
+        "gap": -0.0269
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1498,
+        "realized_rate": 0.1593,
+        "n": 182,
+        "gap": -0.0096
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2494,
+        "realized_rate": 0.1159,
+        "n": 138,
+        "gap": 0.1334
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3465,
+        "realized_rate": 0.157,
+        "n": 121,
+        "gap": 0.1895
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4275,
+        "realized_rate": 0.25,
+        "n": 8,
+        "gap": 0.1775
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.5278,
+        "realized_rate": 0.3889,
+        "n": 18,
+        "gap": 0.1389
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6499,
+        "realized_rate": 0.0741,
+        "n": 81,
+        "gap": 0.5758
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.7427,
+        "realized_rate": 0.1863,
+        "n": 102,
+        "gap": 0.5565
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.8448,
+        "realized_rate": 0.4815,
+        "n": 27,
+        "gap": 0.3633
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.961,
+        "realized_rate": 0.15,
+        "n": 20,
+        "gap": 0.811
+      }
+    ],
+    "superforcaster": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0437,
+        "realized_rate": 0.0347,
+        "n": 4292,
+        "gap": 0.009
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1335,
+        "realized_rate": 0.1055,
+        "n": 2132,
+        "gap": 0.0279
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2368,
+        "realized_rate": 0.1243,
+        "n": 169,
+        "gap": 0.1126
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3508,
+        "realized_rate": 0.2941,
+        "n": 187,
+        "gap": 0.0567
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.429,
+        "realized_rate": 0.4,
+        "n": 20,
+        "gap": 0.029
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.5575,
+        "realized_rate": 0.0,
+        "n": 4,
+        "gap": 0.5575
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6724,
+        "realized_rate": 0.15,
+        "n": 140,
+        "gap": 0.5224
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.7553,
+        "realized_rate": 0.3148,
+        "n": 108,
+        "gap": 0.4405
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.8273,
+        "realized_rate": 0.1992,
+        "n": 492,
+        "gap": 0.6281
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.9551,
+        "realized_rate": 0.3122,
+        "n": 2306,
+        "gap": 0.6428
+      }
+    ],
+    "prediction-request-reasoning": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0305,
+        "realized_rate": 0.0432,
+        "n": 2197,
+        "gap": -0.0127
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.128,
+        "realized_rate": 0.1061,
+        "n": 1319,
+        "gap": 0.0218
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2383,
+        "realized_rate": 0.1235,
+        "n": 332,
+        "gap": 0.1148
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3341,
+        "realized_rate": 0.1842,
+        "n": 380,
+        "gap": 0.1499
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4311,
+        "realized_rate": 0.175,
+        "n": 40,
+        "gap": 0.2561
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.5494,
+        "realized_rate": 0.0816,
+        "n": 49,
+        "gap": 0.4678
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6569,
+        "realized_rate": 0.1285,
+        "n": 319,
+        "gap": 0.5283
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.7388,
+        "realized_rate": 0.1275,
+        "n": 557,
+        "gap": 0.6113
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.8378,
+        "realized_rate": 0.2629,
+        "n": 388,
+        "gap": 0.5749
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.9762,
+        "realized_rate": 0.2548,
+        "n": 1099,
+        "gap": 0.7214
+      }
+    ],
+    "claude-prediction-offline": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.05,
+        "realized_rate": 0.0938,
+        "n": 32,
+        "gap": -0.0437
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.15,
+        "realized_rate": 0.1476,
+        "n": 359,
+        "gap": 0.0024
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.25,
+        "realized_rate": 0.228,
+        "n": 250,
+        "gap": 0.022
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.35,
+        "realized_rate": 0.1333,
+        "n": 90,
+        "gap": 0.2167
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.45,
+        "realized_rate": 1.0,
+        "n": 1,
+        "gap": -0.55
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.52,
+        "realized_rate": 0.0,
+        "n": 3,
+        "gap": 0.52
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.65,
+        "realized_rate": 0.0667,
+        "n": 75,
+        "gap": 0.5833
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.75,
+        "realized_rate": 0.0154,
+        "n": 130,
+        "gap": 0.7346
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.85,
+        "realized_rate": 0.025,
+        "n": 40,
+        "gap": 0.825
+      }
+    ],
+    "prediction-offline": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0626,
+        "realized_rate": 0.2199,
+        "n": 191,
+        "gap": -0.1573
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1607,
+        "realized_rate": 0.0686,
+        "n": 525,
+        "gap": 0.0922
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2677,
+        "realized_rate": 0.0804,
+        "n": 423,
+        "gap": 0.1873
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.345,
+        "realized_rate": 0.0063,
+        "n": 316,
+        "gap": 0.3386
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4021,
+        "realized_rate": 0.0,
+        "n": 29,
+        "gap": 0.4021
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.5494,
+        "realized_rate": 0.0208,
+        "n": 48,
+        "gap": 0.5285
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6431,
+        "realized_rate": 0.2236,
+        "n": 398,
+        "gap": 0.4194
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.747,
+        "realized_rate": 0.0833,
+        "n": 60,
+        "gap": 0.6637
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.85,
+        "realized_rate": 0.0143,
+        "n": 70,
+        "gap": 0.8357
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.9532,
+        "realized_rate": 0.0294,
+        "n": 34,
+        "gap": 0.9238
+      }
+    ],
+    "prediction-request-rag": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0458,
+        "realized_rate": 0.0417,
+        "n": 24,
+        "gap": 0.0042
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1471,
+        "realized_rate": 0.0354,
+        "n": 198,
+        "gap": 0.1118
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2493,
+        "realized_rate": 0.039,
+        "n": 77,
+        "gap": 0.2103
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3419,
+        "realized_rate": 0.0256,
+        "n": 117,
+        "gap": 0.3162
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.436,
+        "realized_rate": 0.2,
+        "n": 5,
+        "gap": 0.236
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.5425,
+        "realized_rate": 0.0,
+        "n": 8,
+        "gap": 0.5425
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6544,
+        "realized_rate": 0.038,
+        "n": 79,
+        "gap": 0.6165
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.7472,
+        "realized_rate": 0.1391,
+        "n": 115,
+        "gap": 0.6081
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.8469,
+        "realized_rate": 0.1949,
+        "n": 118,
+        "gap": 0.6519
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.9737,
+        "realized_rate": 0.3537,
+        "n": 147,
+        "gap": 0.62
+      }
+    ],
+    "prediction-online": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.0636,
+        "realized_rate": 0.14,
+        "n": 50,
+        "gap": -0.0764
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1619,
+        "realized_rate": 0.0083,
+        "n": 120,
+        "gap": 0.1536
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2553,
+        "realized_rate": 0.0395,
+        "n": 76,
+        "gap": 0.2158
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3568,
+        "realized_rate": 0.0109,
+        "n": 184,
+        "gap": 0.346
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4457,
+        "realized_rate": 0.0,
+        "n": 7,
+        "gap": 0.4457
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.55,
+        "realized_rate": 0.0909,
+        "n": 11,
+        "gap": 0.4591
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.6573,
+        "realized_rate": 0.1118,
+        "n": 152,
+        "gap": 0.5455
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.7439,
+        "realized_rate": 0.3649,
+        "n": 74,
+        "gap": 0.3791
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.8462,
+        "realized_rate": 0.1497,
+        "n": 167,
+        "gap": 0.6965
+      },
+      {
+        "bin": "0.9-1.0",
+        "avg_predicted": 0.9538,
+        "realized_rate": 0.3294,
+        "n": 85,
+        "gap": 0.6244
+      }
+    ],
+    "prediction-request-rag-claude": [
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1533,
+        "realized_rate": 0.2222,
+        "n": 9,
+        "gap": -0.0689
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.2459,
+        "realized_rate": 0.3636,
+        "n": 11,
+        "gap": -0.1177
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3567,
+        "realized_rate": 0.0,
+        "n": 3,
+        "gap": 0.3567
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4,
+        "realized_rate": 1.0,
+        "n": 1,
+        "gap": -0.6
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.545,
+        "realized_rate": 1.0,
+        "n": 2,
+        "gap": -0.455
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.75,
+        "realized_rate": 0.0,
+        "n": 2,
+        "gap": 0.75
+      }
+    ],
+    "prediction_request_reasoning-claude": [],
+    "prediction_request_reasoning": [],
+    "prediction_request_reasoning-5.2.mini": [],
+    "claude-prediction-online": [
+      {
+        "bin": "0.0-0.1",
+        "avg_predicted": 0.05,
+        "realized_rate": 1.0,
+        "n": 1,
+        "gap": -0.95
+      },
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.15,
+        "realized_rate": 0.25,
+        "n": 12,
+        "gap": -0.1
+      },
+      {
+        "bin": "0.2-0.3",
+        "avg_predicted": 0.25,
+        "realized_rate": 0.0,
+        "n": 4,
+        "gap": 0.25
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3495,
+        "realized_rate": 0.2,
+        "n": 10,
+        "gap": 0.1495
+      },
+      {
+        "bin": "0.5-0.6",
+        "avg_predicted": 0.52,
+        "realized_rate": 0.0,
+        "n": 2,
+        "gap": 0.52
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.65,
+        "realized_rate": 0.6667,
+        "n": 6,
+        "gap": -0.0167
+      },
+      {
+        "bin": "0.7-0.8",
+        "avg_predicted": 0.75,
+        "realized_rate": 0.0,
+        "n": 1,
+        "gap": 0.75
+      },
+      {
+        "bin": "0.8-0.9",
+        "avg_predicted": 0.85,
+        "realized_rate": 0.0,
+        "n": 1,
+        "gap": 0.85
+      }
+    ],
+    "prediction-online-sme": [
+      {
+        "bin": "0.1-0.2",
+        "avg_predicted": 0.1125,
+        "realized_rate": 0.5,
+        "n": 4,
+        "gap": -0.3875
+      },
+      {
+        "bin": "0.3-0.4",
+        "avg_predicted": 0.3,
+        "realized_rate": 0.2727,
+        "n": 11,
+        "gap": 0.0273
+      },
+      {
+        "bin": "0.4-0.5",
+        "avg_predicted": 0.4,
+        "realized_rate": 0.75,
+        "n": 4,
+        "gap": -0.35
+      },
+      {
+        "bin": "0.6-0.7",
+        "avg_predicted": 0.625,
+        "realized_rate": 0.0,
+        "n": 2,
+        "gap": 0.625
+      }
+    ]
+  }
+}

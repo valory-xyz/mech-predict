@@ -36,7 +36,7 @@ from benchmark.datasets.fetch_production import (
     IPFS_GATEWAY_URL,
     MECH_MARKETPLACE_GNOSIS_URL,
     MECH_MARKETPLACE_POLYGON_URL,
-    _hex_cid_to_base32,
+    _ipfs_hash_to_cid,
     fetch_ipfs_source_content,
 )
 from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, TOOL_REGISTRY, replay
@@ -92,8 +92,8 @@ def _fetch_ipfs_hashes_for_deliver_ids(
             resp.raise_for_status()
             data = resp.json().get("data", {}).get("delivers", [])
             for d in data:
-                mech = d.get("mechDelivery") or {}
-                result[d["id"]] = mech.get("ipfsHash")
+                mp = d.get("marketplaceDelivery") or {}
+                result[d["id"]] = mp.get("ipfsHashBytes")
         except Exception as e:
             log.warning("Failed to fetch IPFS hashes from subgraph: %s", e)
             for did in batch:

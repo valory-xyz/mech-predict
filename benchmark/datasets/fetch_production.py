@@ -257,35 +257,6 @@ DELIVERS_QUERY = """
 }
 """
 
-DELIVERS_WITH_IPFS_QUERY = """
-{
-  delivers(
-    first: %(first)s
-    skip: %(skip)s
-    orderBy: blockTimestamp
-    orderDirection: desc
-    where: { blockTimestamp_gt: %(timestamp_gt)s }
-  ) {
-    id
-    blockTimestamp
-    model
-    toolResponse
-    mechDelivery {
-      ipfsHash
-    }
-    request {
-      id
-      blockTimestamp
-      parsedRequest {
-        questionTitle
-        tool
-        content
-      }
-    }
-  }
-}
-"""
-
 DELIVERS_BY_IDS_QUERY = """
 {
   delivers(
@@ -293,8 +264,8 @@ DELIVERS_BY_IDS_QUERY = """
     where: { id_in: [%(ids)s] }
   ) {
     id
-    mechDelivery {
-      ipfsHash
+    marketplaceDelivery {
+      ipfsHashBytes
     }
   }
 }
@@ -507,18 +478,26 @@ def fetch_deliveries(
 # ---------------------------------------------------------------------------
 
 
-def _hex_cid_to_base32(hex_cid: str) -> str:
-    """Convert a hex-encoded CIDv1 (with 'f' multibase prefix) to base32.
+def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
+    """Convert an IPFS hash from the subgraph to a base32 CIDv1.
 
-    The subgraph stores CIDs as hex strings like:
-      f01701220ab7bf540844e3b91...
-    The IPFS gateway expects base32 CIDv1 like:
-      bafybeiflpp2ubbcohoixmp5f...
+    Handles two formats:
+    - ``0x`` raw sha256 hash (from ``marketplaceDelivery.ipfsHashBytes``):
+      wraps as CIDv1 (version=1, codec=dag-pb, sha256 multihash).
+    - ``f``-prefixed hex CIDv1 (from ``mechDelivery.ipfsHash``):
+      strips multibase prefix and re-encodes.
+
+    The IPFS gateway expects base32 CIDv1 like ``bafybei...``.
     """
-    if hex_cid.startswith("f"):
-        raw = bytes.fromhex(hex_cid[1:])  # strip 'f' multibase prefix
+    if ipfs_hash.startswith("0x"):
+        hash_bytes = bytes.fromhex(ipfs_hash[2:])
+        # CIDv1: version=0x01, codec=0x70 (dag-pb), multihash=0x12 (sha256) + 0x20 (32 bytes) + hash
+        cid_bytes = bytes([0x01, 0x70, 0x12, 0x20]) + hash_bytes
+        return "b" + base64.b32encode(cid_bytes).decode().lower().rstrip("=")
+    if ipfs_hash.startswith("f"):
+        raw = bytes.fromhex(ipfs_hash[1:])
         return "b" + base64.b32encode(raw).decode().lower().rstrip("=")
-    return hex_cid  # return as-is if not hex-encoded
+    return ipfs_hash
 
 
 def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
@@ -531,7 +510,7 @@ def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
     Returns the source_content dict, or None if not available.
     """
     try:
-        cid = _hex_cid_to_base32(ipfs_hash)
+        cid = _ipfs_hash_to_cid(ipfs_hash)
         dir_url = f"{IPFS_GATEWAY_URL}/{cid}/"
 
         # Fetch directory listing to find the file name

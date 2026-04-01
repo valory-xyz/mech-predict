@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import base64
 import re
 import time
 from datetime import datetime, timezone
@@ -73,6 +74,11 @@ MECH_MARKETPLACE_POLYGON_URL = os.environ.get(
     "MECH_MARKETPLACE_POLYGON_URL",
     "https://api.subgraph.autonolas.tech/api/proxy/marketplace-polygon",
 )
+IPFS_GATEWAY_URL = os.environ.get(
+    "IPFS_GATEWAY_URL",
+    "https://gateway.autonolas.tech/ipfs",
+)
+IPFS_FETCH_DELAY = 0.2  # seconds between IPFS gateway requests
 
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
@@ -246,6 +252,49 @@ DELIVERS_QUERY = """
         tool
         content
       }
+    }
+  }
+}
+"""
+
+DELIVERS_WITH_IPFS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    skip: %(skip)s
+    orderBy: blockTimestamp
+    orderDirection: desc
+    where: { blockTimestamp_gt: %(timestamp_gt)s }
+  ) {
+    id
+    blockTimestamp
+    model
+    toolResponse
+    mechDelivery {
+      ipfsHash
+    }
+    request {
+      id
+      blockTimestamp
+      parsedRequest {
+        questionTitle
+        tool
+        content
+      }
+    }
+  }
+}
+"""
+
+DELIVERS_BY_IDS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    where: { id_in: [%(ids)s] }
+  ) {
+    id
+    mechDelivery {
+      ipfsHash
     }
   }
 }
@@ -451,6 +500,73 @@ def fetch_deliveries(
         log.info("  %d/%d deliveries have market_id", has_market_id, len(deliveries))
 
     return deliveries
+
+
+# ---------------------------------------------------------------------------
+# IPFS payload fetch (for source_content extraction)
+# ---------------------------------------------------------------------------
+
+
+def _hex_cid_to_base32(hex_cid: str) -> str:
+    """Convert a hex-encoded CIDv1 (with 'f' multibase prefix) to base32.
+
+    The subgraph stores CIDs as hex strings like:
+      f01701220ab7bf540844e3b91...
+    The IPFS gateway expects base32 CIDv1 like:
+      bafybeiflpp2ubbcohoixmp5f...
+    """
+    if hex_cid.startswith("f"):
+        raw = bytes.fromhex(hex_cid[1:])  # strip 'f' multibase prefix
+        return "b" + base64.b32encode(raw).decode().lower().rstrip("=")
+    return hex_cid  # return as-is if not hex-encoded
+
+
+def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the full IPFS payload and extract source_content from metadata.params.
+
+    The IPFS hash from the subgraph is a hex-encoded CIDv1 pointing to a
+    directory. The directory contains one file named by request ID. We fetch
+    the directory listing, find the file, and extract the payload.
+
+    Returns the source_content dict, or None if not available.
+    """
+    try:
+        cid = _hex_cid_to_base32(ipfs_hash)
+        dir_url = f"{IPFS_GATEWAY_URL}/{cid}/"
+
+        # Fetch directory listing to find the file name
+        resp = requests.get(dir_url, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+
+        # Try parsing as JSON directly (in case gateway returns JSON directory listing)
+        try:
+            dir_data = resp.json()
+            # If the response is already the payload (single-file directory auto-resolved)
+            if isinstance(dir_data, dict) and "metadata" in dir_data:
+                metadata = dir_data.get("metadata") or {}
+                params = metadata.get("params") or {}
+                return params.get("source_content")
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Parse HTML directory listing to find the file link
+        links = re.findall(rf"/ipfs/{re.escape(cid)}/(\d+)", resp.text)
+        if not links:
+            log.debug("No files found in IPFS directory %s", cid)
+            return None
+
+        # Fetch the actual file (first match — there's typically one file per delivery)
+        file_url = f"{IPFS_GATEWAY_URL}/{cid}/{links[0]}"
+        file_resp = requests.get(file_url, timeout=HTTP_TIMEOUT)
+        file_resp.raise_for_status()
+        payload = file_resp.json()
+
+        metadata = payload.get("metadata") or {}
+        params = metadata.get("params") or {}
+        return params.get("source_content")
+    except Exception as e:
+        log.debug("Failed to fetch IPFS %s: %s", ipfs_hash, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -769,8 +885,9 @@ def build_row(
     if request_ts and delivery_ts and delivery_ts > request_ts:
         latency_s = delivery_ts - request_ts
 
-    return {
+    row = {
         "row_id": _make_row_id(platform, delivery["deliver_id"]),
+        "deliver_id": delivery["deliver_id"],
         "schema_version": "1.0",
         "mode": "production_replay",
         "market_id": delivery.get("market_id"),
@@ -796,6 +913,7 @@ def build_row(
         "category": classify_category(question_text),
         "match_confidence": match_confidence,
     }
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1102,12 @@ def main() -> None:
         default=Path(__file__).parent / ".fetch_state.json",
         help="Incremental state file path",
     )
+    parser.add_argument(
+        "--last-n",
+        type=int,
+        default=None,
+        help="Only process the last N rows (most recent first)",
+    )
     args = parser.parse_args()
 
     now = int(time.time())
@@ -1028,6 +1152,11 @@ def main() -> None:
         "polymarket", MECH_MARKETPLACE_POLYGON_URL, poly_markets, poly_delivery_ts, existing_ids, poly_pending,
     )
     all_rows.extend(poly_rows)
+
+    # Apply --last-n truncation (rows are already newest-first from subgraph)
+    if args.last_n is not None and len(all_rows) > args.last_n:
+        log.info("Truncating to last %d rows (from %d)", args.last_n, len(all_rows))
+        all_rows = all_rows[:args.last_n]
 
     # Write results
     if all_rows:

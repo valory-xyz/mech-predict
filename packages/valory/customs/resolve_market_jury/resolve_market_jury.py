@@ -68,6 +68,8 @@ VOTER_TIMEOUT = 120  # seconds per voter API call
 JUDGE_TIMEOUT = 120
 JUDGE_MAX_RETRIES = 3
 JUDGE_RETRY_DELAY = 5  # seconds
+VOTER_MAX_TOKENS = 1024
+JUDGE_MAX_TOKENS = 4096
 
 ALLOWED_TOOLS = [
     "resolve-market-jury-v1",
@@ -266,9 +268,12 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
     is_determinable = data.get("is_determinable")
     confidence = float(data.get("confidence", 0.0))
 
-    # Enforce consistency: null answer means not determinable
+    # Enforce consistency between fields
     if has_occurred is None:
         is_determinable = False
+        confidence = min(confidence, 0.5)
+    if is_determinable is False:
+        has_occurred = None
         confidence = min(confidence, 0.5)
 
     return VoterResult(
@@ -329,6 +334,7 @@ def _adapter_openai(
         search_model = "gpt-4o-search-preview"
         response_cc = client.chat.completions.create(
             model=search_model,
+            max_tokens=VOTER_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
             timeout=VOTER_TIMEOUT,
         )
@@ -354,6 +360,7 @@ def _adapter_openrouter(
     model_online = model if ":online" in model else f"{model}:online"
     response = client.chat.completions.create(
         model=model_online,
+        max_tokens=VOTER_MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
         timeout=VOTER_TIMEOUT,
     )
@@ -449,6 +456,7 @@ def _run_judge(
         try:
             response = client.chat.completions.create(
                 model=judge_model,
+                max_tokens=JUDGE_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
                 timeout=JUDGE_TIMEOUT,
             )
@@ -491,10 +499,11 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     ]
 
 
-def _all_agree(votes: List[VoterResult]) -> bool:
-    """Check if all decided votes unanimously agree on has_occurred."""
+def _has_consensus(votes: List[VoterResult]) -> bool:
+    """Check if a majority of all voters unanimously agree on has_occurred."""
     decided = _decided_votes(votes)
-    if len(decided) < 2:
+    # Need at least a majority of all voters to have decided
+    if len(decided) < 2 or len(decided) <= len(votes) / 2:
         return False
     return all(v.has_occurred == decided[0].has_occurred for v in decided)
 
@@ -510,7 +519,8 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
         "judge_reasoning": "Unanimous voter consensus -- judge skipped.",
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
-        "n_successful": len(decided),
+        "n_successful": len(votes),
+        "n_decided": len(decided),
     }
 
 
@@ -622,7 +632,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     }
 
     # 3. Unanimous early exit (cost saving -- skip judge)
-    if _all_agree(votes):
+    if _has_consensus(votes):
         print("  Unanimous consensus -- skipping judge.")
         result = _build_consensus_result(votes)
         used_params["model"] = voter_models[0]  # judge was not called
@@ -649,6 +659,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "agreement_ratio": _compute_agreement(votes),
         "n_voters": len(selected_voters),
         "n_successful": len(votes),
+        "n_decided": len(_decided_votes(votes)),
     }
 
     return json.dumps(result), judge_reasoning, None, counter_callback, used_params

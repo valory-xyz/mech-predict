@@ -27,11 +27,11 @@ import pytest
 
 from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     VoterResult,
-    _all_agree,
     _build_consensus_result,
     _compute_agreement,
     _decided_votes,
     _extract_json,
+    _has_consensus,
     _parse_vote,
     run,
 )
@@ -150,6 +150,20 @@ class TestParseVote:
         assert result.has_occurred is None
         assert result.confidence == 0.0
 
+    def test_indeterminable_forces_null_answer(self) -> None:
+        """Voter saying is_determinable=false must have has_occurred=None."""
+        raw = json.dumps(
+            {
+                "is_determinable": False,
+                "has_occurred": True,
+                "confidence": 0.9,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.is_determinable is False
+        assert result.has_occurred is None
+        assert result.confidence == 0.5
+
 
 # ---------------------------------------------------------------------------
 # Consensus helpers
@@ -182,7 +196,7 @@ class TestDecidedVotes:
 
 
 class TestAllAgree:
-    """Tests for _all_agree consensus check."""
+    """Tests for _has_consensus consensus check."""
 
     @pytest.mark.parametrize(
         "votes, expected",
@@ -199,18 +213,38 @@ class TestAllAgree:
                 ],
                 True,
             ),
+            (
+                [
+                    _vote(has_occurred=True),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                ],
+                False,
+            ),
+            (
+                [
+                    _vote(has_occurred=True),
+                    _vote(has_occurred=True),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                ],
+                False,
+            ),
         ],
         ids=[
             "unanimous_yes",
             "unanimous_no",
             "disagreement",
             "single",
-            "ignores_indet",
+            "ignores_indet_minority",
+            "minority_decided_rejected",
+            "half_decided_rejected",
         ],
     )
-    def test_all_agree(self, votes: list, expected: bool) -> None:
+    def test_has_consensus(self, votes: list, expected: bool) -> None:
         """Check consensus detection."""
-        assert _all_agree(votes) is expected
+        assert _has_consensus(votes) is expected
 
 
 class TestBuildConsensusResult:

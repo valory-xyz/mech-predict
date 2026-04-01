@@ -99,9 +99,9 @@ Forward-looking predictions on open markets. Less urgent than cached replay but 
 
 | # | What | Owner | Depends on |
 |---|------|-------|-----------|
-| 1 | Fix CI (quota limits, concurrency, multikey) | Jenslee | [CI analysis gist](https://gist.github.com/bennyjo/362e9437cff92dafa1d243c72ecf1557) |
-| 2 | Merge + deploy PR #166 (source content capture) | Jenslee | CI fixed, [IPFS impact](https://github.com/LOCKhart07/random-valory-scripts/blob/main/mech/source_content_impact_report.md) reviewed with Production |
-| 3 | Merge benchmark PRs (#164, #168, #169) + daily reports | Divya Nautiyal | CI fixed |
-| 4 | Build cached replay runner + comparator | TBD | PR #166 deployed, snapshots accumulating |
-| 5 | First parameter sweep (Level 1) on worst tools | TBD | Cached replay working |
-| 6 | Tournament mode | TBD | Cached replay validated |
+| 1 | Merge + deploy PR #166 (source content capture) | Jenslee | [IPFS impact](https://github.com/LOCKhart07/random-valory-scripts/blob/main/mech/source_content_impact_report.md) reviewed with Production |
+| 2 | Merge benchmark PRs (#164, #168, #169) + daily reports | Divya Nautiyal | — |
+| 3 | Build cached replay runner + comparator | TBD | PR #166 deployed, snapshots accumulating |
+| 4 | Tournament mode | TBD | Cached replay validated |
+
+**Alongside steps 3–4:** Fix CI (quota limits, concurrency, multikey) — Jenslee, per [CI analysis gist](https://gist.github.com/bennyjo/362e9437cff92dafa1d243c72ecf1557).

@@ -516,7 +516,7 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
         "is_determinable": True,
         "has_occurred": decided[0].has_occurred,
         "votes": [asdict(v) for v in votes],
-        "judge_reasoning": "Unanimous voter consensus -- judge skipped.",
+        "judge_reasoning": "Voter majority consensus -- judge skipped.",
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
         "n_successful": len(votes),
@@ -621,6 +621,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             "agreement_ratio": 0.0,
             "n_voters": len(selected_voters),
             "n_successful": 0,
+            "n_decided": 0,
         }
         return json.dumps(result), "All voters failed.", None, counter_callback, None
 
@@ -631,9 +632,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "n_voters": len(selected_voters),
     }
 
-    # 3. Unanimous early exit (cost saving -- skip judge)
+    # 3. Majority consensus early exit (cost saving -- skip judge)
     if _has_consensus(votes):
-        print("  Unanimous consensus -- skipping judge.")
+        print("  Voter majority consensus -- skipping judge.")
         result = _build_consensus_result(votes)
         used_params["model"] = voter_models[0]  # judge was not called
         return (

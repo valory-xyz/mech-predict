@@ -68,19 +68,28 @@ Two separate workstreams are blocked by CI test failures (Google API quota limit
 
 ## What Needs to Happen Next
 
-### 1. Fix CI to unblock merges
+### 1. Fix CI to unblock merges (Jenslee)
 
-The pre-existing integration test failures (Google API quota limits) are blocking all benchmark PRs. This needs to be resolved before any of the above can be merged.
+The pre-existing integration test failures (Google API quota limits) are blocking all benchmark PRs. This is part of the broader CI improvement plan:
 
-### 2. Deploy PR #166 to production mechs
+- **CI workflow fixes** from [bennyjo's analysis](https://gist.github.com/bennyjo/362e9437cff92dafa1d243c72ecf1557): add concurrency groups to all repos, remove macOS from `lock_check` `needs:` gate, cut macOS test matrix from 5 to 2 Python versions on PRs. These three changes alone eliminate the 60+ min queue waits seen on March 30.
+- **Multi-key fix** for Google Custom Search API — the shared API key's daily quota is being exhausted by CI run volume. Needs key rotation or separate CI keys.
 
-Once merged, deploy to all mechs. This starts the clock on accumulating contemporaneous content snapshots for cached replay. ~1-2 weeks of predictions needed before we have enough for meaningful replay.
+### 2. Merge + deploy PR #166 to production mechs (Jenslee)
 
-### 3. Build cached replay mode
+Once CI is fixed, merge and deploy to all mechs. This starts the clock on accumulating contemporaneous content snapshots for cached replay. ~1-2 weeks of predictions needed before we have enough for meaningful replay.
+
+**Important:** Sync with Production on IPFS storage impact before deploying. LOCKhart07's [source content impact report](https://github.com/LOCKhart07/random-valory-scripts/blob/main/mech/source_content_impact_report.md) shows enabling `return_source_content=true` would increase daily IPFS storage from ~0.6 MB to ~9.6 GB (~16,000x increase). Most tools add 1.5–3.1 MB per request due to raw HTML; superforcaster is the exception at 3.6 KB (Serper snippets only). Weekly storage would reach ~67 GB, monthly ~288 GB. Need to align on storage strategy (selective enablement, compression, retention policy) before rolling out to all mechs.
+
+### 3. Get automated daily reports in place (Divya Nautiyal)
+
+Merge benchmark reporting PRs (#164, #168, #169) once CI is fixed. These are the fetch → score → analyze pipeline plus the GitHub Actions daily workflow with artifact persistence. All 115 benchmark-specific unit tests pass locally.
+
+### 4. Build cached replay mode
 
 Once PR #166 is deployed and predictions start carrying source content, build the replay runner (Proposal Part 6) and the automated improvement pipeline (Proposal Part 7, Levels 1-4).
 
-### 4. Tournament mode
+### 5. Tournament mode
 
 Forward-looking predictions on open markets. Less urgent than cached replay but the only path for evaluating retrieval improvements and new tools.
 
@@ -88,11 +97,11 @@ Forward-looking predictions on open markets. Less urgent than cached replay but 
 
 ## Suggested Order
 
-| # | What | Depends on |
-|---|------|-----------|
-| 1 | Fix CI (quota limits) to unblock PR merges | Team / infra |
-| 2 | Merge + deploy PR #166 (source content capture) | CI fixed |
-| 3 | Merge benchmark reporting PRs (#164, #168, #169) | CI fixed |
-| 4 | Build cached replay runner + comparator | PR #166 deployed, snapshots accumulating |
-| 5 | First parameter sweep (Level 1) on worst tools | Cached replay working |
-| 6 | Tournament mode | Cached replay validated |
+| # | What | Owner | Depends on |
+|---|------|-------|-----------|
+| 1 | Fix CI (quota limits, concurrency, multikey) | Jenslee | [CI analysis gist](https://gist.github.com/bennyjo/362e9437cff92dafa1d243c72ecf1557) |
+| 2 | Merge + deploy PR #166 (source content capture) | Jenslee | CI fixed, [IPFS impact](https://github.com/LOCKhart07/random-valory-scripts/blob/main/mech/source_content_impact_report.md) reviewed with Production |
+| 3 | Merge benchmark PRs (#164, #168, #169) + daily reports | Divya Nautiyal | CI fixed |
+| 4 | Build cached replay runner + comparator | TBD | PR #166 deployed, snapshots accumulating |
+| 5 | First parameter sweep (Level 1) on worst tools | TBD | Cached replay working |
+| 6 | Tournament mode | TBD | Cached replay validated |

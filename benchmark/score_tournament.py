@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -209,7 +210,9 @@ def check_polymarket_resolutions(
             log.warning("Polymarket fetch failed for %s: %s", cid, exc)
             continue
 
-        # Check if resolved: outcomePrices has a 1.0 value
+        # Check explicit resolved flag first, fall back to price proxy
+        is_resolved = m.get("resolved", False)
+
         prices_raw = m.get("outcomePrices", "[]")
         try:
             prices = (
@@ -217,10 +220,10 @@ def check_polymarket_resolutions(
             )
             prices = [float(p) for p in prices]
         except (json.JSONDecodeError, TypeError, ValueError):
-            continue
+            prices = []
 
-        # A market is resolved when one price hits 1.0 (or very close)
-        if not any(p >= 0.99 for p in prices):
+        # Resolved if API says so OR price hit 1.0 (proxy)
+        if not is_resolved and not any(p >= 0.99 for p in prices):
             continue
 
         outcomes_raw = m.get("outcomes", "[]")
@@ -431,7 +434,16 @@ def _update_predictions_file(
                 updates += 1
             updated_lines.append(json.dumps(row, ensure_ascii=False))
 
-    path.write_text("\n".join(updated_lines) + "\n")
+    # Atomic write: temp file + os.replace to avoid corruption on crash
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp:
+            tmp.write("\n".join(updated_lines) + "\n")
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
     log.info("Updated %d rows in %s", updates, path)
 
 

@@ -26,10 +26,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from benchmark.tournament import (
+    TOOL_REGISTRY,
     _make_row_id,
     build_output_row,
     load_existing_row_ids,
     load_markets,
+    run_single,
 )
 
 
@@ -82,17 +84,28 @@ def _run_result(
 
 class TestMakeRowId:
     def test_deterministic(self) -> None:
-        id1 = _make_row_id("tool-a", "question", "model-1")
-        id2 = _make_row_id("tool-a", "question", "model-1")
+        id1 = _make_row_id("tool-a", "market_1", "omen", "model-1")
+        id2 = _make_row_id("tool-a", "market_1", "omen", "model-1")
         assert id1 == id2
 
     def test_different_tools(self) -> None:
-        id1 = _make_row_id("tool-a", "question", "model-1")
-        id2 = _make_row_id("tool-b", "question", "model-1")
+        id1 = _make_row_id("tool-a", "market_1", "omen", "model-1")
+        id2 = _make_row_id("tool-b", "market_1", "omen", "model-1")
+        assert id1 != id2
+
+    def test_different_markets_same_question(self) -> None:
+        """Two markets with same question but different IDs get different row IDs."""
+        id1 = _make_row_id("tool-a", "omen_0x1", "omen", "model-1")
+        id2 = _make_row_id("tool-a", "poly_abc", "polymarket", "model-1")
+        assert id1 != id2
+
+    def test_different_platforms_same_market_id(self) -> None:
+        id1 = _make_row_id("tool-a", "0xabc", "omen", "model-1")
+        id2 = _make_row_id("tool-a", "0xabc", "polymarket", "model-1")
         assert id1 != id2
 
     def test_prefix(self) -> None:
-        row_id = _make_row_id("prediction-online", "q", "m")
+        row_id = _make_row_id("prediction-online", "m1", "omen", "m")
         assert row_id.startswith("tourn_prediction-online_")
 
 
@@ -175,3 +188,154 @@ class TestJsonlIO:
     def test_load_existing_empty(self, tmp_path: Path) -> None:
         f = tmp_path / "predictions.jsonl"
         assert load_existing_row_ids(f) == set()
+
+
+# ---------------------------------------------------------------------------
+# run_single (mocked — no API keys)
+# ---------------------------------------------------------------------------
+
+
+class TestRunSingle:
+    """Tests for run_single with mocked tool execution."""
+
+    @patch("benchmark.tournament.load_tool_run")
+    def test_valid_result(self, mock_load: MagicMock) -> None:
+        mock_fn = MagicMock(
+            return_value=(
+                '{"p_yes": 0.7, "p_no": 0.3, "confidence": 0.8}',
+                None,
+                None,
+                {"source_content": {"pages": {"http://x.com": "<html>"}}},
+            )
+        )
+        mock_load.return_value = mock_fn
+
+        from packages.valory.skills.task_execution.utils.apis import KeyChain
+
+        keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+
+        assert result["prediction_parse_status"] == "valid"
+        assert result["p_yes"] == 0.7
+        assert result["source_content"] == {"pages": {"http://x.com": "<html>"}}
+        assert result["error"] is None
+
+    @patch("benchmark.tournament.load_tool_run")
+    def test_tool_exception(self, mock_load: MagicMock) -> None:
+        mock_fn = MagicMock(side_effect=RuntimeError("API down"))
+        mock_load.return_value = mock_fn
+
+        from packages.valory.skills.task_execution.utils.apis import KeyChain
+
+        keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+
+        assert result["prediction_parse_status"] == "error"
+        assert result["p_yes"] is None
+        assert "API down" in result["error"]
+        assert result["source_content"] is None
+
+    @patch("benchmark.tournament.load_tool_run")
+    def test_malformed_response(self, mock_load: MagicMock) -> None:
+        mock_fn = MagicMock(return_value=("not json", None, None, {}))
+        mock_load.return_value = mock_fn
+
+        from packages.valory.skills.task_execution.utils.apis import KeyChain
+
+        keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+
+        assert result["prediction_parse_status"] != "valid"
+
+
+# ---------------------------------------------------------------------------
+# run_tournament integration (mocked tools, no API keys)
+# ---------------------------------------------------------------------------
+
+
+class TestRunTournament:
+    """Integration test for the main tournament loop."""
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_writes_predictions(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        from benchmark.tournament import run_tournament
+
+        mock_keys.return_value = MagicMock()
+        mock_run.return_value = _run_result()
+
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(
+            json.dumps(_market("omen_0x1", "Will A?")) + "\n"
+            + json.dumps(_market("omen_0x2", "Will B?")) + "\n"
+        )
+
+        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+
+        lines = output_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+        row = json.loads(lines[0])
+        assert row["mode"] == "tournament"
+        assert row["final_outcome"] is None
+        assert row["p_yes"] == 0.72
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_skips_valid_dedup(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        from benchmark.tournament import run_tournament
+
+        mock_keys.return_value = MagicMock()
+        mock_run.return_value = _run_result()
+
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(json.dumps(_market("omen_0x1")) + "\n")
+
+        # First run
+        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        assert mock_run.call_count == 1
+
+        # Second run — should skip (valid prediction exists)
+        mock_run.reset_mock()
+        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        assert mock_run.call_count == 0
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_retries_malformed(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        from benchmark.tournament import run_tournament
+
+        mock_keys.return_value = MagicMock()
+
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(json.dumps(_market("omen_0x1")) + "\n")
+
+        # First run — malformed result
+        mock_run.return_value = _run_result(
+            p_yes=None, p_no=None, status="malformed"
+        )
+        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        assert mock_run.call_count == 1
+
+        # Second run — should retry (malformed not skipped)
+        mock_run.reset_mock()
+        mock_run.return_value = _run_result()
+        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        assert mock_run.call_count == 1

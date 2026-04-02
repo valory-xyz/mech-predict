@@ -188,9 +188,11 @@ def _alarm_handler(signum: int, frame: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
-    """Deterministic row ID from tool + question + model."""
-    payload = f"{tool_name}:{model}:{question_text}"
+def _make_row_id(
+    tool_name: str, market_id: str, market_platform: str, model: str
+) -> str:
+    """Deterministic row ID from tool + market + platform + model."""
+    payload = f"{tool_name}:{model}:{market_platform}:{market_id}"
     h = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return f"tourn_{tool_name}_{h}"
 
@@ -301,7 +303,9 @@ def build_output_row(
     question_text = market["question_text"]
 
     return {
-        "row_id": _make_row_id(tool_name, question_text, model),
+        "row_id": _make_row_id(
+            tool_name, market.get("id", ""), market.get("platform", ""), model
+        ),
         "schema_version": "1.0",
         "mode": "tournament",
         "market_id": market.get("id"),
@@ -415,7 +419,9 @@ def run_tournament(
                 continue
 
             for tool_name in tools:
-                row_id = _make_row_id(tool_name, question, model)
+                market_id = market.get("id", "")
+                market_platform = market.get("platform", "")
+                row_id = _make_row_id(tool_name, market_id, market_platform, model)
                 if row_id in existing_ids:
                     skipped += 1
                     done += 1

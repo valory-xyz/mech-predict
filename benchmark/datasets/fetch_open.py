@@ -76,8 +76,6 @@ POLYMARKET_CATEGORIES = [
 ]
 POLYMARKET_WINDOW_DAYS = 30
 
-INVALID_ANSWER = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-
 # ---------------------------------------------------------------------------
 # GraphQL queries
 # ---------------------------------------------------------------------------
@@ -214,7 +212,13 @@ def fetch_omen_open(max_markets: int = 500) -> list[dict[str, Any]]:
                     "platform": "omen",
                     "question_text": title,
                     "current_prob": current_prob,
-                    "close_date": None,  # Omen doesn't have a close date in this entity
+                    "close_date": (
+                        datetime.fromtimestamp(
+                            int(fpmm.get("openingTimestamp", 0)), tz=timezone.utc
+                        ).isoformat()
+                        if fpmm.get("openingTimestamp")
+                        else None
+                    ),
                     "category": category,
                     "usd_volume": usd_volume,
                     "usd_liquidity": usd_liquidity,
@@ -411,7 +415,7 @@ def load_existing_ids(path: Path) -> set[str]:
     ids: set[str] = set()
     if not path.exists():
         return ids
-    for line in path.read_text().strip().split("\n"):
+    for line in path.read_text(encoding="utf-8").strip().split("\n"):
         if not line:
             continue
         try:

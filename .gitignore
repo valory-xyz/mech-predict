@@ -43,6 +43,3 @@ benchmark/datasets/*.log
 benchmark/datasets/.fetch_state.json
 benchmark/datasets/snapshots/
 benchmark/results/
-
-measure_mode_comparison.py
-measure_source_content_size.py

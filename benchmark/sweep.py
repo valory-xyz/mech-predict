@@ -33,10 +33,8 @@ from benchmark.compare import compare, format_markdown
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
     IPFS_FETCH_DELAY,
-    IPFS_GATEWAY_URL,
     MECH_MARKETPLACE_GNOSIS_URL,
     MECH_MARKETPLACE_POLYGON_URL,
-    _ipfs_hash_to_cid,
     fetch_ipfs_source_content,
 )
 from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, TOOL_REGISTRY, replay
@@ -165,8 +163,7 @@ def step_build_replay_dataset(
 
         sc = fetch_ipfs_source_content(ipfs_hash)
         if sc:
-            row["source_content"] = sc
-            enriched_rows.append(row)
+            enriched_rows.append({**row, "source_content": sc})
 
         if (i + 1) % 50 == 0:
             log.info("  IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched_rows))

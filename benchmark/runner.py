@@ -131,6 +131,9 @@ def build_keychain() -> KeyChain:
         "serperapi": [os.environ.get("SERPER_API_KEY", "")],
         "openrouter": [os.environ.get("OPENROUTER_API_KEY", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
+        # Replay injects source_content via kwargs, not via the capture flag.
+        # Setting this to "false" prevents tools from re-capturing content
+        # into used_params during replay.
         "return_source_content": ["false"],
     }
     return KeyChain(services)
@@ -376,11 +379,27 @@ def replay(
     errors = 0
 
     with open(output_path, "a") as out:
-        for row in dataset:
+        for row_idx, row in enumerate(dataset):
+            if "question_text" not in row or "final_outcome" not in row:
+                log.warning(
+                    "Skipping row %d: missing required field (question_text or final_outcome)",
+                    row_idx,
+                )
+                continue
+
             question = row["question_text"]
             source_content = row.get("source_content")
+
+            if source_content is None:
+                log.warning(
+                    "Skipping row %d: no source_content (would trigger live web fetch): %s",
+                    row_idx,
+                    question[:60],
+                )
+                continue
+
             sc_mode = (
-                source_content.get("mode", "cleaned")
+                source_content.get("mode", "unknown")
                 if isinstance(source_content, dict)
                 else "none"
             )

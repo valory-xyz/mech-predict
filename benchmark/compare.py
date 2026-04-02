@@ -156,6 +156,13 @@ def _table_row(name: str, stats: dict[str, Any]) -> str:
     """Format one row of a comparison table."""
     b = stats["brier"]
     a = stats["accuracy"]
+    # Show Brier direction + accuracy direction when they disagree
+    if b["direction"] == a["direction"] or a["direction"] == "unchanged":
+        direction = b["direction"]
+    elif b["direction"] == "unchanged":
+        direction = a["direction"]
+    else:
+        direction = f"{b['direction'][:3]}B/{a['direction'][:3]}A"
     return (
         f"| {name:<35} "
         f"| {_fmt(b['baseline']):>8} "
@@ -165,7 +172,8 @@ def _table_row(name: str, stats: dict[str, Any]) -> str:
         f"| {_fmt(a['candidate']):>8} "
         f"| {_fmt_delta(a['delta']):>8} "
         f"| {stats['baseline_n']:>5} "
-        f"| {b['direction']:<10} |"
+        f"| {stats['candidate_n']:>5} "
+        f"| {direction:<10} |"
     )
 
 
@@ -181,11 +189,12 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         f"| {'B.Acc':>8} "
         f"| {'C.Acc':>8} "
         f"| {'Delta':>8} "
-        f"| {'N':>5} "
+        f"| {'B.N':>5} "
+        f"| {'C.N':>5} "
         f"| {'Direction':<10} |"
     )
     separator = "|" + "|".join(
-        ["-" * 36] + ["-" * 9] * 6 + ["-" * 6] + ["-" * 11]
+        ["-" * 36] + ["-" * 9] * 6 + ["-" * 6] * 2 + ["-" * 11]
     ) + "|"
 
     # Overall

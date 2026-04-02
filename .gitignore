@@ -38,6 +38,11 @@ mech_service/
 tools_test_results/
 
 .claude
+benchmark/datasets/*.jsonl
+benchmark/datasets/*.log
 benchmark/datasets/.fetch_state.json
-benchmark/datasets/production_log.jsonl
+benchmark/datasets/snapshots/
 benchmark/results/
+
+measure_mode_comparison.py
+measure_source_content_size.py

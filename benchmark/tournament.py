@@ -35,6 +35,60 @@ from benchmark.datasets.fetch_production import classify_category, parse_tool_re
 
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 
+# ---------------------------------------------------------------------------
+# Package hash lookup (for tool version audit trail)
+# ---------------------------------------------------------------------------
+
+PACKAGES_JSON = Path(__file__).resolve().parent.parent / "packages" / "packages.json"
+
+
+def _load_package_hashes() -> dict[str, str]:
+    """Build a map from tool module path to IPFS hash.
+
+    Reads packages/packages.json and maps the full module path used in
+    TOOL_REGISTRY to its IPFS hash. For example, a packages.json entry
+    ``"custom/valory/prediction_request/0.1.0": "bafybei..."`` becomes
+    ``"packages.valory.customs.prediction_request.prediction_request": "bafybei..."``.
+
+    :return: dict mapping full module path to IPFS hash, empty on error.
+    """
+    if not PACKAGES_JSON.exists():
+        return {}
+    try:
+        data = json.loads(PACKAGES_JSON.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    result: dict[str, str] = {}
+    for key, ipfs_hash in data.get("dev", {}).items():
+        if not key.startswith("custom/"):
+            continue
+        # key format: custom/{author}/{package_name}/{version}
+        parts = key.split("/")
+        if len(parts) < 3:
+            continue
+        author, pkg = parts[1], parts[2]
+        # tools use module path: packages.{author}.customs.{pkg}.{pkg}
+        module_path = f"packages.{author}.customs.{pkg}.{pkg}"
+        result[module_path] = ipfs_hash
+    return result
+
+
+_PACKAGE_HASHES: dict[str, str] = _load_package_hashes()
+
+
+def get_tool_ipfs_hash(tool_name: str) -> Optional[str]:
+    """Look up the IPFS package hash for a registered tool.
+
+    :param tool_name: tool name from TOOL_REGISTRY.
+    :return: IPFS hash string, or None if not found.
+    """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    return _PACKAGE_HASHES.get(spec.module)
+
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -314,6 +368,7 @@ def build_output_row(
         "question_text": question_text,
         "tool_name": tool_name,
         "tool_version": None,
+        "tool_ipfs_hash": get_tool_ipfs_hash(tool_name),
         "model": model,
         "p_yes": run_result["p_yes"],
         "p_no": run_result["p_no"],

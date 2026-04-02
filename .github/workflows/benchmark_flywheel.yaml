@@ -16,7 +16,7 @@ on:
       tools:
         description: 'Comma-separated tool names for tournament'
         required: false
-        default: 'prediction-online'
+        default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme'
 
 jobs:
   # -----------------------------------------------------------------------
@@ -170,6 +170,7 @@ jobs:
         continue-on-error: true
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
           SERPER_API_KEY: ${{ secrets.BENCHMARK_SERPER_API_KEY }}
           SEARCH_PROVIDER: ${{ secrets.BENCHMARK_SEARCH_PROVIDER }}
           GOOGLE_API_KEY: ${{ secrets.BENCHMARK_GOOGLE_API_KEY }}
@@ -177,7 +178,7 @@ jobs:
         run: |
           uv run python -m benchmark.tournament \
             --markets benchmark/datasets/open_markets.jsonl \
-            --tools ${{ github.event.inputs.tools || 'prediction-online' }} \
+            --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme' }}" \
             --max-markets ${{ github.event.inputs.max_markets || '10' }}
 
       - name: Score resolved predictions

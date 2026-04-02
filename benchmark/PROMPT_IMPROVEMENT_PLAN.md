@@ -194,13 +194,7 @@ If the reasoning concludes "very likely" but cites no evidence it has already ha
 your p_yes should generally not exceed 0.75.
 ```
 
-### Fix 6: prediction-online — handle truncation better
-
-`adjust_additional_information()` truncates by character count, which can cut mid-article. This is a code fix, not a prompt fix:
-- Truncate at paragraph boundaries instead of arbitrary character positions.
-- Or adopt the `factual_research` approach: token-budget trimming with a `[... evidence truncated ...]` marker.
-
-### Fix 7: Enforce probability range in output format (ALL tools)
+### Fix 6: Enforce probability range in output format (ALL tools)
 
 Change in all OUTPUT_FORMAT sections:
 ```
@@ -364,8 +358,7 @@ This way, the evidence stays the same but the PREDICTION_PROMPT template (with n
 2. **Fix the prediction-request-reasoning prompt** — second biggest (10.5k rows). Add skepticism to stage 2.
 3. **Build the testing harness** — `cached_sources` kwarg support + dataset builder.
 4. **Run A/B comparison** — baseline vs modified prompt on 200 rows.
-5. **Fix prediction-online truncation** — code change, lower priority.
-6. **Investigate 100% malformed tools** — routing/config issue, not prompt.
+5. **Investigate 100% malformed tools** — routing/config issue, not prompt.
 
 ---
 

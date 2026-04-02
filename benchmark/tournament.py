@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # type: ignore[import-not-found]
 
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 
@@ -344,10 +344,13 @@ def load_markets(path: Path) -> list[dict[str, Any]]:
 
 
 def load_existing_row_ids(output_path: Path) -> set[str]:
-    """Load row IDs of valid predictions from output file for deduplication.
+    """Load row IDs of valid predictions for deduplication.
 
     Only rows with prediction_parse_status == "valid" are considered done.
     Failed/malformed rows are excluded so they can be retried.
+
+    :param output_path: path to the predictions JSONL file.
+    :return: set of row IDs that should be skipped.
     """
     if not output_path.exists():
         return set()

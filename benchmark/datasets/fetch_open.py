@@ -265,9 +265,7 @@ def _is_valid_polymarket_binary(m: dict[str, Any]) -> bool:
 
     prices_raw = m.get("outcomePrices", "[]")
     try:
-        prices = (
-            json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-        )
+        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
         prices = [float(p) for p in prices]
     except (json.JSONDecodeError, TypeError, ValueError):
         prices = []
@@ -301,9 +299,7 @@ def _parse_polymarket_entry(
 
     prices_raw = m.get("outcomePrices", "[]")
     try:
-        prices = (
-            json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-        )
+        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
         prices = [float(p) for p in prices]
     except (json.JSONDecodeError, TypeError, ValueError):
         prices = []
@@ -330,9 +326,7 @@ def _parse_polymarket_entry(
         "market_address": condition_id,
         "platform": "polymarket",
         "question_text": question,
-        "current_prob": (
-            round(current_prob, 4) if current_prob is not None else None
-        ),
+        "current_prob": (round(current_prob, 4) if current_prob is not None else None),
         "close_date": close_date,
         "category": category,
         "usd_volume": volume,

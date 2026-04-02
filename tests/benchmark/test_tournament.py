@@ -34,7 +34,6 @@ from benchmark.tournament import (
     run_single,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -205,6 +204,7 @@ class TestRunSingle:
                 '{"p_yes": 0.7, "p_no": 0.3, "confidence": 0.8}',
                 None,
                 None,
+                None,  # counter_callback
                 {"source_content": {"pages": {"http://x.com": "<html>"}}},
             )
         )

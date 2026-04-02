@@ -249,8 +249,8 @@ def run_single(
 
         # Extract source_content from used_params if captured
         source_content = None
-        if len(result_tuple) > 3 and isinstance(result_tuple[3], dict):
-            source_content = result_tuple[3].get("source_content")
+        if len(result_tuple) > 4 and isinstance(result_tuple[4], dict):
+            source_content = result_tuple[4].get("source_content")
 
         return {
             "latency_s": round(elapsed, 1),

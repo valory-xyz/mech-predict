@@ -187,6 +187,25 @@ class TestCheckPolymarketResolutions:
         result = check_polymarket_resolutions(["cid_3"])
         assert len(result) == 0
 
+    @patch("benchmark.score_tournament.requests.get")
+    def test_resolved_flag_with_unsettled_prices(self, mock_get: MagicMock) -> None:
+        """API says resolved=True but prices haven't hit 1.0 — should still score."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {
+                "conditionId": "cid_4",
+                "resolved": True,
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.97", "0.03"]',
+            }
+        ]
+        mock_get.return_value = mock_resp
+
+        result = check_polymarket_resolutions(["cid_4"])
+        assert "cid_4" in result
+        assert result["cid_4"]["outcome"] is True  # 0.97 > 0.03 → Yes
+
     def test_empty_input(self) -> None:
         result = check_polymarket_resolutions([])
         assert result == {}

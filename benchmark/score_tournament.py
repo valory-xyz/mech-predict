@@ -243,6 +243,11 @@ def check_polymarket_resolutions(
                 winning_idx = idx
                 break
 
+        # Fallback: if API says resolved but prices haven't settled to 1.0,
+        # pick the highest-priced outcome
+        if winning_idx is None and is_resolved and prices:
+            winning_idx = max(range(len(prices)), key=lambda i: prices[i])
+
         if winning_idx is None:
             continue
 

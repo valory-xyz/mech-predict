@@ -36,10 +36,12 @@ TREND_WORSENING_THRESHOLD = 0.02
 
 
 def load_scores(path: Path) -> dict[str, Any]:
+    """Load scores from a JSON file."""
     return json.loads(path.read_text())
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
+    """Load rows from a JSONL file."""
     rows: list[dict[str, Any]] = []
     with open(path) as f:
         for line in f:
@@ -55,6 +57,7 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def row_brier(row: dict[str, Any]) -> float | None:
+    """Compute Brier score for a single row."""
     if (
         row.get("prediction_parse_status") != "valid"
         or row.get("p_yes") is None
@@ -71,6 +74,7 @@ def row_brier(row: dict[str, Any]) -> float | None:
 
 
 def section_overall(scores: dict[str, Any]) -> str:
+    """Generate the overall summary section."""
     o = scores["overall"]
     if scores["total_rows"] == 0:
         return "## Overall\n\nNo predictions to score."
@@ -101,6 +105,7 @@ def _sample_label(stats: dict[str, Any]) -> str:
 
 
 def section_tool_ranking(scores: dict[str, Any]) -> str:
+    """Generate the tool ranking section."""
     tools = scores.get("by_tool", {})
     ranked = sorted(
         tools.items(),
@@ -130,6 +135,7 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
 
 
 def section_platform(scores: dict[str, Any]) -> str:
+    """Generate the platform comparison section."""
     platforms = scores.get("by_platform", {})
     lines = ["## Platform Comparison", ""]
     for platform, stats in sorted(
@@ -141,6 +147,7 @@ def section_platform(scores: dict[str, Any]) -> str:
 
 
 def section_weak_spots(scores: dict[str, Any]) -> str:
+    """Generate the weak spots section."""
     lines = ["## Weak Spots", ""]
     found = False
 
@@ -172,6 +179,7 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
 
 
 def section_reliability_issues(scores: dict[str, Any]) -> str:
+    """Generate the reliability issues section."""
     lines = ["## Reliability Issues", ""]
     found = False
 
@@ -240,18 +248,21 @@ def _format_prediction_list(
 
 
 def section_worst_predictions(rows: list[dict[str, Any]], n: int = 10) -> str:
+    """Generate the worst predictions section."""
     return _format_prediction_list(
         rows, "Worst Predictions", n, reverse=True, keep="worst"
     )
 
 
 def section_best_predictions(rows: list[dict[str, Any]], n: int = 10) -> str:
+    """Generate the best predictions section."""
     return _format_prediction_list(
         rows, "Best Predictions", n, reverse=False, keep="best"
     )
 
 
 def section_trend(scores: dict[str, Any]) -> str:
+    """Generate the trend section."""
     trend = scores.get("trend", [])
     lines = ["## Trend", ""]
 
@@ -278,6 +289,7 @@ def section_trend(scores: dict[str, Any]) -> str:
 
 
 def section_sample_size_warnings(scores: dict[str, Any]) -> str:
+    """Generate the sample size warnings section."""
     lines = ["## Sample Size Warnings", ""]
     found = False
 
@@ -476,6 +488,7 @@ def section_latency(rows: list[dict[str, Any]]) -> str:
 
 
 def generate_report(scores: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    """Generate a full benchmark report from scores and log rows."""
     date = scores.get("generated_at", "")[:10] or datetime.now(timezone.utc).strftime(
         "%Y-%m-%d"
     )
@@ -507,6 +520,7 @@ def generate_report(scores: dict[str, Any], rows: list[dict[str, Any]]) -> str:
 
 
 def main() -> None:
+    """CLI entry point for report generation."""
     parser = argparse.ArgumentParser(
         description="Generate benchmark report from scores and production log.",
     )

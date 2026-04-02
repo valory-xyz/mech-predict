@@ -828,6 +828,9 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 
     Returns dict with market_id, market_type, market_prob, market_liquidity_usd,
     market_close_at if present (schema_version 2.0+). Empty dict otherwise.
+
+    :param content_str: raw JSON string from parsedRequest.content.
+    :return: dict with parsed market context fields, or empty dict.
     """
     if not content_str:
         return {}
@@ -855,6 +858,10 @@ def fetch_deliveries(
 
     Skips deliveries with null parsedRequest (IPFS failures on subgraph side).
     Extracts market_id from request_context when available (schema v2.0+).
+
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
+    :return: list of delivery dicts.
     """
     raw = _paginated_fetch(
         marketplace_url,
@@ -995,11 +1002,13 @@ class ResolvedMarkets:
     """Resolved markets indexed by both market_id and question title."""
 
     def __init__(self) -> None:
+        """Initialize empty market indexes."""
         self.by_id: dict[str, dict[str, Any]] = {}
         self.by_title: dict[str, dict[str, Any]] = {}
         self._seen: set[int] = set()
 
     def add(self, market_id: Optional[str], title: str, data: dict[str, Any]) -> None:
+        """Add a resolved market to the indexes."""
         if market_id:
             self.by_id[market_id] = data
         if title:
@@ -1007,9 +1016,11 @@ class ResolvedMarkets:
         self._seen.add(id(data))
 
     def __len__(self) -> int:
+        """Return the number of unique resolved markets."""
         return len(self._seen)
 
     def __bool__(self) -> bool:
+        """Return True if any resolved markets are stored."""
         return len(self._seen) > 0
 
 
@@ -1018,6 +1029,9 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
 
     Filters by resolution time (currentAnswerTimestamp), not bet placement time.
     Indexes by both market ID (fpmm address) and question title.
+
+    :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :return: ResolvedMarkets indexed by ID and title.
     """
     raw = _paginated_fetch(
         PREDICT_OMEN_SUBGRAPH_URL,
@@ -1066,6 +1080,9 @@ def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
     2. Post-filter to resolved questions only
     3. Only include markets where resolution.blockTimestamp > resolved_after
     4. Deduplicate by question ID
+
+    :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :return: ResolvedMarkets indexed by ID and title.
     """
     candidate_window = int(time.time()) - (POLYMARKET_CANDIDATE_WINDOW_DAYS * 86400)
     raw = _paginated_fetch(
@@ -1137,6 +1154,10 @@ def _match_delivery(
 
     Tries market_id first (deterministic), falls back to title matching (heuristic).
     Returns (market_data, match_confidence).
+
+    :param delivery: delivery dict with question_title and optional market_id.
+    :param markets: resolved markets to match against.
+    :return: tuple of (market_data or None, match_confidence).
     """
     # 1. Deterministic match via market_id (from request_context, schema v2.0+)
     market_id = delivery.get("market_id")
@@ -1403,6 +1424,13 @@ def _match_and_build(
 
     Returns (rows, still_pending, matched_by_id, matched_by_title,
              max_delivery_ts, max_resolved_ts).
+
+    :param deliveries: list of delivery dicts.
+    :param resolved_markets: resolved markets to match against.
+    :param existing_ids: row IDs already written, for deduplication.
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :return: tuple of (rows, still_pending, matched_by_id, matched_by_title,
+        max_delivery_ts, max_resolved_ts).
     """
     rows: list[dict[str, Any]] = []
     still_pending: list[dict[str, Any]] = []
@@ -1456,7 +1484,14 @@ def process_platform(
     resolved markets. Unmatched deliveries are returned as still-pending
     for the next run.
 
-    Returns (rows, still_pending, max_delivery_timestamp, max_resolved_timestamp).
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param resolved_markets: resolved markets to match against.
+    :param delivery_ts_gt: only fetch deliveries after this UNIX timestamp.
+    :param existing_ids: row IDs already written, for deduplication.
+    :param pending_deliveries: unmatched deliveries from previous runs.
+    :return: tuple of (rows, still_pending, max_delivery_timestamp,
+        max_resolved_timestamp).
     """
     # 1. Retry pending deliveries from previous runs
     rows_from_pending: list[dict[str, Any]] = []
@@ -1540,6 +1575,7 @@ def process_platform(
 
 
 def main() -> None:
+    """CLI entry point for fetching production data."""
     parser = argparse.ArgumentParser(
         description="Fetch production prediction data for benchmark scoring.",
     )

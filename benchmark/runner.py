@@ -161,7 +161,7 @@ def load_tool_run(tool_name: str) -> Callable[..., Any]:
         )
 
     module = importlib.import_module(spec.module)
-    run_fn: Callable[..., Any] = getattr(module, "run")
+    run_fn: Callable[..., Any] = module.run
     _tool_cache[tool_name] = run_fn
     return run_fn
 

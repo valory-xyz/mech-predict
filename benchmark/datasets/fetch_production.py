@@ -1387,7 +1387,7 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
     ids: set[str] = set()
     if not output_path.exists():
         return ids
-    with open(output_path) as f:
+    with open(output_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -1403,7 +1403,7 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
 def append_rows(output_path: Path, rows: list[dict[str, Any]]) -> int:
     """Append rows to the output JSONL file. Returns count of rows written."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "a") as f:
+    with open(output_path, "a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
     return len(rows)

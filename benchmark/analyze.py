@@ -43,7 +43,7 @@ def load_scores(path: Path) -> dict[str, Any]:
 def load_rows(path: Path) -> list[dict[str, Any]]:
     """Load rows from a JSONL file."""
     rows: list[dict[str, Any]] = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

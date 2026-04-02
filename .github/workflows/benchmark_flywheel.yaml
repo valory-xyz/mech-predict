@@ -107,13 +107,13 @@ jobs:
 
       - name: Fetch Omen open markets
         run: |
-          python benchmark/datasets/fetch_open.py \
+          python -m benchmark.datasets.fetch_open \
             --platform omen \
             --max-markets ${{ github.event.inputs.max_markets || '10' }}
 
       - name: Fetch Polymarket open markets
         run: |
-          python benchmark/datasets/fetch_open.py \
+          python -m benchmark.datasets.fetch_open \
             --platform polymarket \
             --max-markets ${{ github.event.inputs.max_markets || '10' }} \
             --min-liquidity 1000

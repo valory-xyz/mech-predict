@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_LOG = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "report.md"
@@ -86,10 +85,10 @@ def section_overall(scores: dict[str, Any]) -> str:
         f"- Predictions scored: {scores['valid_rows']} / {scores['total_rows']}"
         f" ({rel_str} reliability)",
         f"- Overall Brier: {brier_str}",
-        f"  - 0.0 = perfect, 0.25 = random guessing, 1.0 = maximally wrong",
+        "  - 0.0 = perfect, 0.25 = random guessing, 1.0 = maximally wrong",
         f"- Accuracy: {acc_str}",
         f"- Sharpness: {sharp_str}",
-        f"  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
+        "  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
     ]
     return "\n".join(lines)
 
@@ -111,12 +110,17 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
     lines = ["## Tool Ranking", ""]
     for i, (tool, stats) in enumerate(ranked, 1):
         flags = ""
-        if stats.get("reliability") is not None and stats["reliability"] < RELIABILITY_ISSUE_THRESHOLD:
+        if (
+            stats.get("reliability") is not None
+            and stats["reliability"] < RELIABILITY_ISSUE_THRESHOLD
+        ):
             flags = f" — {stats['reliability']:.0%} reliability"
         flags += _sample_label(stats)
         brier = stats["brier"] if stats["brier"] is not None else "N/A"
         acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
-        sharp = f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        sharp = (
+            f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        )
         lines.append(
             f"{i}. **{tool}** — Brier: {brier}, Acc: {acc},"
             f" Sharp: {sharp} (n={stats['n']}){flags}"
@@ -128,7 +132,10 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
 def section_platform(scores: dict[str, Any]) -> str:
     platforms = scores.get("by_platform", {})
     lines = ["## Platform Comparison", ""]
-    for platform, stats in sorted(platforms.items(), key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999):
+    for platform, stats in sorted(
+        platforms.items(),
+        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+    ):
         lines.append(f"- **{platform}**: Brier: {stats['brier']} (n={stats['n']})")
     return "\n".join(lines)
 
@@ -146,14 +153,20 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
             brier = stats.get("brier")
             if brier is not None and brier > BRIER_WEAK_THRESHOLD:
                 found = True
-                label = "anti-predictive (worse than coin flip)" if brier > 0.5 else "weak performance"
+                label = (
+                    "anti-predictive (worse than coin flip)"
+                    if brier > 0.5
+                    else "weak performance"
+                )
                 lines.append(
                     f"- **{name}** ({section_name}): Brier {brier:.4f} (n={stats['n']})"
                     f" — {label}"
                 )
 
     if not found:
-        lines.append(f"No weak spots detected (all Brier scores below {BRIER_WEAK_THRESHOLD}).")
+        lines.append(
+            f"No weak spots detected (all Brier scores below {BRIER_WEAK_THRESHOLD})."
+        )
 
     return "\n".join(lines)
 
@@ -227,11 +240,15 @@ def _format_prediction_list(
 
 
 def section_worst_predictions(rows: list[dict[str, Any]], n: int = 10) -> str:
-    return _format_prediction_list(rows, "Worst Predictions", n, reverse=True, keep="worst")
+    return _format_prediction_list(
+        rows, "Worst Predictions", n, reverse=True, keep="worst"
+    )
 
 
 def section_best_predictions(rows: list[dict[str, Any]], n: int = 10) -> str:
-    return _format_prediction_list(rows, "Best Predictions", n, reverse=False, keep="best")
+    return _format_prediction_list(
+        rows, "Best Predictions", n, reverse=False, keep="best"
+    )
 
 
 def section_trend(scores: dict[str, Any]) -> str:
@@ -267,7 +284,9 @@ def section_sample_size_warnings(scores: dict[str, Any]) -> str:
     for cat, stats in (scores.get("by_category") or {}).items():
         if stats["n"] < SAMPLE_SIZE_WARNING:
             found = True
-            lines.append(f"- **{cat}**: only {stats['n']} questions — treat with caution")
+            lines.append(
+                f"- **{cat}**: only {stats['n']} questions — treat with caution"
+            )
 
     if not found:
         lines.append("All categories have sufficient sample size.")
@@ -296,9 +315,13 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
         platform = parts[1] if len(parts) > 1 else "?"
         brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
         acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
-        sharp = f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        sharp = (
+            f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        )
         label = _sample_label(stats)
-        lines.append(f"| {tool} | {platform} | {brier} | {acc} | {sharp} | {stats['n']}{label} |")
+        lines.append(
+            f"| {tool} | {platform} | {brier} | {acc} | {sharp} | {stats['n']}{label} |"
+        )
 
     return "\n".join(lines)
 
@@ -324,9 +347,19 @@ def section_tool_platform_horizon(scores: dict[str, Any]) -> str:
             if not stats or stats.get("n", 0) == 0:
                 continue
             brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
-            acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
-            h_label = {"short_lt_7d": "<7d", "medium_7_30d": "7-30d", "long_gt_30d": ">30d"}[horizon]
-            lines.append(f"| {tool} | {platform} | {h_label} | {brier} | {acc} | {stats['n']} |")
+            acc = (
+                f"{stats['accuracy']:.0%}"
+                if stats.get("accuracy") is not None
+                else "N/A"
+            )
+            h_label = {
+                "short_lt_7d": "<7d",
+                "medium_7_30d": "7-30d",
+                "long_gt_30d": ">30d",
+            }[horizon]
+            lines.append(
+                f"| {tool} | {platform} | {h_label} | {brier} | {acc} | {stats['n']} |"
+            )
 
     return "\n".join(lines)
 
@@ -350,24 +383,34 @@ def section_calibration(scores: dict[str, Any]) -> str:
         realized = f"{bucket['realized_rate']:.2f}"
         gap = bucket["gap"]
         gap_str = f"{gap:+.2f}"
-        lines.append(f"| {bucket['bin']} | {avg_p} | {realized} | {gap_str} | {bucket['n']} |")
+        lines.append(
+            f"| {bucket['bin']} | {avg_p} | {realized} | {gap_str} | {bucket['n']} |"
+        )
 
     # Summary interpretation
     lines.append("")
-    high_conf = [b for b in cal if b.get("avg_predicted", 0) > 0.7 and b.get("n", 0) > 0]
+    high_conf = [
+        b for b in cal if b.get("avg_predicted", 0) > 0.7 and b.get("n", 0) > 0
+    ]
     low_conf = [b for b in cal if b.get("avg_predicted", 0) < 0.3 and b.get("n", 0) > 0]
     if high_conf:
         avg_gap = sum(b["gap"] for b in high_conf) / len(high_conf)
         if avg_gap < -0.1:
-            lines.append("**High-confidence predictions are overconfident** — predicted high yes-probability"
-                         " but realized rate is much lower.")
+            lines.append(
+                "**High-confidence predictions are overconfident** — predicted high yes-probability"
+                " but realized rate is much lower."
+            )
         elif avg_gap > 0.1:
-            lines.append("**High-confidence predictions are underconfident** — realized rate exceeds predictions.")
+            lines.append(
+                "**High-confidence predictions are underconfident** — realized rate exceeds predictions."
+            )
     if low_conf:
         avg_gap = sum(b["gap"] for b in low_conf) / len(low_conf)
         if avg_gap > 0.1:
-            lines.append("**Low-confidence predictions are underconfident** — predicted low yes-probability"
-                         " but events happen more often than predicted.")
+            lines.append(
+                "**Low-confidence predictions are underconfident** — predicted low yes-probability"
+                " but events happen more often than predicted."
+            )
 
     return "\n".join(lines)
 
@@ -376,7 +419,9 @@ def section_parse_breakdown(rows: list[dict[str, Any]]) -> str:
     """Per-tool parse status breakdown."""
     by_tool: dict[str, Counter] = defaultdict(Counter)
     for row in rows:
-        by_tool[row.get("tool_name", "unknown")][row.get("prediction_parse_status", "unknown")] += 1
+        by_tool[row.get("tool_name", "unknown")][
+            row.get("prediction_parse_status", "unknown")
+        ] += 1
 
     lines = [
         "## Parse/Error Breakdown by Tool",
@@ -418,7 +463,9 @@ def section_latency(rows: list[dict[str, Any]]) -> str:
         mean = statistics.mean(vals)
         p95_idx = min(int(len(vals) * 0.95), len(vals) - 1)
         p95 = vals[p95_idx]
-        lines.append(f"| {tool} | {med:.0f}s | {mean:.0f}s | {p95:.0f}s | {len(vals)} |")
+        lines.append(
+            f"| {tool} | {med:.0f}s | {mean:.0f}s | {p95:.0f}s | {len(vals)} |"
+        )
 
     return "\n".join(lines)
 
@@ -429,7 +476,9 @@ def section_latency(rows: list[dict[str, Any]]) -> str:
 
 
 def generate_report(scores: dict[str, Any], rows: list[dict[str, Any]]) -> str:
-    date = scores.get("generated_at", "")[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = scores.get("generated_at", "")[:10] or datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d"
+    )
 
     sections = [
         f"# Benchmark Report — {date}",

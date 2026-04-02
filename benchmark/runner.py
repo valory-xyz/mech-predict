@@ -26,9 +26,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
+
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,8 @@ def build_keychain() -> KeyChain:
 
     Each service gets a single-key list. Missing keys become empty strings
     so that tools relying on other providers don't crash at import time.
+
+    :return: a KeyChain populated from environment variables.
     """
     services: dict[str, list[str]] = {
         "openai": [os.environ.get("OPENAI_API_KEY", "")],
@@ -210,8 +213,14 @@ def run_single(
 ) -> dict[str, Any]:
     """Run one tool on one question and return parsed result.
 
-    Returns dict with: p_yes, p_no, confidence, prediction_parse_status,
-    latency_s, error.
+    :param tool_name: registered tool name.
+    :param question_text: the prediction question.
+    :param source_content: cached web content for replay.
+    :param model: LLM model identifier.
+    :param api_keys: KeyChain with API credentials.
+    :param timeout: per-tool timeout in seconds.
+    :return: dict with p_yes, p_no, confidence, prediction_parse_status,
+        latency_s, error.
     """
     run_fn = load_tool_run(tool_name)
 
@@ -326,7 +335,7 @@ def build_output_row(
 def load_dataset(path: Path) -> list[dict[str, Any]]:
     """Load replay dataset from JSONL."""
     rows: list[dict[str, Any]] = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -339,7 +348,7 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
     if not output_path.exists():
         return set()
     ids: set[str] = set()
-    with open(output_path) as f:
+    with open(output_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -378,7 +387,7 @@ def replay(
     skipped = 0
     errors = 0
 
-    with open(output_path, "a") as out:
+    with open(output_path, "a", encoding="utf-8") as out:
         for row_idx, row in enumerate(dataset):
             if "question_text" not in row or "final_outcome" not in row:
                 log.warning(
@@ -504,9 +513,7 @@ def main() -> None:
         tools = [t.strip() for t in args.tools.split(",")]
         for t in tools:
             if t not in TOOL_REGISTRY:
-                parser.error(
-                    f"Unknown tool: {t}. Available: {sorted(TOOL_REGISTRY)}"
-                )
+                parser.error(f"Unknown tool: {t}. Available: {sorted(TOOL_REGISTRY)}")
     else:
         tools = sorted(TOOL_REGISTRY)
 

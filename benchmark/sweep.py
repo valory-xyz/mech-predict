@@ -73,7 +73,9 @@ def _fetch_ipfs_hashes_for_deliver_ids(
 ) -> dict[str, Optional[str]]:
     """Query the subgraph for IPFS hashes by deliver IDs.
 
-    Returns a dict mapping deliver_id → ipfs_hash (or None if not available).
+    :param deliver_ids: list of deliver IDs to look up.
+    :param marketplace_url: subgraph endpoint URL.
+    :return: dict mapping deliver_id to ipfs_hash (or None).
     """
     result: dict[str, Optional[str]] = {}
     for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
@@ -109,12 +111,17 @@ def step_build_replay_dataset(
 
     Writes the enriched rows to a replay dataset JSONL file.
     Only rows that have source_content after enrichment are included.
+
+    :param production_log: path to the production_log.jsonl file.
+    :param output: path to write the enriched replay dataset.
+    :param last_n: number of most recent rows to process.
+    :return: the output path.
     """
     log.info("=== BUILD REPLAY DATASET from %s (last %d) ===", production_log, last_n)
 
     # Read all rows, take last N
     all_rows: list[dict[str, Any]] = []
-    with open(production_log) as f:
+    with open(production_log, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -144,9 +151,13 @@ def step_build_replay_dataset(
             _fetch_ipfs_hashes_for_deliver_ids(gnosis_ids, MECH_MARKETPLACE_GNOSIS_URL)
         )
     if polygon_ids:
-        log.info("  Fetching IPFS hashes for %d Polygon deliveries...", len(polygon_ids))
+        log.info(
+            "  Fetching IPFS hashes for %d Polygon deliveries...", len(polygon_ids)
+        )
         ipfs_hashes.update(
-            _fetch_ipfs_hashes_for_deliver_ids(polygon_ids, MECH_MARKETPLACE_POLYGON_URL)
+            _fetch_ipfs_hashes_for_deliver_ids(
+                polygon_ids, MECH_MARKETPLACE_POLYGON_URL
+            )
         )
 
     has_hash = sum(1 for v in ipfs_hashes.values() if v)
@@ -166,7 +177,12 @@ def step_build_replay_dataset(
             enriched_rows.append({**row, "source_content": sc})
 
         if (i + 1) % 50 == 0:
-            log.info("  IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched_rows))
+            log.info(
+                "  IPFS progress: %d/%d (%d enriched)",
+                i + 1,
+                len(rows),
+                len(enriched_rows),
+            )
 
         time.sleep(IPFS_FETCH_DELAY)
 
@@ -174,7 +190,7 @@ def step_build_replay_dataset(
 
     # Write replay dataset
     output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         for row in enriched_rows:
             f.write(json.dumps(row) + "\n")
 
@@ -350,22 +366,30 @@ def main() -> None:
     # ---------------------------------------------------------------
     if args.baseline_scores:
         log.info("Using existing baseline scores: %s", args.baseline_scores)
-        with open(args.baseline_scores) as f:
+        with open(args.baseline_scores, encoding="utf-8") as f:
             baseline_scores = json.load(f)
     else:
         baseline_results = results_dir / f"sweep_baseline_{args.baseline_model}.jsonl"
-        baseline_scores_path = results_dir / f"sweep_baseline_{args.baseline_model}_scores.json"
+        baseline_scores_path = (
+            results_dir / f"sweep_baseline_{args.baseline_model}_scores.json"
+        )
 
-        step_replay(dataset_path, baseline_results, tools, args.baseline_model, args.timeout)
+        step_replay(
+            dataset_path, baseline_results, tools, args.baseline_model, args.timeout
+        )
         baseline_scores = step_score(baseline_results, baseline_scores_path)
 
     # ---------------------------------------------------------------
     # Step 3: Candidate scores
     # ---------------------------------------------------------------
     candidate_results = results_dir / f"sweep_candidate_{args.candidate_model}.jsonl"
-    candidate_scores_path = results_dir / f"sweep_candidate_{args.candidate_model}_scores.json"
+    candidate_scores_path = (
+        results_dir / f"sweep_candidate_{args.candidate_model}_scores.json"
+    )
 
-    step_replay(dataset_path, candidate_results, tools, args.candidate_model, args.timeout)
+    step_replay(
+        dataset_path, candidate_results, tools, args.candidate_model, args.timeout
+    )
     candidate_scores = step_score(candidate_results, candidate_scores_path)
 
     # ---------------------------------------------------------------

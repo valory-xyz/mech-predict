@@ -17,7 +17,6 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-
 # ---------------------------------------------------------------------------
 # Delta computation
 # ---------------------------------------------------------------------------
@@ -105,8 +104,12 @@ def compare_dimension(
     result: dict[str, dict[str, Any]] = {}
 
     empty_stats: dict[str, Any] = {
-        "brier": None, "accuracy": None, "sharpness": None,
-        "reliability": None, "n": 0, "valid_n": 0,
+        "brier": None,
+        "accuracy": None,
+        "sharpness": None,
+        "reliability": None,
+        "n": 0,
+        "valid_n": 0,
     }
 
     for key in all_keys:
@@ -193,9 +196,9 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         f"| {'C.N':>5} "
         f"| {'Direction':<10} |"
     )
-    separator = "|" + "|".join(
-        ["-" * 36] + ["-" * 9] * 6 + ["-" * 6] * 2 + ["-" * 11]
-    ) + "|"
+    separator = (
+        "|" + "|".join(["-" * 36] + ["-" * 9] * 6 + ["-" * 6] * 2 + ["-" * 11]) + "|"
+    )
 
     # Overall
     lines.append("## Overall")
@@ -271,9 +274,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    with open(args.baseline) as f:
+    with open(args.baseline, encoding="utf-8") as f:
         baseline = json.load(f)
-    with open(args.candidate) as f:
+    with open(args.candidate, encoding="utf-8") as f:
         candidate = json.load(f)
 
     comparison = compare(baseline, candidate)

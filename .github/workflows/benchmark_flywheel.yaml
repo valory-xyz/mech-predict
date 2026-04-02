@@ -126,11 +126,24 @@ jobs:
           retention-days: 90
 
   # -----------------------------------------------------------------------
-  # Job 3: Run tournament predictions + score (slow, needs API keys)
+  # Job 3a: Check if benchmark API keys are configured
+  # -----------------------------------------------------------------------
+  check-secrets:
+    runs-on: ubuntu-22.04
+    outputs:
+      has_keys: ${{ steps.check.outputs.has_keys }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+        run: echo "has_keys=${{ env.KEY != '' }}" >> $GITHUB_OUTPUT
+
+  # -----------------------------------------------------------------------
+  # Job 3b: Run tournament predictions + score (slow, needs API keys)
   # -----------------------------------------------------------------------
   tournament-run:
-    needs: tournament-fetch
-    if: ${{ secrets.BENCHMARK_OPENAI_API_KEY != '' }}
+    needs: [tournament-fetch, check-secrets]
+    if: needs.check-secrets.outputs.has_keys == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
 

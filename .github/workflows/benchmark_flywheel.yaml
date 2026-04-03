@@ -307,9 +307,12 @@ jobs:
             Run `tomte check-code` and fix any issues before committing.
 
             Phase 4 — Output:
+            IMPORTANT: NEVER commit directly to main. Always create a new branch first.
+
             If you made a concrete fix:
+              - Create a new branch: git checkout -b auto-improve/<tool-name>
               - Commit only the changed tool file(s). Add [skip ci] to the commit message.
-              - Open a PR to the main branch with label "auto-improvement".
+              - Push the branch and open a PR to the main branch with label "auto-improvement".
               - PR title: "improve: <tool-name> prompt (Brier X.XX)"
               - PR body: current Brier, what was wrong, what you changed.
               - Include a "Validation" section with instructions for the reviewer:
@@ -331,6 +334,11 @@ jobs:
             Always — Write a summary of what you did (phases completed, decisions made,
             outcome) to benchmark/results/suggestion_log.txt. Do NOT include API keys,
             secrets, or sensitive data in this file or in any PR/issue body.
+            The LAST line of suggestion_log.txt MUST be exactly:
+              Phases Completed: All
+            if all four phases finished, or:
+              Phases Completed: 1,2 (partial)
+            listing only the phases that completed.
           claude_args: |
             --max-turns 30
             --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)

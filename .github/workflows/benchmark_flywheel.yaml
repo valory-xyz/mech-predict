@@ -17,6 +17,11 @@ on:
         description: 'Comma-separated tool names for tournament'
         required: false
         default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme'
+      notify_slack:
+        description: 'Post summary to Slack'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   # -----------------------------------------------------------------------
@@ -58,6 +63,13 @@ jobs:
 
       - name: Analyze
         run: python benchmark/analyze.py
+
+      - name: Post summary to Slack
+        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+        run: python benchmark/notify_slack.py --report benchmark/results/report.md
 
       # Upload data files for next run (persists between runs)
       - name: Upload benchmark data

@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
 
@@ -36,7 +35,7 @@ MIN_SAMPLE_SIZE = 30
 def load_rows(path: Path) -> list[dict[str, Any]]:
     """Load rows from a JSONL file."""
     rows: list[dict[str, Any]] = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -59,17 +58,26 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     All rows count toward reliability. Only valid rows with
     final_outcome count toward Brier.
+
+    :param rows: list of prediction row dicts.
+    :return: dict with brier, accuracy, sharpness, reliability, n, valid_n,
+        decision_worthy.
     """
     total = len(rows)
     if total == 0:
         return {
-            "brier": None, "accuracy": None, "sharpness": None,
-            "reliability": None, "n": 0, "valid_n": 0,
+            "brier": None,
+            "accuracy": None,
+            "sharpness": None,
+            "reliability": None,
+            "n": 0,
+            "valid_n": 0,
             "decision_worthy": False,
         }
 
     valid = [
-        r for r in rows
+        r
+        for r in rows
         if r["prediction_parse_status"] == "valid"
         and r["final_outcome"] is not None
         and r["p_yes"] is not None
@@ -79,9 +87,12 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     if not valid:
         return {
-            "brier": None, "accuracy": None, "sharpness": None,
+            "brier": None,
+            "accuracy": None,
+            "sharpness": None,
             "reliability": round(reliability, 4),
-            "n": total, "valid_n": 0,
+            "n": total,
+            "valid_n": 0,
             "decision_worthy": False,
         }
 
@@ -89,10 +100,7 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     avg_brier = sum(scores) / len(scores)
 
     # p_yes == 0.5 counted as incorrect (no directional signal)
-    correct = sum(
-        1 for r in valid
-        if (r["p_yes"] > 0.5) == r["final_outcome"]
-    )
+    correct = sum(1 for r in valid if (r["p_yes"] > 0.5) == r["final_outcome"])
     accuracy = correct / len(valid)
 
     sharpness = sum(abs(r["p_yes"] - 0.5) for r in valid) / len(valid)
@@ -179,6 +187,11 @@ def group_by_composite(
 
     When *horizon* is False, returns ``{key: stats}``.
     When *horizon* is True, returns ``{key: {horizon_bucket: stats}}``.
+
+    :param rows: list of prediction row dicts.
+    :param fields: field names to form the composite key.
+    :param horizon: whether to sub-group by horizon bucket.
+    :return: dict mapping composite keys to stats or horizon sub-dicts.
     """
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -199,8 +212,16 @@ def group_by_composite(
 # ---------------------------------------------------------------------------
 
 CALIBRATION_BINS = [
-    (0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4), (0.4, 0.5),
-    (0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01),
+    (0.0, 0.1),
+    (0.1, 0.2),
+    (0.2, 0.3),
+    (0.3, 0.4),
+    (0.4, 0.5),
+    (0.5, 0.6),
+    (0.6, 0.7),
+    (0.7, 0.8),
+    (0.8, 0.9),
+    (0.9, 1.01),
 ]
 
 
@@ -220,9 +241,13 @@ def compute_calibration(
 
     Positive gap = overconfident (predicted > realized).
     Negative gap = underconfident (predicted < realized).
+
+    :param rows: list of prediction row dicts.
+    :return: list of calibration bin dicts.
     """
     valid = [
-        r for r in rows
+        r
+        for r in rows
         if r.get("prediction_parse_status") == "valid"
         and r.get("final_outcome") is not None
         and r.get("p_yes") is not None
@@ -248,13 +273,15 @@ def compute_calibration(
         avg_pred = sum(r["p_yes"] for r in group) / len(group)
         realized = sum(1 for r in group if r["final_outcome"]) / len(group)
         gap = round(avg_pred - realized, 4)
-        result.append({
-            "bin": label,
-            "avg_predicted": round(avg_pred, 4),
-            "realized_rate": round(realized, 4),
-            "n": len(group),
-            "gap": gap,
-        })
+        result.append(
+            {
+                "bin": label,
+                "avg_predicted": round(avg_pred, 4),
+                "realized_rate": round(realized, 4),
+                "n": len(group),
+                "gap": gap,
+            }
+        )
 
     return result
 
@@ -295,7 +322,9 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Tool × platform × horizon breakdown
     by_tool_platform_horizon = group_by_composite(
-        rows, ["tool_name", "platform"], horizon=True,
+        rows,
+        ["tool_name", "platform"],
+        horizon=True,
     )
 
     # Monthly trend
@@ -331,6 +360,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def main() -> None:
+    """CLI entry point for scoring."""
     parser = argparse.ArgumentParser(
         description="Score production prediction data.",
     )
@@ -366,7 +396,9 @@ def main() -> None:
     )
 
     if overall["reliability"] is not None and overall["reliability"] < RELIABILITY_GATE:
-        print(f"WARNING: Reliability {overall['reliability']} is below {RELIABILITY_GATE} gate")
+        print(
+            f"WARNING: Reliability {overall['reliability']} is below {RELIABILITY_GATE} gate"
+        )
 
     print("\nBy tool (decision-worthy):")
     ranked = sorted(result["by_tool"].items(), key=lambda x: x[1].get("brier") or 999)
@@ -377,7 +409,9 @@ def main() -> None:
         if not stats["decision_worthy"]:
             flags.append(f"LOW-SAMPLE<{MIN_SAMPLE_SIZE}")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
-        print(f"  {tool}: Brier={stats['brier']}, Acc={stats['accuracy']}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}")
+        print(
+            f"  {tool}: Brier={stats['brier']}, Acc={stats['accuracy']}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}"
+        )
 
     print("\nBy platform:")
     for platform, stats in result["by_platform"].items():
@@ -398,7 +432,9 @@ def main() -> None:
 
     print("\nTrend:")
     for entry in result["trend"]:
-        print(f"  {entry['month']}: Brier={entry['brier']}, Acc={entry['accuracy']}, n={entry['n']}")
+        print(
+            f"  {entry['month']}: Brier={entry['brier']}, Acc={entry['accuracy']}, n={entry['n']}"
+        )
 
     print("\nCalibration (overall):")
     print(f"  {'Bin':<10} {'Predicted':>10} {'Realized':>10} {'Gap':>8} {'n':>6}")

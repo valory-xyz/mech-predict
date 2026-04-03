@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
@@ -73,150 +74,576 @@ MECH_MARKETPLACE_POLYGON_URL = os.environ.get(
     "MECH_MARKETPLACE_POLYGON_URL",
     "https://api.subgraph.autonolas.tech/api/proxy/marketplace-polygon",
 )
+IPFS_GATEWAY_URL = os.environ.get(
+    "IPFS_GATEWAY_URL",
+    "https://gateway.autonolas.tech/ipfs",
+)
+IPFS_FETCH_DELAY = 0.2  # seconds between IPFS gateway requests
 
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
 # Falls back to "other" if no keywords match.
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "business": [
-        "business", "corp", "corporate", "merger", "acquisition", "startup",
-        "ceo", "cfo", "layoff", "hiring", "strike", "labor union", "trade union",
-        "bankruptcy", "ipo", "company", "brand", "retail", "supply chain",
-        "logistics", "management", "industry", "commercial", "monopoly",
-        "antitrust", "executive", "stellantis", "byd", "tesla", "revenue", "profit",
+        "business",
+        "corp",
+        "corporate",
+        "merger",
+        "acquisition",
+        "startup",
+        "ceo",
+        "cfo",
+        "layoff",
+        "hiring",
+        "strike",
+        "labor union",
+        "trade union",
+        "bankruptcy",
+        "ipo",
+        "company",
+        "brand",
+        "retail",
+        "supply chain",
+        "logistics",
+        "management",
+        "industry",
+        "commercial",
+        "monopoly",
+        "antitrust",
+        "executive",
+        "stellantis",
+        "byd",
+        "tesla",
+        "revenue",
+        "profit",
     ],
     "crypto": [
-        "crypto", "cryptocurrency", "bitcoin", "btc", "ethereum", "eth",
-        "blockchain", "web3", "defi", "nft", "token", "wallet", "coinbase",
-        "binance", "solana", "doge", "stablecoin", "altcoin", "mining",
-        "ledger", "satoshi", "airdrop", "smart contract", "bull run",
+        "crypto",
+        "cryptocurrency",
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "blockchain",
+        "web3",
+        "defi",
+        "nft",
+        "token",
+        "wallet",
+        "coinbase",
+        "binance",
+        "solana",
+        "doge",
+        "stablecoin",
+        "altcoin",
+        "mining",
+        "ledger",
+        "satoshi",
+        "airdrop",
+        "smart contract",
+        "bull run",
     ],
     "politics": [
-        "politics", "political", "election", "vote", "poll", "ballot",
-        "democrat", "republican", "congress", "senate", "parliament",
-        "president", "prime minister", "biden", "trump", "harris", "campaign",
-        "legislation", "bill", "law", "supreme court", "governor", "mayor",
-        "tory", "labour", "party", "impeachment", "regulatory", "uscis",
+        "politics",
+        "political",
+        "election",
+        "vote",
+        "poll",
+        "ballot",
+        "democrat",
+        "republican",
+        "congress",
+        "senate",
+        "parliament",
+        "president",
+        "prime minister",
+        "biden",
+        "trump",
+        "harris",
+        "campaign",
+        "legislation",
+        "bill",
+        "law",
+        "supreme court",
+        "governor",
+        "mayor",
+        "tory",
+        "labour",
+        "party",
+        "impeachment",
+        "regulatory",
+        "uscis",
         "federal court",
     ],
     "science": [
-        "science", "physics", "chemistry", "biology", "astronomy", "nasa",
-        "space", "rocket", "spacex", "laboratory", "experiment", "discovery",
-        "research", "scientist", "nobel prize", "atom", "molecule", "dna",
-        "genetics", "telescope", "quantum", "fusion", "superconductor",
-        "study", "peer-reviewed", "comet", "asteroid",
+        "science",
+        "physics",
+        "chemistry",
+        "biology",
+        "astronomy",
+        "nasa",
+        "space",
+        "rocket",
+        "spacex",
+        "laboratory",
+        "experiment",
+        "discovery",
+        "research",
+        "scientist",
+        "nobel prize",
+        "atom",
+        "molecule",
+        "dna",
+        "genetics",
+        "telescope",
+        "quantum",
+        "fusion",
+        "superconductor",
+        "study",
+        "peer-reviewed",
+        "comet",
+        "asteroid",
     ],
     "tech": [
-        "technology", "tech", "ai", "artificial intelligence", "gpt", "llm",
-        "software", "hardware", "app", "google", "apple", "microsoft", "meta",
-        "server", "cloud", "algorithm", "robot", "cyber", "silicon", "chip",
-        "semiconductor", "nvidia", "virtual reality", "metaverse", "device",
-        "smartphone", "adobe", "semrush",
+        "technology",
+        "tech",
+        "ai",
+        "artificial intelligence",
+        "gpt",
+        "llm",
+        "software",
+        "hardware",
+        "app",
+        "google",
+        "apple",
+        "microsoft",
+        "meta",
+        "server",
+        "cloud",
+        "algorithm",
+        "robot",
+        "cyber",
+        "silicon",
+        "chip",
+        "semiconductor",
+        "nvidia",
+        "virtual reality",
+        "metaverse",
+        "device",
+        "smartphone",
+        "adobe",
+        "semrush",
     ],
     "trending": [
-        "trending", "viral", "trend", "tiktok", "meme", "challenge", "hashtag",
-        "breaking", "hype", "buzz", "influencer", "youtuber", "streamer",
-        "mrbeast", "drama", "cancel culture",
+        "trending",
+        "viral",
+        "trend",
+        "tiktok",
+        "meme",
+        "challenge",
+        "hashtag",
+        "breaking",
+        "hype",
+        "buzz",
+        "influencer",
+        "youtuber",
+        "streamer",
+        "mrbeast",
+        "drama",
+        "cancel culture",
     ],
     "fashion": [
-        "fashion", "clothing", "apparel", "luxury", "gucci", "prada", "nike",
-        "adidas", "sneaker", "shoe", "runway", "designer", "style", "vogue",
-        "wear", "textile", "fashion collection", "couture", "handbag",
+        "fashion",
+        "clothing",
+        "apparel",
+        "luxury",
+        "gucci",
+        "prada",
+        "nike",
+        "adidas",
+        "sneaker",
+        "shoe",
+        "runway",
+        "designer",
+        "style",
+        "vogue",
+        "wear",
+        "textile",
+        "fashion collection",
+        "couture",
+        "handbag",
     ],
     "social": [
-        "social", "society", "demographic", "population", "census", "birth rate",
-        "inequality", "human rights", "protest", "civil rights", "gender",
-        "race", "immigration", "poverty", "class", "community", "homelessness",
-        "socio-economic", "student",
+        "social",
+        "society",
+        "demographic",
+        "population",
+        "census",
+        "birth rate",
+        "inequality",
+        "human rights",
+        "protest",
+        "civil rights",
+        "gender",
+        "race",
+        "immigration",
+        "poverty",
+        "class",
+        "community",
+        "homelessness",
+        "socio-economic",
+        "student",
     ],
     "health": [
-        "health", "medicine", "medical", "doctor", "hospital", "virus",
-        "disease", "cancer", "vaccine", "drug", "pharmaceutical", "fda",
-        "covid", "pandemic", "therapy", "surgery", "mental health", "diet",
-        "nutrition", "obesity", "who", "treatment",
+        "health",
+        "medicine",
+        "medical",
+        "doctor",
+        "hospital",
+        "virus",
+        "disease",
+        "cancer",
+        "vaccine",
+        "drug",
+        "pharmaceutical",
+        "fda",
+        "covid",
+        "pandemic",
+        "therapy",
+        "surgery",
+        "mental health",
+        "diet",
+        "nutrition",
+        "obesity",
+        "who",
+        "treatment",
     ],
     "sustainability": [
-        "sustainability", "sustainable", "climate", "carbon", "green",
-        "renewable", "solar", "wind", "energy", "electric vehicle", "ev",
-        "emission", "pollution", "environment", "recycle", "plastic",
-        "global warming", "net zero", "clean energy",
+        "sustainability",
+        "sustainable",
+        "climate",
+        "carbon",
+        "green",
+        "renewable",
+        "solar",
+        "wind",
+        "energy",
+        "electric vehicle",
+        "ev",
+        "emission",
+        "pollution",
+        "environment",
+        "recycle",
+        "plastic",
+        "global warming",
+        "net zero",
+        "clean energy",
     ],
     "internet": [
-        "internet", "website", "domain", "url", "broadband", "fiber", "wifi",
-        "5g", "browser", "search engine", "online", "digital", "connectivity",
-        "network", "router", "isp", "cybersecurity", "hack", "ddos",
+        "internet",
+        "website",
+        "domain",
+        "url",
+        "broadband",
+        "fiber",
+        "wifi",
+        "5g",
+        "browser",
+        "search engine",
+        "online",
+        "digital",
+        "connectivity",
+        "network",
+        "router",
+        "isp",
+        "cybersecurity",
+        "hack",
+        "ddos",
     ],
     "travel": [
-        "travel", "tourism", "airline", "flight", "airport", "plane", "boeing",
-        "airbus", "hotel", "resort", "visa", "passport", "destination", "cruise",
-        "vacation", "booking", "airbnb", "expedia", "trip", "passenger",
-        "transportation", "tour", "bus", "ntsb",
+        "travel",
+        "tourism",
+        "airline",
+        "flight",
+        "airport",
+        "plane",
+        "boeing",
+        "airbus",
+        "hotel",
+        "resort",
+        "visa",
+        "passport",
+        "destination",
+        "cruise",
+        "vacation",
+        "booking",
+        "airbnb",
+        "expedia",
+        "trip",
+        "passenger",
+        "transportation",
+        "tour",
+        "bus",
+        "ntsb",
     ],
     "food": [
-        "food", "drink", "restaurant", "dining", "mcdonalds", "starbucks",
-        "burger", "meat", "plant-based", "agriculture", "farming", "crop",
-        "harvest", "beer", "wine", "spirit", "coffee", "sugar", "grocery",
-        "supermarket", "chef", "cooking",
+        "food",
+        "drink",
+        "restaurant",
+        "dining",
+        "mcdonalds",
+        "starbucks",
+        "burger",
+        "meat",
+        "plant-based",
+        "agriculture",
+        "farming",
+        "crop",
+        "harvest",
+        "beer",
+        "wine",
+        "spirit",
+        "coffee",
+        "sugar",
+        "grocery",
+        "supermarket",
+        "chef",
+        "cooking",
     ],
     "pets": [
-        "pet", "pets", "dog", "cat", "puppy", "kitten", "veterinarian", "vet",
-        "breed", "animal shelter", "adoption", "kibble", "leash", "domestic animal",
+        "pet",
+        "pets",
+        "dog",
+        "cat",
+        "puppy",
+        "kitten",
+        "veterinarian",
+        "vet",
+        "breed",
+        "animal shelter",
+        "adoption",
+        "kibble",
+        "leash",
+        "domestic animal",
     ],
     "animals": [
-        "animal", "wildlife", "zoo", "species", "extinction",
-        "wildlife conservation", "nature conservation", "lion", "tiger", "whale",
-        "bear", "biodiversity", "safari", "jungle", "forest", "fauna", "marine",
+        "animal",
+        "wildlife",
+        "zoo",
+        "species",
+        "extinction",
+        "wildlife conservation",
+        "nature conservation",
+        "lion",
+        "tiger",
+        "whale",
+        "bear",
+        "biodiversity",
+        "safari",
+        "jungle",
+        "forest",
+        "fauna",
+        "marine",
     ],
     "curiosities": [
-        "curiosities", "mystery", "ufo", "alien", "flat earth", "paranormal",
-        "ghost", "psychic", "anomaly", "weird", "strange", "guinness",
-        "record breaker", "bizarre", "hoax", "conspiracy", "qanon",
+        "curiosities",
+        "mystery",
+        "ufo",
+        "alien",
+        "flat earth",
+        "paranormal",
+        "ghost",
+        "psychic",
+        "anomaly",
+        "weird",
+        "strange",
+        "guinness",
+        "record breaker",
+        "bizarre",
+        "hoax",
+        "conspiracy",
+        "qanon",
     ],
     "music": [
-        "music", "song", "album", "artist", "concert", "tour", "spotify",
-        "grammy", "billboard", "singer", "band", "rapper", "genre", "hip hop",
-        "chart", "musical", "vocalist",
+        "music",
+        "song",
+        "album",
+        "artist",
+        "concert",
+        "tour",
+        "spotify",
+        "grammy",
+        "billboard",
+        "singer",
+        "band",
+        "rapper",
+        "genre",
+        "hip hop",
+        "chart",
+        "musical",
+        "vocalist",
     ],
     "economics": [
-        "economy", "economic", "inflation", "recession", "gdp", "cpi",
-        "interest rate", "fed", "federal reserve", "central bank",
-        "unemployment", "jobs report", "macro", "debt", "deficit",
-        "yield curve", "treasury", "fiscal", "mortgage", "freddie mac",
+        "economy",
+        "economic",
+        "inflation",
+        "recession",
+        "gdp",
+        "cpi",
+        "interest rate",
+        "fed",
+        "federal reserve",
+        "central bank",
+        "unemployment",
+        "jobs report",
+        "macro",
+        "debt",
+        "deficit",
+        "yield curve",
+        "treasury",
+        "fiscal",
+        "mortgage",
+        "freddie mac",
     ],
     "arts": [
-        "art", "arts", "museum", "painting", "auction", "sothebys", "christies",
-        "gallery", "masterpiece", "sculpture", "exhibition", "cultural",
-        "literature", "novel", "biography", "author", "poet",
+        "art",
+        "arts",
+        "museum",
+        "painting",
+        "auction",
+        "sothebys",
+        "christies",
+        "gallery",
+        "masterpiece",
+        "sculpture",
+        "exhibition",
+        "cultural",
+        "literature",
+        "novel",
+        "biography",
+        "author",
+        "poet",
     ],
     "entertainment": [
-        "entertainment", "movie", "film", "cinema", "hollywood", "actor",
-        "actress", "netflix", "disney", "hbo", "box office", "oscar", "tv",
-        "series", "streaming", "show", "theater", "gambling", "betting",
-        "poker", "casino", "lottery",
+        "entertainment",
+        "movie",
+        "film",
+        "cinema",
+        "hollywood",
+        "actor",
+        "actress",
+        "netflix",
+        "disney",
+        "hbo",
+        "box office",
+        "oscar",
+        "tv",
+        "series",
+        "streaming",
+        "show",
+        "theater",
+        "gambling",
+        "betting",
+        "poker",
+        "casino",
+        "lottery",
     ],
     "weather": [
-        "weather", "forecast", "hurricane", "storm", "tornado", "temperature",
-        "rain", "snow", "heatwave", "drought", "flood", "meteorology",
-        "monsoon", "el nino", "tropical", "dissipate", "noaa",
+        "weather",
+        "forecast",
+        "hurricane",
+        "storm",
+        "tornado",
+        "temperature",
+        "rain",
+        "snow",
+        "heatwave",
+        "drought",
+        "flood",
+        "meteorology",
+        "monsoon",
+        "el nino",
+        "tropical",
+        "dissipate",
+        "noaa",
     ],
     "sports": [
-        "sports", "sport", "football", "basketball", "soccer", "baseball",
-        "nfl", "nba", "mlb", "fifa", "olympics", "world cup", "medal",
-        "champion", "league", "sports team", "athlete", "score", "match",
-        "tournament", "ufc", "boxing", "f1", "liverpool", "transfer",
-        "player", "tennis", "grand slam",
+        "sports",
+        "sport",
+        "football",
+        "basketball",
+        "soccer",
+        "baseball",
+        "nfl",
+        "nba",
+        "mlb",
+        "fifa",
+        "olympics",
+        "world cup",
+        "medal",
+        "champion",
+        "league",
+        "sports team",
+        "athlete",
+        "score",
+        "match",
+        "tournament",
+        "ufc",
+        "boxing",
+        "f1",
+        "liverpool",
+        "transfer",
+        "player",
+        "tennis",
+        "grand slam",
     ],
     "finance": [
-        "finance", "financial", "stock", "share", "market", "wall street",
-        "sp500", "nasdaq", "dow jones", "trade", "investor", "dividend",
-        "portfolio", "hedge fund", "equity", "bond", "earnings", "bloomberg",
-        "etf", "short", "long", "robinhood", "close",
+        "finance",
+        "financial",
+        "stock",
+        "share",
+        "market",
+        "wall street",
+        "sp500",
+        "nasdaq",
+        "dow jones",
+        "trade",
+        "investor",
+        "dividend",
+        "portfolio",
+        "hedge fund",
+        "equity",
+        "bond",
+        "earnings",
+        "bloomberg",
+        "etf",
+        "short",
+        "long",
+        "robinhood",
+        "close",
     ],
     "international": [
-        "international", "global", "war", "conflict", "ukraine", "russia",
-        "israel", "gaza", "china", "un", "united nations", "nato", "treaty",
-        "diplomacy", "foreign", "border", "geopolitics", "summit", "sanction",
-        "ambassador", "territory",
+        "international",
+        "global",
+        "war",
+        "conflict",
+        "ukraine",
+        "russia",
+        "israel",
+        "gaza",
+        "china",
+        "un",
+        "united nations",
+        "nato",
+        "treaty",
+        "diplomacy",
+        "foreign",
+        "border",
+        "geopolitics",
+        "summit",
+        "sanction",
+        "ambassador",
+        "territory",
     ],
 }
 
@@ -246,6 +673,20 @@ DELIVERS_QUERY = """
         tool
         content
       }
+    }
+  }
+}
+"""
+
+DELIVERS_BY_IDS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    where: { id_in: [%(ids)s] }
+  ) {
+    id
+    marketplaceDelivery {
+      ipfsHashBytes
     }
   }
 }
@@ -327,7 +768,9 @@ def _post_graphql(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     headers = {"Content-Type": "application/json"}
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=HTTP_TIMEOUT)
+            resp = requests.post(
+                url, json=payload, headers=headers, timeout=HTTP_TIMEOUT
+            )
             resp.raise_for_status()
             body = resp.json()
             if "errors" in body:
@@ -336,10 +779,17 @@ def _post_graphql(url: str, payload: dict[str, Any]) -> dict[str, Any]:
         except requests.exceptions.ReadTimeout:
             if attempt < MAX_RETRIES:
                 wait = attempt * 10
-                log.warning("Timeout on %s (attempt %d/%d), retrying in %ds", url, attempt, MAX_RETRIES, wait)
+                log.warning(
+                    "Timeout on %s (attempt %d/%d), retrying in %ds",
+                    url,
+                    attempt,
+                    MAX_RETRIES,
+                    wait,
+                )
                 time.sleep(wait)
             else:
                 raise
+    return {}  # unreachable, but satisfies mypy
 
 
 def _paginated_fetch(
@@ -378,6 +828,9 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 
     Returns dict with market_id, market_type, market_prob, market_liquidity_usd,
     market_close_at if present (schema_version 2.0+). Empty dict otherwise.
+
+    :param content_str: raw JSON string from parsedRequest.content.
+    :return: dict with parsed market context fields, or empty dict.
     """
     if not content_str:
         return {}
@@ -405,9 +858,15 @@ def fetch_deliveries(
 
     Skips deliveries with null parsedRequest (IPFS failures on subgraph side).
     Extracts market_id from request_context when available (schema v2.0+).
+
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
+    :return: list of delivery dicts.
     """
     raw = _paginated_fetch(
-        marketplace_url, DELIVERS_QUERY, "delivers",
+        marketplace_url,
+        DELIVERS_QUERY,
+        "delivers",
         {"timestamp_gt": timestamp_gt},
     )
 
@@ -429,19 +888,21 @@ def fetch_deliveries(
         delivery_ts = int(d["blockTimestamp"])
         ctx = _parse_request_context(parsed.get("content", ""))
 
-        deliveries.append({
-            "deliver_id": d["id"],
-            "timestamp": delivery_ts,
-            "request_timestamp": request_ts,
-            "model": d.get("model"),
-            "tool_response": d.get("toolResponse"),
-            "tool": parsed.get("tool") or "unknown",
-            "question_title": question_title,
-            "market_id": ctx.get("market_id"),
-            "market_prob": ctx.get("market_prob"),
-            "market_liquidity_usd": ctx.get("market_liquidity_usd"),
-            "market_close_at": ctx.get("market_close_at"),
-        })
+        deliveries.append(
+            {
+                "deliver_id": d["id"],
+                "timestamp": delivery_ts,
+                "request_timestamp": request_ts,
+                "model": d.get("model"),
+                "tool_response": d.get("toolResponse"),
+                "tool": parsed.get("tool") or "unknown",
+                "question_title": question_title,
+                "market_id": ctx.get("market_id"),
+                "market_prob": ctx.get("market_prob"),
+                "market_liquidity_usd": ctx.get("market_liquidity_usd"),
+                "market_close_at": ctx.get("market_close_at"),
+            }
+        )
 
     if skipped:
         log.info("  skipped %d deliveries with null parsedRequest", skipped)
@@ -454,6 +915,85 @@ def fetch_deliveries(
 
 
 # ---------------------------------------------------------------------------
+# IPFS payload fetch (for source_content extraction)
+# ---------------------------------------------------------------------------
+
+
+def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
+    """Convert an IPFS hash from the subgraph to a base32 CIDv1.
+
+    Handles two formats:
+    - ``0x`` raw sha256 hash (from ``marketplaceDelivery.ipfsHashBytes``):
+      wraps as CIDv1 (version=1, codec=dag-pb, sha256 multihash).
+    - ``f``-prefixed hex CIDv1 (from ``mechDelivery.ipfsHash``):
+      strips multibase prefix and re-encodes.
+
+    The IPFS gateway expects base32 CIDv1 like ``bafybei...``.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: base32-encoded CIDv1 string.
+    """
+    if ipfs_hash.startswith("0x"):
+        hash_bytes = bytes.fromhex(ipfs_hash[2:])
+        # CIDv1: version=0x01, codec=0x70 (dag-pb), multihash=0x12 (sha256) + 0x20 (32 bytes) + hash
+        cid_bytes = bytes([0x01, 0x70, 0x12, 0x20]) + hash_bytes
+        return "b" + base64.b32encode(cid_bytes).decode().lower().rstrip("=")
+    if ipfs_hash.startswith("f"):
+        raw = bytes.fromhex(ipfs_hash[1:])
+        return "b" + base64.b32encode(raw).decode().lower().rstrip("=")
+    return ipfs_hash
+
+
+def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the full IPFS payload and extract source_content from metadata.params.
+
+    The IPFS hash from the subgraph is a hex-encoded CIDv1 pointing to a
+    directory. The directory contains one file named by request ID. We fetch
+    the directory listing, find the file, and extract the payload.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: the source_content dict, or None if not available.
+    """
+    try:
+        cid = _ipfs_hash_to_cid(ipfs_hash)
+        dir_url = f"{IPFS_GATEWAY_URL}/{cid}/"
+
+        # Fetch directory listing to find the file name
+        resp = requests.get(dir_url, timeout=HTTP_TIMEOUT)
+        resp.raise_for_status()
+
+        # Try parsing as JSON directly (in case gateway returns JSON directory listing)
+        try:
+            dir_data = resp.json()
+            # If the response is already the payload (single-file directory auto-resolved)
+            if isinstance(dir_data, dict) and "metadata" in dir_data:
+                metadata = dir_data.get("metadata") or {}
+                params = metadata.get("params") or {}
+                return params.get("source_content")
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Parse HTML directory listing to find the file link
+        links = re.findall(rf"/ipfs/{re.escape(cid)}/(\d+)", resp.text)
+        if not links:
+            log.debug("No files found in IPFS directory %s", cid)
+            return None
+
+        # Fetch the actual file (first match — there's typically one file per delivery)
+        file_url = f"{IPFS_GATEWAY_URL}/{cid}/{links[0]}"
+        file_resp = requests.get(file_url, timeout=HTTP_TIMEOUT)
+        file_resp.raise_for_status()
+        payload = file_resp.json()
+
+        metadata = payload.get("metadata") or {}
+        params = metadata.get("params") or {}
+        return params.get("source_content")
+    except Exception as e:
+        log.debug("Failed to fetch IPFS %s: %s", ipfs_hash, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Fetch resolved markets (prediction subgraphs)
 # ---------------------------------------------------------------------------
 
@@ -462,11 +1002,13 @@ class ResolvedMarkets:
     """Resolved markets indexed by both market_id and question title."""
 
     def __init__(self) -> None:
+        """Initialize empty market indexes."""
         self.by_id: dict[str, dict[str, Any]] = {}
         self.by_title: dict[str, dict[str, Any]] = {}
         self._seen: set[int] = set()
 
     def add(self, market_id: Optional[str], title: str, data: dict[str, Any]) -> None:
+        """Add a resolved market to the indexes."""
         if market_id:
             self.by_id[market_id] = data
         if title:
@@ -474,9 +1016,11 @@ class ResolvedMarkets:
         self._seen.add(id(data))
 
     def __len__(self) -> int:
+        """Return the number of unique resolved markets."""
         return len(self._seen)
 
     def __bool__(self) -> bool:
+        """Return True if any resolved markets are stored."""
         return len(self._seen) > 0
 
 
@@ -485,9 +1029,14 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
 
     Filters by resolution time (currentAnswerTimestamp), not bet placement time.
     Indexes by both market ID (fpmm address) and question title.
+
+    :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :return: ResolvedMarkets indexed by ID and title.
     """
     raw = _paginated_fetch(
-        PREDICT_OMEN_SUBGRAPH_URL, OMEN_BETS_QUERY, "bets",
+        PREDICT_OMEN_SUBGRAPH_URL,
+        OMEN_BETS_QUERY,
+        "bets",
         {"resolved_after": resolved_after},
     )
 
@@ -531,10 +1080,15 @@ def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
     2. Post-filter to resolved questions only
     3. Only include markets where resolution.blockTimestamp > resolved_after
     4. Deduplicate by question ID
+
+    :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :return: ResolvedMarkets indexed by ID and title.
     """
     candidate_window = int(time.time()) - (POLYMARKET_CANDIDATE_WINDOW_DAYS * 86400)
     raw = _paginated_fetch(
-        PREDICT_POLYMARKET_SUBGRAPH_URL, POLYMARKET_BETS_QUERY, "bets",
+        PREDICT_POLYMARKET_SUBGRAPH_URL,
+        POLYMARKET_BETS_QUERY,
+        "bets",
         {"timestamp_gt": candidate_window},
     )
 
@@ -600,6 +1154,10 @@ def _match_delivery(
 
     Tries market_id first (deterministic), falls back to title matching (heuristic).
     Returns (market_data, match_confidence).
+
+    :param delivery: delivery dict with question_title and optional market_id.
+    :param markets: resolved markets to match against.
+    :return: tuple of (market_data or None, match_confidence).
     """
     # 1. Deterministic match via market_id (from request_context, schema v2.0+)
     market_id = delivery.get("market_id")
@@ -669,7 +1227,11 @@ def parse_tool_response(tool_response: Optional[str]) -> dict[str, Any]:
                     return {
                         "p_yes": p_yes,
                         "p_no": p_no,
-                        "confidence": float(data["confidence"]) if data.get("confidence") is not None else None,
+                        "confidence": (
+                            float(data["confidence"])
+                            if data.get("confidence") is not None
+                            else None
+                        ),
                         "prediction_parse_status": "valid",
                     }
 
@@ -722,7 +1284,7 @@ def classify_category(question_text: str) -> str:
     text_lower = question_text.lower()
     for category, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
-            if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+            if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
                 return category
     return "other"
 
@@ -760,17 +1322,16 @@ def build_row(
 
     prediction_lead_time_days: Optional[float] = None
     if delivery_ts and resolved_at_ts and resolved_at_ts > delivery_ts:
-        prediction_lead_time_days = round(
-            (resolved_at_ts - delivery_ts) / 86400, 1
-        )
+        prediction_lead_time_days = round((resolved_at_ts - delivery_ts) / 86400, 1)
 
     # Block-level granularity (~5s Gnosis, ~12s Ethereum), not sub-second
     latency_s: Optional[int] = None
     if request_ts and delivery_ts and delivery_ts > request_ts:
         latency_s = delivery_ts - request_ts
 
-    return {
+    row = {
         "row_id": _make_row_id(platform, delivery["deliver_id"]),
+        "deliver_id": delivery["deliver_id"],
         "schema_version": "1.0",
         "mode": "production_replay",
         "market_id": delivery.get("market_id"),
@@ -796,6 +1357,7 @@ def build_row(
         "category": classify_category(question_text),
         "match_confidence": match_confidence,
     }
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -809,7 +1371,9 @@ def load_fetch_state(state_path: Path) -> dict[str, Any]:
         try:
             return json.loads(state_path.read_text())
         except (json.JSONDecodeError, OSError):
-            log.warning("Could not read fetch state from %s, starting fresh", state_path)
+            log.warning(
+                "Could not read fetch state from %s, starting fresh", state_path
+            )
     return {}
 
 
@@ -823,7 +1387,7 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
     ids: set[str] = set()
     if not output_path.exists():
         return ids
-    with open(output_path) as f:
+    with open(output_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -839,7 +1403,7 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
 def append_rows(output_path: Path, rows: list[dict[str, Any]]) -> int:
     """Append rows to the output JSONL file. Returns count of rows written."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "a") as f:
+    with open(output_path, "a", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row) + "\n")
     return len(rows)
@@ -860,6 +1424,13 @@ def _match_and_build(
 
     Returns (rows, still_pending, matched_by_id, matched_by_title,
              max_delivery_ts, max_resolved_ts).
+
+    :param deliveries: list of delivery dicts.
+    :param resolved_markets: resolved markets to match against.
+    :param existing_ids: row IDs already written, for deduplication.
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :return: tuple of (rows, still_pending, matched_by_id, matched_by_title,
+        max_delivery_ts, max_resolved_ts).
     """
     rows: list[dict[str, Any]] = []
     still_pending: list[dict[str, Any]] = []
@@ -890,7 +1461,14 @@ def _match_and_build(
         if market.get("resolved_at_ts"):
             max_resolved_ts = max(max_resolved_ts, market["resolved_at_ts"])
 
-    return rows, still_pending, matched_by_id, matched_by_title, max_delivery_ts, max_resolved_ts
+    return (
+        rows,
+        still_pending,
+        matched_by_id,
+        matched_by_title,
+        max_delivery_ts,
+        max_resolved_ts,
+    )
 
 
 def process_platform(
@@ -907,23 +1485,42 @@ def process_platform(
     resolved markets. Unmatched deliveries are returned as still-pending
     for the next run.
 
-    Returns (rows, still_pending, max_delivery_timestamp, max_resolved_timestamp).
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param resolved_markets: resolved markets to match against.
+    :param delivery_ts_gt: only fetch deliveries after this UNIX timestamp.
+    :param existing_ids: row IDs already written, for deduplication.
+    :param pending_deliveries: unmatched deliveries from previous runs.
+    :return: tuple of (rows, still_pending, max_delivery_timestamp,
+        max_resolved_timestamp).
     """
     # 1. Retry pending deliveries from previous runs
     rows_from_pending: list[dict[str, Any]] = []
     remaining_pending: list[dict[str, Any]] = []
     if pending_deliveries and resolved_markets:
         rows_from_pending, remaining_pending, p_id, p_title, _, _ = _match_and_build(
-            pending_deliveries, resolved_markets, existing_ids, platform,
+            pending_deliveries,
+            resolved_markets,
+            existing_ids,
+            platform,
         )
         if rows_from_pending:
-            log.info("%s: matched %d previously pending deliveries", platform, len(rows_from_pending))
+            log.info(
+                "%s: matched %d previously pending deliveries",
+                platform,
+                len(rows_from_pending),
+            )
 
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)
     new_deliveries = fetch_deliveries(marketplace_url, delivery_ts_gt)
-    log.info("%s: %d new deliveries, %d resolved markets, %d pending from before",
-             platform, len(new_deliveries), len(resolved_markets), len(pending_deliveries))
+    log.info(
+        "%s: %d new deliveries, %d resolved markets, %d pending from before",
+        platform,
+        len(new_deliveries),
+        len(resolved_markets),
+        len(pending_deliveries),
+    )
 
     rows_from_new: list[dict[str, Any]] = []
     new_pending: list[dict[str, Any]] = []
@@ -933,9 +1530,14 @@ def process_platform(
     matched_by_title = 0
 
     if new_deliveries:
-        rows_from_new, new_pending, matched_by_id, matched_by_title, max_delivery_ts, max_resolved_ts = (
-            _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
-        )
+        (
+            rows_from_new,
+            new_pending,
+            matched_by_id,
+            matched_by_title,
+            max_delivery_ts,
+            max_resolved_ts,
+        ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
 
     all_rows = rows_from_pending + rows_from_new
     all_pending = remaining_pending + new_pending
@@ -946,14 +1548,24 @@ def process_platform(
     all_pending = [d for d in all_pending if d["timestamp"] > cutoff]
     pruned = before_prune - len(all_pending)
     if pruned:
-        log.info("%s: pruned %d pending deliveries older than %d days", platform, pruned, PENDING_MAX_AGE_DAYS)
+        log.info(
+            "%s: pruned %d pending deliveries older than %d days",
+            platform,
+            pruned,
+            PENDING_MAX_AGE_DAYS,
+        )
 
     total_matched = len(all_rows)
     log.info(
         "%s: %d matched (%d by market_id, %d by title, %d from pending), "
         "%d still pending, %d rows built",
-        platform, total_matched, matched_by_id, matched_by_title,
-        len(rows_from_pending), len(all_pending), len(all_rows),
+        platform,
+        total_matched,
+        matched_by_id,
+        matched_by_title,
+        len(rows_from_pending),
+        len(all_pending),
+        len(all_rows),
     )
     return all_rows, all_pending, max_delivery_ts, max_resolved_ts
 
@@ -964,6 +1576,7 @@ def process_platform(
 
 
 def main() -> None:
+    """CLI entry point for fetching production data."""
     parser = argparse.ArgumentParser(
         description="Fetch production prediction data for benchmark scoring.",
     )
@@ -984,6 +1597,12 @@ def main() -> None:
         type=Path,
         default=Path(__file__).parent / ".fetch_state.json",
         help="Incremental state file path",
+    )
+    parser.add_argument(
+        "--last-n",
+        type=int,
+        default=None,
+        help="Only process the last N rows (most recent first)",
     )
     args = parser.parse_args()
 
@@ -1007,12 +1626,21 @@ def main() -> None:
     omen_delivery_ts = max(lookback_ts, omen_state.get("last_delivery_timestamp", 0))
     omen_resolved_ts = max(lookback_ts, omen_state.get("last_resolved_timestamp", 0))
     omen_pending = omen_state.get("pending_deliveries", [])
-    log.info("Omen: deliveries since %s, resolved since %s, %d pending",
-             _ts_to_iso(omen_delivery_ts), _ts_to_iso(omen_resolved_ts), len(omen_pending))
+    log.info(
+        "Omen: deliveries since %s, resolved since %s, %d pending",
+        _ts_to_iso(omen_delivery_ts),
+        _ts_to_iso(omen_resolved_ts),
+        len(omen_pending),
+    )
     omen_markets = fetch_omen_resolved(resolved_after=omen_resolved_ts)
 
     omen_rows, omen_still_pending, omen_max_del_ts, omen_max_res_ts = process_platform(
-        "omen", MECH_MARKETPLACE_GNOSIS_URL, omen_markets, omen_delivery_ts, existing_ids, omen_pending,
+        "omen",
+        MECH_MARKETPLACE_GNOSIS_URL,
+        omen_markets,
+        omen_delivery_ts,
+        existing_ids,
+        omen_pending,
     )
     all_rows.extend(omen_rows)
 
@@ -1021,14 +1649,28 @@ def main() -> None:
     poly_delivery_ts = max(lookback_ts, poly_state.get("last_delivery_timestamp", 0))
     poly_resolved_ts = max(lookback_ts, poly_state.get("last_resolved_timestamp", 0))
     poly_pending = poly_state.get("pending_deliveries", [])
-    log.info("Polymarket: deliveries since %s, resolved since %s, %d pending",
-             _ts_to_iso(poly_delivery_ts), _ts_to_iso(poly_resolved_ts), len(poly_pending))
+    log.info(
+        "Polymarket: deliveries since %s, resolved since %s, %d pending",
+        _ts_to_iso(poly_delivery_ts),
+        _ts_to_iso(poly_resolved_ts),
+        len(poly_pending),
+    )
     poly_markets = fetch_polymarket_resolved(resolved_after=poly_resolved_ts)
 
     poly_rows, poly_still_pending, poly_max_del_ts, poly_max_res_ts = process_platform(
-        "polymarket", MECH_MARKETPLACE_POLYGON_URL, poly_markets, poly_delivery_ts, existing_ids, poly_pending,
+        "polymarket",
+        MECH_MARKETPLACE_POLYGON_URL,
+        poly_markets,
+        poly_delivery_ts,
+        existing_ids,
+        poly_pending,
     )
     all_rows.extend(poly_rows)
+
+    # Apply --last-n truncation (rows are already newest-first from subgraph)
+    if args.last_n is not None and len(all_rows) > args.last_n:
+        log.info("Truncating to last %d rows (from %d)", args.last_n, len(all_rows))
+        all_rows = all_rows[: args.last_n]
 
     # Write results
     if all_rows:
@@ -1041,15 +1683,31 @@ def main() -> None:
     # Pending deliveries are persisted for retry on next run.
     if omen_max_del_ts or omen_max_res_ts or omen_still_pending:
         state["omen"] = {
-            "last_delivery_timestamp": (omen_max_del_ts - 1) if omen_max_del_ts else omen_state.get("last_delivery_timestamp", 0),
-            "last_resolved_timestamp": (omen_max_res_ts - 1) if omen_max_res_ts else omen_state.get("last_resolved_timestamp", 0),
+            "last_delivery_timestamp": (
+                (omen_max_del_ts - 1)
+                if omen_max_del_ts
+                else omen_state.get("last_delivery_timestamp", 0)
+            ),
+            "last_resolved_timestamp": (
+                (omen_max_res_ts - 1)
+                if omen_max_res_ts
+                else omen_state.get("last_resolved_timestamp", 0)
+            ),
             "pending_deliveries": omen_still_pending,
             "last_run": _ts_to_iso(now),
         }
     if poly_max_del_ts or poly_max_res_ts or poly_still_pending:
         state["polymarket"] = {
-            "last_delivery_timestamp": (poly_max_del_ts - 1) if poly_max_del_ts else poly_state.get("last_delivery_timestamp", 0),
-            "last_resolved_timestamp": (poly_max_res_ts - 1) if poly_max_res_ts else poly_state.get("last_resolved_timestamp", 0),
+            "last_delivery_timestamp": (
+                (poly_max_del_ts - 1)
+                if poly_max_del_ts
+                else poly_state.get("last_delivery_timestamp", 0)
+            ),
+            "last_resolved_timestamp": (
+                (poly_max_res_ts - 1)
+                if poly_max_res_ts
+                else poly_state.get("last_resolved_timestamp", 0)
+            ),
             "pending_deliveries": poly_still_pending,
             "last_run": _ts_to_iso(now),
         }
@@ -1060,7 +1718,9 @@ def main() -> None:
     valid = sum(1 for r in all_rows if r["prediction_parse_status"] == "valid")
     log.info(
         "Summary: %d total rows, %d valid predictions, %d missing/malformed",
-        len(all_rows), valid, len(all_rows) - valid,
+        len(all_rows),
+        valid,
+        len(all_rows) - valid,
     )
 
 

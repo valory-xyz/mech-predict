@@ -49,7 +49,7 @@ jobs:
       - name: Fetch production data
         run: |
           python benchmark/datasets/fetch_production.py \
-            --lookback-days ${{ github.event.inputs.lookback_days || '7' }}
+            --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
       - name: Score
         run: |
@@ -109,13 +109,13 @@ jobs:
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform omen \
-            --max-markets ${{ github.event.inputs.max_markets || '10' }}
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
 
       - name: Fetch Polymarket open markets
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform polymarket \
-            --max-markets ${{ github.event.inputs.max_markets || '10' }} \
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}" \
             --min-liquidity 1000
 
       - name: Upload tournament markets
@@ -192,7 +192,7 @@ jobs:
           uv run python -m benchmark.tournament \
             --markets benchmark/datasets/open_markets.jsonl \
             --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme' }}" \
-            --max-markets ${{ github.event.inputs.max_markets || '10' }}
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
 
       - name: Score resolved predictions
         run: uv run python -m benchmark.score_tournament

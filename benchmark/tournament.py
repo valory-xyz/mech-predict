@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import threading
 import time
@@ -40,6 +41,16 @@ from packages.valory.skills.task_execution.utils.apis import KeyChain
 # ---------------------------------------------------------------------------
 
 PACKAGES_JSON = Path(__file__).resolve().parent.parent / "packages" / "packages.json"
+
+# Patterns that look like API keys / tokens (long hex, base64, sk-... etc.)
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9]{8,}|[A-Za-z0-9+/]{32,}={0,2}|[0-9a-f]{32,})",
+)
+
+
+def _sanitize_error(error: str) -> str:
+    """Redact potential secrets from error strings."""
+    return _SECRET_RE.sub("REDACTED", error)
 
 
 def _load_package_hashes() -> dict[str, str]:
@@ -331,7 +342,7 @@ def run_single(
             "confidence": None,
             "prediction_parse_status": "error",
             "latency_s": round(elapsed, 1),
-            "error": str(e),
+            "error": _sanitize_error(str(e)),
             "source_content": None,
         }
     finally:

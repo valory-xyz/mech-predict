@@ -261,8 +261,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install poetry && poetry install --no-interaction
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install project dependencies
+        run: uv sync
+
+      - name: Sync packages
+        run: |
+          uv run autonomy init --reset --author ci --remote --ipfs --ipfs-node "/dns/registry.autonolas.tech/tcp/443/https"
+          uv run autonomy packages sync
 
       - name: Claude Code Analysis
         uses: anthropics/claude-code-action@v1
@@ -294,19 +301,30 @@ jobs:
 
             Phase 4 — Validate with cached replay:
             Check if benchmark/results/tournament_predictions.jsonl exists with rows that
-            have final_outcome set and source_content present. If so, extract up to 20
-            resolved questions for the target tool into a temp JSONL file and run:
-              python benchmark/runner.py --dataset <temp_file> --tools <tool_name>
-              python benchmark/scorer.py --input benchmark/results/replay_results.jsonl --output benchmark/results/replay_scores.json
-            Compare the new Brier score to the baseline from scores.json.
+            have final_outcome set and source_content present for the target tool.
+
+            Baseline: score the EXISTING predictions for this tool from
+            tournament_predictions.jsonl — these were made with the original prompt.
+              python benchmark/scorer.py --input <extracted_baseline_rows> --output benchmark/results/baseline_scores.json
+
+            Improved: run the MODIFIED prompt on the same markets using cached replay:
+              python benchmark/runner.py --dataset <same_markets> --tools <tool_name>
+              python benchmark/scorer.py --input benchmark/results/replay_results.jsonl --output benchmark/results/improved_scores.json
+
+            Compare the two Brier scores on the SAME set of markets. Do NOT compare
+            against the global baseline in scores.json — only the matched markets matter.
             If no replay data is available, skip validation and note this in the PR.
 
-            Phase 5 — Open PR:
-            Commit only the changed tool file(s). PR title format:
+            Phase 5 — Lint:
+            Run `tomte check-code` and fix any issues before committing.
+
+            Phase 6 — Open PR:
+            Commit only the changed tool file(s). Add [skip ci] to the commit message.
+            PR title format:
               "improve: <tool-name> prompt (Brier X.XX → Y.YY)"
             PR body must include: baseline score, new score (or "not validated" if no
             replay data), what changed, and a note that cached replay was used
             (does not test retrieval/search changes).
           claude_args: |
-            --max-turns 20
-            --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*)
+            --max-turns 25
+            --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)

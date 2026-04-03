@@ -1498,7 +1498,7 @@ def process_platform(
     rows_from_pending: list[dict[str, Any]] = []
     remaining_pending: list[dict[str, Any]] = []
     if pending_deliveries and resolved_markets:
-        rows_from_pending, remaining_pending, p_id, p_title, _, _ = _match_and_build(
+        rows_from_pending, remaining_pending, _, _, _, _ = _match_and_build(
             pending_deliveries,
             resolved_markets,
             existing_ids,

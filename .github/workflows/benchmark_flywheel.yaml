@@ -9,8 +9,19 @@ on:
         description: 'Number of days to look back for data'
         required: false
         default: '7'
+      max_markets:
+        description: 'Max markets per platform for tournament'
+        required: false
+        default: '10'
+      tools:
+        description: 'Comma-separated tool names for tournament'
+        required: false
+        default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme'
 
 jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Production benchmark (existing, unchanged)
+  # -----------------------------------------------------------------------
   benchmark:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -38,7 +49,7 @@ jobs:
       - name: Fetch production data
         run: |
           python benchmark/datasets/fetch_production.py \
-            --lookback-days ${{ github.event.inputs.lookback_days || '7' }}
+            --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
       - name: Score
         run: |
@@ -66,4 +77,131 @@ jobs:
           path: |
             benchmark/results/scores.json
             benchmark/results/report.md
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 2: Fetch open markets for tournament (fast, no API keys)
+  # -----------------------------------------------------------------------
+  tournament-fetch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Download previous open markets
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: tournament-markets
+          path: benchmark/datasets/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Fetch Omen open markets
+        run: |
+          python -m benchmark.datasets.fetch_open \
+            --platform omen \
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
+
+      - name: Fetch Polymarket open markets
+        run: |
+          python -m benchmark.datasets.fetch_open \
+            --platform polymarket \
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}" \
+            --min-liquidity 1000
+
+      - name: Upload tournament markets
+        uses: actions/upload-artifact@v4
+        with:
+          name: tournament-markets
+          path: benchmark/datasets/open_markets.jsonl
+          retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 3a: Check if benchmark API keys are configured
+  # -----------------------------------------------------------------------
+  check-secrets:
+    runs-on: ubuntu-22.04
+    outputs:
+      has_keys: ${{ steps.check.outputs.has_keys }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+        run: echo "has_keys=${{ env.KEY != '' }}" >> $GITHUB_OUTPUT
+
+  # -----------------------------------------------------------------------
+  # Job 3b: Run tournament predictions + score (slow, needs API keys)
+  # -----------------------------------------------------------------------
+  tournament-run:
+    needs: [tournament-fetch, check-secrets]
+    if: needs.check-secrets.outputs.has_keys == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install project dependencies
+        run: uv sync
+
+      - name: Sync autonomy packages
+        run: |
+          uv run autonomy init --reset --author ci --remote --ipfs --ipfs-node "/dns/registry.autonolas.tech/tcp/443/https"
+          uv run autonomy packages sync
+
+      - name: Download tournament markets
+        uses: actions/download-artifact@v4
+        with:
+          name: tournament-markets
+          path: benchmark/datasets/
+
+      - name: Download previous tournament predictions
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Run tournament predictions
+        continue-on-error: true
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.BENCHMARK_SERPER_API_KEY }}
+          SEARCH_PROVIDER: ${{ secrets.BENCHMARK_SEARCH_PROVIDER }}
+          GOOGLE_API_KEY: ${{ secrets.BENCHMARK_GOOGLE_API_KEY }}
+          GOOGLE_ENGINE_ID: ${{ secrets.BENCHMARK_GOOGLE_ENGINE_ID }}
+        run: |
+          uv run python -m benchmark.tournament \
+            --markets benchmark/datasets/open_markets.jsonl \
+            --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme' }}" \
+            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
+
+      - name: Score resolved predictions
+        run: uv run python -m benchmark.score_tournament
+
+      - name: Upload tournament predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: tournament-predictions
+          path: |
+            benchmark/results/tournament_predictions.jsonl
+            benchmark/results/tournament_scored.jsonl
           retention-days: 90

@@ -327,6 +327,19 @@ jobs:
               - Issue title: "tool-improvement: <tool-name> (Brier X.XX)"
               - Issue body: diagnosis, what you tried (if anything), why it didn't work,
                 and suggested approaches for a human to investigate.
+
+            Always — Write a summary of what you did (phases completed, decisions made,
+            outcome) to benchmark/results/suggestion_log.txt. Do NOT include API keys,
+            secrets, or sensitive data in this file or in any PR/issue body.
           claude_args: |
             --max-turns 15
             --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)
+
+      - name: Upload suggestion log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suggestion-log
+          path: benchmark/results/suggestion_log.txt
+          retention-days: 30
+          if-no-files-found: ignore

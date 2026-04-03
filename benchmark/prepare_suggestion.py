@@ -146,11 +146,12 @@ def _build_context(
 
     # Platform breakdown
     by_tp = scores.get("by_tool_platform", {})
-    platform_rows = {k: v for k, v in by_tp.items() if k.startswith(f"{tool_name}/")}
+    # Keys use " | " separator, e.g. "prediction-request-rag | omen"
+    platform_rows = {k: v for k, v in by_tp.items() if k.startswith(f"{tool_name} | ")}
     if platform_rows:
         sections.extend(["", "## Platform Breakdown"])
         for key, pstats in sorted(platform_rows.items()):
-            platform = key.split("/", 1)[1] if "/" in key else key
+            platform = key.split(" | ", 1)[1] if " | " in key else key
             sections.append(
                 f"- **{platform}:** Brier {pstats.get('brier')}, "
                 f"Acc {pstats.get('accuracy')}, n={pstats.get('n')}"

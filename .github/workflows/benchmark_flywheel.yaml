@@ -272,67 +272,65 @@ jobs:
           uv run autonomy init --reset --author ci --remote --ipfs --ipfs-node "/dns/registry.autonolas.tech/tcp/443/https"
           uv run autonomy packages sync
 
+      - name: Prepare suggestion context
+        run: uv run python -m benchmark.prepare_suggestion
+
       - name: Claude Code Analysis
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
           prompt: |
-            You are analyzing benchmark results for prediction tools and suggesting improvements.
+            Read benchmark/results/suggestion_context.md first.
 
-            Phase 0 — Check for existing work:
-            Run: gh pr list --label "auto-improvement" --state open --json title
-            Run: gh issue list --label "auto-improvement" --state open --json title
-            If there's already an open PR or issue for the same tool, stop — don't
-            create duplicates.
+            If it says NO_TARGET or DUPLICATE, write that to
+            benchmark/results/suggestion_log.txt and stop immediately.
 
-            Phase 1 — Identify target tool:
-            Read benchmark/results/scores.json. Look at the "by_tool" section. Find the tool
-            with the worst (highest) Brier score that has >= 50 valid predictions (valid_n)
-            and > 80% reliability. This is the tool to improve.
-            If no tool has Brier > 0.27, stop — all tools are performing above baseline.
+            Otherwise, the file contains the target tool name, its source file path,
+            benchmark stats, and comparison tools. Use this context to:
 
-            Phase 2 — Diagnose:
-            Read the tool's source code. Use the TOOL_REGISTRY mapping in benchmark/runner.py
-            to find the module path (e.g., prediction-online maps to
-            packages.valory.customs.prediction_request.prediction_request). Compare its prompt
-            template to better-performing tools. Identify concrete issues:
+            Phase 1 — Read the tool's source code at the path given in the context file.
+            Also read the source of the best-performing comparison tools listed in the
+            context to understand what good prompts look like.
+
+            Phase 2 — Diagnose and fix:
+            Compare the target tool's prompt to the better tools. Identify issues:
             - Weak/missing reasoning scaffolding
-            - No bias correction
+            - No bias correction or calibration guidance
             - Missing chain-of-thought
             - Poor output format instructions
+            Modify the prompt template. DO NOT change function signatures, return formats,
+            or package structure. Only modify prompt strings and parameters.
 
-            Phase 3 — Fix:
-            Modify the tool's prompt template. DO NOT change the function signature, return
-            format, or package structure. Only modify prompt strings and parameters
-            (temperature, max_tokens, etc.).
-
-            Phase 4 — Lint:
+            Phase 3 — Lint:
             Run `tomte check-code` and fix any issues before committing.
 
-            Phase 5 — Output:
+            Phase 4 — Output:
             If you made a concrete fix:
               - Commit only the changed tool file(s). Add [skip ci] to the commit message.
               - Open a PR to the main branch with label "auto-improvement".
               - PR title: "improve: <tool-name> prompt (Brier X.XX)"
-              - PR body must include: current Brier score, what was wrong, what you changed.
-              - Include a "Validation" section in the PR body with instructions for the
-                reviewer to run cached replay before merging:
+              - PR body: current Brier, what was wrong, what you changed.
+              - Include a "Validation" section with instructions for the reviewer:
                   1. Extract resolved rows for this tool from tournament_predictions.jsonl
                   2. Score existing predictions as baseline
-                  3. Run modified prompt via: python benchmark/runner.py --dataset <file> --tools <tool_name>
+                  3. Run modified prompt: python benchmark/runner.py --dataset <file> --tools <tool_name>
                   4. Compare Brier scores on the same set of markets
 
-            If you diagnosed issues but couldn't come up with a concrete fix:
+            If you couldn't come up with a concrete fix:
               - Open a GitHub issue with label "auto-improvement".
               - Issue title: "tool-improvement: <tool-name> (Brier X.XX)"
-              - Issue body: diagnosis, what you tried (if anything), why it didn't work,
+              - Issue body: diagnosis, what you tried, why it didn't work,
                 and suggested approaches for a human to investigate.
+
+            IMPORTANT: If you reach turn 20, stop immediately. Write your partial
+            findings to suggestion_log.txt and open a GitHub issue with whatever
+            diagnosis you have so far. Partial output is better than no output.
 
             Always — Write a summary of what you did (phases completed, decisions made,
             outcome) to benchmark/results/suggestion_log.txt. Do NOT include API keys,
             secrets, or sensitive data in this file or in any PR/issue body.
           claude_args: |
-            --max-turns 15
+            --max-turns 25
             --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)
 
       - name: Upload suggestion log

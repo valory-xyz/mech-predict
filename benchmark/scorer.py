@@ -337,6 +337,41 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for tool, group in group_by(rows, "tool_name").items()
     }
 
+    # Per-tool parse status breakdown
+    parse_breakdown_by_tool = {}
+    for tool, group in group_by(rows, "tool_name").items():
+        counts: dict[str, int] = defaultdict(int)
+        for r in group:
+            counts[r.get("prediction_parse_status", "unknown")] += 1
+        parse_breakdown_by_tool[tool] = dict(counts)
+
+    # Per-tool overconfidence stats
+    overconfidence_by_tool = {}
+    for tool, group in group_by(rows, "tool_name").items():
+        high_conf = [
+            r for r in group
+            if r.get("prediction_parse_status") == "valid"
+            and r.get("final_outcome") is not None
+            and r.get("p_yes") is not None
+            and (r["p_yes"] > 0.9 or r["p_yes"] < 0.1)
+        ]
+        if not high_conf:
+            overconfidence_by_tool[tool] = {
+                "high_confidence_n": 0,
+                "high_confidence_wrong": 0,
+                "high_confidence_wrong_rate": None,
+            }
+            continue
+        wrong = sum(
+            1 for r in high_conf
+            if (r["p_yes"] > 0.9) != r["final_outcome"]
+        )
+        overconfidence_by_tool[tool] = {
+            "high_confidence_n": len(high_conf),
+            "high_confidence_wrong": wrong,
+            "high_confidence_wrong_rate": round(wrong / len(high_conf), 4),
+        }
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_rows": total,
@@ -351,6 +386,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "trend": trend,
         "calibration": calibration,
         "calibration_by_tool": calibration_by_tool,
+        "parse_breakdown_by_tool": parse_breakdown_by_tool,
+        "overconfidence_by_tool": overconfidence_by_tool,
     }
 
 

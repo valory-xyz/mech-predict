@@ -276,6 +276,8 @@ jobs:
         run: uv run python -m benchmark.prepare_suggestion
 
       - name: Claude Code Analysis
+        id: claude
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
@@ -322,7 +324,7 @@ jobs:
               - Issue body: diagnosis, what you tried, why it didn't work,
                 and suggested approaches for a human to investigate.
 
-            IMPORTANT: If you reach turn 20, stop immediately. Write your partial
+            IMPORTANT: If you reach turn 25, stop immediately. Write your partial
             findings to suggestion_log.txt and open a GitHub issue with whatever
             diagnosis you have so far. Partial output is better than no output.
 
@@ -330,8 +332,18 @@ jobs:
             outcome) to benchmark/results/suggestion_log.txt. Do NOT include API keys,
             secrets, or sensitive data in this file or in any PR/issue body.
           claude_args: |
-            --max-turns 25
+            --max-turns 30
             --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)
+
+      - name: Check suggestion outcome
+        if: steps.claude.outcome == 'failure'
+        run: |
+          if grep -q "Phases Completed: All" benchmark/results/suggestion_log.txt 2>/dev/null; then
+            echo "Claude hit turn limit but completed all phases — treating as success"
+          else
+            echo "Claude failed before completing all phases"
+            exit 1
+          fi
 
       - name: Upload suggestion log
         if: always()

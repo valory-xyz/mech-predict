@@ -21,20 +21,31 @@ from urllib.request import Request, urlopen
 log = logging.getLogger(__name__)
 
 SUMMARY_SYSTEM_PROMPT = """\
-Summarize this benchmark report for Slack. Max 5 bullet points.
-Include: overall Brier/accuracy, worst tool or category, regressions, reliability issues.
-Only flag problems.
+Summarize this benchmark report for Slack using EXACTLY this structure.
 
-Tool names with hyphens vs underscores are DIFFERENT tools — do not conflate them.
+*Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends.
 
-Format rules (Slack mrkdwn, NOT markdown):
-- Bold: *text* (single asterisk, NOT double)
-- Code: `text`
-- Each bullet on its own line starting with •
-- No **double asterisks**, no _underscores for italic_
-- No greetings or preamble"""
+*Top tools:*
+• `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "strong calibration")
+(list top 3)
 
-MODEL = "gpt-4.1-nano"
+*Worst tools:*
+• `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "overconfident", "anti-predictive")
+(list bottom 3, ignore tools with 0% reliability or < 50 predictions)
+
+*Weak categories:* list categories with Brier > 0.40 and brief note
+
+*Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
+
+*Recommended actions:* 2-3 concrete next steps based on the data
+
+Rules:
+- Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
+- Wrap tool names and Brier scores in backticks.
+- Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
+- No greetings or preamble."""
+
+MODEL = "gpt-4.1-mini"
 
 
 def summarize_report(report_text: str, api_key: str) -> str:
@@ -116,8 +127,14 @@ def main() -> None:
         log.warning("Report is empty: %s", args.report)
         return
 
+    # Extract heading from report (e.g. "# Benchmark Report — 2026-04-03")
+    heading = "*Benchmark Report*"
+    first_line = report_text.split("\n", 1)[0]
+    if first_line.startswith("# "):
+        heading = f"*{first_line.lstrip('# ').strip()}*"
+
     log.info("Summarizing report with %s...", MODEL)
-    summary = summarize_report(report_text, api_key)
+    summary = f"{heading}\n\n{summarize_report(report_text, api_key)}"
 
     # Append link to full report if running in GitHub Actions
     run_url = _build_run_url()

@@ -217,3 +217,91 @@ jobs:
             benchmark/results/tournament_predictions.jsonl
             benchmark/results/tournament_scored.jsonl
           retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 4: AI-powered tool improvement suggestions
+  # -----------------------------------------------------------------------
+  suggest-improvements:
+    needs: [benchmark]
+    if: (vars.ENABLE_TOOL_SUGGESTIONS != 'false')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download benchmark results
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: benchmark-results
+          path: benchmark/results/
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Download tournament predictions
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install poetry && poetry install --no-interaction
+
+      - name: Claude Code Analysis
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+          prompt: |
+            You are analyzing benchmark results for prediction tools and suggesting improvements.
+
+            Phase 1 — Identify target tool:
+            Read benchmark/results/scores.json. Look at the "by_tool" section. Find the tool
+            with the worst (highest) Brier score that has >= 50 valid predictions (valid_n)
+            and > 80% reliability. This is the tool to improve.
+            If no tool has Brier > 0.27, stop — all tools are performing above baseline.
+
+            Phase 2 — Diagnose:
+            Read the tool's source code. Use the TOOL_REGISTRY mapping in benchmark/runner.py
+            to find the module path (e.g., prediction-online maps to
+            packages.valory.customs.prediction_request.prediction_request). Compare its prompt
+            template to better-performing tools. Identify concrete issues:
+            - Weak/missing reasoning scaffolding
+            - No bias correction
+            - Missing chain-of-thought
+            - Poor output format instructions
+
+            Phase 3 — Fix:
+            Modify the tool's prompt template. DO NOT change the function signature, return
+            format, or package structure. Only modify prompt strings and parameters
+            (temperature, max_tokens, etc.).
+
+            Phase 4 — Validate with cached replay:
+            Check if benchmark/results/tournament_predictions.jsonl exists with rows that
+            have final_outcome set and source_content present. If so, extract up to 20
+            resolved questions for the target tool into a temp JSONL file and run:
+              python benchmark/runner.py --dataset <temp_file> --tools <tool_name>
+              python benchmark/scorer.py --input benchmark/results/replay_results.jsonl --output benchmark/results/replay_scores.json
+            Compare the new Brier score to the baseline from scores.json.
+            If no replay data is available, skip validation and note this in the PR.
+
+            Phase 5 — Open PR:
+            Commit only the changed tool file(s). PR title format:
+              "improve: <tool-name> prompt (Brier X.XX → Y.YY)"
+            PR body must include: baseline score, new score (or "not validated" if no
+            replay data), what changed, and a note that cached replay was used
+            (does not test retrieval/search changes).
+          claude_args: |
+            --max-turns 20
+            --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*)

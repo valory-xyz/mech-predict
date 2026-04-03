@@ -279,6 +279,12 @@ jobs:
           prompt: |
             You are analyzing benchmark results for prediction tools and suggesting improvements.
 
+            Phase 0 — Check for existing work:
+            Run: gh pr list --label "auto-improvement" --state open --json title
+            Run: gh issue list --label "auto-improvement" --state open --json title
+            If there's already an open PR or issue for the same tool, stop — don't
+            create duplicates.
+
             Phase 1 — Identify target tool:
             Read benchmark/results/scores.json. Look at the "by_tool" section. Find the tool
             with the worst (highest) Brier score that has >= 50 valid predictions (valid_n)
@@ -319,13 +325,21 @@ jobs:
             Phase 5 — Lint:
             Run `tomte check-code` and fix any issues before committing.
 
-            Phase 6 — Open PR:
-            Commit only the changed tool file(s). Add [skip ci] to the commit message.
-            PR title format:
-              "improve: <tool-name> prompt (Brier X.XX → Y.YY)"
-            PR body must include: baseline score, new score (or "not validated" if no
-            replay data), what changed, and a note that cached replay was used
-            (does not test retrieval/search changes).
+            Phase 6 — Output:
+            If the replay shows improvement (lower Brier) OR you made changes you're
+            confident about but couldn't validate (no replay data):
+              - Commit only the changed tool file(s). Add [skip ci] to the commit message.
+              - Open a PR to the main branch with label "auto-improvement".
+              - PR title: "improve: <tool-name> prompt (Brier X.XX → Y.YY)"
+              - PR body: baseline score, new score (or "not validated"), what changed,
+                and whether cached replay or tournament validation is needed.
+
+            If you diagnosed issues but couldn't come up with a concrete fix, OR the
+            replay shows no improvement:
+              - Open a GitHub issue with label "auto-improvement".
+              - Issue title: "tool-improvement: <tool-name> (Brier X.XX)"
+              - Issue body: diagnosis, what you tried (if anything), why it didn't work,
+                and suggested approaches for a human to investigate.
           claude_args: |
             --max-turns 25
             --allowedTools Read,Edit,Write,Glob,Grep,Bash(python:*),Bash(pip:*),Bash(git:*),Bash(gh:*),Bash(uv:*),Bash(tomte:*)

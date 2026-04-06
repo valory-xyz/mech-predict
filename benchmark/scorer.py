@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import glob as glob_mod
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -439,13 +440,19 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     valid_n = group["valid_n"]
     if n == 0:
         result.update(
-            brier=None, accuracy=None, sharpness=None,
-            reliability=None, decision_worthy=False,
+            brier=None,
+            accuracy=None,
+            sharpness=None,
+            reliability=None,
+            decision_worthy=False,
         )
     elif valid_n == 0:
         result.update(
-            brier=None, accuracy=None, sharpness=None,
-            reliability=round(0.0, 4), decision_worthy=False,
+            brier=None,
+            accuracy=None,
+            sharpness=None,
+            reliability=round(0.0, 4),
+            decision_worthy=False,
         )
     else:
         result["brier"] = round(group["brier_sum"] / valid_n, 4)
@@ -456,58 +463,44 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _ensure_and_accumulate(
+    dimension: dict[str, dict[str, Any]],
+    key: str,
+    row: dict[str, Any],
+) -> None:
+    """Ensure a key exists in a dimension dict and accumulate the row into it.
+
+    :param dimension: dict mapping group keys to accumulator dicts.
+    :param key: the group key to accumulate into.
+    :param row: a production log row dict.
+    """
+    if key not in dimension:
+        dimension[key] = _empty_group()
+    _accumulate_group(dimension[key], row)
+
+
 def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """Merge one row into all accumulator dimensions (mutates *scores*).
 
     :param scores: the full scores dict with accumulators.
     :param row: a production log row dict.
     """
-    # Overall
     _accumulate_group(scores["overall"], row)
 
-    # By tool
     tool = row.get("tool_name", "unknown")
-    if tool not in scores["by_tool"]:
-        scores["by_tool"][tool] = _empty_group()
-    _accumulate_group(scores["by_tool"][tool], row)
-
-    # By platform
     platform = row.get("platform", "unknown")
-    if platform not in scores["by_platform"]:
-        scores["by_platform"][platform] = _empty_group()
-    _accumulate_group(scores["by_platform"][platform], row)
-
-    # By category
     category = row.get("category", "unknown")
-    if category not in scores["by_category"]:
-        scores["by_category"][category] = _empty_group()
-    _accumulate_group(scores["by_category"][category], row)
-
-    # By horizon
     horizon = classify_horizon(row.get("prediction_lead_time_days"))
-    if horizon not in scores["by_horizon"]:
-        scores["by_horizon"][horizon] = _empty_group()
-    _accumulate_group(scores["by_horizon"][horizon], row)
-
-    # By tool × platform
-    tp_key = f"{tool} | {platform}"
-    if tp_key not in scores["by_tool_platform"]:
-        scores["by_tool_platform"][tp_key] = _empty_group()
-    _accumulate_group(scores["by_tool_platform"][tp_key], row)
-
-    # By tool version
     tool_version = row.get("tool_version") or "unknown"
-    tv_key = f"{tool} | {tool_version}"
-    if tv_key not in scores["by_tool_version"]:
-        scores["by_tool_version"][tv_key] = _empty_group()
-    _accumulate_group(scores["by_tool_version"][tv_key], row)
-
-    # By config
     config_hash = row.get("config_hash") or "unknown"
-    cfg_key = f"{tool} | {config_hash}"
-    if cfg_key not in scores["by_config"]:
-        scores["by_config"][cfg_key] = _empty_group()
-    _accumulate_group(scores["by_config"][cfg_key], row)
+
+    _ensure_and_accumulate(scores["by_tool"], tool, row)
+    _ensure_and_accumulate(scores["by_platform"], platform, row)
+    _ensure_and_accumulate(scores["by_category"], category, row)
+    _ensure_and_accumulate(scores["by_horizon"], horizon, row)
+    _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
+    _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
+    _ensure_and_accumulate(scores["by_config"], f"{tool} | {config_hash}", row)
 
     # Calibration buckets
     is_valid = (
@@ -582,8 +575,15 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     result["total_rows"] = scores["overall"]["n"]
     result["valid_rows"] = scores["overall"]["valid_n"]
 
-    for dim in ("by_tool", "by_platform", "by_category", "by_horizon",
-                "by_tool_platform", "by_tool_version", "by_config"):
+    for dim in (
+        "by_tool",
+        "by_platform",
+        "by_category",
+        "by_horizon",
+        "by_tool_platform",
+        "by_tool_version",
+        "by_config",
+    ):
         result[dim] = {k: _derive_group(v) for k, v in scores[dim].items()}
 
     # Calibration — derive avg_predicted, realized_rate, gap
@@ -597,13 +597,15 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         avg_pred = bucket["predicted_sum"] / count
         realized = bucket["outcome_sum"] / count
         gap = round(avg_pred - realized, 4)
-        cal_result.append({
-            "bin": label,
-            "avg_predicted": round(avg_pred, 4),
-            "realized_rate": round(realized, 4),
-            "n": count,
-            "gap": gap,
-        })
+        cal_result.append(
+            {
+                "bin": label,
+                "avg_predicted": round(avg_pred, 4),
+                "realized_rate": round(realized, 4),
+                "n": count,
+                "gap": gap,
+            }
+        )
     result["calibration"] = cal_result
 
     result["parse_breakdown"] = scores["parse_breakdown"]
@@ -688,8 +690,15 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
             "sharpness_sum": data["overall"]["sharpness_sum"],
         },
     }
-    for dim in ("by_tool", "by_platform", "by_category", "by_horizon",
-                "by_tool_platform", "by_tool_version", "by_config"):
+    for dim in (
+        "by_tool",
+        "by_platform",
+        "by_category",
+        "by_horizon",
+        "by_tool_platform",
+        "by_tool_version",
+        "by_config",
+    ):
         scores[dim] = {}
         for key, group in data.get(dim, {}).items():
             scores[dim][key] = {
@@ -755,17 +764,29 @@ def update(
     finalized = _finalize_scores(scores)
     # Merge accumulators into the output so next load can resume
     output = dict(finalized)
-    output["overall"] = {**finalized["overall"], **{
-        k: scores["overall"][k]
-        for k in ("brier_sum", "correct_count", "sharpness_sum")
-    }}
-    for dim in ("by_tool", "by_platform", "by_category", "by_horizon",
-                "by_tool_platform", "by_tool_version", "by_config"):
+    output["overall"] = {
+        **finalized["overall"],
+        **{
+            k: scores["overall"][k]
+            for k in ("brier_sum", "correct_count", "sharpness_sum")
+        },
+    }
+    for dim in (
+        "by_tool",
+        "by_platform",
+        "by_category",
+        "by_horizon",
+        "by_tool_platform",
+        "by_tool_version",
+        "by_config",
+    ):
         for key, group in scores[dim].items():
-            output[dim][key] = {**finalized[dim][key], **{
-                k: group[k]
-                for k in ("brier_sum", "correct_count", "sharpness_sum")
-            }}
+            output[dim][key] = {
+                **finalized[dim][key],
+                **{
+                    k: group[k] for k in ("brier_sum", "correct_count", "sharpness_sum")
+                },
+            }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
 
@@ -790,7 +811,6 @@ def rebuild(
     :param history_path: output path for ``scores_history.jsonl``.
     :return: finalized scores dict.
     """
-    import glob as glob_mod
 
     # Collect all log files
     pattern = str(logs_dir / "production_log_*.jsonl")
@@ -842,17 +862,29 @@ def rebuild(
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use
     output = dict(finalized)
-    output["overall"] = {**finalized["overall"], **{
-        k: scores["overall"][k]
-        for k in ("brier_sum", "correct_count", "sharpness_sum")
-    }}
-    for dim in ("by_tool", "by_platform", "by_category", "by_horizon",
-                "by_tool_platform", "by_tool_version", "by_config"):
+    output["overall"] = {
+        **finalized["overall"],
+        **{
+            k: scores["overall"][k]
+            for k in ("brier_sum", "correct_count", "sharpness_sum")
+        },
+    }
+    for dim in (
+        "by_tool",
+        "by_platform",
+        "by_category",
+        "by_horizon",
+        "by_tool_platform",
+        "by_tool_version",
+        "by_config",
+    ):
         for key, group in scores[dim].items():
-            output[dim][key] = {**finalized[dim][key], **{
-                k: group[k]
-                for k in ("brier_sum", "correct_count", "sharpness_sum")
-            }}
+            output[dim][key] = {
+                **finalized[dim][key],
+                **{
+                    k: group[k] for k in ("brier_sum", "correct_count", "sharpness_sum")
+                },
+            }
     output["_calibration_accum"] = scores["calibration"]
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)

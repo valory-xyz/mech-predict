@@ -26,7 +26,7 @@ import os
 import re
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1464,8 +1464,6 @@ def _daily_log_files(logs_dir: Path, n_days: int) -> list[Path]:
     :param n_days: number of days to look back (inclusive of today).
     :return: list of existing daily log file paths.
     """
-    from datetime import timedelta
-
     now = datetime.now(timezone.utc)
     paths: list[Path] = []
     for i in range(n_days):
@@ -1650,7 +1648,9 @@ def _enrich_rows_with_ipfs_metadata(
 
     ipfs_hashes = _fetch_ipfs_hashes_for_deliver_ids(deliver_ids, marketplace_url)
     has_hash = sum(1 for v in ipfs_hashes.values() if v)
-    log.info("IPFS enrichment: %d/%d deliveries have hashes", has_hash, len(deliver_ids))
+    log.info(
+        "IPFS enrichment: %d/%d deliveries have hashes", has_hash, len(deliver_ids)
+    )
 
     enriched = 0
     for row in rows:
@@ -1801,6 +1801,42 @@ def _migrate_legacy_log(legacy_path: Path, logs_dir: Path) -> None:
     log.info("Migrated legacy log %s -> %s", legacy_path, dest)
 
 
+def _update_platform_state(
+    state: dict[str, Any],
+    platform: str,
+    prev_state: dict[str, Any],
+    max_del_ts: int,
+    max_res_ts: int,
+    still_pending: list[dict[str, Any]],
+    now: int,
+) -> None:
+    """Update incremental state for one platform.
+
+    :param state: full state dict (mutated in place).
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param prev_state: previous state for this platform.
+    :param max_del_ts: max delivery timestamp seen this run.
+    :param max_res_ts: max resolved timestamp seen this run.
+    :param still_pending: deliveries still unmatched.
+    :param now: current UNIX timestamp.
+    """
+    if max_del_ts or max_res_ts or still_pending:
+        state[platform] = {
+            "last_delivery_timestamp": (
+                (max_del_ts - 1)
+                if max_del_ts
+                else prev_state.get("last_delivery_timestamp", 0)
+            ),
+            "last_resolved_timestamp": (
+                (max_res_ts - 1)
+                if max_res_ts
+                else prev_state.get("last_resolved_timestamp", 0)
+            ),
+            "pending_deliveries": still_pending,
+            "last_run": _ts_to_iso(now),
+        }
+
+
 def main() -> None:
     """CLI entry point for fetching production data."""
     parser = argparse.ArgumentParser(
@@ -1839,7 +1875,9 @@ def main() -> None:
     parser.add_argument(
         "--history",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "results" / "scores_history.jsonl",
+        default=Path(__file__).resolve().parent.parent
+        / "results"
+        / "scores_history.jsonl",
         help="Path to scores_history.jsonl",
     )
     args = parser.parse_args()
@@ -1927,7 +1965,7 @@ def main() -> None:
 
         # Incremental scoring — update accumulators in scores.json
         try:
-            from benchmark.scorer import update as scorer_update
+            from benchmark.scorer import update as scorer_update  # pylint: disable=import-outside-toplevel
 
             scorer_update(all_rows, args.scores, args.history)
             log.info("Scores updated at %s", args.scores)
@@ -1937,37 +1975,14 @@ def main() -> None:
         log.info("No new rows to write")
 
     # Update incremental state — separate cursors, subtract 1 for same-block safety.
-    # Pending deliveries are persisted for retry on next run.
-    if omen_max_del_ts or omen_max_res_ts or omen_still_pending:
-        state["omen"] = {
-            "last_delivery_timestamp": (
-                (omen_max_del_ts - 1)
-                if omen_max_del_ts
-                else omen_state.get("last_delivery_timestamp", 0)
-            ),
-            "last_resolved_timestamp": (
-                (omen_max_res_ts - 1)
-                if omen_max_res_ts
-                else omen_state.get("last_resolved_timestamp", 0)
-            ),
-            "pending_deliveries": omen_still_pending,
-            "last_run": _ts_to_iso(now),
-        }
-    if poly_max_del_ts or poly_max_res_ts or poly_still_pending:
-        state["polymarket"] = {
-            "last_delivery_timestamp": (
-                (poly_max_del_ts - 1)
-                if poly_max_del_ts
-                else poly_state.get("last_delivery_timestamp", 0)
-            ),
-            "last_resolved_timestamp": (
-                (poly_max_res_ts - 1)
-                if poly_max_res_ts
-                else poly_state.get("last_resolved_timestamp", 0)
-            ),
-            "pending_deliveries": poly_still_pending,
-            "last_run": _ts_to_iso(now),
-        }
+    _update_platform_state(
+        state, "omen", omen_state,
+        omen_max_del_ts, omen_max_res_ts, omen_still_pending, now,
+    )
+    _update_platform_state(
+        state, "polymarket", poly_state,
+        poly_max_del_ts, poly_max_res_ts, poly_still_pending, now,
+    )
 
     save_fetch_state(args.state_file, state)
     log.info("State saved to %s", args.state_file)

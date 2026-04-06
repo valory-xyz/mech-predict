@@ -497,7 +497,9 @@ def main() -> None:
 
     scores = load_scores(args.scores)
     history = load_history(args.history)
-    print(f"Loaded scores ({scores.get('total_rows', 0)} rows), {len(history)} months of history")
+    print(
+        f"Loaded scores ({scores.get('total_rows', 0)} rows), {len(history)} months of history"
+    )
 
     report = generate_report(scores, history)
 

@@ -703,10 +703,7 @@ def replay(
         open(candidate_path, "w", encoding="utf-8") as cf,
     ):
         for i, row in enumerate(sampled):
-            question = row["question_text"]
-            user_prompt = row["extracted_user_prompt"]
-            additional_info = row["extracted_additional_information"]
-            outcome = row["final_outcome"]
+            question, outcome = row["question_text"], row["final_outcome"]
 
             # --- Baseline row (original production prediction) ---
             baseline_row = {
@@ -730,8 +727,8 @@ def replay(
 
             # --- Candidate: re-format with current prompt template ---
             formatted_prompt = PREDICTION_PROMPT.format(
-                user_prompt=user_prompt,
-                additional_information=additional_info,
+                user_prompt=row["extracted_user_prompt"],
+                additional_information=row["extracted_additional_information"],
             )
 
             log.info(

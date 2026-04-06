@@ -18,18 +18,26 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/scorer.py"""
 
+import json
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
 from benchmark.scorer import (
+    LATENCY_RESERVOIR_SIZE,
+    WORST_BEST_SIZE,
     brier_score,
     classify_horizon,
     compute_group_stats,
     group_by,
     group_by_horizon,
     group_by_month,
+    load_history,
+    rebuild,
     score,
+    update,
 )
 
 
@@ -47,6 +55,8 @@ def _row(
     category: str = "other",
     lead_days: float | None = 2.0,
     predicted_at: str = "2026-03-15T10:00:00Z",
+    tool_version: str | None = None,
+    config_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
     return {
@@ -59,6 +69,8 @@ def _row(
         "category": category,
         "prediction_lead_time_days": lead_days,
         "predicted_at": predicted_at,
+        "tool_version": tool_version,
+        "config_hash": config_hash,
     }
 
 
@@ -299,3 +311,413 @@ class TestScore:
         ]
         for key in expected_keys:
             assert key in result, f"Missing key: {key}"
+
+
+# ---------------------------------------------------------------------------
+# Incremental update
+# ---------------------------------------------------------------------------
+
+
+class TestIncrementalUpdate:
+
+    def test_empty_scores_initialized(self, tmp_path: Path) -> None:
+        """First update with no existing scores creates accumulators."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        rows = [_row(p_yes=0.9, outcome=True)]
+
+        result = update(rows, scores_path, history_path)
+
+        assert result["overall"]["n"] == 1
+        assert result["overall"]["valid_n"] == 1
+        assert result["overall"]["brier"] is not None
+        assert scores_path.exists()
+
+    def test_merge_two_batches(self, tmp_path: Path) -> None:
+        """Two sequential updates accumulate correctly."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        batch1 = [_row(p_yes=0.9, outcome=True), _row(p_yes=0.8, outcome=False)]
+        update(batch1, scores_path, history_path)
+
+        batch2 = [_row(p_yes=0.6, outcome=True)]
+        result = update(batch2, scores_path, history_path)
+
+        assert result["overall"]["n"] == 3
+        assert result["overall"]["valid_n"] == 3
+
+    def test_brier_matches_full_recompute(self, tmp_path: Path) -> None:
+        """Incremental Brier matches computing from all rows at once."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        all_rows = [
+            _row(p_yes=0.13, outcome=True),
+            _row(p_yes=0.90, outcome=True),
+            _row(p_yes=0.80, outcome=False),
+            _row(p_yes=0.60, outcome=True),
+            _row(p_yes=0.30, outcome=False),
+        ]
+
+        # Incremental: 2 batches
+        update(all_rows[:2], scores_path, history_path)
+        inc_result = update(all_rows[2:], scores_path, history_path)
+
+        # Full recompute
+        full_result = score(all_rows)
+
+        assert inc_result["overall"]["brier"] == full_result["overall"]["brier"]
+        assert inc_result["overall"]["accuracy"] == full_result["overall"]["accuracy"]
+        assert inc_result["overall"]["n"] == full_result["overall"]["n"]
+
+    def test_by_tool_accumulated(self, tmp_path: Path) -> None:
+        """Per-tool breakdown accumulates across updates."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        update([_row(tool="tool-a"), _row(tool="tool-b")], scores_path, history_path)
+        result = update([_row(tool="tool-a")], scores_path, history_path)
+
+        assert result["by_tool"]["tool-a"]["n"] == 2
+        assert result["by_tool"]["tool-b"]["n"] == 1
+
+    def test_calibration_buckets_accumulate(self, tmp_path: Path) -> None:
+        """Calibration buckets accumulate counts correctly."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.75, outcome=True),
+            _row(p_yes=0.75, outcome=False),
+            _row(p_yes=0.15, outcome=False),
+        ]
+        update(rows[:2], scores_path, history_path)
+        result = update(rows[2:], scores_path, history_path)
+
+        cal = {b["bin"]: b for b in result["calibration"]}
+        assert cal["0.7-0.8"]["n"] == 2
+        assert cal["0.1-0.2"]["n"] == 1
+
+    def test_parse_breakdown_accumulates(self, tmp_path: Path) -> None:
+        """Parse status counters accumulate across updates."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(status="valid", tool="t1"),
+            _row(status="malformed", tool="t1"),
+            _row(status="valid", tool="t1"),
+        ]
+        update(rows[:1], scores_path, history_path)
+        result = update(rows[1:], scores_path, history_path)
+
+        assert result["parse_breakdown"]["t1"]["valid"] == 2
+        assert result["parse_breakdown"]["t1"]["malformed"] == 1
+
+    def test_latency_reservoir_bounded(self, tmp_path: Path) -> None:
+        """Reservoir stays at max LATENCY_RESERVOIR_SIZE per tool."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            {**_row(tool="t1"), "latency_s": i}
+            for i in range(LATENCY_RESERVOIR_SIZE + 50)
+        ]
+        result = update(rows, scores_path, history_path)
+
+        reservoir = result["latency_reservoir"]["t1"]
+        assert len(reservoir) == LATENCY_RESERVOIR_SIZE
+        # Should be the last 200 values (deterministic last-N)
+        assert reservoir[0] == 50
+        assert reservoir[-1] == LATENCY_RESERVOIR_SIZE + 49
+
+    def test_worst_10_maintained(self, tmp_path: Path) -> None:
+        """Worst 10 list keeps the highest Brier scores."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        # Create 15 rows with varying Brier scores
+        rows = [_row(p_yes=0.5 + i * 0.03, outcome=False) for i in range(15)]
+        result = update(rows, scores_path, history_path)
+
+        assert len(result["worst_10"]) == WORST_BEST_SIZE
+        # Worst should have highest Brier (highest p_yes when outcome=False)
+        worst_briers = [w["brier"] for w in result["worst_10"]]
+        assert worst_briers == sorted(worst_briers, reverse=True)
+
+    def test_best_10_maintained(self, tmp_path: Path) -> None:
+        """Best 10 list keeps the lowest Brier scores."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(p_yes=0.5 + i * 0.03, outcome=True) for i in range(15)]
+        result = update(rows, scores_path, history_path)
+
+        assert len(result["best_10"]) == WORST_BEST_SIZE
+        best_briers = [b["brier"] for b in result["best_10"]]
+        assert best_briers == sorted(best_briers)
+
+    def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
+        """Malformed rows count toward n but not valid_n or Brier."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.9, outcome=True),
+            _row(status="malformed"),
+            _row(status="error"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert result["overall"]["n"] == 3
+        assert result["overall"]["valid_n"] == 1
+        assert result["overall"]["reliability"] == round(1 / 3, 4)
+
+
+# ---------------------------------------------------------------------------
+# Month rollover
+# ---------------------------------------------------------------------------
+
+
+class TestMonthRollover:
+
+    def test_new_month_creates_snapshot(self, tmp_path: Path) -> None:
+        """When month changes, old month is snapshot to history."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        # First update in March
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = type("D", (), {
+                "strftime": lambda self, fmt: "2026-03" if fmt == "%Y-%m"
+                else "2026-03-15T10:00:00Z",
+            })()
+            mock_dt.side_effect = lambda *a, **k: type("D", (), {
+                "strftime": lambda self, fmt: "2026-03" if fmt == "%Y-%m"
+                else "2026-03-15T10:00:00Z",
+            })()
+            update([_row()], scores_path, history_path)
+
+        # Force current_month to March in the saved file
+        data = json.loads(scores_path.read_text())
+        data["current_month"] = "2026-03"
+        scores_path.write_text(json.dumps(data))
+
+        # Second update in April (real time)
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            from datetime import datetime, timezone
+            real_dt = datetime
+            mock_dt.now.return_value = real_dt(2026, 4, 6, 12, tzinfo=timezone.utc)
+            update([_row()], scores_path, history_path)
+
+        history = load_history(history_path)
+        assert len(history) == 1
+        assert history[0]["month"] == "2026-03"
+
+    def test_snapshot_contains_final_stats(self, tmp_path: Path) -> None:
+        """Snapshot has correct n and by_tool from the completed month."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(tool="t1"), _row(tool="t1"), _row(tool="t2")]
+        update(rows, scores_path, history_path)
+
+        # Force month to old value
+        data = json.loads(scores_path.read_text())
+        data["current_month"] = "2026-01"
+        scores_path.write_text(json.dumps(data))
+
+        # Trigger rollover
+        update([_row()], scores_path, history_path)
+
+        history = load_history(history_path)
+        assert history[0]["overall"]["n"] == 3
+        assert "t1" in history[0]["by_tool"]
+        assert history[0]["by_tool"]["t1"]["n"] == 2
+
+    def test_accumulators_reset_after_rollover(self, tmp_path: Path) -> None:
+        """After rollover, scores.json starts fresh for new month."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        update([_row(), _row(), _row()], scores_path, history_path)
+
+        # Force old month
+        data = json.loads(scores_path.read_text())
+        data["current_month"] = "2025-12"
+        scores_path.write_text(json.dumps(data))
+
+        # Trigger rollover with 1 new row
+        result = update([_row()], scores_path, history_path)
+        assert result["overall"]["n"] == 1  # only the new row
+
+    def test_same_month_no_snapshot(self, tmp_path: Path) -> None:
+        """No snapshot when month hasn't changed."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        update([_row()], scores_path, history_path)
+        update([_row()], scores_path, history_path)
+
+        assert not history_path.exists() or history_path.read_text().strip() == ""
+
+    def test_load_history(self, tmp_path: Path) -> None:
+        """load_history reads multiple monthly lines."""
+        history_path = tmp_path / "history.jsonl"
+        history_path.write_text(
+            '{"month": "2026-01", "overall": {"n": 100}}\n'
+            '{"month": "2026-02", "overall": {"n": 200}}\n'
+        )
+        entries = load_history(history_path)
+        assert len(entries) == 2
+        assert entries[0]["month"] == "2026-01"
+        assert entries[1]["overall"]["n"] == 200
+
+    def test_load_history_missing_file(self, tmp_path: Path) -> None:
+        """load_history returns empty list for missing file."""
+        assert load_history(tmp_path / "nope.jsonl") == []
+
+
+# ---------------------------------------------------------------------------
+# Rebuild
+# ---------------------------------------------------------------------------
+
+
+class TestRebuild:
+
+    def test_rebuild_from_archive_files(self, tmp_path: Path) -> None:
+        """Rebuild reads all log files and produces valid scores."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        # Write two daily files with rows from different months
+        f1 = logs_dir / "production_log_2026_03_15.jsonl"
+        f1.write_text(
+            json.dumps(_row(p_yes=0.9, outcome=True, predicted_at="2026-03-15T10:00:00Z")) + "\n"
+            + json.dumps(_row(p_yes=0.8, outcome=False, predicted_at="2026-03-16T10:00:00Z")) + "\n"
+        )
+        f2 = logs_dir / "production_log_2026_04_01.jsonl"
+        f2.write_text(
+            json.dumps(_row(p_yes=0.7, outcome=True, predicted_at="2026-04-01T10:00:00Z")) + "\n"
+        )
+
+        result = rebuild(logs_dir, scores_path, history_path)
+
+        # March should be in history, April should be current
+        history = load_history(history_path)
+        assert len(history) == 1
+        assert history[0]["month"] == "2026-03"
+        assert history[0]["overall"]["n"] == 2
+
+        # Current scores should have April's row
+        assert result["overall"]["n"] == 1
+        assert result["overall"]["brier"] is not None
+
+    def test_rebuild_single_month(self, tmp_path: Path) -> None:
+        """Rebuild with all rows in same month creates no history."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        f1 = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [_row(predicted_at="2026-04-01T10:00:00Z") for _ in range(5)]
+        f1.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        result = rebuild(logs_dir, scores_path, history_path)
+
+        assert result["overall"]["n"] == 5
+        assert not history_path.exists() or history_path.read_text().strip() == ""
+
+    def test_rebuild_empty_dir(self, tmp_path: Path) -> None:
+        """Rebuild with no log files produces empty scores."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        result = rebuild(logs_dir, scores_path, history_path)
+
+        assert result["overall"]["n"] == 0
+        assert result["overall"]["brier"] is None
+
+    def test_rebuild_includes_legacy(self, tmp_path: Path) -> None:
+        """Rebuild picks up production_log_legacy.jsonl."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        legacy = logs_dir / "production_log_legacy.jsonl"
+        legacy.write_text(
+            json.dumps(_row(predicted_at="2026-03-01T10:00:00Z")) + "\n"
+        )
+
+        result = rebuild(logs_dir, scores_path, history_path)
+        # Legacy file matched by production_log_*.jsonl glob
+        assert result["overall"]["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Tool version and config breakdowns
+# ---------------------------------------------------------------------------
+
+
+class TestToolVersionBreakdown:
+
+    def test_groups_by_version(self, tmp_path: Path) -> None:
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(tool="t1", tool_version="v1"),
+            _row(tool="t1", tool_version="v1"),
+            _row(tool="t1", tool_version="v2"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | v1" in result["by_tool_version"]
+        assert "t1 | v2" in result["by_tool_version"]
+        assert result["by_tool_version"]["t1 | v1"]["n"] == 2
+        assert result["by_tool_version"]["t1 | v2"]["n"] == 1
+
+    def test_null_version_grouped_as_unknown(self, tmp_path: Path) -> None:
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(tool="t1"), _row(tool="t1")]  # tool_version=None
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | unknown" in result["by_tool_version"]
+        assert result["by_tool_version"]["t1 | unknown"]["n"] == 2
+
+
+class TestConfigBreakdown:
+
+    def test_groups_by_config(self, tmp_path: Path) -> None:
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(tool="t1", config_hash="abc123"),
+            _row(tool="t1", config_hash="abc123"),
+            _row(tool="t1", config_hash="def456"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | abc123" in result["by_config"]
+        assert "t1 | def456" in result["by_config"]
+        assert result["by_config"]["t1 | abc123"]["n"] == 2
+        assert result["by_config"]["t1 | def456"]["n"] == 1
+
+    def test_null_config_grouped_as_unknown(self, tmp_path: Path) -> None:
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(tool="t1")]  # config_hash=None
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | unknown" in result["by_config"]

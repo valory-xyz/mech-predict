@@ -24,8 +24,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,6 +80,11 @@ IPFS_GATEWAY_URL = os.environ.get(
     "https://gateway.autonolas.tech/ipfs",
 )
 IPFS_FETCH_DELAY = 0.2  # seconds between IPFS gateway requests
+
+# Daily log file rotation
+LOGS_DIR = Path(__file__).parent / "logs"
+LEGACY_LOG_PATH = Path(__file__).parent / "production_log.jsonl"
+DEDUP_LOOKBACK_DAYS = 7  # how many daily files to scan on state-loss recovery
 
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
@@ -933,15 +939,14 @@ def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
     return ipfs_hash
 
 
-def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
-    """Fetch the full IPFS payload and extract source_content from metadata.params.
+def fetch_ipfs_metadata(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the full IPFS payload and return the metadata dict.
 
     The IPFS hash from the subgraph is a hex-encoded CIDv1 pointing to a
-    directory. The directory contains one file named by request ID. We fetch
-    the directory listing, find the file, and extract the payload.
+    directory. The directory contains one file named by request ID.
 
     :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
-    :return: the source_content dict, or None if not available.
+    :return: the full metadata dict, or None if not available.
     """
     try:
         cid = _ipfs_hash_to_cid(ipfs_hash)
@@ -956,9 +961,7 @@ def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
             dir_data = resp.json()
             # If the response is already the payload (single-file directory auto-resolved)
             if isinstance(dir_data, dict) and "metadata" in dir_data:
-                metadata = dir_data.get("metadata") or {}
-                params = metadata.get("params") or {}
-                return params.get("source_content")
+                return dir_data.get("metadata") or {}
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -974,12 +977,23 @@ def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
         file_resp.raise_for_status()
         payload = file_resp.json()
 
-        metadata = payload.get("metadata") or {}
-        params = metadata.get("params") or {}
-        return params.get("source_content")
+        return payload.get("metadata") or {}
     except Exception as e:
         log.debug("Failed to fetch IPFS %s: %s", ipfs_hash, e)
         return None
+
+
+def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the IPFS payload and extract source_content from metadata.params.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: the source_content dict, or None if not available.
+    """
+    metadata = fetch_ipfs_metadata(ipfs_hash)
+    if metadata is None:
+        return None
+    params = metadata.get("params") or {}
+    return params.get("source_content")
 
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1304,32 @@ def _ts_to_iso(ts: Optional[int]) -> Optional[str]:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _compute_config_hash(
+    tool_hash: Optional[str],
+    model: Optional[str],
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Optional[str]:
+    """Compute a deterministic config hash from tool + model parameters.
+
+    :param tool_hash: IPFS tool hash (e.g. ``bafyabc123``).
+    :param model: model name (e.g. ``gpt-4.1``).
+    :param temperature: optional temperature setting.
+    :param max_tokens: optional max tokens setting.
+    :return: first 12 chars of SHA256 hex digest, or None if no inputs.
+    """
+    if tool_hash is None and model is None:
+        return None
+    parts = [
+        "" if tool_hash is None else str(tool_hash),
+        "" if model is None else str(model),
+        "" if temperature is None else str(temperature),
+        "" if max_tokens is None else str(max_tokens),
+    ]
+    h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+    return h
+
+
 def _make_row_id(platform: str, deliver_id: str) -> str:
     """Generate a deterministic row ID from platform + deliver_id."""
     h = hashlib.sha256(f"{platform}:{deliver_id}".encode()).hexdigest()[:12]
@@ -1301,8 +1341,17 @@ def build_row(
     market: dict[str, Any],
     match_confidence: float,
     platform: str,
+    ipfs_metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Build a production_log row from a delivery matched to a resolved market."""
+    """Build a production_log row from a delivery matched to a resolved market.
+
+    :param delivery: delivery dict from the subgraph.
+    :param market: resolved market dict.
+    :param match_confidence: confidence of the delivery-to-market match.
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param ipfs_metadata: optional IPFS metadata dict with tool_hash and params.
+    :return: production log row dict.
+    """
     question_text = delivery["question_title"]
     parsed = parse_tool_response(delivery["tool_response"])
     delivery_ts = delivery["timestamp"]
@@ -1318,6 +1367,19 @@ def build_row(
     if request_ts and delivery_ts and delivery_ts > request_ts:
         latency_s = delivery_ts - request_ts
 
+    # Extract tool_version and config_hash from IPFS metadata if available
+    tool_version: Optional[str] = None
+    config_hash: Optional[str] = None
+    if ipfs_metadata:
+        tool_version = ipfs_metadata.get("tool_hash")
+        params = ipfs_metadata.get("params") or {}
+        config_hash = _compute_config_hash(
+            tool_version,
+            delivery["model"],
+            params.get("temperature"),
+            params.get("max_tokens"),
+        )
+
     row = {
         "row_id": _make_row_id(platform, delivery["deliver_id"]),
         "deliver_id": delivery["deliver_id"],
@@ -1327,10 +1389,9 @@ def build_row(
         "platform": platform,
         "question_text": question_text,
         "tool_name": delivery["tool"],
-        "tool_version": None,
+        "tool_version": tool_version,
         "model": delivery["model"],
-        "prompt_template": None,
-        "config_hash": None,
+        "config_hash": config_hash,
         "p_yes": parsed["p_yes"],
         "p_no": parsed["p_no"],
         "prediction_parse_status": parsed["prediction_parse_status"],
@@ -1371,12 +1432,42 @@ def save_fetch_state(state_path: Path, state: dict[str, Any]) -> None:
     state_path.write_text(json.dumps(state, indent=2))
 
 
-def load_existing_row_ids(output_path: Path) -> set[str]:
-    """Load existing row IDs from the output JSONL file for deduplication."""
+def daily_log_path(logs_dir: Path, date: datetime | None = None) -> Path:
+    """Return the daily log file path for the given date (default: today UTC).
+
+    :param logs_dir: directory containing daily log files.
+    :param date: date to use; defaults to today in UTC.
+    :return: path like ``logs/production_log_2026_04_06.jsonl``.
+    """
+    if date is None:
+        date = datetime.now(timezone.utc)
+    return logs_dir / f"production_log_{date.strftime('%Y_%m_%d')}.jsonl"
+
+
+def _daily_log_files(logs_dir: Path, n_days: int) -> list[Path]:
+    """Return the last *n_days* daily log file paths that exist on disk.
+
+    Checks today and the previous *n_days - 1* days (UTC).
+
+    :param logs_dir: directory containing daily log files.
+    :param n_days: number of days to look back (inclusive of today).
+    :return: list of existing daily log file paths.
+    """
+    now = datetime.now(timezone.utc)
+    paths: list[Path] = []
+    for i in range(n_days):
+        p = daily_log_path(logs_dir, now - timedelta(days=i))
+        if p.exists():
+            paths.append(p)
+    return paths
+
+
+def _load_ids_from_file(path: Path) -> set[str]:
+    """Extract row IDs from a single JSONL file."""
     ids: set[str] = set()
-    if not output_path.exists():
+    if not path.exists():
         return ids
-    with open(output_path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -1386,6 +1477,34 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
                 ids.add(row["row_id"])
             except (json.JSONDecodeError, KeyError):
                 continue
+    return ids
+
+
+def load_existing_row_ids(
+    logs_dir: Path,
+    *,
+    state_loss: bool = False,
+) -> set[str]:
+    """Load existing row IDs from daily log files for deduplication.
+
+    Normal case: reads only today's file (handles cursor overlap and
+    same-day reruns).  State-loss recovery: reads the last
+    ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates across
+    the lookback window.
+
+    :param logs_dir: directory containing daily log files.
+    :param state_loss: if True, widen dedup scope to last 7 days.
+    :return: set of row IDs already written.
+    """
+    if state_loss:
+        files = _daily_log_files(logs_dir, DEDUP_LOOKBACK_DAYS)
+    else:
+        files = [daily_log_path(logs_dir)]
+        if not files[0].exists():
+            files = []
+    ids: set[str] = set()
+    for path in files:
+        ids |= _load_ids_from_file(path)
     return ids
 
 
@@ -1460,6 +1579,95 @@ def _match_and_build(
     )
 
 
+def _fetch_ipfs_hashes_for_deliver_ids(
+    deliver_ids: list[str],
+    marketplace_url: str,
+) -> dict[str, Optional[str]]:
+    """Query the subgraph for IPFS hashes by deliver IDs.
+
+    :param deliver_ids: list of deliver IDs to look up.
+    :param marketplace_url: subgraph endpoint URL.
+    :return: dict mapping deliver_id to ipfs_hash (or None).
+    """
+    result: dict[str, Optional[str]] = {}
+    for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
+        batch = deliver_ids[i : i + DEFAULT_BATCH_SIZE]
+        ids_str = ", ".join(f'"{did}"' for did in batch)
+        query = DELIVERS_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
+
+        try:
+            resp = requests.post(
+                marketplace_url,
+                json={"query": query},
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {}).get("delivers", [])
+            for d in data:
+                mp = d.get("marketplaceDelivery") or {}
+                result[d["id"]] = mp.get("ipfsHashBytes")
+        except Exception as e:
+            log.warning("Failed to fetch IPFS hashes from subgraph: %s", e)
+            for did in batch:
+                result[did] = None
+
+    return result
+
+
+def _enrich_rows_with_ipfs_metadata(
+    rows: list[dict[str, Any]],
+    marketplace_url: str,
+) -> None:
+    """Enrich matched rows with tool_version and config_hash from IPFS.
+
+    Fetches IPFS hashes in batch from the subgraph, then fetches metadata
+    for each row that has a hash. Mutates rows in place. Failures are
+    silently skipped (rows keep tool_version=None, config_hash=None).
+
+    :param rows: list of production log row dicts (mutated in place).
+    :param marketplace_url: subgraph endpoint URL.
+    """
+    if not rows:
+        return
+
+    # Batch fetch IPFS hashes for all deliver IDs
+    deliver_ids = [r["deliver_id"] for r in rows if r.get("deliver_id")]
+    if not deliver_ids:
+        return
+
+    ipfs_hashes = _fetch_ipfs_hashes_for_deliver_ids(deliver_ids, marketplace_url)
+    has_hash = sum(1 for v in ipfs_hashes.values() if v)
+    log.info(
+        "IPFS enrichment: %d/%d deliveries have hashes", has_hash, len(deliver_ids)
+    )
+
+    enriched = 0
+    for row in rows:
+        deliver_id = row.get("deliver_id", "")
+        ipfs_hash = ipfs_hashes.get(deliver_id)
+        if not ipfs_hash:
+            continue
+
+        metadata = fetch_ipfs_metadata(ipfs_hash)
+        if not metadata:
+            continue
+
+        tool_version = metadata.get("tool_hash")
+        params = metadata.get("params") or {}
+        config_hash = _compute_config_hash(
+            tool_version,
+            row.get("model"),
+            params.get("temperature"),
+            params.get("max_tokens"),
+        )
+        row["tool_version"] = tool_version
+        row["config_hash"] = config_hash
+        enriched += 1
+        time.sleep(IPFS_FETCH_DELAY)
+
+    log.info("IPFS enrichment: %d/%d rows enriched", enriched, len(rows))
+
+
 def process_platform(
     platform: str,
     marketplace_url: str,
@@ -1531,6 +1739,9 @@ def process_platform(
     all_rows = rows_from_pending + rows_from_new
     all_pending = remaining_pending + new_pending
 
+    # 3. Enrich matched rows with IPFS metadata (tool_version, config_hash)
+    _enrich_rows_with_ipfs_metadata(all_rows, marketplace_url)
+
     # Prune old pending deliveries to keep state file small
     cutoff = int(time.time()) - (PENDING_MAX_AGE_DAYS * 86400)
     before_prune = len(all_pending)
@@ -1564,8 +1775,64 @@ def process_platform(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """CLI entry point for fetching production data."""
+def _migrate_legacy_log(legacy_path: Path, logs_dir: Path) -> None:
+    """Move the old single-file production log into the daily logs directory.
+
+    This is a one-time migration. After the move the legacy path no longer
+    exists and all future reads go through the daily log directory.
+
+    :param legacy_path: path to the old ``production_log.jsonl``.
+    :param logs_dir: target ``logs/`` directory.
+    """
+    if not legacy_path.exists():
+        return
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    dest = logs_dir / "production_log_legacy.jsonl"
+    shutil.move(str(legacy_path), str(dest))
+    log.info("Migrated legacy log %s -> %s", legacy_path, dest)
+
+
+def _update_platform_state(
+    state: dict[str, Any],
+    platform: str,
+    prev_state: dict[str, Any],
+    max_del_ts: int,
+    max_res_ts: int,
+    still_pending: list[dict[str, Any]],
+    now: int,
+) -> None:
+    """Update incremental state for one platform.
+
+    :param state: full state dict (mutated in place).
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param prev_state: previous state for this platform.
+    :param max_del_ts: max delivery timestamp seen this run.
+    :param max_res_ts: max resolved timestamp seen this run.
+    :param still_pending: deliveries still unmatched.
+    :param now: current UNIX timestamp.
+    """
+    if max_del_ts or max_res_ts or still_pending:
+        state[platform] = {
+            "last_delivery_timestamp": (
+                (max_del_ts - 1)
+                if max_del_ts
+                else prev_state.get("last_delivery_timestamp", 0)
+            ),
+            "last_resolved_timestamp": (
+                (max_res_ts - 1)
+                if max_res_ts
+                else prev_state.get("last_resolved_timestamp", 0)
+            ),
+            "pending_deliveries": still_pending,
+            "last_run": _ts_to_iso(now),
+        }
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for fetch_production.
+
+    :return: configured ArgumentParser.
+    """
     parser = argparse.ArgumentParser(
         description="Fetch production prediction data for benchmark scoring.",
     )
@@ -1576,10 +1843,10 @@ def main() -> None:
         help="How many days back to fetch (default: 7)",
     )
     parser.add_argument(
-        "--output",
+        "--logs-dir",
         type=Path,
-        default=Path(__file__).parent / "production_log.jsonl",
-        help="Output JSONL file path",
+        default=LOGS_DIR,
+        help="Directory for daily log files",
     )
     parser.add_argument(
         "--state-file",
@@ -1593,14 +1860,42 @@ def main() -> None:
         default=None,
         help="Only process the last N rows (most recent first)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--scores",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "results" / "scores.json",
+        help="Path to scores.json for incremental scoring",
+    )
+    parser.add_argument(
+        "--history",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent
+        / "results"
+        / "scores_history.jsonl",
+        help="Path to scores_history.jsonl",
+    )
+    return parser
+
+
+def main() -> None:
+    """CLI entry point for fetching production data."""
+    args = _build_arg_parser().parse_args()
+
+    # One-time migration: move old single-file log into logs/ directory
+    legacy_path = args.logs_dir.parent / "production_log.jsonl"
+    _migrate_legacy_log(legacy_path, args.logs_dir)
 
     now = int(time.time())
     lookback_ts = now - (args.lookback_days * 86400)
 
     state = load_fetch_state(args.state_file)
-    existing_ids = load_existing_row_ids(args.output)
-    log.info("Loaded %d existing row IDs for deduplication", len(existing_ids))
+    state_loss = not state
+    existing_ids = load_existing_row_ids(args.logs_dir, state_loss=state_loss)
+    log.info(
+        "Loaded %d existing row IDs for deduplication (state_loss=%s)",
+        len(existing_ids),
+        state_loss,
+    )
 
     all_rows: list[dict[str, Any]] = []
 
@@ -1661,45 +1956,43 @@ def main() -> None:
         log.info("Truncating to last %d rows (from %d)", args.last_n, len(all_rows))
         all_rows = all_rows[: args.last_n]
 
-    # Write results
+    # Write results to today's daily log file
+    output_path = daily_log_path(args.logs_dir)
     if all_rows:
-        written = append_rows(args.output, all_rows)
-        log.info("Appended %d new rows to %s", written, args.output)
+        written = append_rows(output_path, all_rows)
+        log.info("Appended %d new rows to %s", written, output_path)
+
+        # Incremental scoring — update accumulators in scores.json
+        try:
+            # pylint: disable-next=import-outside-toplevel
+            from benchmark.scorer import update as scorer_update
+
+            scorer_update(all_rows, args.scores, args.history)
+            log.info("Scores updated at %s", args.scores)
+        except Exception:
+            log.exception("Scorer update failed (non-fatal, fetch data is safe)")
     else:
         log.info("No new rows to write")
 
     # Update incremental state — separate cursors, subtract 1 for same-block safety.
-    # Pending deliveries are persisted for retry on next run.
-    if omen_max_del_ts or omen_max_res_ts or omen_still_pending:
-        state["omen"] = {
-            "last_delivery_timestamp": (
-                (omen_max_del_ts - 1)
-                if omen_max_del_ts
-                else omen_state.get("last_delivery_timestamp", 0)
-            ),
-            "last_resolved_timestamp": (
-                (omen_max_res_ts - 1)
-                if omen_max_res_ts
-                else omen_state.get("last_resolved_timestamp", 0)
-            ),
-            "pending_deliveries": omen_still_pending,
-            "last_run": _ts_to_iso(now),
-        }
-    if poly_max_del_ts or poly_max_res_ts or poly_still_pending:
-        state["polymarket"] = {
-            "last_delivery_timestamp": (
-                (poly_max_del_ts - 1)
-                if poly_max_del_ts
-                else poly_state.get("last_delivery_timestamp", 0)
-            ),
-            "last_resolved_timestamp": (
-                (poly_max_res_ts - 1)
-                if poly_max_res_ts
-                else poly_state.get("last_resolved_timestamp", 0)
-            ),
-            "pending_deliveries": poly_still_pending,
-            "last_run": _ts_to_iso(now),
-        }
+    _update_platform_state(
+        state,
+        "omen",
+        omen_state,
+        omen_max_del_ts,
+        omen_max_res_ts,
+        omen_still_pending,
+        now,
+    )
+    _update_platform_state(
+        state,
+        "polymarket",
+        poly_state,
+        poly_max_del_ts,
+        poly_max_res_ts,
+        poly_still_pending,
+        now,
+    )
 
     save_fetch_state(args.state_file, state)
     log.info("State saved to %s", args.state_file)

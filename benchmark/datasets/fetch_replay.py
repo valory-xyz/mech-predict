@@ -35,12 +35,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+import requests
 
 from benchmark.datasets.fetch_production import (
     IPFS_FETCH_DELAY,
@@ -55,7 +56,6 @@ from benchmark.datasets.fetch_production import (
 from benchmark.prompt_replay import (
     ADDITIONAL_INFO_RE,
     USER_PROMPT_RE,
-    _ipfs_hash_to_cid,
     fetch_ipfs_prompt,
     stratified_sample,
 )
@@ -113,8 +113,6 @@ DELIVERS_WITH_IPFS_QUERY = """
 # Subgraph helpers (reuse from fetch_production)
 # ---------------------------------------------------------------------------
 
-import requests
-
 MAX_RETRIES = 3
 
 
@@ -128,7 +126,9 @@ def _post_graphql(url: str, payload: dict[str, Any]) -> dict[str, Any]:
             if "errors" in body:
                 error_msg = str(body["errors"])
                 if "reorganized" in error_msg and attempt < MAX_RETRIES:
-                    log.warning("Chain reorg, retrying (attempt %d/%d)", attempt, MAX_RETRIES)
+                    log.warning(
+                        "Chain reorg, retrying (attempt %d/%d)", attempt, MAX_RETRIES
+                    )
                     time.sleep(attempt * 5)
                     continue
                 raise RuntimeError(f"GraphQL errors: {body['errors']}")
@@ -218,17 +218,19 @@ def fetch_deliveries(
         except (json.JSONDecodeError, TypeError):
             pass
 
-        deliveries.append({
-            "deliver_id": d["id"],
-            "timestamp": int(d["blockTimestamp"]),
-            "request_timestamp": int(request.get("blockTimestamp") or 0) or None,
-            "model": d.get("model"),
-            "tool_response": d.get("toolResponse"),
-            "tool": tool,
-            "question_title": question_title,
-            "market_id": market_id,
-            "ipfs_hash": ipfs_hash,
-        })
+        deliveries.append(
+            {
+                "deliver_id": d["id"],
+                "timestamp": int(d["blockTimestamp"]),
+                "request_timestamp": int(request.get("blockTimestamp") or 0) or None,
+                "model": d.get("model"),
+                "tool_response": d.get("toolResponse"),
+                "tool": tool,
+                "question_title": question_title,
+                "market_id": market_id,
+                "ipfs_hash": ipfs_hash,
+            }
+        )
 
     if skipped:
         log.info("  skipped %d deliveries (null parsedRequest or title)", skipped)
@@ -284,17 +286,19 @@ def match_outcomes(
             if parsed["prediction_parse_status"] != "valid":
                 continue
 
-            matched.append({
-                **d,
-                "platform": platform,
-                "final_outcome": market_data["outcome"],
-                "resolved_at_ts": market_data["resolved_at_ts"],
-                "match_confidence": match_confidence,
-                "p_yes": parsed["p_yes"],
-                "p_no": parsed["p_no"],
-                "confidence": parsed.get("confidence"),
-                "prediction_parse_status": "valid",
-            })
+            matched.append(
+                {
+                    **d,
+                    "platform": platform,
+                    "final_outcome": market_data["outcome"],
+                    "resolved_at_ts": market_data["resolved_at_ts"],
+                    "match_confidence": match_confidence,
+                    "p_yes": parsed["p_yes"],
+                    "p_no": parsed["p_no"],
+                    "confidence": parsed.get("confidence"),
+                    "prediction_parse_status": "valid",
+                }
+            )
 
     log.info("  %d/%d deliveries matched to outcomes", len(matched), len(deliveries))
     return matched
@@ -329,7 +333,9 @@ def enrich_with_prompts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         enriched.append(row)
 
         if (i + 1) % 10 == 0:
-            log.info("  IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched))
+            log.info(
+                "  IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched)
+            )
 
         time.sleep(IPFS_FETCH_DELAY)
 
@@ -366,30 +372,34 @@ def build_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
 
         question = row["question_title"]
-        output.append({
-            "row_id": row["deliver_id"],
-            "deliver_id": row["deliver_id"],
-            "schema_version": "1.0",
-            "mode": "production_replay",
-            "platform": row["platform"],
-            "question_text": question,
-            "tool_name": row["tool"],
-            "model": row.get("model"),
-            "p_yes": row["p_yes"],
-            "p_no": row["p_no"],
-            "prediction_parse_status": "valid",
-            "confidence": row.get("confidence"),
-            "final_outcome": row["final_outcome"],
-            "requested_at": _ts_to_iso(request_ts),
-            "predicted_at": _ts_to_iso(delivery_ts),
-            "resolved_at": _ts_to_iso(resolved_at_ts),
-            "latency_s": latency_s,
-            "prediction_lead_time_days": prediction_lead_time_days,
-            "category": classify_category(question),
-            "match_confidence": row["match_confidence"],
-            "extracted_user_prompt": row["extracted_user_prompt"],
-            "extracted_additional_information": row["extracted_additional_information"],
-        })
+        output.append(
+            {
+                "row_id": row["deliver_id"],
+                "deliver_id": row["deliver_id"],
+                "schema_version": "1.0",
+                "mode": "production_replay",
+                "platform": row["platform"],
+                "question_text": question,
+                "tool_name": row["tool"],
+                "model": row.get("model"),
+                "p_yes": row["p_yes"],
+                "p_no": row["p_no"],
+                "prediction_parse_status": "valid",
+                "confidence": row.get("confidence"),
+                "final_outcome": row["final_outcome"],
+                "requested_at": _ts_to_iso(request_ts),
+                "predicted_at": _ts_to_iso(delivery_ts),
+                "resolved_at": _ts_to_iso(resolved_at_ts),
+                "latency_s": latency_s,
+                "prediction_lead_time_days": prediction_lead_time_days,
+                "category": classify_category(question),
+                "match_confidence": row["match_confidence"],
+                "extracted_user_prompt": row["extracted_user_prompt"],
+                "extracted_additional_information": row[
+                    "extracted_additional_information"
+                ],
+            }
+        )
     return output
 
 
@@ -408,9 +418,13 @@ def _report_breakdown(rows: list[dict[str, Any]]) -> None:
         by_platform[plat] += 1
         by_outcome[plat][outcome] += 1
     for plat in sorted(by_platform):
-        log.info("  %s: %d rows (yes=%d, no=%d)",
-                 plat, by_platform[plat],
-                 by_outcome[plat]["yes"], by_outcome[plat]["no"])
+        log.info(
+            "  %s: %d rows (yes=%d, no=%d)",
+            plat,
+            by_platform[plat],
+            by_outcome[plat]["yes"],
+            by_outcome[plat]["no"],
+        )
 
 
 def _write_jsonl(rows: list[dict[str, Any]], output: Path) -> None:
@@ -439,7 +453,9 @@ def fetch_pool(
     upper_cutoff = now - (skip_recent_days * 86400) if skip_recent_days > 0 else None
 
     # 1. Fetch deliveries from both chains
-    log.info("=== Fetching %s deliveries (last %d days) ===", tool_filter, lookback_days)
+    log.info(
+        "=== Fetching %s deliveries (last %d days) ===", tool_filter, lookback_days
+    )
 
     log.info("Gnosis marketplace...")
     gnosis_deliveries = fetch_deliveries(
@@ -453,10 +469,20 @@ def fetch_pool(
     # Filter out recent deliveries if skip_recent_days is set
     if upper_cutoff is not None:
         before = len(gnosis_deliveries) + len(polygon_deliveries)
-        gnosis_deliveries = [d for d in gnosis_deliveries if d["timestamp"] <= upper_cutoff]
-        polygon_deliveries = [d for d in polygon_deliveries if d["timestamp"] <= upper_cutoff]
+        gnosis_deliveries = [
+            d for d in gnosis_deliveries if d["timestamp"] <= upper_cutoff
+        ]
+        polygon_deliveries = [
+            d for d in polygon_deliveries if d["timestamp"] <= upper_cutoff
+        ]
         after = len(gnosis_deliveries) + len(polygon_deliveries)
-        log.info("Filtered to days %d-%d: %d -> %d deliveries", skip_recent_days, lookback_days, before, after)
+        log.info(
+            "Filtered to days %d-%d: %d -> %d deliveries",
+            skip_recent_days,
+            lookback_days,
+            before,
+            after,
+        )
 
     # 2. Match to resolved markets
     log.info("=== Matching to resolved markets ===")
@@ -464,8 +490,12 @@ def fetch_pool(
     poly_matched = match_outcomes(polygon_deliveries, cutoff, "polymarket")
 
     all_matched = omen_matched + poly_matched
-    log.info("Total matched: %d (omen=%d, polymarket=%d)",
-             len(all_matched), len(omen_matched), len(poly_matched))
+    log.info(
+        "Total matched: %d (omen=%d, polymarket=%d)",
+        len(all_matched),
+        len(omen_matched),
+        len(poly_matched),
+    )
 
     if not all_matched:
         log.warning("No matched deliveries found")
@@ -565,29 +595,36 @@ def main() -> None:
 
     # --- fetch (pool only) ---
     fetch_parser = subparsers.add_parser(
-        "fetch", help="Fetch deliveries + match outcomes → pool JSONL (no IPFS)",
+        "fetch",
+        help="Fetch deliveries + match outcomes → pool JSONL (no IPFS)",
     )
     fetch_parser.add_argument("--tool", type=str, default="prediction-online")
     fetch_parser.add_argument("--lookback-days", type=int, default=7)
     fetch_parser.add_argument("--skip-recent-days", type=int, default=0)
     fetch_parser.add_argument(
-        "--output", type=Path, default=Path("benchmark/results/pool.jsonl"),
+        "--output",
+        type=Path,
+        default=Path("benchmark/results/pool.jsonl"),
     )
 
     # --- sample (from pool) ---
     sample_parser = subparsers.add_parser(
-        "sample", help="Stratified sample from pool + IPFS fetch → enriched JSONL",
+        "sample",
+        help="Stratified sample from pool + IPFS fetch → enriched JSONL",
     )
     sample_parser.add_argument("--pool", type=Path, required=True)
     sample_parser.add_argument("--sample-per-platform", type=int, default=None)
     sample_parser.add_argument("--seed", type=int, default=42)
     sample_parser.add_argument(
-        "--output", type=Path, default=Path("benchmark/results/replay_dataset.jsonl"),
+        "--output",
+        type=Path,
+        default=Path("benchmark/results/replay_dataset.jsonl"),
     )
 
     # --- run (combined) ---
     run_parser = subparsers.add_parser(
-        "run", help="Fetch + sample in one command (saves pool as intermediate)",
+        "run",
+        help="Fetch + sample in one command (saves pool as intermediate)",
     )
     run_parser.add_argument("--tool", type=str, default="prediction-online")
     run_parser.add_argument("--lookback-days", type=int, default=7)
@@ -595,7 +632,9 @@ def main() -> None:
     run_parser.add_argument("--sample-per-platform", type=int, default=None)
     run_parser.add_argument("--seed", type=int, default=42)
     run_parser.add_argument(
-        "--output", type=Path, default=Path("benchmark/results/replay_dataset.jsonl"),
+        "--output",
+        type=Path,
+        default=Path("benchmark/results/replay_dataset.jsonl"),
     )
 
     args = parser.parse_args()

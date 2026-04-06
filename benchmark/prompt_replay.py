@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import logging
@@ -38,7 +39,7 @@ import random
 import re
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -76,9 +77,7 @@ DEFAULT_MODEL = "gpt-4.1-2025-04-14"
 
 # Regex to extract user_prompt and additional_information from the old
 # formatted PREDICTION_PROMPT.  The old format uses triple-backtick fences.
-USER_PROMPT_RE = re.compile(
-    r"USER_PROMPT:\s*```\s*\n(.*?)\n```", re.DOTALL
-)
+USER_PROMPT_RE = re.compile(r"USER_PROMPT:\s*```\s*\n(.*?)\n```", re.DOTALL)
 ADDITIONAL_INFO_RE = re.compile(
     r"ADDITIONAL_INFORMATION:\s*```\s*\n(.*?)\n```", re.DOTALL
 )
@@ -121,8 +120,6 @@ def _fetch_ipfs_hashes_for_deliver_ids(
 
 def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
     """Convert a hex IPFS hash to base32 CIDv1."""
-    import base64
-
     if ipfs_hash.startswith("0x"):
         hash_bytes = bytes.fromhex(ipfs_hash[2:])
         cid_bytes = bytes([0x01, 0x70, 0x12, 0x20]) + hash_bytes
@@ -138,6 +135,9 @@ def fetch_ipfs_prompt(ipfs_hash: str) -> Optional[str]:
 
     This is the formatted prompt that was sent to the LLM, containing
     both the user_prompt and additional_information baked in.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: the formatted prompt string, or None if not available.
     """
     try:
         cid = _ipfs_hash_to_cid(ipfs_hash)
@@ -186,30 +186,94 @@ def extract_prompt_components(
 
 
 # ---------------------------------------------------------------------------
-# Enrich subcommand
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def enrich(
+def _fetch_and_extract_prompts(
+    rows: list[dict[str, Any]],
+    ipfs_hashes: dict[str, Optional[str]],
+) -> list[dict[str, Any]]:
+    """Fetch IPFS prompts and extract user_prompt + additional_information.
+
+    :param rows: list of row dicts with 'deliver_id' keys.
+    :param ipfs_hashes: mapping of deliver_id to IPFS hash.
+    :return: list of enriched row dicts.
+    """
+    enriched: list[dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        did = row["deliver_id"]
+        ipfs_hash = ipfs_hashes.get(did)
+        if not ipfs_hash:
+            continue
+
+        prompt_text = fetch_ipfs_prompt(ipfs_hash)
+        if not prompt_text:
+            continue
+
+        components = extract_prompt_components(prompt_text)
+        if not components:
+            log.debug(
+                "Could not parse prompt components for %s", row["question_text"][:60]
+            )
+            continue
+
+        enriched_row = {
+            **row,
+            "extracted_user_prompt": components["user_prompt"],
+            "extracted_additional_information": components["additional_information"],
+        }
+        enriched.append(enriched_row)
+
+        if (i + 1) % 10 == 0:
+            log.info(
+                "IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched)
+            )
+
+        time.sleep(IPFS_FETCH_DELAY)
+
+    log.info("Enriched %d/%d rows", len(enriched), len(rows))
+    return enriched
+
+
+def _log_platform_breakdown(rows: list[dict[str, Any]]) -> None:
+    """Log platform/outcome breakdown.
+
+    :param rows: list of row dicts with 'platform' and 'final_outcome' keys.
+    """
+    by_platform: dict[str, int] = defaultdict(int)
+    by_outcome: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in rows:
+        plat = row.get("platform", "unknown")
+        outcome = "yes" if row["final_outcome"] else "no"
+        by_platform[plat] += 1
+        by_outcome[plat][outcome] += 1
+    for plat in sorted(by_platform):
+        log.info(
+            "  %s: %d rows (yes=%d, no=%d)",
+            plat,
+            by_platform[plat],
+            by_outcome[plat]["yes"],
+            by_outcome[plat]["no"],
+        )
+
+
+def _load_and_filter_rows(
     production_log: Path,
     tool_filter: str,
-    output: Path,
-    last_days: Optional[int] = None,
-    sample_per_platform: Optional[int] = None,
-    seed: int = 42,
-) -> None:
-    """Fetch IPFS prompts and extract components for replay.
+    last_days: Optional[int],
+) -> list[dict[str, Any]]:
+    """Load production log and filter for valid rows.
 
-    When --sample-per-platform is given, stratified sampling is done BEFORE
-    the slow IPFS fetch so we only download what we need.
+    :param production_log: path to production_log.jsonl.
+    :param tool_filter: tool name to filter for.
+    :param last_days: only include rows from the last N days.
+    :return: filtered list of row dicts.
     """
     cutoff = None
     if last_days is not None:
-        from datetime import timedelta
-
         cutoff = datetime.now(timezone.utc) - timedelta(days=last_days)
 
-    # Load and filter
     rows: list[dict[str, Any]] = []
     with open(production_log, encoding="utf-8") as f:
         for line in f:
@@ -232,7 +296,35 @@ def enrich(
                     if dt < cutoff:
                         continue
             rows.append(row)
+    return rows
 
+
+# ---------------------------------------------------------------------------
+# Enrich subcommand
+# ---------------------------------------------------------------------------
+
+
+def enrich(
+    production_log: Path,
+    tool_filter: str,
+    output: Path,
+    last_days: Optional[int] = None,
+    sample_per_platform: Optional[int] = None,
+    seed: int = 42,
+) -> None:
+    """Fetch IPFS prompts and extract components for replay.
+
+    When --sample-per-platform is given, stratified sampling is done BEFORE
+    the slow IPFS fetch so we only download what we need.
+
+    :param production_log: path to production_log.jsonl.
+    :param tool_filter: tool name to filter for.
+    :param output: path to write enriched JSONL.
+    :param last_days: only include rows from the last N days.
+    :param sample_per_platform: stratified sample N per platform before IPFS fetch.
+    :param seed: random seed for sampling.
+    """
+    rows = _load_and_filter_rows(production_log, tool_filter, last_days)
     log.info(
         "Loaded %d %s rows with deliver_id + valid predictions + known outcome",
         len(rows),
@@ -276,57 +368,8 @@ def enrich(
     has_hash = sum(1 for v in ipfs_hashes.values() if v)
     log.info("%d/%d deliveries have IPFS hashes", has_hash, len(ipfs_hashes))
 
-    # Fetch prompts and extract components
-    enriched: list[dict[str, Any]] = []
-    for i, row in enumerate(rows):
-        did = row["deliver_id"]
-        ipfs_hash = ipfs_hashes.get(did)
-        if not ipfs_hash:
-            continue
-
-        prompt_text = fetch_ipfs_prompt(ipfs_hash)
-        if not prompt_text:
-            continue
-
-        components = extract_prompt_components(prompt_text)
-        if not components:
-            log.debug(
-                "Could not parse prompt components for %s", row["question_text"][:60]
-            )
-            continue
-
-        enriched_row = {
-            **row,
-            "extracted_user_prompt": components["user_prompt"],
-            "extracted_additional_information": components["additional_information"],
-        }
-        enriched.append(enriched_row)
-
-        if (i + 1) % 10 == 0:
-            log.info(
-                "IPFS progress: %d/%d (%d enriched)", i + 1, len(rows), len(enriched)
-            )
-
-        time.sleep(IPFS_FETCH_DELAY)
-
-    log.info("Enriched %d/%d rows", len(enriched), len(rows))
-
-    # Report platform breakdown
-    by_platform: dict[str, int] = defaultdict(int)
-    by_outcome: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for row in enriched:
-        plat = row.get("platform", "unknown")
-        outcome = "yes" if row["final_outcome"] else "no"
-        by_platform[plat] += 1
-        by_outcome[plat][outcome] += 1
-    for plat in sorted(by_platform):
-        log.info(
-            "  %s: %d rows (yes=%d, no=%d)",
-            plat,
-            by_platform[plat],
-            by_outcome[plat]["yes"],
-            by_outcome[plat]["no"],
-        )
+    enriched = _fetch_and_extract_prompts(rows, ipfs_hashes)
+    _log_platform_breakdown(enriched)
 
     # Write
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -352,6 +395,11 @@ def stratified_sample(
     Within each platform, splits rows by final_outcome (True/False),
     then samples proportionally from each stratum.  This prevents
     accidentally getting all-yes or all-no markets.
+
+    :param rows: list of row dicts with 'platform' and 'final_outcome' keys.
+    :param sample_per_platform: max rows to sample per platform.
+    :param seed: random seed for reproducibility.
+    :return: list of sampled row dicts.
     """
     rng = random.Random(seed)
 
@@ -445,6 +493,78 @@ def _make_row_id(prefix: str, tool_name: str, question_text: str, model: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Replay helpers
+# ---------------------------------------------------------------------------
+
+
+def _log_replay_summary(
+    sampled: list[dict[str, Any]],
+    candidate_path: Path,
+    baseline_brier_sum: float,
+    candidate_brier_sum: float,
+    total: int,
+    n_scored: int,
+    baseline_path: Path,
+) -> None:
+    """Compute accuracy and log the replay summary.
+
+    :param sampled: list of sampled row dicts with production p_yes.
+    :param candidate_path: path to the candidate JSONL file.
+    :param baseline_brier_sum: sum of baseline Brier scores.
+    :param candidate_brier_sum: sum of candidate Brier scores.
+    :param total: total number of markets.
+    :param n_scored: number of candidate predictions scored.
+    :param baseline_path: path to the baseline JSONL file.
+    """
+    avg_baseline = baseline_brier_sum / total if total else 0
+    avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
+
+    baseline_correct = sum(
+        1
+        for c in sampled
+        if (c["p_yes"] > 0.5 and c["final_outcome"])
+        or (c["p_yes"] < 0.5 and not c["final_outcome"])
+    )
+
+    candidate_correct = 0
+    with open(candidate_path, encoding="utf-8") as cf_read:
+        for line in cf_read:
+            cr = json.loads(line.strip())
+            if cr["p_yes"] is not None:
+                if (cr["p_yes"] > 0.5 and cr["final_outcome"]) or (
+                    cr["p_yes"] < 0.5 and not cr["final_outcome"]
+                ):
+                    candidate_correct += 1
+
+    baseline_acc = baseline_correct / total if total else 0
+    candidate_acc = candidate_correct / n_scored if n_scored else 0
+
+    log.info("=" * 60)
+    log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
+    log.info(
+        "  Baseline avg Brier:  %.4f  Accuracy: %.1f%%",
+        avg_baseline,
+        baseline_acc * 100,
+    )
+    log.info(
+        "  Candidate avg Brier: %.4f  Accuracy: %.1f%%",
+        avg_candidate,
+        candidate_acc * 100,
+    )
+    if avg_baseline > 0:
+        delta_pct = (avg_candidate - avg_baseline) / avg_baseline * 100
+        log.info(
+            "  Brier delta: %+.4f (%+.1f%%) — %s",
+            avg_candidate - avg_baseline,
+            delta_pct,
+            "IMPROVED" if avg_candidate < avg_baseline else "REGRESSED",
+        )
+    log.info("  Baseline:  %s", baseline_path)
+    log.info("  Candidate: %s", candidate_path)
+    log.info("=" * 60)
+
+
+# ---------------------------------------------------------------------------
 # Replay subcommand
 # ---------------------------------------------------------------------------
 
@@ -457,9 +577,13 @@ def replay(
     """Replay enriched rows through current prompt template vs production baseline.
 
     Uses ALL rows from the enriched dataset (sampling already happened in enrich).
+
+    :param dataset: path to enriched JSONL from enrich step.
+    :param output_dir: directory for baseline.jsonl + candidate.jsonl output.
+    :param model: LLM model identifier.
     """
     # Import prompt template from tool module (picks up any code changes)
-    from packages.valory.customs.prediction_request.prediction_request import (
+    from packages.valory.customs.prediction_request.prediction_request import (  # pylint: disable=import-outside-toplevel
         PREDICTION_PROMPT,
         SYSTEM_PROMPT_FORECASTER,
     )
@@ -550,9 +674,7 @@ def replay(
             parsed = parse_tool_response(response_text)
 
             candidate_row = {
-                "row_id": _make_row_id(
-                    "candidate", row["tool_name"], question, model
-                ),
+                "row_id": _make_row_id("candidate", row["tool_name"], question, model),
                 "schema_version": "1.0",
                 "mode": "candidate",
                 "platform": row.get("platform", "unknown"),
@@ -586,55 +708,29 @@ def replay(
                     b_brier,
                     parsed["p_yes"],
                     c_brier,
-                    "BETTER" if c_brier < b_brier else "WORSE" if c_brier > b_brier else "SAME",
+                    (
+                        "BETTER"
+                        if c_brier < b_brier
+                        else "WORSE" if c_brier > b_brier else "SAME"
+                    ),
                 )
             else:
                 log.warning(
                     "  candidate parse failed: %s", parsed["prediction_parse_status"]
                 )
 
-    # Summary — compute accuracy (prediction correct if p_yes > 0.5 matches outcome)
+    # Summary
     total = len(sampled)
-    avg_baseline = baseline_brier_sum / total if total else 0
-    avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
 
-    baseline_correct = 0
-    candidate_correct = 0
-    for c in sampled:
-        key = c["question_text"] + c.get("platform", "")
-        outcome = c["final_outcome"]
-        b_pyes = c["p_yes"]
-        # baseline accuracy
-        if (b_pyes > 0.5 and outcome) or (b_pyes < 0.5 and not outcome):
-            baseline_correct += 1
-
-    # Re-read candidate rows for accuracy
-    with open(candidate_path, encoding="utf-8") as cf_read:
-        for line in cf_read:
-            cr = json.loads(line.strip())
-            if cr["p_yes"] is not None:
-                outcome = cr["final_outcome"]
-                if (cr["p_yes"] > 0.5 and outcome) or (cr["p_yes"] < 0.5 and not outcome):
-                    candidate_correct += 1
-
-    baseline_acc = baseline_correct / total if total else 0
-    candidate_acc = candidate_correct / n_scored if n_scored else 0
-
-    log.info("=" * 60)
-    log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
-    log.info("  Baseline avg Brier:  %.4f  Accuracy: %.1f%%", avg_baseline, baseline_acc * 100)
-    log.info("  Candidate avg Brier: %.4f  Accuracy: %.1f%%", avg_candidate, candidate_acc * 100)
-    if avg_baseline > 0:
-        delta_pct = (avg_candidate - avg_baseline) / avg_baseline * 100
-        log.info(
-            "  Brier delta: %+.4f (%+.1f%%) — %s",
-            avg_candidate - avg_baseline,
-            delta_pct,
-            "IMPROVED" if avg_candidate < avg_baseline else "REGRESSED",
-        )
-    log.info("  Baseline:  %s", baseline_path)
-    log.info("  Candidate: %s", candidate_path)
-    log.info("=" * 60)
+    _log_replay_summary(
+        sampled,
+        candidate_path,
+        baseline_brier_sum,
+        candidate_brier_sum,
+        total,
+        n_scored,
+        baseline_path,
+    )
 
 
 # ---------------------------------------------------------------------------

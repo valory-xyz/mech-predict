@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 log = logging.getLogger(__name__)
 
 SUMMARY_SYSTEM_PROMPT = """\
-Summarize this benchmark report for Slack using EXACTLY this structure.
+Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
 *Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends.
 
@@ -43,19 +43,58 @@ Rules:
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
 - Wrap tool names and Brier scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
-- No greetings or preamble."""
+- No greetings or preamble.
+- Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 MODEL = "gpt-4.1-mini"
 
 
+def _tool_ownership_context(report_text: str) -> str:
+    """Classify tools in the report as ours vs third-party.
+
+    Tools in TOOL_REGISTRY (tournament.py) are ours; everything else
+    appearing in the report is third-party marketplace.
+    """
+    # Parse TOOL_REGISTRY keys from tournament.py without importing it
+    # (importing pulls heavy deps like KeyChain / open-autonomy packages).
+    registry_path = Path(__file__).parent / "tournament.py"
+    our_names: set[str] = set()
+    if registry_path.exists():
+        import re
+
+        text = registry_path.read_text(encoding="utf-8")
+        # Match quoted keys in TOOL_REGISTRY dict: "tool-name": ToolSpec(
+        for m in re.finditer(r'"([^"]+)":\s*ToolSpec\(', text):
+            our_names.add(m.group(1))
+
+    # Extract tool names from the numbered ranking section
+    report_tools: list[str] = []
+    for line in report_text.splitlines():
+        # "1. **tool-name** — ..."
+        if line.lstrip()[:3].rstrip(".").isdigit() and "**" in line:
+            parts = line.split("**")
+            if len(parts) >= 2:
+                report_tools.append(parts[1])
+
+    seen = dict.fromkeys(report_tools)  # deduplicate, preserve order
+    theirs = [t for t in seen if t not in our_names]
+    if not theirs:
+        return ""
+    return f"Third-party tools (ignore these): {', '.join(theirs)}"
+
+
 def summarize_report(report_text: str, api_key: str) -> str:
     """Call OpenAI to produce a short Slack-formatted summary."""
+    ownership = _tool_ownership_context(report_text)
+    user_content = report_text
+    if ownership:
+        user_content = f"{ownership}\n\n{report_text}"
     payload = json.dumps(
         {
             "model": MODEL,
             "messages": [
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-                {"role": "user", "content": report_text},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": 400,
             "temperature": 0.2,

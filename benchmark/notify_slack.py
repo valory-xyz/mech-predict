@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 log = logging.getLogger(__name__)
 
 SUMMARY_SYSTEM_PROMPT = """\
-Summarize this benchmark report for Slack using EXACTLY this structure.
+Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
 *Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends.
 
@@ -43,19 +43,59 @@ Rules:
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
 - Wrap tool names and Brier scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
-- No greetings or preamble."""
+- No greetings or preamble.
+- Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 MODEL = "gpt-4.1-mini"
 
 
+# Tools we serve — keep in sync with TOOL_REGISTRY in tournament.py.
+OUR_TOOLS: set[str] = {
+    "prediction-online",
+    "prediction-offline",
+    "claude-prediction-online",
+    "claude-prediction-offline",
+    "superforcaster",
+    "prediction-request-reasoning",
+    "prediction-request-reasoning-claude",
+    "prediction-request-rag",
+    "prediction-request-rag-claude",
+    "prediction-url-cot",
+    "prediction-url-cot-claude",
+    "prediction-offline-sme",
+    "prediction-online-sme",
+}
+
+
+def _tool_ownership_context(report_text: str) -> str:
+    """List third-party tools found in the report so the LLM can ignore them."""
+    report_tools: list[str] = []
+    for line in report_text.splitlines():
+        # "1. **tool-name** — ..."
+        if line.lstrip()[:3].rstrip(".").isdigit() and "**" in line:
+            parts = line.split("**")
+            if len(parts) >= 2:
+                report_tools.append(parts[1])
+
+    seen = dict.fromkeys(report_tools)
+    theirs = [t for t in seen if t not in OUR_TOOLS]
+    if not theirs:
+        return ""
+    return f"Third-party tools (ignore these): {', '.join(theirs)}"
+
+
 def summarize_report(report_text: str, api_key: str) -> str:
     """Call OpenAI to produce a short Slack-formatted summary."""
+    ownership = _tool_ownership_context(report_text)
+    user_content = report_text
+    if ownership:
+        user_content = f"{ownership}\n\n{report_text}"
     payload = json.dumps(
         {
             "model": MODEL,
             "messages": [
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-                {"role": "user", "content": report_text},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": 400,
             "temperature": 0.2,

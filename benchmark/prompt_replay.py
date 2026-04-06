@@ -459,7 +459,43 @@ def call_llm(
     temperature: float = 0,
     max_tokens: int = 4096,
 ) -> Optional[str]:
-    """Send a prompt to the LLM and return the response content."""
+    """Send a prompt to the LLM and return the response content.
+
+    :param model: model identifier (e.g. gpt-4.1-2025-04-14, claude-4-sonnet-20250514).
+    :param system_prompt: system message content.
+    :param user_prompt: user message content.
+    :param api_key: API key for the provider.
+    :param temperature: sampling temperature.
+    :param max_tokens: maximum tokens to generate.
+    :return: response content string, or None on failure.
+    """
+    if "claude" in model:
+        return _call_anthropic(
+            model, system_prompt, user_prompt, api_key, temperature, max_tokens
+        )
+    return _call_openai(
+        model, system_prompt, user_prompt, api_key, temperature, max_tokens
+    )
+
+
+def _call_openai(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    api_key: str,
+    temperature: float,
+    max_tokens: int,
+) -> Optional[str]:
+    """Call OpenAI-compatible API.
+
+    :param model: model identifier.
+    :param system_prompt: system message content.
+    :param user_prompt: user message content.
+    :param api_key: OpenAI API key.
+    :param temperature: sampling temperature.
+    :param max_tokens: maximum tokens to generate.
+    :return: response content string, or None on failure.
+    """
     client = openai.OpenAI(api_key=api_key)
     try:
         response = client.chat.completions.create(
@@ -473,6 +509,43 @@ def call_llm(
             timeout=150,
         )
         return response.choices[0].message.content
+    except Exception as e:
+        log.warning("LLM call failed: %s", e)
+        return None
+    finally:
+        client.close()
+
+
+def _call_anthropic(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    api_key: str,
+    temperature: float,
+    max_tokens: int,
+) -> Optional[str]:
+    """Call Anthropic API.
+
+    :param model: model identifier.
+    :param system_prompt: system message content.
+    :param user_prompt: user message content.
+    :param api_key: Anthropic API key.
+    :param temperature: sampling temperature.
+    :param max_tokens: maximum tokens to generate.
+    :return: response content string, or None on failure.
+    """
+    import anthropic  # pylint: disable=import-outside-toplevel
+
+    client = anthropic.Anthropic(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model=model,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.content[0].text
     except Exception as e:
         log.warning("LLM call failed: %s", e)
         return None
@@ -588,10 +661,16 @@ def replay(
         SYSTEM_PROMPT_FORECASTER,
     )
 
-    api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not api_key:
-        log.error("OPENAI_API_KEY not set")
-        return
+    if "claude" in model:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            log.error("ANTHROPIC_API_KEY not set")
+            return
+    else:
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if not api_key:
+            log.error("OPENAI_API_KEY not set")
+            return
 
     # Load enriched dataset
     sampled: list[dict[str, Any]] = []

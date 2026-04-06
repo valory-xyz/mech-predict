@@ -412,3 +412,31 @@ First version to improve W1 accuracy (59.8%→62.1%). Best W2 accuracy across al
 | V4 | -11.3% | 55.2% | -16.2% | 66.0% | 36/33/18 | 45/30/25 |
 | V5 | -11.8% | 52.9% | -15.2% | 68.0% | 37/32/18 | 39/27/34 |
 | **V6** | -9.6% | **62.1%** | **-19.2%** | **72.0%** | 37/31/19 | 48/35/17 |
+
+## Holdout Validation (60 markets, days 8-14, seed 99)
+
+| Version | Model | Brier | Delta % | Accuracy | B/W/S |
+|---------|-------|-------|---------|----------|-------|
+| Baseline (prod) | gpt-4.1 | 0.2939 | — | 63.3% | — |
+| V5 | gpt-4.1 | 0.2211 | **-24.8%** | **76.7%** | 26/22/12 |
+| V6 | gpt-4.1 | 0.2481 | -15.6% | 70.0% | 28/21/11 |
+
+V5 selected as best candidate — V6 regressed on holdout.
+
+## Claude (claude-4-sonnet-20250514) Validation
+
+Same holdout dataset (60 markets). `PREDICTION_PROMPT` is shared between `prediction-online` (GPT) and `claude-prediction-online` (Claude).
+
+| Prompt | Brier | Delta vs prod baseline | Accuracy |
+|--------|-------|----------------------|----------|
+| Old prompt (Claude) | 0.2955 | +0.5% | — |
+| **V5 (Claude)** | **0.2511** | **-14.5%** | 65.0% |
+
+### Platform breakdown (Claude V5, holdout)
+
+| Platform | Baseline Brier | V5 Brier | Delta | Acc | B/W/S |
+|----------|---------------|----------|-------|-----|-------|
+| omen | 0.2701 | 0.2398 | -11.2% | 67%→70% | 13B/12W/5S |
+| polymarket | 0.3028 | 0.2624 | -13.3% | 63%→60% | 14B/16W/0S |
+
+V5 calibration rules improve Claude predictions too. Claude with old prompt performs about the same as production GPT baseline (0.2955 vs 0.2939), confirming the prompt — not the model — is the bottleneck.

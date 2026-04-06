@@ -1654,7 +1654,8 @@ def _enrich_rows_with_ipfs_metadata(
 
     enriched = 0
     for row in rows:
-        ipfs_hash = ipfs_hashes.get(row.get("deliver_id"))
+        deliver_id = row.get("deliver_id", "")
+        ipfs_hash = ipfs_hashes.get(deliver_id)
         if not ipfs_hash:
             continue
 
@@ -1747,6 +1748,7 @@ def process_platform(
         ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
 
     all_rows = rows_from_pending + rows_from_new
+    all_pending = remaining_pending + new_pending
 
     # 3. Enrich matched rows with IPFS metadata (tool_version, config_hash)
     _enrich_rows_with_ipfs_metadata(all_rows, marketplace_url)
@@ -1837,8 +1839,11 @@ def _update_platform_state(
         }
 
 
-def main() -> None:
-    """CLI entry point for fetching production data."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for fetch_production.
+
+    :return: configured ArgumentParser.
+    """
     parser = argparse.ArgumentParser(
         description="Fetch production prediction data for benchmark scoring.",
     )
@@ -1880,7 +1885,12 @@ def main() -> None:
         / "scores_history.jsonl",
         help="Path to scores_history.jsonl",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """CLI entry point for fetching production data."""
+    args = _build_arg_parser().parse_args()
 
     # One-time migration: move old single-file log into logs/ directory
     legacy_path = args.logs_dir.parent / "production_log.jsonl"
@@ -1965,7 +1975,9 @@ def main() -> None:
 
         # Incremental scoring — update accumulators in scores.json
         try:
-            from benchmark.scorer import update as scorer_update  # pylint: disable=import-outside-toplevel
+            from benchmark.scorer import (
+                update as scorer_update,  # pylint: disable=import-outside-toplevel
+            )
 
             scorer_update(all_rows, args.scores, args.history)
             log.info("Scores updated at %s", args.scores)
@@ -1976,12 +1988,22 @@ def main() -> None:
 
     # Update incremental state — separate cursors, subtract 1 for same-block safety.
     _update_platform_state(
-        state, "omen", omen_state,
-        omen_max_del_ts, omen_max_res_ts, omen_still_pending, now,
+        state,
+        "omen",
+        omen_state,
+        omen_max_del_ts,
+        omen_max_res_ts,
+        omen_still_pending,
+        now,
     )
     _update_platform_state(
-        state, "polymarket", poly_state,
-        poly_max_del_ts, poly_max_res_ts, poly_still_pending, now,
+        state,
+        "polymarket",
+        poly_state,
+        poly_max_del_ts,
+        poly_max_res_ts,
+        poly_still_pending,
+        now,
     )
 
     save_fetch_state(args.state_file, state)

@@ -306,13 +306,13 @@ class TestClassifyCategory:
     @pytest.mark.parametrize(
         "question,expected",
         [
-            ("Will Bitcoin hit $100k?", "crypto"),
-            ("Will ETH price rise?", "crypto"),
+            ("Will Bitcoin hit $100k?", "finance"),
+            ("Will ETH price rise?", "finance"),
             ("Will the president win the election?", "politics"),
             ("Will Tesla revenue grow?", "business"),
             ("Will NASA launch the rocket?", "science"),
-            ("Will Apple release a new iPhone?", "tech"),
-            ("Will GDP grow this quarter?", "economics"),
+            ("Will Apple release a new iPhone?", "technology"),
+            ("Will GDP grow this quarter?", "business"),
             ("Will NATO expand?", "international"),
             ("Will the NBA finals be exciting?", "sports"),
             ("Will Netflix release a new series?", "entertainment"),
@@ -330,7 +330,7 @@ class TestClassifyCategory:
         assert classify_category("Will something happen?") == "other"
 
     def test_case_insensitive(self) -> None:
-        assert classify_category("WILL BITCOIN HIT $100K?") == "crypto"
+        assert classify_category("WILL BITCOIN HIT $100K?") == "finance"
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +428,7 @@ class TestBuildRow:
         assert row["prediction_lead_time_days"] == 2.0
         assert row["market_id"] == "0xmarket"
         assert row["market_prob_at_prediction"] == 0.65
-        assert row["category"] == "crypto"
+        assert row["category"] == "finance"
 
     def test_missing_request_timestamp(self) -> None:
         delivery = {

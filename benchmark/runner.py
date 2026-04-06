@@ -307,7 +307,6 @@ def build_output_row(
         "tool_name": tool_name,
         "tool_version": None,
         "model": model,
-        "prompt_template": None,
         "config_hash": None,
         "p_yes": run_result["p_yes"],
         "p_no": run_result["p_no"],

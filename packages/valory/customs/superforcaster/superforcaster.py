@@ -165,7 +165,7 @@ def count_tokens(text: str, model: str) -> int:
 
 
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "limit_max_tokens": 4096,
     "temperature": 0,
 }

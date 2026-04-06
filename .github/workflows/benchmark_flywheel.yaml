@@ -41,26 +41,23 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      # Download previous run's data (if it exists)
+      # Download previous run's state + scores (if they exist)
       - name: Download previous benchmark data
         uses: dawidd6/action-download-artifact@v3
         with:
           name: benchmark-data
-          path: benchmark/datasets/
+          path: benchmark/
           workflow: benchmark_flywheel.yaml
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # Fetch writes daily log file + calls scorer.update() inline
       - name: Fetch production data
         run: |
           python benchmark/datasets/fetch_production.py \
             --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
-      - name: Score
-        run: |
-          mkdir -p benchmark/results
-          python benchmark/scorer.py
-
+      # Analyze reads only scores.json + scores_history.jsonl
       - name: Analyze
         run: python benchmark/analyze.py
 
@@ -71,24 +68,24 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
         run: python benchmark/notify_slack.py --report benchmark/results/report.md
 
-      # Upload data files for next run (persists between runs)
+      # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-data
           path: |
-            benchmark/datasets/production_log.jsonl
             benchmark/datasets/.fetch_state.json
+            benchmark/results/scores.json
+            benchmark/results/scores_history.jsonl
+            benchmark/results/report.md
           retention-days: 90
 
-      # Upload results for viewing
-      - name: Upload benchmark results
+      # Daily log files uploaded separately for archival
+      - name: Upload daily log archive
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
-          path: |
-            benchmark/results/scores.json
-            benchmark/results/report.md
+          name: benchmark-log-${{ github.run_id }}
+          path: benchmark/datasets/logs/
           retention-days: 90
 
   # -----------------------------------------------------------------------

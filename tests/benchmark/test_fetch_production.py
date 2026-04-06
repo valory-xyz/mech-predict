@@ -482,6 +482,18 @@ class TestComputeConfigHash:
     def test_none_inputs_returns_none(self) -> None:
         assert _compute_config_hash(None, None) is None
 
+    def test_zero_temperature_not_treated_as_none(self) -> None:
+        """temperature=0.0 is valid and must differ from temperature=None."""
+        h_zero = _compute_config_hash("bafyabc", "gpt-4.1", 0.0, 4096)
+        h_none = _compute_config_hash("bafyabc", "gpt-4.1", None, 4096)
+        assert h_zero != h_none
+
+    def test_zero_max_tokens_not_treated_as_none(self) -> None:
+        """max_tokens=0 is valid and must differ from max_tokens=None."""
+        h_zero = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 0)
+        h_none = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, None)
+        assert h_zero != h_none
+
 
 class TestBuildRowWithMetadata:
     """Tests for build_row with IPFS metadata."""

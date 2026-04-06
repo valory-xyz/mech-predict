@@ -1329,13 +1329,13 @@ def _compute_config_hash(
     :param max_tokens: optional max tokens setting.
     :return: first 12 chars of SHA256 hex digest, or None if no inputs.
     """
-    if not tool_hash and not model:
+    if tool_hash is None and model is None:
         return None
     parts = [
-        str(tool_hash or ""),
-        str(model or ""),
-        str(temperature or ""),
-        str(max_tokens or ""),
+        "" if tool_hash is None else str(tool_hash),
+        "" if model is None else str(model),
+        "" if temperature is None else str(temperature),
+        "" if max_tokens is None else str(max_tokens),
     ]
     h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
     return h
@@ -1592,6 +1592,92 @@ def _match_and_build(
     )
 
 
+def _fetch_ipfs_hashes_for_deliver_ids(
+    deliver_ids: list[str],
+    marketplace_url: str,
+) -> dict[str, Optional[str]]:
+    """Query the subgraph for IPFS hashes by deliver IDs.
+
+    :param deliver_ids: list of deliver IDs to look up.
+    :param marketplace_url: subgraph endpoint URL.
+    :return: dict mapping deliver_id to ipfs_hash (or None).
+    """
+    result: dict[str, Optional[str]] = {}
+    for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
+        batch = deliver_ids[i : i + DEFAULT_BATCH_SIZE]
+        ids_str = ", ".join(f'"{did}"' for did in batch)
+        query = DELIVERS_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
+
+        try:
+            resp = requests.post(
+                marketplace_url,
+                json={"query": query},
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {}).get("delivers", [])
+            for d in data:
+                mp = d.get("marketplaceDelivery") or {}
+                result[d["id"]] = mp.get("ipfsHashBytes")
+        except Exception as e:
+            log.warning("Failed to fetch IPFS hashes from subgraph: %s", e)
+            for did in batch:
+                result[did] = None
+
+    return result
+
+
+def _enrich_rows_with_ipfs_metadata(
+    rows: list[dict[str, Any]],
+    marketplace_url: str,
+) -> None:
+    """Enrich matched rows with tool_version and config_hash from IPFS.
+
+    Fetches IPFS hashes in batch from the subgraph, then fetches metadata
+    for each row that has a hash. Mutates rows in place. Failures are
+    silently skipped (rows keep tool_version=None, config_hash=None).
+
+    :param rows: list of production log row dicts (mutated in place).
+    :param marketplace_url: subgraph endpoint URL.
+    """
+    if not rows:
+        return
+
+    # Batch fetch IPFS hashes for all deliver IDs
+    deliver_ids = [r["deliver_id"] for r in rows if r.get("deliver_id")]
+    if not deliver_ids:
+        return
+
+    ipfs_hashes = _fetch_ipfs_hashes_for_deliver_ids(deliver_ids, marketplace_url)
+    has_hash = sum(1 for v in ipfs_hashes.values() if v)
+    log.info("IPFS enrichment: %d/%d deliveries have hashes", has_hash, len(deliver_ids))
+
+    enriched = 0
+    for row in rows:
+        ipfs_hash = ipfs_hashes.get(row.get("deliver_id"))
+        if not ipfs_hash:
+            continue
+
+        metadata = fetch_ipfs_metadata(ipfs_hash)
+        if not metadata:
+            continue
+
+        tool_version = metadata.get("tool_hash")
+        params = metadata.get("params") or {}
+        config_hash = _compute_config_hash(
+            tool_version,
+            row.get("model"),
+            params.get("temperature"),
+            params.get("max_tokens"),
+        )
+        row["tool_version"] = tool_version
+        row["config_hash"] = config_hash
+        enriched += 1
+        time.sleep(IPFS_FETCH_DELAY)
+
+    log.info("IPFS enrichment: %d/%d rows enriched", enriched, len(rows))
+
+
 def process_platform(
     platform: str,
     marketplace_url: str,
@@ -1661,7 +1747,9 @@ def process_platform(
         ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
 
     all_rows = rows_from_pending + rows_from_new
-    all_pending = remaining_pending + new_pending
+
+    # 3. Enrich matched rows with IPFS metadata (tool_version, config_hash)
+    _enrich_rows_with_ipfs_metadata(all_rows, marketplace_url)
 
     # Prune old pending deliveries to keep state file small
     cutoff = int(time.time()) - (PENDING_MAX_AGE_DAYS * 86400)

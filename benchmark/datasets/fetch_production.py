@@ -1332,6 +1332,8 @@ def _compute_config_hash(
     return h
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(platform: str, deliver_id: str) -> str:
     """Generate a deterministic row ID from platform + deliver_id."""
     h = hashlib.sha256(f"{platform}:{deliver_id}".encode()).hexdigest()[:12]

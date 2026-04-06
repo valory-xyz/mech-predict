@@ -131,6 +131,8 @@ TASK_DEADLINE = 240  # seconds, matches production
 # ---------------------------------------------------------------------------
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(
     tool_name: str, market_id: str, market_platform: str, model: str
 ) -> str:

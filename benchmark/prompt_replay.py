@@ -559,6 +559,8 @@ def _call_anthropic(
 # ---------------------------------------------------------------------------
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(prefix: str, tool_name: str, question_text: str, model: str) -> str:
     """Deterministic row ID."""
     payload = f"{tool_name}:{model}:{question_text}"

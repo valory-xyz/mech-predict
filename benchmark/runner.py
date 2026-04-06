@@ -62,6 +62,8 @@ TASK_DEADLINE = 240  # seconds, matches production
 # ---------------------------------------------------------------------------
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
     """Deterministic row ID from tool + question + model."""
     payload = f"{tool_name}:{model}:{question_text}"

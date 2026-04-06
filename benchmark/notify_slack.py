@@ -49,25 +49,26 @@ Rules:
 MODEL = "gpt-4.1-mini"
 
 
+# Tools we serve — keep in sync with TOOL_REGISTRY in tournament.py.
+OUR_TOOLS: set[str] = {
+    "prediction-online",
+    "prediction-offline",
+    "claude-prediction-online",
+    "claude-prediction-offline",
+    "superforcaster",
+    "prediction-request-reasoning",
+    "prediction-request-reasoning-claude",
+    "prediction-request-rag",
+    "prediction-request-rag-claude",
+    "prediction-url-cot",
+    "prediction-url-cot-claude",
+    "prediction-offline-sme",
+    "prediction-online-sme",
+}
+
+
 def _tool_ownership_context(report_text: str) -> str:
-    """Classify tools in the report as ours vs third-party.
-
-    Tools in TOOL_REGISTRY (tournament.py) are ours; everything else
-    appearing in the report is third-party marketplace.
-    """
-    # Parse TOOL_REGISTRY keys from tournament.py without importing it
-    # (importing pulls heavy deps like KeyChain / open-autonomy packages).
-    registry_path = Path(__file__).parent / "tournament.py"
-    our_names: set[str] = set()
-    if registry_path.exists():
-        import re
-
-        text = registry_path.read_text(encoding="utf-8")
-        # Match quoted keys in TOOL_REGISTRY dict: "tool-name": ToolSpec(
-        for m in re.finditer(r'"([^"]+)":\s*ToolSpec\(', text):
-            our_names.add(m.group(1))
-
-    # Extract tool names from the numbered ranking section
+    """List third-party tools found in the report so the LLM can ignore them."""
     report_tools: list[str] = []
     for line in report_text.splitlines():
         # "1. **tool-name** — ..."
@@ -76,8 +77,8 @@ def _tool_ownership_context(report_text: str) -> str:
             if len(parts) >= 2:
                 report_tools.append(parts[1])
 
-    seen = dict.fromkeys(report_tools)  # deduplicate, preserve order
-    theirs = [t for t in seen if t not in our_names]
+    seen = dict.fromkeys(report_tools)
+    theirs = [t for t in seen if t not in OUR_TOOLS]
     if not theirs:
         return ""
     return f"Third-party tools (ignore these): {', '.join(theirs)}"

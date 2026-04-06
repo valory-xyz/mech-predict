@@ -367,3 +367,48 @@ Best balanced version. Combines V3's strength on polymarket (broad prior) with V
 | V3 | -10.9% | 54.0% | -15.2% | 67.0% | 40/28/19 | 44/26/30 |
 | V4 | -11.3% | 55.2% | **-16.2%** | 66.0% | 36/33/18 | 45/30/25 |
 | **V5** | **-11.8%** | 52.9% | -15.2% | **68.0%** | 37/32/18 | 39/27/34 |
+
+---
+
+## V6: Reasoning Before JSON
+
+### Changes from V5
+
+Added one line at the end of CALIBRATION CHECKS:
+
+```
+Before outputting the JSON, write 2-3 sentences explaining your key reasoning and which calibration checks applied. Then output the JSON object on its own line.
+```
+
+No other changes. The existing `extract_json_string` parser already handles text before JSON (regex grabs first `{...}` block).
+
+### Results
+
+| Dataset | Baseline Brier | V6 Brier | Delta % | Baseline Acc | V6 Acc | Better | Worse | Same |
+|---------|---------------|----------|---------|-------------|--------|--------|-------|------|
+| W1 overall | 0.2916 | 0.2637 | -9.6% | 59.8% | **62.1%** | 37 | 31 | 19 |
+| W1 omen | 0.2656 | 0.2345 | **-11.7%** | 66.0% | 64.0% | 23 | 17 | 10 |
+| W1 polymarket | 0.3255 | 0.3031 | -6.9% | 54.1% | 59.5% | 14 | 14 | 9 |
+| W2 overall | 0.2919 | 0.2358 | **-19.2%** | 63.0% | **72.0%** | 48 | 35 | 17 |
+| W2 omen | 0.2804 | 0.1881 | **-32.9%** | 64.0% | **76.0%** | 30 | 12 | 8 |
+| W2 polymarket | 0.3037 | 0.2835 | -6.6% | 62.0% | 68.0% | 18 | 23 | 9 |
+
+### Analysis
+
+The reasoning step is a game-changer for omen (-32.9% W2 Brier, accuracy 64%→76%) — forcing the model to justify its estimate makes it actually apply calibration rules on novel-action questions. But it hurts polymarket (-6.6% vs V5's -13.7%) — the model overthinks stock/weather/earnings questions where the data should speak for itself.
+
+First version to improve W1 accuracy (59.8%→62.1%). Best W2 accuracy across all versions (72.0%).
+
+**Tradeoff**: V5 is better balanced across platforms. V6 is better if omen volume matters more (it does — omen has 10x more prediction-online traffic than polymarket).
+
+## Updated Comparison Table
+
+| Version | W1 Brier (Δ%) | W1 Acc | W2 Brier (Δ%) | W2 Acc | W1 B/W/S | W2 B/W/S |
+|---------|--------------|--------|--------------|--------|----------|----------|
+| Baseline | 0.2916 | 59.8% | 0.2919 | 63.0% | — | — |
+| V1 | -7.2% | — | — | — | 32/35/20 | — |
+| V2 | -2.4% | — | — | — | 29/29/29 | — |
+| V3 | -10.9% | 54.0% | -15.2% | 67.0% | 40/28/19 | 44/26/30 |
+| V4 | -11.3% | 55.2% | -16.2% | 66.0% | 36/33/18 | 45/30/25 |
+| V5 | -11.8% | 52.9% | -15.2% | 68.0% | 37/32/18 | 39/27/34 |
+| **V6** | -9.6% | **62.1%** | **-19.2%** | **72.0%** | 37/31/19 | 48/35/17 |

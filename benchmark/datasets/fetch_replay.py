@@ -1,20 +1,33 @@
 """
 Fetch replay-ready dataset directly from on-chain subgraphs.
 
-Combines delivery fetch, IPFS prompt extraction, and outcome matching
-in a single pass. Outputs enriched JSONL ready for prompt_replay.py replay.
+Three subcommands:
+  fetch   — subgraph queries + outcome matching → pool JSONL (slow, do once)
+  sample  — stratified sample from pool + IPFS prompt fetch → enriched JSONL (reusable)
+  run     — fetch + sample in one command (convenience shortcut)
 
 Usage:
-    python benchmark/datasets/fetch_replay.py \
-      --tool prediction-online \
-      --lookback-days 7 \
-      --output benchmark/results/replay_dataset.jsonl
+    # Two-step (recommended for iteration):
+    python -m benchmark.datasets.fetch_replay fetch \
+      --tool prediction-online --lookback-days 14 --skip-recent-days 7 \
+      --output benchmark/results/pool_week2.jsonl
 
-    python benchmark/datasets/fetch_replay.py \
-      --tool prediction-online \
-      --lookback-days 30 \
+    python -m benchmark.datasets.fetch_replay sample \
+      --pool benchmark/results/pool_week2.jsonl \
       --sample-per-platform 50 --seed 42 \
-      --output benchmark/results/replay_dataset_50x50.jsonl
+      --output benchmark/results/replay_dataset_week2.jsonl
+
+    # Re-sample with different seed (instant, no subgraph fetch):
+    python -m benchmark.datasets.fetch_replay sample \
+      --pool benchmark/results/pool_week2.jsonl \
+      --sample-per-platform 30 --seed 99 \
+      --output benchmark/results/replay_dataset_week2_v2.jsonl
+
+    # One-step (convenience):
+    python -m benchmark.datasets.fetch_replay run \
+      --tool prediction-online --lookback-days 7 \
+      --sample-per-platform 50 --seed 42 \
+      --output benchmark/results/replay_dataset.jsonl
 """
 
 from __future__ import annotations
@@ -385,15 +398,42 @@ def build_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def fetch_replay(
+def _report_breakdown(rows: list[dict[str, Any]]) -> None:
+    """Log platform/outcome breakdown."""
+    by_platform: dict[str, int] = defaultdict(int)
+    by_outcome: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in rows:
+        plat = row.get("platform", "unknown")
+        outcome = "yes" if row.get("final_outcome") else "no"
+        by_platform[plat] += 1
+        by_outcome[plat][outcome] += 1
+    for plat in sorted(by_platform):
+        log.info("  %s: %d rows (yes=%d, no=%d)",
+                 plat, by_platform[plat],
+                 by_outcome[plat]["yes"], by_outcome[plat]["no"])
+
+
+def _write_jsonl(rows: list[dict[str, Any]], output: Path) -> None:
+    """Write rows to JSONL file."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+    log.info("Written %d rows to %s", len(rows), output)
+
+
+# ---------------------------------------------------------------------------
+# Step 1: fetch pool (subgraph + outcome matching, slow)
+# ---------------------------------------------------------------------------
+
+
+def fetch_pool(
     tool_filter: str,
     lookback_days: int,
     output: Path,
-    sample_per_platform: Optional[int] = None,
-    seed: int = 42,
     skip_recent_days: int = 0,
 ) -> None:
-    """Fetch replay-ready dataset: deliveries + outcomes + IPFS prompts."""
+    """Fetch deliveries, match outcomes, save pool JSONL (no IPFS fetch)."""
     now = int(time.time())
     cutoff = now - (lookback_days * 86400)
     upper_cutoff = now - (skip_recent_days * 86400) if skip_recent_days > 0 else None
@@ -431,47 +471,84 @@ def fetch_replay(
         log.warning("No matched deliveries found")
         return
 
-    # 3. Stratified sample before IPFS fetch
-    if sample_per_platform is not None:
-        all_matched = stratified_sample(
-            # stratified_sample expects "final_outcome" key
-            all_matched,
-            sample_per_platform,
-            seed,
-        )
-        log.info("Sampled %d rows for IPFS fetch", len(all_matched))
+    _report_breakdown(all_matched)
+    _write_jsonl(all_matched, output)
 
-    # 4. Enrich with IPFS prompts
+
+# ---------------------------------------------------------------------------
+# Step 2: sample + enrich from pool (fast, reusable)
+# ---------------------------------------------------------------------------
+
+
+def sample_and_enrich(
+    pool_path: Path,
+    output: Path,
+    sample_per_platform: Optional[int] = None,
+    seed: int = 42,
+) -> None:
+    """Load pool, stratified sample, IPFS fetch, output enriched JSONL."""
+    # Load pool
+    pool: list[dict[str, Any]] = []
+    with open(pool_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                pool.append(json.loads(line))
+
+    log.info("Loaded %d rows from pool %s", len(pool), pool_path)
+    _report_breakdown(pool)
+
+    # Stratified sample
+    if sample_per_platform is not None:
+        pool = stratified_sample(pool, sample_per_platform, seed)
+        log.info("Sampled %d rows for IPFS fetch", len(pool))
+
+    # Enrich with IPFS prompts
     log.info("=== Fetching IPFS prompts ===")
-    enriched = enrich_with_prompts(all_matched)
+    enriched = enrich_with_prompts(pool)
 
     if not enriched:
         log.warning("No rows enriched with prompts")
         return
 
-    # 5. Build output
+    # Build output rows
     output_rows = build_output_rows(enriched)
+    _report_breakdown(output_rows)
+    _write_jsonl(output_rows, output)
 
-    # Report
-    by_platform: dict[str, int] = defaultdict(int)
-    by_outcome: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for row in output_rows:
-        plat = row["platform"]
-        outcome = "yes" if row["final_outcome"] else "no"
-        by_platform[plat] += 1
-        by_outcome[plat][outcome] += 1
-    for plat in sorted(by_platform):
-        log.info("  %s: %d rows (yes=%d, no=%d)",
-                 plat, by_platform[plat],
-                 by_outcome[plat]["yes"], by_outcome[plat]["no"])
 
-    # Write
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        for row in output_rows:
-            f.write(json.dumps(row) + "\n")
+# ---------------------------------------------------------------------------
+# Combined: fetch + sample in one command
+# ---------------------------------------------------------------------------
 
-    log.info("Written %d rows to %s", len(output_rows), output)
+
+def fetch_replay(
+    tool_filter: str,
+    lookback_days: int,
+    output: Path,
+    sample_per_platform: Optional[int] = None,
+    seed: int = 42,
+    skip_recent_days: int = 0,
+    pool_output: Optional[Path] = None,
+) -> None:
+    """Fetch pool, sample, enrich — all in one command."""
+    # Determine pool path
+    if pool_output is None:
+        pool_output = output.parent / f"pool_{output.stem}.jsonl"
+
+    fetch_pool(
+        tool_filter=tool_filter,
+        lookback_days=lookback_days,
+        output=pool_output,
+        skip_recent_days=skip_recent_days,
+    )
+
+    sample_and_enrich(
+        pool_path=pool_output,
+        output=output,
+        sample_per_platform=sample_per_platform,
+        seed=seed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -484,52 +561,68 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Fetch replay-ready dataset from on-chain subgraphs.",
     )
-    parser.add_argument(
-        "--tool",
-        type=str,
-        default="prediction-online",
-        help="Tool name to filter (default: prediction-online)",
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # --- fetch (pool only) ---
+    fetch_parser = subparsers.add_parser(
+        "fetch", help="Fetch deliveries + match outcomes → pool JSONL (no IPFS)",
     )
-    parser.add_argument(
-        "--lookback-days",
-        type=int,
-        default=7,
-        help="Fetch deliveries from the last N days (default: 7)",
+    fetch_parser.add_argument("--tool", type=str, default="prediction-online")
+    fetch_parser.add_argument("--lookback-days", type=int, default=7)
+    fetch_parser.add_argument("--skip-recent-days", type=int, default=0)
+    fetch_parser.add_argument(
+        "--output", type=Path, default=Path("benchmark/results/pool.jsonl"),
     )
-    parser.add_argument(
-        "--sample-per-platform",
-        type=int,
-        default=None,
-        help="Stratified sample N markets per platform (default: all)",
+
+    # --- sample (from pool) ---
+    sample_parser = subparsers.add_parser(
+        "sample", help="Stratified sample from pool + IPFS fetch → enriched JSONL",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for stratified sampling (default: 42)",
+    sample_parser.add_argument("--pool", type=Path, required=True)
+    sample_parser.add_argument("--sample-per-platform", type=int, default=None)
+    sample_parser.add_argument("--seed", type=int, default=42)
+    sample_parser.add_argument(
+        "--output", type=Path, default=Path("benchmark/results/replay_dataset.jsonl"),
     )
-    parser.add_argument(
-        "--skip-recent-days",
-        type=int,
-        default=0,
-        help="Exclude the most recent N days (default: 0). Use to create non-overlapping windows.",
+
+    # --- run (combined) ---
+    run_parser = subparsers.add_parser(
+        "run", help="Fetch + sample in one command (saves pool as intermediate)",
     )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("benchmark/results/replay_dataset.jsonl"),
-        help="Output JSONL path",
+    run_parser.add_argument("--tool", type=str, default="prediction-online")
+    run_parser.add_argument("--lookback-days", type=int, default=7)
+    run_parser.add_argument("--skip-recent-days", type=int, default=0)
+    run_parser.add_argument("--sample-per-platform", type=int, default=None)
+    run_parser.add_argument("--seed", type=int, default=42)
+    run_parser.add_argument(
+        "--output", type=Path, default=Path("benchmark/results/replay_dataset.jsonl"),
     )
+
     args = parser.parse_args()
 
-    fetch_replay(
-        tool_filter=args.tool,
-        lookback_days=args.lookback_days,
-        output=args.output,
-        sample_per_platform=args.sample_per_platform,
-        seed=args.seed,
-        skip_recent_days=args.skip_recent_days,
-    )
+    if args.command == "fetch":
+        fetch_pool(
+            tool_filter=args.tool,
+            lookback_days=args.lookback_days,
+            output=args.output,
+            skip_recent_days=args.skip_recent_days,
+        )
+    elif args.command == "sample":
+        sample_and_enrich(
+            pool_path=args.pool,
+            output=args.output,
+            sample_per_platform=args.sample_per_platform,
+            seed=args.seed,
+        )
+    elif args.command == "run":
+        fetch_replay(
+            tool_filter=args.tool,
+            lookback_days=args.lookback_days,
+            output=args.output,
+            sample_per_platform=args.sample_per_platform,
+            seed=args.seed,
+            skip_recent_days=args.skip_recent_days,
+        )
 
 
 if __name__ == "__main__":

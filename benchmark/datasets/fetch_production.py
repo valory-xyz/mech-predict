@@ -1964,8 +1964,8 @@ def main() -> None:
 
         # Incremental scoring — update accumulators in scores.json
         try:
-            from benchmark.scorer import (
-                update as scorer_update,  # pylint: disable=import-outside-toplevel
+            from benchmark.scorer import (  # pylint: disable=import-outside-toplevel
+                update as scorer_update,
             )
 
             scorer_update(all_rows, args.scores, args.history)

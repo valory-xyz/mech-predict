@@ -54,7 +54,7 @@ customs:
 - valory/resolve_market_jury:0.1.0:bafybeidih3xlxizifdqbygerr5rvdwajgph3dpfavnlwgvpmgmedd7yxmy
 - valory/prediction_request:0.1.0:bafybeigokr75k3zzmfajglukqjsnrpxgumzasczsfpttwukkxpylmbylji
 - napthaai/resolve_market_reasoning:0.1.0:bafybeifbsvempfym747rqtzmytox2im6cqq526syy6rpy6sho3yradet3q
-- napthaai/prediction_request_rag:0.1.0:bafybeiajqv64f4psuhypfvfd4aizsfesxejsbfrtvm3hzg7xnxbaiyajk4
+- napthaai/prediction_request_rag:0.1.0:bafybeidf2z2wlgu6otdmzvovar5lb7syxe47crffdte7a32qvr2xjgnoci
 - napthaai/prediction_request_reasoning:0.1.0:bafybeidtszf4yaguoxdkoci5jtxbv7hprk67wpybyms3stheq46g56vl34
 - valory/prepare_tx:0.1.0:bafybeifyve3gy32tq5pbakanf7ipwairk4ifo3hm2ydq6oun543o4wkoyq
 - napthaai/prediction_url_cot:0.1.0:bafybeiftltb243ucskxjyoi6gktndihtqqvgwhrbexrkhmkr3gebnxgsze

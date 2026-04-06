@@ -314,7 +314,7 @@ class TestClassifyCategory:
             ("Will Apple release a new iPhone?", "technology"),
             ("Will GDP grow this quarter?", "business"),
             ("Will NATO expand?", "international"),
-            ("Will the NBA finals be exciting?", "entertainment"),
+            ("Will the NBA finals be exciting?", "sports"),
             ("Will Netflix release a new series?", "entertainment"),
             ("Will the hurricane hit Florida?", "weather"),
         ],

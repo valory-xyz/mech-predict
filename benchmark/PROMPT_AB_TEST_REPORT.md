@@ -182,8 +182,8 @@ BEFORE FINAL ANSWER — apply all three checks:
    p_yes > 0.80 needs strong specific evidence, not plausibility or reputation.
    Plans, proposals, and intentions are not completed actions.
 
-2. CONFIDENCE COUPLING: If confidence < 0.5, keep p_yes between 0.30-0.70.
-   If confidence < 0.3, keep p_yes between 0.20-0.80.
+2. CONFIDENCE COUPLING: If confidence < 0.3, keep p_yes between 0.30-0.70.
+   If confidence < 0.5, keep p_yes between 0.20-0.80.
 
 3. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the current
    value and compare to the threshold. A large gap overrides sentiment or forecasts.

@@ -260,3 +260,110 @@ Week 2 dataset: 100 markets from days 8-14, no overlap with week 1.
 | **overall** | **100** | **21** | **79** | **0.2919** | **0.2475** | **-15.2%** | **44** | **26** | **30** |
 
 **No overfitting.** Week 2 improved more than week 1 (-15.2% vs -10.9%). The NO-heavy omen distribution (42 no / 8 yes) confirms the base-rate prior works well — it's the core improvement driver.
+
+---
+
+## V4: Narrowed Base-Rate Prior
+
+### Changes from V3
+
+1. Narrowed the "most resolve NO" prior to only apply to "announce/launch/complete a novel action by deadline" questions
+2. Added separate rule for stock prices, earnings, weather: "use data directly, compare to thresholds, use trends"
+3. Merged old numeric threshold check into the new continuous-outcomes rule
+
+### Full prompt diff from V3
+
+```
+CALIBRATION CHECKS (apply before outputting your answer)
+- * Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
++ * For questions about whether an organization will announce, launch, or complete a specific novel action by a deadline: the base rate is low. Most such questions resolve NO unless there is direct evidence the action already occurred.
+  * If sources confirm the event already occurred or was completed, high p_yes is justified.
+  * Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
+  * Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
+- * If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
+- * For numeric threshold questions (prices, temperatures, counts), find the current value in the sources and compare to the threshold.
++ * For stock prices, earnings, weather, and other questions about continuous/measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility.
++ * If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
+```
+
+### Results
+
+| Dataset | Baseline | V4 Brier | Delta % | Better | Worse | Same |
+|---------|----------|----------|---------|--------|-------|------|
+| Week 1 overall | 0.2916 | 0.2587 | -11.3% | 36 | 33 | 18 |
+| Week 1 omen | 0.2656 | 0.2427 | -8.6% | 20 | 19 | 11 |
+| Week 1 polymarket | 0.3255 | 0.2804 | -13.9% | 16 | 14 | 7 |
+| Week 2 overall | 0.2919 | 0.2447 | **-16.2%** | 45 | 30 | 25 |
+| Week 2 omen | 0.2804 | 0.2102 | **-25.0%** | 25 | 18 | 7 |
+| Week 2 polymarket | 0.3037 | 0.2792 | -8.1% | 20 | 12 | 18 |
+
+### Analysis
+
+V4 is better than V3 on omen (narrower prior avoids false conservatism on legitimate YES events) but worse on polymarket (the separate stock/weather rule is too permissive). The tradeoff:
+
+- V3: strong polymarket, weak omen
+- V4: strong omen, weaker polymarket
+
+## Updated Comparison Table
+
+| Version | W1 Overall | W1 Omen | W1 Poly | W2 Overall | W2 Omen | W2 Poly |
+|---------|-----------|---------|---------|-----------|---------|---------|
+| Baseline | 0.2916 | 0.2656 | 0.3255 | 0.2919 | 0.2804 | 0.3037 |
+| V1 | -7.2% | -1.4% | -14.3% | — | — | — |
+| V2 | -2.4% | +2.6% | -7.5% | — | — | — |
+| V3 | -10.9% | -6.5% | **-15.4%** | -15.2% | -19.0% | **-11.8%** |
+| V4 | -11.3% | -8.6% | -13.9% | **-16.2%** | **-25.0%** | -8.1% |
+
+---
+
+## V5: Combined (V3 broad prior + V4 measurable-outcomes carve-out)
+
+### Changes from V3
+
+1. Kept V3's broad "most will-X-by-Y resolve NO" prior
+2. Strengthened confirmed-event escape valve: "do not second-guess confirmed facts"
+3. Added V4's measurable-outcomes rule for stock/earnings/weather with explicit note: "the 'most resolve NO' prior does not apply to these"
+
+### Full prompt diff from V3
+
+```
+CALIBRATION CHECKS (apply before outputting your answer)
+  * Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
+- * If sources confirm the event already occurred or was completed, high p_yes is justified.
++ * If sources confirm the event already occurred or was completed, high p_yes is justified — do not second-guess confirmed facts.
+  * Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
+  * Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
++ * For stock prices, earnings, weather, and other measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility. The "most resolve NO" prior does not apply to these.
+  * If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
+- * For numeric threshold questions (prices, temperatures, counts), find the current value in the sources and compare to the threshold.
+```
+
+### Results
+
+| Dataset | Baseline Brier | V5 Brier | Delta % | Baseline Acc | V5 Acc | Better | Worse | Same |
+|---------|---------------|----------|---------|-------------|--------|--------|-------|------|
+| W1 overall | 0.2916 | 0.2571 | **-11.8%** | 59.8% | 52.9% | 37 | 32 | 18 |
+| W1 omen | 0.2656 | 0.2465 | -7.2% | 66.0% | 56.0% | 22 | 22 | 6 |
+| W1 polymarket | 0.3255 | 0.2713 | **-16.7%** | 54.1% | 48.6% | 15 | 10 | 12 |
+| W2 overall | 0.2919 | 0.2475 | **-15.2%** | 63.0% | **68.0%** | 39 | 27 | 34 |
+| W2 omen | 0.2804 | 0.2330 | -16.9% | 64.0% | 68.0% | 20 | 18 | 12 |
+| W2 polymarket | 0.3037 | 0.2619 | **-13.7%** | 62.0% | 68.0% | 19 | 9 | 22 |
+
+### Analysis
+
+Best balanced version. Combines V3's strength on polymarket (broad prior) with V4's measurable-outcomes carve-out. Key properties:
+- Best polymarket Brier on both weeks
+- Solid omen improvement on both weeks
+- Best W2 accuracy (68.0% vs 63.0% baseline)
+- W1 accuracy drops (52.9%) — same pattern as V3/V4 where predictions cross the 0.5 line due to calibration pulling toward center
+
+## Updated Comparison Table
+
+| Version | W1 Brier (Δ%) | W1 Acc | W2 Brier (Δ%) | W2 Acc | W1 B/W/S | W2 B/W/S |
+|---------|--------------|--------|--------------|--------|----------|----------|
+| Baseline | 0.2916 | 59.8% | 0.2919 | 63.0% | — | — |
+| V1 | -7.2% | — | — | — | 32/35/20 | — |
+| V2 | -2.4% | — | — | — | 29/29/29 | — |
+| V3 | -10.9% | 54.0% | -15.2% | 67.0% | 40/28/19 | 44/26/30 |
+| V4 | -11.3% | 55.2% | **-16.2%** | 66.0% | 36/33/18 | 45/30/25 |
+| **V5** | **-11.8%** | 52.9% | -15.2% | **68.0%** | 37/32/18 | 39/27/34 |

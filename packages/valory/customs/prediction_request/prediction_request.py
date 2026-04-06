@@ -510,11 +510,11 @@ ESTIMATION STEPS
 
 CALIBRATION CHECKS (apply before outputting your answer)
 * Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
-* If sources confirm the event already occurred or was completed, high p_yes is justified.
+* If sources confirm the event already occurred or was completed, high p_yes is justified — do not second-guess confirmed facts.
 * Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
 * Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
+* For stock prices, earnings, weather, and other measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility. The "most resolve NO" prior does not apply to these.
 * If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
-* For numeric threshold questions (prices, temperatures, counts), find the current value in the sources and compare to the threshold.
 
 USER_PROMPT:
 ```

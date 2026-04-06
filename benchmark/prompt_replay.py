@@ -593,19 +593,41 @@ def replay(
                     "  candidate parse failed: %s", parsed["prediction_parse_status"]
                 )
 
-    # Summary
+    # Summary — compute accuracy (prediction correct if p_yes > 0.5 matches outcome)
     total = len(sampled)
     avg_baseline = baseline_brier_sum / total if total else 0
     avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
 
+    baseline_correct = 0
+    candidate_correct = 0
+    for c in sampled:
+        key = c["question_text"] + c.get("platform", "")
+        outcome = c["final_outcome"]
+        b_pyes = c["p_yes"]
+        # baseline accuracy
+        if (b_pyes > 0.5 and outcome) or (b_pyes < 0.5 and not outcome):
+            baseline_correct += 1
+
+    # Re-read candidate rows for accuracy
+    with open(candidate_path, encoding="utf-8") as cf_read:
+        for line in cf_read:
+            cr = json.loads(line.strip())
+            if cr["p_yes"] is not None:
+                outcome = cr["final_outcome"]
+                if (cr["p_yes"] > 0.5 and outcome) or (cr["p_yes"] < 0.5 and not outcome):
+                    candidate_correct += 1
+
+    baseline_acc = baseline_correct / total if total else 0
+    candidate_acc = candidate_correct / n_scored if n_scored else 0
+
     log.info("=" * 60)
     log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
-    log.info("  Baseline avg Brier:  %.4f", avg_baseline)
-    log.info("  Candidate avg Brier: %.4f", avg_candidate)
+    log.info("  Baseline avg Brier:  %.4f  Accuracy: %.1f%%", avg_baseline, baseline_acc * 100)
+    log.info("  Candidate avg Brier: %.4f  Accuracy: %.1f%%", avg_candidate, candidate_acc * 100)
     if avg_baseline > 0:
         delta_pct = (avg_candidate - avg_baseline) / avg_baseline * 100
         log.info(
-            "  Delta: %+.4f (%+.1f%%) — %s",
+            "  Brier delta: %+.4f (%+.1f%%) — %s",
             avg_candidate - avg_baseline,
             delta_pct,
             "IMPROVED" if avg_candidate < avg_baseline else "REGRESSED",

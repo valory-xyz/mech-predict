@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,11 @@ IPFS_GATEWAY_URL = os.environ.get(
 )
 IPFS_FETCH_DELAY = 0.2  # seconds between IPFS gateway requests
 
+# Daily log file rotation
+LOGS_DIR = Path(__file__).parent / "logs"
+LEGACY_LOG_PATH = Path(__file__).parent / "production_log.jsonl"
+DEDUP_LOOKBACK_DAYS = 7  # how many daily files to scan on state-loss recovery
+
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
 # Falls back to "other" if no keywords match.
@@ -116,191 +122,8 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "tesla",
         "revenue",
         "profit",
-        # merged from economics
-        "economy",
-        "economic",
-        "inflation",
-        "recession",
-        "gdp",
-        "cpi",
-        "interest rate",
-        "fed",
-        "federal reserve",
-        "central bank",
-        "unemployment",
-        "jobs report",
-        "macro",
-        "debt",
-        "deficit",
-        "yield curve",
-        "treasury",
-        "fiscal",
-        "mortgage",
-        "freddie mac",
-        # merged from food
-        "food",
-        "drink",
-        "restaurant",
-        "dining",
-        "mcdonalds",
-        "starbucks",
-        "burger",
-        "meat",
-        "plant-based",
-        "agriculture",
-        "farming",
-        "crop",
-        "harvest",
-        "beer",
-        "wine",
-        "spirit",
-        "coffee",
-        "sugar",
-        "grocery",
-        "supermarket",
-        "chef",
-        "cooking",
     ],
-    "curiosities": [
-        "curiosities",
-        "mystery",
-        "ufo",
-        "alien",
-        "flat earth",
-        "paranormal",
-        "ghost",
-        "psychic",
-        "anomaly",
-        "weird",
-        "strange",
-        "guinness",
-        "record breaker",
-        "bizarre",
-        "hoax",
-        "conspiracy",
-        "qanon",
-    ],
-    "entertainment": [
-        "entertainment",
-        "movie",
-        "film",
-        "cinema",
-        "hollywood",
-        "actor",
-        "actress",
-        "netflix",
-        "disney",
-        "hbo",
-        "box office",
-        "oscar",
-        "tv",
-        "series",
-        "streaming",
-        "show",
-        "theater",
-        "gambling",
-        "betting",
-        "poker",
-        "casino",
-        "lottery",
-        # merged from music
-        "music",
-        "song",
-        "album",
-        "artist",
-        "concert",
-        "spotify",
-        "grammy",
-        "billboard",
-        "singer",
-        "band",
-        "rapper",
-        "genre",
-        "hip hop",
-        "chart",
-        "musical",
-        "vocalist",
-        # merged from arts
-        "art",
-        "arts",
-        "museum",
-        "painting",
-        "auction",
-        "sothebys",
-        "christies",
-        "gallery",
-        "masterpiece",
-        "sculpture",
-        "exhibition",
-        "cultural",
-        "literature",
-        "novel",
-        "biography",
-        "author",
-        "poet",
-        # merged from fashion
-        "fashion",
-        "clothing",
-        "apparel",
-        "luxury",
-        "gucci",
-        "prada",
-        "nike",
-        "adidas",
-        "sneaker",
-        "shoe",
-        "runway",
-        "designer",
-        "style",
-        "vogue",
-        "wear",
-        "textile",
-        "fashion collection",
-        "couture",
-        "handbag",
-        # merged from trending
-        "trending",
-        "viral",
-        "trend",
-        "tiktok",
-        "meme",
-        "challenge",
-        "hashtag",
-        "breaking",
-        "hype",
-        "buzz",
-        "influencer",
-        "youtuber",
-        "streamer",
-        "mrbeast",
-        "drama",
-        "cancel culture",
-    ],
-    "finance": [
-        "finance",
-        "financial",
-        "stock",
-        "share",
-        "market",
-        "wall street",
-        "sp500",
-        "nasdaq",
-        "dow jones",
-        "trade",
-        "investor",
-        "dividend",
-        "portfolio",
-        "hedge fund",
-        "equity",
-        "bond",
-        "earnings",
-        "bloomberg",
-        "etf",
-        "short",
-        "long",
-        "robinhood",
-        "close",
-        # merged from crypto
+    "crypto": [
         "crypto",
         "cryptocurrency",
         "bitcoin",
@@ -325,107 +148,6 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "airdrop",
         "smart contract",
         "bull run",
-    ],
-    "health": [
-        "health",
-        "medicine",
-        "medical",
-        "doctor",
-        "hospital",
-        "virus",
-        "disease",
-        "cancer",
-        "vaccine",
-        "drug",
-        "pharmaceutical",
-        "fda",
-        "covid",
-        "pandemic",
-        "therapy",
-        "surgery",
-        "mental health",
-        "diet",
-        "nutrition",
-        "obesity",
-        "who",
-        "treatment",
-    ],
-    "international": [
-        "international",
-        "global",
-        "war",
-        "conflict",
-        "ukraine",
-        "russia",
-        "israel",
-        "gaza",
-        "china",
-        "un",
-        "united nations",
-        "nato",
-        "treaty",
-        "diplomacy",
-        "foreign",
-        "border",
-        "geopolitics",
-        "summit",
-        "sanction",
-        "ambassador",
-        "territory",
-        # merged from social
-        "social",
-        "society",
-        "demographic",
-        "population",
-        "census",
-        "birth rate",
-        "inequality",
-        "human rights",
-        "protest",
-        "civil rights",
-        "gender",
-        "race",
-        "immigration",
-        "poverty",
-        "class",
-        "community",
-        "homelessness",
-        "socio-economic",
-        "student",
-    ],
-    "pets": [
-        "pet",
-        "pets",
-        "dog",
-        "cat",
-        "puppy",
-        "kitten",
-        "veterinarian",
-        "vet",
-        "breed",
-        "animal shelter",
-        "adoption",
-        "kibble",
-        "leash",
-        "domestic animal",
-        # merged from animals
-        "animal",
-        "wildlife",
-        "zoo",
-        "species",
-        "extinction",
-        "wildlife conservation",
-        "nature conservation",
-        "lion",
-        "tiger",
-        "whale",
-        "bear",
-        "biodiversity",
-        "safari",
-        "jungle",
-        "forest",
-        "fauna",
-        "marine",
     ],
     "politics": [
         "politics",
@@ -488,58 +210,7 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "comet",
         "asteroid",
     ],
-    "sports": [
-        "sports",
-        "sport",
-        "football",
-        "basketball",
-        "soccer",
-        "baseball",
-        "nfl",
-        "nba",
-        "mlb",
-        "fifa",
-        "olympics",
-        "world cup",
-        "medal",
-        "champion",
-        "league",
-        "sports team",
-        "athlete",
-        "score",
-        "match",
-        "tournament",
-        "ufc",
-        "boxing",
-        "f1",
-        "liverpool",
-        "transfer",
-        "player",
-        "tennis",
-        "grand slam",
-    ],
-    "sustainability": [
-        "sustainability",
-        "sustainable",
-        "climate",
-        "carbon",
-        "green",
-        "renewable",
-        "solar",
-        "wind",
-        "energy",
-        "electric vehicle",
-        "ev",
-        "emission",
-        "pollution",
-        "environment",
-        "recycle",
-        "plastic",
-        "global warming",
-        "net zero",
-        "clean energy",
-    ],
-    "technology": [
+    "tech": [
         "technology",
         "tech",
         "ai",
@@ -568,7 +239,113 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "smartphone",
         "adobe",
         "semrush",
-        # merged from internet
+    ],
+    "trending": [
+        "trending",
+        "viral",
+        "trend",
+        "tiktok",
+        "meme",
+        "challenge",
+        "hashtag",
+        "breaking",
+        "hype",
+        "buzz",
+        "influencer",
+        "youtuber",
+        "streamer",
+        "mrbeast",
+        "drama",
+        "cancel culture",
+    ],
+    "fashion": [
+        "fashion",
+        "clothing",
+        "apparel",
+        "luxury",
+        "gucci",
+        "prada",
+        "nike",
+        "adidas",
+        "sneaker",
+        "shoe",
+        "runway",
+        "designer",
+        "style",
+        "vogue",
+        "wear",
+        "textile",
+        "fashion collection",
+        "couture",
+        "handbag",
+    ],
+    "social": [
+        "social",
+        "society",
+        "demographic",
+        "population",
+        "census",
+        "birth rate",
+        "inequality",
+        "human rights",
+        "protest",
+        "civil rights",
+        "gender",
+        "race",
+        "immigration",
+        "poverty",
+        "class",
+        "community",
+        "homelessness",
+        "socio-economic",
+        "student",
+    ],
+    "health": [
+        "health",
+        "medicine",
+        "medical",
+        "doctor",
+        "hospital",
+        "virus",
+        "disease",
+        "cancer",
+        "vaccine",
+        "drug",
+        "pharmaceutical",
+        "fda",
+        "covid",
+        "pandemic",
+        "therapy",
+        "surgery",
+        "mental health",
+        "diet",
+        "nutrition",
+        "obesity",
+        "who",
+        "treatment",
+    ],
+    "sustainability": [
+        "sustainability",
+        "sustainable",
+        "climate",
+        "carbon",
+        "green",
+        "renewable",
+        "solar",
+        "wind",
+        "energy",
+        "electric vehicle",
+        "ev",
+        "emission",
+        "pollution",
+        "environment",
+        "recycle",
+        "plastic",
+        "global warming",
+        "net zero",
+        "clean energy",
+    ],
+    "internet": [
         "internet",
         "website",
         "domain",
@@ -615,6 +392,168 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "bus",
         "ntsb",
     ],
+    "food": [
+        "food",
+        "drink",
+        "restaurant",
+        "dining",
+        "mcdonalds",
+        "starbucks",
+        "burger",
+        "meat",
+        "plant-based",
+        "agriculture",
+        "farming",
+        "crop",
+        "harvest",
+        "beer",
+        "wine",
+        "spirit",
+        "coffee",
+        "sugar",
+        "grocery",
+        "supermarket",
+        "chef",
+        "cooking",
+    ],
+    "pets": [
+        "pet",
+        "pets",
+        "dog",
+        "cat",
+        "puppy",
+        "kitten",
+        "veterinarian",
+        "vet",
+        "breed",
+        "animal shelter",
+        "adoption",
+        "kibble",
+        "leash",
+        "domestic animal",
+    ],
+    "animals": [
+        "animal",
+        "wildlife",
+        "zoo",
+        "species",
+        "extinction",
+        "wildlife conservation",
+        "nature conservation",
+        "lion",
+        "tiger",
+        "whale",
+        "bear",
+        "biodiversity",
+        "safari",
+        "jungle",
+        "forest",
+        "fauna",
+        "marine",
+    ],
+    "curiosities": [
+        "curiosities",
+        "mystery",
+        "ufo",
+        "alien",
+        "flat earth",
+        "paranormal",
+        "ghost",
+        "psychic",
+        "anomaly",
+        "weird",
+        "strange",
+        "guinness",
+        "record breaker",
+        "bizarre",
+        "hoax",
+        "conspiracy",
+        "qanon",
+    ],
+    "music": [
+        "music",
+        "song",
+        "album",
+        "artist",
+        "concert",
+        "tour",
+        "spotify",
+        "grammy",
+        "billboard",
+        "singer",
+        "band",
+        "rapper",
+        "genre",
+        "hip hop",
+        "chart",
+        "musical",
+        "vocalist",
+    ],
+    "economics": [
+        "economy",
+        "economic",
+        "inflation",
+        "recession",
+        "gdp",
+        "cpi",
+        "interest rate",
+        "fed",
+        "federal reserve",
+        "central bank",
+        "unemployment",
+        "jobs report",
+        "macro",
+        "debt",
+        "deficit",
+        "yield curve",
+        "treasury",
+        "fiscal",
+        "mortgage",
+        "freddie mac",
+    ],
+    "arts": [
+        "art",
+        "arts",
+        "museum",
+        "painting",
+        "auction",
+        "sothebys",
+        "christies",
+        "gallery",
+        "masterpiece",
+        "sculpture",
+        "exhibition",
+        "cultural",
+        "literature",
+        "novel",
+        "biography",
+        "author",
+        "poet",
+    ],
+    "entertainment": [
+        "entertainment",
+        "movie",
+        "film",
+        "cinema",
+        "hollywood",
+        "actor",
+        "actress",
+        "netflix",
+        "disney",
+        "hbo",
+        "box office",
+        "oscar",
+        "tv",
+        "series",
+        "streaming",
+        "show",
+        "theater",
+        "gambling",
+        "betting",
+        "poker",
+        "casino",
+        "lottery",
+    ],
     "weather": [
         "weather",
         "forecast",
@@ -633,6 +572,84 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "tropical",
         "dissipate",
         "noaa",
+    ],
+    "sports": [
+        "sports",
+        "sport",
+        "football",
+        "basketball",
+        "soccer",
+        "baseball",
+        "nfl",
+        "nba",
+        "mlb",
+        "fifa",
+        "olympics",
+        "world cup",
+        "medal",
+        "champion",
+        "league",
+        "sports team",
+        "athlete",
+        "score",
+        "match",
+        "tournament",
+        "ufc",
+        "boxing",
+        "f1",
+        "liverpool",
+        "transfer",
+        "player",
+        "tennis",
+        "grand slam",
+    ],
+    "finance": [
+        "finance",
+        "financial",
+        "stock",
+        "share",
+        "market",
+        "wall street",
+        "sp500",
+        "nasdaq",
+        "dow jones",
+        "trade",
+        "investor",
+        "dividend",
+        "portfolio",
+        "hedge fund",
+        "equity",
+        "bond",
+        "earnings",
+        "bloomberg",
+        "etf",
+        "short",
+        "long",
+        "robinhood",
+        "close",
+    ],
+    "international": [
+        "international",
+        "global",
+        "war",
+        "conflict",
+        "ukraine",
+        "russia",
+        "israel",
+        "gaza",
+        "china",
+        "un",
+        "united nations",
+        "nato",
+        "treaty",
+        "diplomacy",
+        "foreign",
+        "border",
+        "geopolitics",
+        "summit",
+        "sanction",
+        "ambassador",
+        "territory",
     ],
 }
 
@@ -933,15 +950,14 @@ def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
     return ipfs_hash
 
 
-def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
-    """Fetch the full IPFS payload and extract source_content from metadata.params.
+def fetch_ipfs_metadata(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the full IPFS payload and return the metadata dict.
 
     The IPFS hash from the subgraph is a hex-encoded CIDv1 pointing to a
-    directory. The directory contains one file named by request ID. We fetch
-    the directory listing, find the file, and extract the payload.
+    directory. The directory contains one file named by request ID.
 
     :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
-    :return: the source_content dict, or None if not available.
+    :return: the full metadata dict, or None if not available.
     """
     try:
         cid = _ipfs_hash_to_cid(ipfs_hash)
@@ -956,9 +972,7 @@ def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
             dir_data = resp.json()
             # If the response is already the payload (single-file directory auto-resolved)
             if isinstance(dir_data, dict) and "metadata" in dir_data:
-                metadata = dir_data.get("metadata") or {}
-                params = metadata.get("params") or {}
-                return params.get("source_content")
+                return dir_data.get("metadata") or {}
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -974,12 +988,23 @@ def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
         file_resp.raise_for_status()
         payload = file_resp.json()
 
-        metadata = payload.get("metadata") or {}
-        params = metadata.get("params") or {}
-        return params.get("source_content")
+        return payload.get("metadata") or {}
     except Exception as e:
         log.debug("Failed to fetch IPFS %s: %s", ipfs_hash, e)
         return None
+
+
+def fetch_ipfs_source_content(ipfs_hash: str) -> Optional[dict[str, Any]]:
+    """Fetch the IPFS payload and extract source_content from metadata.params.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: the source_content dict, or None if not available.
+    """
+    metadata = fetch_ipfs_metadata(ipfs_hash)
+    if metadata is None:
+        return None
+    params = metadata.get("params") or {}
+    return params.get("source_content")
 
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1315,32 @@ def _ts_to_iso(ts: Optional[int]) -> Optional[str]:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _compute_config_hash(
+    tool_hash: Optional[str],
+    model: Optional[str],
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Optional[str]:
+    """Compute a deterministic config hash from tool + model parameters.
+
+    :param tool_hash: IPFS tool hash (e.g. ``bafyabc123``).
+    :param model: model name (e.g. ``gpt-4.1``).
+    :param temperature: optional temperature setting.
+    :param max_tokens: optional max tokens setting.
+    :return: first 12 chars of SHA256 hex digest, or None if no inputs.
+    """
+    if not tool_hash and not model:
+        return None
+    parts = [
+        str(tool_hash or ""),
+        str(model or ""),
+        str(temperature or ""),
+        str(max_tokens or ""),
+    ]
+    h = hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+    return h
+
+
 def _make_row_id(platform: str, deliver_id: str) -> str:
     """Generate a deterministic row ID from platform + deliver_id."""
     h = hashlib.sha256(f"{platform}:{deliver_id}".encode()).hexdigest()[:12]
@@ -1301,8 +1352,17 @@ def build_row(
     market: dict[str, Any],
     match_confidence: float,
     platform: str,
+    ipfs_metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Build a production_log row from a delivery matched to a resolved market."""
+    """Build a production_log row from a delivery matched to a resolved market.
+
+    :param delivery: delivery dict from the subgraph.
+    :param market: resolved market dict.
+    :param match_confidence: confidence of the delivery-to-market match.
+    :param platform: platform name (e.g. "omen", "polymarket").
+    :param ipfs_metadata: optional IPFS metadata dict with tool_hash and params.
+    :return: production log row dict.
+    """
     question_text = delivery["question_title"]
     parsed = parse_tool_response(delivery["tool_response"])
     delivery_ts = delivery["timestamp"]
@@ -1318,6 +1378,19 @@ def build_row(
     if request_ts and delivery_ts and delivery_ts > request_ts:
         latency_s = delivery_ts - request_ts
 
+    # Extract tool_version and config_hash from IPFS metadata if available
+    tool_version: Optional[str] = None
+    config_hash: Optional[str] = None
+    if ipfs_metadata:
+        tool_version = ipfs_metadata.get("tool_hash")
+        params = ipfs_metadata.get("params") or {}
+        config_hash = _compute_config_hash(
+            tool_version,
+            delivery["model"],
+            params.get("temperature"),
+            params.get("max_tokens"),
+        )
+
     row = {
         "row_id": _make_row_id(platform, delivery["deliver_id"]),
         "deliver_id": delivery["deliver_id"],
@@ -1327,10 +1400,9 @@ def build_row(
         "platform": platform,
         "question_text": question_text,
         "tool_name": delivery["tool"],
-        "tool_version": None,
+        "tool_version": tool_version,
         "model": delivery["model"],
-        "prompt_template": None,
-        "config_hash": None,
+        "config_hash": config_hash,
         "p_yes": parsed["p_yes"],
         "p_no": parsed["p_no"],
         "prediction_parse_status": parsed["prediction_parse_status"],
@@ -1371,12 +1443,44 @@ def save_fetch_state(state_path: Path, state: dict[str, Any]) -> None:
     state_path.write_text(json.dumps(state, indent=2))
 
 
-def load_existing_row_ids(output_path: Path) -> set[str]:
-    """Load existing row IDs from the output JSONL file for deduplication."""
+def daily_log_path(logs_dir: Path, date: datetime | None = None) -> Path:
+    """Return the daily log file path for the given date (default: today UTC).
+
+    :param logs_dir: directory containing daily log files.
+    :param date: date to use; defaults to today in UTC.
+    :return: path like ``logs/production_log_2026_04_06.jsonl``.
+    """
+    if date is None:
+        date = datetime.now(timezone.utc)
+    return logs_dir / f"production_log_{date.strftime('%Y_%m_%d')}.jsonl"
+
+
+def _daily_log_files(logs_dir: Path, n_days: int) -> list[Path]:
+    """Return the last *n_days* daily log file paths that exist on disk.
+
+    Checks today and the previous *n_days - 1* days (UTC).
+
+    :param logs_dir: directory containing daily log files.
+    :param n_days: number of days to look back (inclusive of today).
+    :return: list of existing daily log file paths.
+    """
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    paths: list[Path] = []
+    for i in range(n_days):
+        p = daily_log_path(logs_dir, now - timedelta(days=i))
+        if p.exists():
+            paths.append(p)
+    return paths
+
+
+def _load_ids_from_file(path: Path) -> set[str]:
+    """Extract row IDs from a single JSONL file."""
     ids: set[str] = set()
-    if not output_path.exists():
+    if not path.exists():
         return ids
-    with open(output_path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -1386,6 +1490,34 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
                 ids.add(row["row_id"])
             except (json.JSONDecodeError, KeyError):
                 continue
+    return ids
+
+
+def load_existing_row_ids(
+    logs_dir: Path,
+    *,
+    state_loss: bool = False,
+) -> set[str]:
+    """Load existing row IDs from daily log files for deduplication.
+
+    Normal case: reads only today's file (handles cursor overlap and
+    same-day reruns).  State-loss recovery: reads the last
+    ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates across
+    the lookback window.
+
+    :param logs_dir: directory containing daily log files.
+    :param state_loss: if True, widen dedup scope to last 7 days.
+    :return: set of row IDs already written.
+    """
+    if state_loss:
+        files = _daily_log_files(logs_dir, DEDUP_LOOKBACK_DAYS)
+    else:
+        files = [daily_log_path(logs_dir)]
+        if not files[0].exists():
+            files = []
+    ids: set[str] = set()
+    for path in files:
+        ids |= _load_ids_from_file(path)
     return ids
 
 
@@ -1564,6 +1696,23 @@ def process_platform(
 # ---------------------------------------------------------------------------
 
 
+def _migrate_legacy_log(legacy_path: Path, logs_dir: Path) -> None:
+    """Move the old single-file production log into the daily logs directory.
+
+    This is a one-time migration. After the move the legacy path no longer
+    exists and all future reads go through the daily log directory.
+
+    :param legacy_path: path to the old ``production_log.jsonl``.
+    :param logs_dir: target ``logs/`` directory.
+    """
+    if not legacy_path.exists():
+        return
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    dest = logs_dir / "production_log_legacy.jsonl"
+    shutil.move(str(legacy_path), str(dest))
+    log.info("Migrated legacy log %s -> %s", legacy_path, dest)
+
+
 def main() -> None:
     """CLI entry point for fetching production data."""
     parser = argparse.ArgumentParser(
@@ -1576,10 +1725,10 @@ def main() -> None:
         help="How many days back to fetch (default: 7)",
     )
     parser.add_argument(
-        "--output",
+        "--logs-dir",
         type=Path,
-        default=Path(__file__).parent / "production_log.jsonl",
-        help="Output JSONL file path",
+        default=LOGS_DIR,
+        help="Directory for daily log files",
     )
     parser.add_argument(
         "--state-file",
@@ -1593,14 +1742,35 @@ def main() -> None:
         default=None,
         help="Only process the last N rows (most recent first)",
     )
+    parser.add_argument(
+        "--scores",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "results" / "scores.json",
+        help="Path to scores.json for incremental scoring",
+    )
+    parser.add_argument(
+        "--history",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "results" / "scores_history.jsonl",
+        help="Path to scores_history.jsonl",
+    )
     args = parser.parse_args()
+
+    # One-time migration: move old single-file log into logs/ directory
+    legacy_path = args.logs_dir.parent / "production_log.jsonl"
+    _migrate_legacy_log(legacy_path, args.logs_dir)
 
     now = int(time.time())
     lookback_ts = now - (args.lookback_days * 86400)
 
     state = load_fetch_state(args.state_file)
-    existing_ids = load_existing_row_ids(args.output)
-    log.info("Loaded %d existing row IDs for deduplication", len(existing_ids))
+    state_loss = not state
+    existing_ids = load_existing_row_ids(args.logs_dir, state_loss=state_loss)
+    log.info(
+        "Loaded %d existing row IDs for deduplication (state_loss=%s)",
+        len(existing_ids),
+        state_loss,
+    )
 
     all_rows: list[dict[str, Any]] = []
 
@@ -1661,10 +1831,20 @@ def main() -> None:
         log.info("Truncating to last %d rows (from %d)", args.last_n, len(all_rows))
         all_rows = all_rows[: args.last_n]
 
-    # Write results
+    # Write results to today's daily log file
+    output_path = daily_log_path(args.logs_dir)
     if all_rows:
-        written = append_rows(args.output, all_rows)
-        log.info("Appended %d new rows to %s", written, args.output)
+        written = append_rows(output_path, all_rows)
+        log.info("Appended %d new rows to %s", written, output_path)
+
+        # Incremental scoring — update accumulators in scores.json
+        try:
+            from benchmark.scorer import update as scorer_update
+
+            scorer_update(all_rows, args.scores, args.history)
+            log.info("Scores updated at %s", args.scores)
+        except Exception:
+            log.exception("Scorer update failed (non-fatal, fetch data is safe)")
     else:
         log.info("No new rows to write")
 

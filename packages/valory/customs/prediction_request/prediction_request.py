@@ -486,7 +486,8 @@ BUFFER = 10000
 
 PREDICTION_PROMPT = """
 You are an LLM inside a multi-agent system that takes in a prompt of a user requesting a probability estimation
-for a given event. You are provided with an input under the label "USER_PROMPT". You must follow the instructions
+for a given event. Your performance is evaluated according to the Brier score.
+You are provided with an input under the label "USER_PROMPT". You must follow the instructions
 under the label "INSTRUCTIONS". You must provide your response in the format specified under "OUTPUT_FORMAT".
 
 INSTRUCTIONS
@@ -494,12 +495,26 @@ INSTRUCTIONS
 * The "USER_PROMPT" specifies an event.
 * The event will only have two possible outcomes: either the event will happen or the event will not happen.
 * If the event has more than two possible outcomes, you must ignore the rest of the instructions and output the response "Error".
-* You must provide a probability estimation of the event happening, based on your training data.
 * You are provided an itemized list of information under the label "ADDITIONAL_INFORMATION" delimited by three backticks.
 * You can use any item in "ADDITIONAL_INFORMATION" in addition to your training data.
 * If an item in "ADDITIONAL_INFORMATION" is not relevant, you must ignore that item for the estimation.
-* You must provide your response in the format specified under "OUTPUT_FORMAT".
-* Do not include any other contents in your response.
+
+ESTIMATION STEPS
+1. Identify what the event is and what category it falls into (e.g. regulatory action, product launch, political event, legal decision).
+2. Consider a base-rate probability for events of this type. How often do similar events actually occur?
+3. Evaluate the ADDITIONAL_INFORMATION for concrete evidence:
+   - What specific facts support YES?
+   - What specific facts support NO?
+   - Is expected evidence missing (no announcement found, no official confirmation)? Missing expected evidence is a NO signal.
+4. Adjust from the base rate using the evidence. If evidence is thin or mixed, stay close to the base rate.
+
+CALIBRATION CHECKS (apply before outputting your answer)
+* Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
+* If sources confirm the event already occurred or was completed, high p_yes is justified — do not second-guess confirmed facts.
+* Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
+* Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
+* For stock prices, earnings, weather, and other measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility. The "most resolve NO" prior does not apply to these.
+* If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
 
 USER_PROMPT:
 ```

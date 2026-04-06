@@ -20,8 +20,6 @@
 
 from typing import Any
 
-import pytest
-
 from benchmark.analyze import (
     generate_report,
     section_best_predictions,
@@ -33,7 +31,6 @@ from benchmark.analyze import (
     section_weak_spots,
     section_worst_predictions,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,17 +75,23 @@ def _scores(
 
 
 class TestSectionOverall:
+    """Tests for section_overall."""
 
     def test_normal(self) -> None:
+        """Test normal scores with valid brier and reliability."""
         result = section_overall(_scores(brier=0.31, reliability=0.95))
         assert "0.31" in result
         assert "95%" in result
 
     def test_empty_dataset(self) -> None:
-        result = section_overall(_scores(brier=None, reliability=None, total=0, valid=0))
+        """Test empty dataset with no predictions."""
+        result = section_overall(
+            _scores(brier=None, reliability=None, total=0, valid=0)
+        )
         assert "No predictions to score" in result
 
     def test_all_invalid(self) -> None:
+        """Test all invalid predictions."""
         result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
         assert "N/A" in result  # Brier is N/A
 
@@ -99,10 +102,13 @@ class TestSectionOverall:
 
 
 class TestSectionWeakSpots:
+    """Tests for section_weak_spots."""
 
     def test_anti_predictive_label(self) -> None:
         """Brier > 0.5 should say 'anti-predictive'."""
-        s = _scores(by_category={"social": {"brier": 0.81, "n": 100, "reliability": 0.9}})
+        s = _scores(
+            by_category={"social": {"brier": 0.81, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "anti-predictive" in result
 
@@ -114,7 +120,10 @@ class TestSectionWeakSpots:
         assert "anti-predictive" not in result
 
     def test_no_weak_spots(self) -> None:
-        s = _scores(by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}})
+        """Test no weak spots detected."""
+        s = _scores(
+            by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "No weak spots" in result
 
@@ -131,8 +140,10 @@ class TestSectionWeakSpots:
 
 
 class TestSectionTrend:
+    """Tests for section_trend."""
 
     def test_worsening_alert(self) -> None:
+        """Test worsening trend triggers alert."""
         history = [
             {"month": "2026-01", "overall": {"brier": 0.20, "n": 50}},
             {"month": "2026-02", "overall": {"brier": 0.25, "n": 60}},
@@ -141,6 +152,7 @@ class TestSectionTrend:
         assert "Warning" in result
 
     def test_no_alert_when_stable(self) -> None:
+        """Test stable trend produces no alert."""
         history = [
             {"month": "2026-01", "overall": {"brier": 0.20, "n": 50}},
             {"month": "2026-02", "overall": {"brier": 0.21, "n": 60}},
@@ -149,6 +161,7 @@ class TestSectionTrend:
         assert "Warning" not in result
 
     def test_empty_trend(self) -> None:
+        """Test empty trend data."""
         result = section_trend([])
         assert "No trend data" in result
 
@@ -159,15 +172,20 @@ class TestSectionTrend:
 
 
 class TestSectionSampleSizeWarnings:
+    """Tests for section_sample_size_warnings."""
 
     def test_small_category_warned(self) -> None:
+        """Test small category triggers warning."""
         s = _scores(by_category={"weather": {"brier": 0.3, "n": 4, "reliability": 1.0}})
         result = section_sample_size_warnings(s)
         assert "weather" in result
         assert "4 questions" in result
 
     def test_large_category_not_warned(self) -> None:
-        s = _scores(by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}})
+        """Test large category produces no warning."""
+        s = _scores(
+            by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
+        )
         result = section_sample_size_warnings(s)
         assert "sufficient sample size" in result
 
@@ -178,114 +196,148 @@ class TestSectionSampleSizeWarnings:
 
 
 class TestSectionWorstPredictions:
+    """Tests for section_worst_predictions."""
 
     def test_renders_entries(self) -> None:
-        s = _scores(worst_10=[
-            {
-                "question_text": "Will X happen?",
-                "tool_name": "tool-a",
-                "p_yes": 0.95,
-                "final_outcome": False,
-                "brier": 0.9025,
-                "platform": "omen",
-                "category": "finance",
-            },
-        ])
+        """Test rendering worst prediction entries."""
+        s = _scores(
+            worst_10=[
+                {
+                    "question_text": "Will X happen?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.95,
+                    "final_outcome": False,
+                    "brier": 0.9025,
+                    "platform": "omen",
+                    "category": "finance",
+                },
+            ]
+        )
         result = section_worst_predictions(s)
         assert "Will X happen?" in result
         assert "0.9025" in result
         assert "tool-a" in result
 
     def test_empty(self) -> None:
+        """Test empty worst predictions."""
         result = section_worst_predictions(_scores())
         assert "No prediction data" in result
 
 
 class TestSectionBestPredictions:
+    """Tests for section_best_predictions."""
 
     def test_renders_entries(self) -> None:
-        s = _scores(best_10=[
-            {
-                "question_text": "Will Y happen?",
-                "tool_name": "tool-b",
-                "p_yes": 0.98,
-                "final_outcome": True,
-                "brier": 0.0004,
-                "platform": "polymarket",
-                "category": "politics",
-            },
-        ])
+        """Test rendering best prediction entries."""
+        s = _scores(
+            best_10=[
+                {
+                    "question_text": "Will Y happen?",
+                    "tool_name": "tool-b",
+                    "p_yes": 0.98,
+                    "final_outcome": True,
+                    "brier": 0.0004,
+                    "platform": "polymarket",
+                    "category": "politics",
+                },
+            ]
+        )
         result = section_best_predictions(s)
         assert "Will Y happen?" in result
         assert "0.0004" in result
 
     def test_empty(self) -> None:
+        """Test empty best predictions."""
         result = section_best_predictions(_scores())
         assert "No prediction data" in result
 
 
 # ---------------------------------------------------------------------------
-# section_parse_breakdown
+# Parse breakdown
 # ---------------------------------------------------------------------------
 
 
 class TestSectionParseBreakdown:
+    """Tests for section_parse_breakdown."""
 
     def test_renders_table(self) -> None:
-        s = _scores(parse_breakdown={
-            "tool-a": {"valid": 90, "malformed": 5, "error": 5},
-        })
+        """Test rendering parse breakdown table."""
+        s = _scores(
+            parse_breakdown={
+                "tool-a": {"valid": 90, "malformed": 5, "error": 5},
+            }
+        )
         result = section_parse_breakdown(s)
         assert "tool-a" in result
         assert "90" in result
 
     def test_empty(self) -> None:
+        """Test empty parse breakdown."""
         result = section_parse_breakdown(_scores())
         assert "No parse data" in result
 
 
 # ---------------------------------------------------------------------------
-# section_latency
+# Latency
 # ---------------------------------------------------------------------------
 
 
 class TestSectionLatency:
+    """Tests for section_latency."""
 
     def test_renders_table(self) -> None:
-        s = _scores(latency_reservoir={
-            "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
-        })
+        """Test rendering latency table."""
+        s = _scores(
+            latency_reservoir={
+                "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
+            }
+        )
         result = section_latency(s)
         assert "tool-a" in result
         assert "Median" in result
 
     def test_empty(self) -> None:
+        """Test empty latency data."""
         result = section_latency(_scores())
         assert "No latency data" in result
 
 
 # ---------------------------------------------------------------------------
-# generate_report (integration)
+# Generate report (integration)
 # ---------------------------------------------------------------------------
 
 
 class TestGenerateReport:
+    """Tests for generate_report."""
 
     def test_has_all_sections(self) -> None:
+        """Test report contains all expected sections."""
         s = _scores(
             by_tool={"tool-a": {"brier": 0.3, "n": 50, "reliability": 1.0}},
             by_platform={"omen": {"brier": 0.4, "n": 50, "reliability": 1.0}},
             by_category={"crypto": {"brier": 0.2, "n": 50, "reliability": 1.0}},
-            worst_10=[{
-                "question_text": "Will X?", "tool_name": "tool-a",
-                "p_yes": 0.9, "final_outcome": True, "brier": 0.01,
-                "platform": "omen", "category": "crypto",
-            }],
-            best_10=[{
-                "question_text": "Will Y?", "tool_name": "tool-a",
-                "p_yes": 0.1, "final_outcome": False, "brier": 0.01,
-                "platform": "omen", "category": "crypto",
-            }],
+            worst_10=[
+                {
+                    "question_text": "Will X?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.9,
+                    "final_outcome": True,
+                    "brier": 0.01,
+                    "platform": "omen",
+                    "category": "crypto",
+                }
+            ],
+            best_10=[
+                {
+                    "question_text": "Will Y?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.1,
+                    "final_outcome": False,
+                    "brier": 0.01,
+                    "platform": "omen",
+                    "category": "crypto",
+                }
+            ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
         report = generate_report(s, history)
@@ -302,6 +354,7 @@ class TestGenerateReport:
         assert "## Sample Size Warnings" in report
 
     def test_empty_data_no_crash(self) -> None:
+        """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
         report = generate_report(s, [])
         assert "# Benchmark Report" in report

@@ -32,6 +32,8 @@ from typing import Any, Optional
 
 import requests
 
+from benchmark.io import append_jsonl
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -1510,11 +1512,7 @@ def load_existing_row_ids(
 
 def append_rows(output_path: Path, rows: list[dict[str, Any]]) -> int:
     """Append rows to the output JSONL file. Returns count of rows written."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
-    return len(rows)
+    return append_jsonl(output_path, rows)
 
 
 # ---------------------------------------------------------------------------

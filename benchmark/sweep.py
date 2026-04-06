@@ -37,8 +37,9 @@ from benchmark.datasets.fetch_production import (
     MECH_MARKETPLACE_POLYGON_URL,
     fetch_ipfs_source_content,
 )
-from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, TOOL_REGISTRY, replay
+from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, replay
 from benchmark.scorer import load_rows, score
+from benchmark.tools import TOOL_REGISTRY
 
 # ---------------------------------------------------------------------------
 # Logging

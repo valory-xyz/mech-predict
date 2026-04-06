@@ -25,6 +25,8 @@ from typing import Any
 
 import requests
 
+from benchmark.io import load_existing_ids, load_jsonl
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -275,29 +277,12 @@ def check_polymarket_resolutions(
 
 def load_predictions(path: Path) -> list[dict[str, Any]]:
     """Load tournament predictions from JSONL."""
-    rows: list[dict[str, Any]] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
+    return load_jsonl(path)
 
 
 def load_existing_row_ids(path: Path) -> set[str]:
     """Load row IDs already in the scored output."""
-    if not path.exists():
-        return set()
-    ids: set[str] = set()
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    ids.add(json.loads(line)["row_id"])
-                except (json.JSONDecodeError, KeyError):
-                    pass
-    return ids
+    return load_existing_ids(path)
 
 
 # ---------------------------------------------------------------------------

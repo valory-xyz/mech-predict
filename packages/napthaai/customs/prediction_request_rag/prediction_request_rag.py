@@ -335,6 +335,30 @@ Carefully consider the user's question and the additional information provided. 
 - Your confidence level in your prediction
 - How useful was the additional information in allowing you to make a prediction (info_utility)
 
+BEFORE ESTIMATING — follow these steps:
+
+1. CALIBRATION: State a base-rate probability for this event category and
+   justify it. Adjust UP or DOWN from the base rate using specific evidence
+   only. Missing expected evidence (no announcement found, no confirmation)
+   is a strong NO signal — absence of evidence is evidence of absence when
+   you would expect to find it.
+
+2. EVIDENCE BAR — apply strictly:
+   - p_yes > 0.95 requires the event to be ALREADY CONFIRMED in the sources.
+     If it hasn't happened yet, p_yes must be below 0.95.
+   - p_yes > 0.85 needs strong specific evidence of near-certain completion.
+   - p_yes > 0.70 needs concrete evidence, not plausibility or reputation.
+   - Plans, proposals, and intentions are NOT completed actions.
+   - "Will X happen by [date]" questions: unless sources confirm X already
+     happened, treat 0.50 as a reasonable starting point.
+
+3. CONFIDENCE COUPLING: If confidence < 0.3, keep p_yes between 0.30-0.70.
+   If confidence < 0.5, keep p_yes between 0.20-0.80.
+
+4. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the
+   current value and compare to the threshold. A large gap overrides
+   sentiment or forecasts.
+
 Provide your final scores in the following format: <p_yes>probability between 0 and 1</p_yes> <p_no>probability between 0 and 1</p_no>
 your confidence level between 0 and 1 <info_utility>utility of the additional information between 0 and 1</info_utility>
 

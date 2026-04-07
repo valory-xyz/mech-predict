@@ -276,9 +276,7 @@ def step_score_baseline(
     all_rows = load_rows(dataset_path)
     rows = [r for r in all_rows if r.get("tool_name") in tools]
     if len(rows) < len(all_rows):
-        log.info(
-            "  Filtered %d → %d rows matching --tools", len(all_rows), len(rows)
-        )
+        log.info("  Filtered %d → %d rows matching --tools", len(all_rows), len(rows))
     if not rows:
         log.warning("  No rows to score")
         return {"overall": {}, "by_tool": {}, "by_platform": {}, "by_category": {}}

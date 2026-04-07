@@ -18,8 +18,8 @@
 # ------------------------------------------------------------------------------
 """Multi-model jury tool for resolving prediction markets.
 
-Fans out a market question to N independent AI voters (each with native web search),
-then an Anthropic Claude judge synthesizes the final verdict.
+Fans out a market question to N independent AI voters (each with web search),
+then an AI judge synthesizes the final verdict.
 
 Drop-in replacement for resolve_market_reasoning -- same input kwargs, same output
 tuple shape, same JSON result schema ({is_valid, is_determinable, has_occurred}).
@@ -74,10 +74,6 @@ JUDGE_TIMEOUT = 120
 ALLOWED_TOOLS = [
     "resolve-market-jury-v1",
 ]
-
-TOOL_TO_ENGINE = {
-    "resolve-market-jury-v1": JUDGE_MODEL_CLAUDE,
-}
 
 
 def _noop_token_counter(*_args: Any, **_kwargs: Any) -> int:
@@ -191,31 +187,31 @@ class VoterResult:
 class VoterConfig:
     """Configuration for a single voter."""
 
-    adapter: str  # "_adapter_openai" or "_adapter_openrouter"
-    model: str  # model name / slug
-    key_name: str  # KeyChain service name
+    adapter: str
+    model: str
+    api_key_id: str
 
 
 VOTER_CONFIG: Dict[str, VoterConfig] = {
     "openai": VoterConfig(
         adapter="_adapter_openrouter",
         model=VOTER_MODEL_OPENAI,
-        key_name="openrouter",
+        api_key_id="openrouter",
     ),
     "grok": VoterConfig(
         adapter="_adapter_openrouter",
         model=VOTER_MODEL_GROK,
-        key_name="openrouter",
+        api_key_id="openrouter",
     ),
     "gemini": VoterConfig(
         adapter="_adapter_openrouter",
         model=VOTER_MODEL_GEMINI,
-        key_name="openrouter",
+        api_key_id="openrouter",
     ),
     "claude": VoterConfig(
         adapter="_adapter_openrouter",
         model=VOTER_MODEL_CLAUDE,
-        key_name="openrouter",
+        api_key_id="openrouter",
     ),
 }
 
@@ -369,21 +365,21 @@ _ADAPTERS: Dict[str, Callable] = {
 
 
 def cast_vote(
-    voter_name: str,
+    voter_id: str,
     question: str,
     api_keys: Any,
     counter_callback: Optional[Callable] = None,
 ) -> VoterResult:
     """Uniform entry point -- delegates to provider-specific adapter.
 
-    :param voter_name: registry key for this voter.
+    :param voter_id: registry key for this voter.
     :param question: market question.
     :param api_keys: KeyChain object.
     :param counter_callback: optional token/cost accounting callback.
     :return: parsed vote result.
     """
-    config = VOTER_CONFIG[voter_name]
-    api_key = api_keys[config.key_name]
+    config = VOTER_CONFIG[voter_id]
+    api_key = api_keys[config.api_key_id]
     prompt = VOTER_PROMPT.format(question=question)
     model = config.model
     adapter_fn = _ADAPTERS[config.adapter]
@@ -397,42 +393,49 @@ def cast_vote(
         retry_delay=VOTER_RETRY_DELAY,
         counter_callback=counter_callback,
     )
-    return _parse_vote(raw, voter_name, model)
+    return _parse_vote(raw, voter_id, model)
 
 
 def collect_votes(
     question: str,
-    voter_names: List[str],
+    voter_ids: List[str],
     api_keys: Any,
     counter_callback: Optional[Callable] = None,
 ) -> List[VoterResult]:
     """Fan out to all voters in parallel, collect results.
 
     :param question: market question.
-    :param voter_names: list of voter registry keys to use.
+    :param voter_ids: list of voter registry keys to use.
     :param api_keys: KeyChain object.
     :param counter_callback: optional token/cost accounting callback.
     :return: list of voter results.
     """
     results: List[VoterResult] = []
-    with ThreadPoolExecutor(max_workers=len(voter_names)) as pool:
+    with ThreadPoolExecutor(max_workers=len(voter_ids)) as pool:
         futures = {
-            pool.submit(cast_vote, name, question, api_keys, counter_callback): name
-            for name in voter_names
+            pool.submit(cast_vote, voter_id, question, api_keys, counter_callback): voter_id
+            for voter_id in voter_ids
         }
         for future in as_completed(futures):
-            name = futures[future]
+            voter_id = futures[future]
             try:
                 result = future.result(timeout=VOTER_TIMEOUT + 30)
-                results.append(result)
                 print(
-                    f"  Voter [{name}]: "
+                    f"  Voter [{voter_id}]: "
                     f"has_occurred={result.has_occurred}, "
                     f"is_determinable={result.is_determinable}, "
                     f"confidence={result.confidence}"
                 )
             except Exception as e:  # pylint: disable=broad-except
-                print(f"  Voter [{name}] failed: {e}")
+                print(f"  Voter [{voter_id}] failed: {e}")
+                result = VoterResult(
+                    voter=voter_id,
+                    model=VOTER_CONFIG[voter_id].model,
+                    error=str(e),
+                )
+
+            results.append(result)
+
     return results
 
 
@@ -506,9 +509,16 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
 
 
 def _has_consensus(votes: List[VoterResult]) -> bool:
-    """Check if a majority of all voters unanimously agree on has_occurred."""
+    """Check whether decided voters form a strict majority and all agree.
+
+    Undecided / failed / invalid voters count against the threshold: a strict
+    majority of *all* voters (not just decided ones) must have produced a
+    determinate verdict, AND those decided voters must unanimously agree on
+    ``has_occurred``. This prevents 2-of-4 minority agreement from short-
+    circuiting the judge.
+    """
     decided = _decided_votes(votes)
-    # Need at least a majority of all voters to have decided
+    # Need at least a strict majority of all voters to have decided.
     if len(decided) < 2 or len(decided) <= len(votes) / 2:
         return False
     return all(v.has_occurred == decided[0].has_occurred for v in decided)
@@ -599,6 +609,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         raise ValueError(f"Tool {tool} is not supported. Allowed: {ALLOWED_TOOLS}")
 
     voters = DEFAULT_VOTERS
+    voter_models = [VOTER_CONFIG[v].model for v in voters]
 
     # Cost calculation mode
     if delivery_rate == 0:
@@ -606,10 +617,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             raise ValueError(
                 "A delivery rate of `0` was passed, but no counter callback was given."
             )
-        voter_models = tuple(VOTER_CONFIG[name].model for name in voters)
         max_cost = counter_callback(
             max_cost=True,
-            models_calls=voter_models + (JUDGE_MODEL_CLAUDE,),
+            models_calls=tuple(voter_models) + (JUDGE_MODEL_CLAUDE,),
         )
         return max_cost
 
@@ -632,8 +642,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         }
         return json.dumps(result), "All voters failed.", None, counter_callback, None
 
-    voter_models = [VOTER_CONFIG[v].model for v in voters]
-    used_params = {
+    used_params: Dict[str, Any] = {
         "model": JUDGE_MODEL_CLAUDE,
         "voter_models": voter_models,
         "n_voters": len(voters),
@@ -643,7 +652,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if _has_consensus(votes):
         print("  Voter majority consensus -- skipping judge.")
         result = _build_consensus_result(votes)
-        used_params["model"] = voter_models[0]  # judge was not called
+        # Judge was not called -- record the voters that actually contributed
+        # to the verdict instead of pinning a single misleading model id.
+        used_params["model"] = None
         return (
             json.dumps(result),
             result["judge_reasoning"],

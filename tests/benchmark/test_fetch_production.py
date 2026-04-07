@@ -27,16 +27,22 @@ import pytest
 import time
 
 from benchmark.datasets.fetch_production import (
+    DEDUP_LOOKBACK_DAYS,
     PENDING_MAX_AGE_DAYS,
     PROBABILITY_SUM_TOLERANCE,
     ResolvedMarkets,
+    _compute_config_hash,
     _extract_question_title,
+    _load_ids_from_file,
     _make_row_id,
     _match_and_build,
     _match_delivery,
+    _migrate_legacy_log,
     _parse_request_context,
+    append_rows,
     build_row,
     classify_category,
+    daily_log_path,
     load_existing_row_ids,
     load_fetch_state,
     parse_tool_response,
@@ -306,13 +312,13 @@ class TestClassifyCategory:
     @pytest.mark.parametrize(
         "question,expected",
         [
-            ("Will Bitcoin hit $100k?", "crypto"),
-            ("Will ETH price rise?", "crypto"),
+            ("Will Bitcoin hit $100k?", "finance"),
+            ("Will ETH price rise?", "finance"),
             ("Will the president win the election?", "politics"),
             ("Will Tesla revenue grow?", "business"),
             ("Will NASA launch the rocket?", "science"),
-            ("Will Apple release a new iPhone?", "tech"),
-            ("Will GDP grow this quarter?", "economics"),
+            ("Will Apple release a new iPhone?", "technology"),
+            ("Will GDP grow this quarter?", "business"),
             ("Will NATO expand?", "international"),
             ("Will the NBA finals be exciting?", "sports"),
             ("Will Netflix release a new series?", "entertainment"),
@@ -330,7 +336,7 @@ class TestClassifyCategory:
         assert classify_category("Will something happen?") == "other"
 
     def test_case_insensitive(self) -> None:
-        assert classify_category("WILL BITCOIN HIT $100K?") == "crypto"
+        assert classify_category("WILL BITCOIN HIT $100K?") == "finance"
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +434,7 @@ class TestBuildRow:
         assert row["prediction_lead_time_days"] == 2.0
         assert row["market_id"] == "0xmarket"
         assert row["market_prob_at_prediction"] == 0.65
-        assert row["category"] == "crypto"
+        assert row["category"] == "finance"
 
     def test_missing_request_timestamp(self) -> None:
         delivery = {
@@ -448,6 +454,92 @@ class TestBuildRow:
         row = build_row(delivery, market, 1.0, "polymarket")
         assert row["latency_s"] is None
         assert row["requested_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# IPFS metadata enrichment
+# ---------------------------------------------------------------------------
+
+
+class TestComputeConfigHash:
+    """Tests for _compute_config_hash."""
+
+    def test_deterministic(self) -> None:
+        h1 = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 4096)
+        h2 = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 4096)
+        assert h1 == h2
+
+    def test_differs_on_model_change(self) -> None:
+        h1 = _compute_config_hash("bafyabc", "gpt-4.1")
+        h2 = _compute_config_hash("bafyabc", "gpt-4o")
+        assert h1 != h2
+
+    def test_differs_on_tool_hash_change(self) -> None:
+        h1 = _compute_config_hash("bafyabc", "gpt-4.1")
+        h2 = _compute_config_hash("bafydef", "gpt-4.1")
+        assert h1 != h2
+
+    def test_none_inputs_returns_none(self) -> None:
+        assert _compute_config_hash(None, None) is None
+
+    def test_zero_temperature_not_treated_as_none(self) -> None:
+        """temperature=0.0 is valid and must differ from temperature=None."""
+        h_zero = _compute_config_hash("bafyabc", "gpt-4.1", 0.0, 4096)
+        h_none = _compute_config_hash("bafyabc", "gpt-4.1", None, 4096)
+        assert h_zero != h_none
+
+    def test_zero_max_tokens_not_treated_as_none(self) -> None:
+        """max_tokens=0 is valid and must differ from max_tokens=None."""
+        h_zero = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 0)
+        h_none = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, None)
+        assert h_zero != h_none
+
+
+class TestBuildRowWithMetadata:
+    """Tests for build_row with IPFS metadata."""
+
+    def _delivery(self) -> dict[str, Any]:
+        return {
+            "deliver_id": "0xabc",
+            "timestamp": 1774900000,
+            "request_timestamp": None,
+            "model": "gpt-4.1",
+            "tool_response": '{"p_yes": 0.8, "p_no": 0.2, "confidence": 0.9}',
+            "tool": "superforcaster",
+            "question_title": "Will BTC hit $100k?",
+            "market_id": None,
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+        }
+
+    def test_with_metadata(self) -> None:
+        metadata = {
+            "tool_hash": "bafyabc123",
+            "params": {"temperature": 0.7, "max_tokens": 4096},
+        }
+        row = build_row(
+            self._delivery(),
+            {"outcome": True, "resolved_at_ts": 1774900000 + 86400},
+            1.0,
+            "omen",
+            ipfs_metadata=metadata,
+        )
+        assert row["tool_version"] == "bafyabc123"
+        assert row["config_hash"] is not None
+        assert len(row["config_hash"]) == 12
+        assert "prompt_template" not in row
+
+    def test_without_metadata(self) -> None:
+        row = build_row(
+            self._delivery(),
+            {"outcome": True, "resolved_at_ts": 1774900000 + 86400},
+            1.0,
+            "omen",
+        )
+        assert row["tool_version"] is None
+        assert row["config_hash"] is None
+        assert "prompt_template" not in row
 
 
 # ---------------------------------------------------------------------------
@@ -508,23 +600,23 @@ class TestIncrementalState:
 
 class TestDeduplication:
 
-    def test_load_existing_ids(self, tmp_path: Path) -> None:
+    def test_load_ids_from_file(self, tmp_path: Path) -> None:
         log_path = tmp_path / "log.jsonl"
         log_path.write_text(
             '{"row_id": "a"}\n'
             '{"row_id": "b"}\n'
             '{"row_id": "c"}\n'
         )
-        ids = load_existing_row_ids(log_path)
+        ids = _load_ids_from_file(log_path)
         assert ids == {"a", "b", "c"}
 
     def test_empty_file(self, tmp_path: Path) -> None:
         log_path = tmp_path / "log.jsonl"
         log_path.write_text("")
-        assert load_existing_row_ids(log_path) == set()
+        assert _load_ids_from_file(log_path) == set()
 
     def test_missing_file(self, tmp_path: Path) -> None:
-        assert load_existing_row_ids(tmp_path / "nope.jsonl") == set()
+        assert _load_ids_from_file(tmp_path / "nope.jsonl") == set()
 
     def test_row_id_deterministic(self) -> None:
         id1 = _make_row_id("omen", "0xabc")
@@ -532,6 +624,137 @@ class TestDeduplication:
         id3 = _make_row_id("polymarket", "0xabc")
         assert id1 == id2
         assert id1 != id3
+
+
+# ---------------------------------------------------------------------------
+# Daily log rotation
+# ---------------------------------------------------------------------------
+
+
+class TestDailyLogPath:
+    """Tests for daily_log_path helper."""
+
+    def test_returns_dated_filename(self) -> None:
+        from datetime import datetime, timezone
+
+        d = datetime(2026, 4, 6, 12, 0, 0, tzinfo=timezone.utc)
+        result = daily_log_path(Path("/tmp/logs"), d)
+        assert result == Path("/tmp/logs/production_log_2026_04_06.jsonl")
+
+    def test_defaults_to_today(self) -> None:
+        from datetime import datetime, timezone
+
+        today = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+        result = daily_log_path(Path("/tmp/logs"))
+        assert result.name == f"production_log_{today}.jsonl"
+
+
+class TestDailyLogRotation:
+    """Tests for daily log file writing and dedup scoping."""
+
+    def test_writes_to_dated_file(self, tmp_path: Path) -> None:
+        """Rows are written to today's dated log file."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        output = daily_log_path(logs_dir)
+        rows = [{"row_id": "r1", "data": "x"}, {"row_id": "r2", "data": "y"}]
+        append_rows(output, rows)
+        assert output.exists()
+        lines = [
+            json.loads(ln) for ln in output.read_text().strip().split("\n")
+        ]
+        assert len(lines) == 2
+        assert {ln["row_id"] for ln in lines} == {"r1", "r2"}
+
+    def test_same_day_appends(self, tmp_path: Path) -> None:
+        """Two writes on the same day append to the same file."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        output = daily_log_path(logs_dir)
+        append_rows(output, [{"row_id": "r1"}])
+        append_rows(output, [{"row_id": "r2"}])
+        lines = output.read_text().strip().split("\n")
+        assert len(lines) == 2
+
+    def test_dedup_reads_todays_file_only(self, tmp_path: Path) -> None:
+        """Normal dedup (state_loss=False) reads only today's file."""
+        from datetime import datetime, timedelta, timezone
+
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        # Write to yesterday's file
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        old_path = daily_log_path(logs_dir, yesterday)
+        old_path.write_text('{"row_id": "old_row"}\n')
+        # Write to today's file
+        today_path = daily_log_path(logs_dir)
+        today_path.write_text('{"row_id": "today_row"}\n')
+
+        ids = load_existing_row_ids(logs_dir, state_loss=False)
+        assert "today_row" in ids
+        assert "old_row" not in ids
+
+    def test_dedup_reads_7_days_on_state_loss(self, tmp_path: Path) -> None:
+        """State-loss recovery reads the last DEDUP_LOOKBACK_DAYS files."""
+        from datetime import datetime, timedelta, timezone
+
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        now = datetime.now(timezone.utc)
+
+        # Write files for days 0..8 (today through 8 days ago)
+        for i in range(9):
+            d = now - timedelta(days=i)
+            p = daily_log_path(logs_dir, d)
+            p.write_text(f'{{"row_id": "row_day_{i}"}}\n')
+
+        ids = load_existing_row_ids(logs_dir, state_loss=True)
+        # Days 0-6 (within DEDUP_LOOKBACK_DAYS=7) should be included
+        for i in range(DEDUP_LOOKBACK_DAYS):
+            assert f"row_day_{i}" in ids
+        # Day 8 is outside the window
+        assert "row_day_8" not in ids
+
+    def test_dedup_empty_logs_dir(self, tmp_path: Path) -> None:
+        """Empty logs dir returns empty set."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        assert load_existing_row_ids(logs_dir) == set()
+        assert load_existing_row_ids(logs_dir, state_loss=True) == set()
+
+
+class TestMigration:
+    """Tests for _migrate_legacy_log."""
+
+    def test_legacy_file_moved(self, tmp_path: Path) -> None:
+        """Old production_log.jsonl is moved to logs/production_log_legacy.jsonl."""
+        legacy = tmp_path / "production_log.jsonl"
+        legacy.write_text('{"row_id": "r1"}\n{"row_id": "r2"}\n')
+        logs_dir = tmp_path / "logs"
+
+        _migrate_legacy_log(legacy, logs_dir)
+
+        assert not legacy.exists()
+        dest = logs_dir / "production_log_legacy.jsonl"
+        assert dest.exists()
+        assert dest.read_text() == '{"row_id": "r1"}\n{"row_id": "r2"}\n'
+
+    def test_no_legacy_file_noop(self, tmp_path: Path) -> None:
+        """No crash when legacy file doesn't exist."""
+        logs_dir = tmp_path / "logs"
+        _migrate_legacy_log(tmp_path / "production_log.jsonl", logs_dir)
+        assert not logs_dir.exists()  # logs dir not created unnecessarily
+
+    def test_legacy_empty_file_moved(self, tmp_path: Path) -> None:
+        """Empty legacy file is still moved."""
+        legacy = tmp_path / "production_log.jsonl"
+        legacy.write_text("")
+        logs_dir = tmp_path / "logs"
+
+        _migrate_legacy_log(legacy, logs_dir)
+
+        assert not legacy.exists()
+        assert (logs_dir / "production_log_legacy.jsonl").exists()
 
 
 # ---------------------------------------------------------------------------

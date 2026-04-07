@@ -486,7 +486,8 @@ BUFFER = 10000
 
 PREDICTION_PROMPT = """
 You are an LLM inside a multi-agent system that takes in a prompt of a user requesting a probability estimation
-for a given event. You are provided with an input under the label "USER_PROMPT". You must follow the instructions
+for a given event. Your performance is evaluated according to the Brier score.
+You are provided with an input under the label "USER_PROMPT". You must follow the instructions
 under the label "INSTRUCTIONS". You must provide your response in the format specified under "OUTPUT_FORMAT".
 
 INSTRUCTIONS
@@ -494,12 +495,26 @@ INSTRUCTIONS
 * The "USER_PROMPT" specifies an event.
 * The event will only have two possible outcomes: either the event will happen or the event will not happen.
 * If the event has more than two possible outcomes, you must ignore the rest of the instructions and output the response "Error".
-* You must provide a probability estimation of the event happening, based on your training data.
 * You are provided an itemized list of information under the label "ADDITIONAL_INFORMATION" delimited by three backticks.
 * You can use any item in "ADDITIONAL_INFORMATION" in addition to your training data.
 * If an item in "ADDITIONAL_INFORMATION" is not relevant, you must ignore that item for the estimation.
-* You must provide your response in the format specified under "OUTPUT_FORMAT".
-* Do not include any other contents in your response.
+
+ESTIMATION STEPS
+1. Identify what the event is and what category it falls into (e.g. regulatory action, product launch, political event, legal decision).
+2. Consider a base-rate probability for events of this type. How often do similar events actually occur?
+3. Evaluate the ADDITIONAL_INFORMATION for concrete evidence:
+   - What specific facts support YES?
+   - What specific facts support NO?
+   - Is expected evidence missing (no announcement found, no official confirmation)? Missing expected evidence is a NO signal.
+4. Adjust from the base rate using the evidence. If evidence is thin or mixed, stay close to the base rate.
+
+CALIBRATION CHECKS (apply before outputting your answer)
+* Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
+* If sources confirm the event already occurred or was completed, high p_yes is justified — do not second-guess confirmed facts.
+* Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
+* Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
+* For stock prices, earnings, weather, and other measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility. The "most resolve NO" prior does not apply to these.
+* If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
 
 USER_PROMPT:
 ```
@@ -742,12 +757,18 @@ def process_in_batches(
 
 
 def extract_texts(
-    urls: List[str], num_words: Optional[int]
+    urls: List[str],
+    num_words: Optional[int],
+    source_content_mode: str = "cleaned",
 ) -> Tuple[List[ExtendedDocument], Dict[str, Any]]:
     """Extract texts from URLs"""
     max_allowed = 5
     extracted_docs: List[ExtendedDocument] = []
-    raw_source_content: Dict[str, Any] = {"pages": {}, "pdfs": {}}
+    raw_source_content: Dict[str, Any] = {
+        "mode": source_content_mode,
+        "pages": {},
+        "pdfs": {},
+    }
     count = 0
     stop = False
     for batch in process_in_batches(urls=urls):
@@ -763,8 +784,11 @@ def extract_texts(
                         doc = extract_text_from_pdf(url, num_words=num_words)
                         raw_source_content["pdfs"][url] = doc.text if doc else ""
                     else:
-                        raw_source_content["pages"][url] = result.text
                         doc = extract_text(html=result.text, num_words=num_words)
+                        if source_content_mode == "raw":
+                            raw_source_content["pages"][url] = result.text
+                        else:
+                            raw_source_content["pages"][url] = doc.text if doc else ""
             except requests.exceptions.ReadTimeout:
                 print(f"Request timed out: {url}.")
             except Exception as e:
@@ -909,6 +933,7 @@ def fetch_additional_information(
     num_words: int,
     counter_callback: Optional[Callable] = None,
     source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
 ) -> Tuple[str, Dict[str, Any], Any]:
     """Fetch additional information."""
     url_query_prompt = URL_QUERY_PROMPT.format(
@@ -961,12 +986,16 @@ def fetch_additional_information(
                 engine=google_engine,
                 num=num_urls,
             )
-        docs, raw_source_content = extract_texts(urls, num_words)
+        docs, raw_source_content = extract_texts(urls, num_words, source_content_mode)
     else:
         raw_source_content = source_content
         docs = []
-        for url, html in islice(source_content.get("pages", {}).items(), 3):
-            doc = extract_text(html=html, num_words=num_words)
+        mode = source_content.get("mode", "cleaned")
+        for url, content in islice(source_content.get("pages", {}).items(), 3):
+            if mode == "raw":
+                doc = extract_text(html=content, num_words=num_words)
+            else:
+                doc = ExtendedDocument(text=content, url=url)
             if doc and doc.text != "":
                 doc.url = url
                 docs.append(doc)
@@ -1123,6 +1152,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             raise ValueError(f"Tool {tool} is not supported.")
 
         return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
         active_prompt = PREDICTION_PROMPT
         additional_information = ""
         source_content: Dict[str, Any] = {}
@@ -1142,6 +1176,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     num_words,  # type: ignore
                     counter_callback=counter_callback,
                     source_content=kwargs.get("source_content", None),
+                    source_content_mode=source_content_mode,
                 )
             )
         elif "claude" not in engine:

@@ -335,6 +335,30 @@ Carefully consider the user's question and the additional information provided. 
 - Your confidence level in your prediction
 - How useful was the additional information in allowing you to make a prediction (info_utility)
 
+BEFORE ESTIMATING — follow these steps:
+
+1. CALIBRATION: State a base-rate probability for this event category and
+   justify it. Adjust UP or DOWN from the base rate using specific evidence
+   only. Missing expected evidence (no announcement found, no confirmation)
+   is a strong NO signal — absence of evidence is evidence of absence when
+   you would expect to find it.
+
+2. EVIDENCE BAR — apply strictly:
+   - p_yes > 0.95 requires the event to be ALREADY CONFIRMED in the sources.
+     If it hasn't happened yet, p_yes must be below 0.95.
+   - p_yes > 0.85 needs strong specific evidence of near-certain completion.
+   - p_yes > 0.70 needs concrete evidence, not plausibility or reputation.
+   - Plans, proposals, and intentions are NOT completed actions.
+   - "Will X happen by [date]" questions: unless sources confirm X already
+     happened, treat 0.50 as a reasonable starting point.
+
+3. CONFIDENCE COUPLING: If confidence < 0.3, keep p_yes between 0.30-0.70.
+   If confidence < 0.5, keep p_yes between 0.20-0.80.
+
+4. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the
+   current value and compare to the threshold. A large gap overrides
+   sentiment or forecasts.
+
 Provide your final scores in the following format: <p_yes>probability between 0 and 1</p_yes> <p_no>probability between 0 and 1</p_no>
 your confidence level between 0 and 1 <info_utility>utility of the additional information between 0 and 1</info_utility>
 
@@ -666,11 +690,17 @@ def process_in_batches(
 
 
 def extract_texts(
-    urls: List[str], num_words: Optional[int] = None
+    urls: List[str],
+    num_words: Optional[int] = None,
+    source_content_mode: str = "cleaned",
 ) -> Tuple[List[ExtendedDocument], Dict[str, Any]]:
     """Extract texts from URLs with improved error handling, excluding failed URLs."""
     extracted_texts = []
-    raw_source_content: Dict[str, Any] = {"pages": {}, "pdfs": {}}
+    raw_source_content: Dict[str, Any] = {
+        "mode": source_content_mode,
+        "pages": {},
+        "pdfs": {},
+    }
     for batch in process_in_batches(urls=urls) or []:
         for future, url in batch:
             if future is None:
@@ -687,8 +717,11 @@ def extract_texts(
                         doc = extract_text_from_pdf(url, num_words=num_words)
                         raw_source_content["pdfs"][url] = doc.text if doc else ""
                     else:
-                        raw_source_content["pages"][url] = result.text
                         doc = extract_text(html=result.text, num_words=num_words)
+                        if source_content_mode == "raw":
+                            raw_source_content["pages"][url] = result.text
+                        else:
+                            raw_source_content["pages"][url] = doc.text if doc else ""
 
                     if doc:
                         doc.url = url
@@ -799,7 +832,7 @@ def recursive_character_text_splitter(
     return [text[i : i + max_tokens] for i in range(0, len(text), max_tokens - overlap)]
 
 
-def fetch_additional_information(
+def fetch_additional_information(  # pylint: disable=too-many-statements
     client: "LLMClient",
     client_embedding: Optional["LLMClient"],
     prompt: str,
@@ -810,6 +843,7 @@ def fetch_additional_information(
     search_provider: str,
     counter_callback: Optional[Callable] = None,
     source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
     temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
@@ -862,12 +896,17 @@ def fetch_additional_information(
         # Extract text and dates from the URLs
         docs, raw_source_content = extract_texts(
             urls=urls,
+            source_content_mode=source_content_mode,
         )
     else:
         raw_source_content = source_content
         docs = []
-        for url, html in source_content.get("pages", {}).items():
-            doc = extract_text(html=html)
+        mode = source_content.get("mode", "cleaned")
+        for url, content in source_content.get("pages", {}).items():
+            if mode == "raw":
+                doc = extract_text(html=content)
+            else:
+                doc = ExtendedDocument(text=content, url=url)
             if doc:
                 doc.url = url
                 docs.append(doc)
@@ -1016,6 +1055,11 @@ def run(
             raise ValueError(f"Tool {tool} not supported.")
 
         return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
         additional_information, source_content, counter_callback = (
             fetch_additional_information(
                 client=llm_client,
@@ -1028,6 +1072,7 @@ def run(
                 search_provider=search_provider,
                 counter_callback=counter_callback,
                 source_content=kwargs.get("source_content", None),
+                source_content_mode=source_content_mode,
                 num_urls=num_urls,
                 num_queries=num_queries,
                 temperature=temperature,

@@ -10,7 +10,7 @@ fingerprint:
   __init__.py: bafybeifrz7qan24aum3xyaavvl437rdffrposlcmobujzqwyb34e5d5ule
   resolve_market_jury.py: bafybeidwztcyci6z5yqgpomgxgeuuhryigfq3uc4bmsrhhdr24nfse5mwu
   tests/__init__.py: bafybeicxwzllyegjmuqjdilqfjdvskya5w5nc44nc6cb2ytvcgsldmivza
-  tests/test_resolve_market_jury.py: bafybeiaeump7puvemjwb2iuh2nylzc44vslv2ieiuz7rhp4fjjc6hztuhi
+  tests/test_resolve_market_jury.py: bafybeigjhmepyh2kzhmeabbgaozsv2gz7it34mvovokozlefbphkhurt4e
 fingerprint_ignore_patterns: []
 entry_point: resolve_market_jury.py
 callable: run

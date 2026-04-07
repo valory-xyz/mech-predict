@@ -20,7 +20,7 @@
 """Unit tests for resolve_market_jury."""
 
 import json
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,8 +32,8 @@ from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     _decided_votes,
     _extract_json,
     _has_consensus,
+    _noop_token_counter,
     _parse_vote,
-    _record_usage,
     run,
 )
 
@@ -285,44 +285,101 @@ class TestComputeAgreement:
 
 
 # ---------------------------------------------------------------------------
-# _record_usage
+# _adapter_openrouter usage recording
 # ---------------------------------------------------------------------------
 
 
-class TestRecordUsage:
-    """Tests for the counter_callback usage recording helper."""
+class TestAdapterOpenrouterUsageRecording:
+    """Tests for the counter_callback recording inside _adapter_openrouter."""
+
+    def _make_client(
+        self, *, usage: Any, content: str = '{"is_valid": true}'
+    ) -> MagicMock:
+        """Build a mocked openai client returning a single response."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content=content))
+        ]
+        mock_client.chat.completions.create.return_value.usage = usage
+        return mock_client
+
+    def _call(self, mock_client: MagicMock, counter_callback: Any) -> None:
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _adapter_openrouter,
+        )
+
+        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
+            _adapter_openrouter(
+                model="model-x",
+                prompt="p",
+                api_key="k",
+                max_tokens=100,
+                timeout=1,
+                max_retries=1,
+                retry_delay=0,
+                counter_callback=counter_callback,
+            )
 
     def test_no_callback_is_noop(self) -> None:
-        """Returns silently when no callback is provided."""
-        _record_usage(None, "model", MagicMock())  # should not raise
+        """When no callback is provided, nothing is recorded."""
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens", "cost"])
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+        usage.cost = 0.01
+        self._call(self._make_client(usage=usage), counter_callback=None)
+        # no assertion needed -- if anything tried to call the callback, this would crash
 
     def test_no_usage_is_noop(self) -> None:
-        """Returns silently when response has no usage."""
+        """When response has no usage, callback is not called."""
         cb = MagicMock()
-        response = MagicMock(spec=[])  # no 'usage' attr
-        _record_usage(cb, "model", response)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content='{"is_valid": true}'))
+        ]
+        mock_client.chat.completions.create.return_value.usage = None
+        self._call(mock_client, counter_callback=cb)
         cb.assert_not_called()
 
-    def test_records_tokens(self) -> None:
-        """Forwards token counts to callback."""
+    def test_forwards_tokens_and_call_cost(self) -> None:
+        """Forwards token counts and usage.cost as call_cost."""
         cb = MagicMock()
-        response = MagicMock()
-        response.usage.prompt_tokens = 100
-        response.usage.completion_tokens = 50
-        _record_usage(cb, "model-x", response)
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens", "cost"])
+        usage.prompt_tokens = 100
+        usage.completion_tokens = 50
+        usage.cost = 0.025
+        self._call(self._make_client(usage=usage), counter_callback=cb)
         cb.assert_called_once()
         kwargs = cb.call_args.kwargs
         assert kwargs["model"] == "model-x"
         assert kwargs["input_tokens"] == 100
         assert kwargs["output_tokens"] == 50
+        assert kwargs["call_cost"] == 0.025
+
+    def test_call_cost_none_when_usage_has_no_cost(self) -> None:
+        """When usage.cost is missing, call_cost is None."""
+        cb = MagicMock()
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        usage.prompt_tokens = 100
+        usage.completion_tokens = 50
+        self._call(self._make_client(usage=usage), counter_callback=cb)
+        kwargs = cb.call_args.kwargs
+        assert kwargs["call_cost"] is None
 
     def test_callback_exception_is_swallowed(self) -> None:
         """Exceptions in callback are caught and logged."""
         cb = MagicMock(side_effect=ValueError("bad model"))
-        response = MagicMock()
-        response.usage.prompt_tokens = 10
-        response.usage.completion_tokens = 5
-        _record_usage(cb, "model", response)  # should not raise
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+        self._call(
+            self._make_client(usage=usage), counter_callback=cb
+        )  # should not raise
+
+    def test_noop_token_counter_returns_zero(self) -> None:
+        """The placeholder counter ignores arguments and returns 0."""
+        assert _noop_token_counter() == 0
+        assert _noop_token_counter("any text", "any model") == 0
+        assert _noop_token_counter(text="x", model="y") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -338,23 +395,28 @@ class TestAdapterOpenrouter:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
             MagicMock(
-                message=MagicMock(
-                    content='{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-                )
+                message=MagicMock(content='{"is_valid": true, "has_occurred": true}')
             )
         ]
+        mock_client.chat.completions.create.return_value.usage = None
 
         with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
             from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
                 _adapter_openrouter,
             )
 
-            result = _adapter_openrouter(
-                "grok", "x-ai/grok-4.1-fast:online", "prompt", "key"
+            raw = _adapter_openrouter(
+                model="x-ai/grok-4.1-fast:online",
+                prompt="prompt",
+                api_key="key",
+                max_tokens=100,
+                timeout=1,
+                max_retries=1,
+                retry_delay=0,
             )
             call_args = mock_client.chat.completions.create.call_args
             assert call_args.kwargs["model"] == "x-ai/grok-4.1-fast:online"
-            assert result.has_occurred is True
+            assert '"is_valid": true' in raw
 
 
 # ---------------------------------------------------------------------------
@@ -499,9 +561,12 @@ class TestCastVote:
     """Tests for the cast_vote facade."""
 
     def test_delegates_to_adapter(self) -> None:
-        """cast_vote looks up registry and calls adapter."""
-        mock_result = _vote()
-        mock_adapter = MagicMock(return_value=mock_result)
+        """cast_vote looks up registry, calls adapter, and parses raw text."""
+        raw_json = (
+            '{"is_valid": true, "is_determinable": true, "has_occurred": true, '
+            '"confidence": 0.9, "reasoning": "test", "sources": ["http://x"]}'
+        )
+        mock_adapter = MagicMock(return_value=raw_json)
 
         with patch(f"{MODULE}._ADAPTERS", {"_adapter_openrouter": mock_adapter}):
             from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
@@ -510,7 +575,8 @@ class TestCastVote:
 
             keys = _mock_api_keys()
             result = cast_vote("openai", "question?", keys)
-            assert result is mock_result
+            assert isinstance(result, VoterResult)
+            assert result.has_occurred is True
             mock_adapter.assert_called_once()
 
 

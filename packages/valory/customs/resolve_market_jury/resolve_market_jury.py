@@ -61,16 +61,15 @@ JUDGE_MODEL_CLAUDE = "anthropic/claude-sonnet-4:online"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-N_VOTER_CALLS = 4  # default number of voters
-N_JUDGE_CALLS = 1
-N_MODEL_CALLS = N_VOTER_CALLS + N_JUDGE_CALLS
 
-VOTER_TIMEOUT = 120  # seconds per voter API call
-JUDGE_TIMEOUT = 120
-JUDGE_MAX_RETRIES = 3
-JUDGE_RETRY_DELAY = 5  # seconds
+VOTER_MAX_RETRIES = 1
 VOTER_MAX_TOKENS = 1024
+VOTER_RETRY_DELAY = 5
+VOTER_TIMEOUT = 120
+JUDGE_MAX_RETRIES = 3
 JUDGE_MAX_TOKENS = 4096
+JUDGE_RETRY_DELAY = 5
+JUDGE_TIMEOUT = 120
 
 ALLOWED_TOOLS = [
     "resolve-market-jury-v1",
@@ -79,6 +78,11 @@ ALLOWED_TOOLS = [
 TOOL_TO_ENGINE = {
     "resolve-market-jury-v1": JUDGE_MODEL_CLAUDE,
 }
+
+
+def _noop_token_counter(*_args: Any, **_kwargs: Any) -> int:
+    """No-op token counter passed to TokenCounterCallback."""
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -285,63 +289,73 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
 
 
 # ---------------------------------------------------------------------------
-# Adapter: OpenAI (native web_search tool)
-# ---------------------------------------------------------------------------
-
-
-def _record_usage(
-    counter_callback: Optional[Callable],
-    model: str,
-    response: Any,
-) -> None:
-    """Record token usage from an API response into the counter callback."""
-    if counter_callback is None:
-        return
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return
-    try:
-        counter_callback(
-            model=model,
-            token_counter=lambda *_a, **_kw: 0,
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-        )
-    except Exception as e:  # pylint: disable=broad-except
-        print(f"  Warning: counter_callback failed for {model}: {e}")
-
-
-# ---------------------------------------------------------------------------
 # Adapter: OpenRouter
 # ---------------------------------------------------------------------------
 
 
 def _adapter_openrouter(
-    voter_name: str,
     model: str,
     prompt: str,
     api_key: str,
+    max_tokens: int,
+    timeout: int,
+    max_retries: int,
+    retry_delay: int,
     counter_callback: Optional[Callable] = None,
-) -> VoterResult:
-    """Run OpenRouter voter.
+) -> str:
+    """Make an OpenRouter chat completion call and return the raw text.
 
-    :param voter_name: registry key for this voter.
+    Records token usage + per-call surcharge to ``counter_callback``.
+    Retries on 529 (overloaded) errors up to ``max_retries`` attempts.
+
     :param model: OpenRouter model slug.
-    :param prompt: formatted voter prompt.
+    :param prompt: prompt to send.
     :param api_key: OpenRouter API key.
+    :param max_tokens: max output tokens.
+    :param timeout: per-request timeout in seconds.
+    :param max_retries: total attempts (>=1). Only 529 errors trigger a retry.
+    :param retry_delay: seconds to sleep between retry attempts.
     :param counter_callback: optional token/cost accounting callback.
-    :return: parsed vote result.
+    :return: raw text from the response (may be empty string).
     """
     client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=VOTER_MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=VOTER_TIMEOUT,
-    )
+    for attempt in range(max_retries):  # pragma: no branch
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout,
+            )
+            break
+        except openai.APIStatusError as err:
+            if err.status_code == 529 and attempt < max_retries - 1:
+                print(
+                    f"  {model} overloaded, retrying in {retry_delay}s "
+                    f"(attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(retry_delay)
+            else:
+                raise
     raw = response.choices[0].message.content or ""
-    _record_usage(counter_callback, model, response)
-    return _parse_vote(raw, voter_name, model)
+
+    # Forward token usage and real call cost to the callback so that
+    # total_cost matches what OpenRouter billed (including any
+    # web-search surcharge or routing markup).
+    usage = getattr(response, "usage", None)
+    if counter_callback is not None and usage is not None:
+        try:
+            counter_callback(
+                model=model,
+                token_counter=_noop_token_counter,
+                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                call_cost=getattr(usage, "cost", None),
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            print(f"  Warning: counter_callback failed for {model}: {e}")
+
+    return raw
 
 
 _ADAPTERS: Dict[str, Callable] = {
@@ -371,14 +385,19 @@ def cast_vote(
     config = VOTER_CONFIG[voter_name]
     api_key = api_keys[config.key_name]
     prompt = VOTER_PROMPT.format(question=question)
+    model = config.model
     adapter_fn = _ADAPTERS[config.adapter]
-    return adapter_fn(
-        voter_name=voter_name,
-        model=config.model,
+    raw = adapter_fn(
+        model=model,
         prompt=prompt,
         api_key=api_key,
+        max_tokens=VOTER_MAX_TOKENS,
+        timeout=VOTER_TIMEOUT,
+        max_retries=VOTER_MAX_RETRIES,
+        retry_delay=VOTER_RETRY_DELAY,
         counter_callback=counter_callback,
     )
+    return _parse_vote(raw, voter_name, model)
 
 
 def collect_votes(
@@ -398,9 +417,7 @@ def collect_votes(
     results: List[VoterResult] = []
     with ThreadPoolExecutor(max_workers=len(voter_names)) as pool:
         futures = {
-            pool.submit(
-                cast_vote, name, question, api_keys, counter_callback
-            ): name
+            pool.submit(cast_vote, name, question, api_keys, counter_callback): name
             for name in voter_names
         }
         for future in as_completed(futures):
@@ -451,29 +468,16 @@ def _run_judge(
         formatted_votes += f"\nVoter {i}:\n{json.dumps(vote_data, indent=2)}\n"
 
     prompt = JUDGE_PROMPT.format(question=question, votes=formatted_votes)
-    client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-
-    for attempt in range(JUDGE_MAX_RETRIES):  # pragma: no branch
-        try:
-            response = client.chat.completions.create(
-                model=JUDGE_MODEL_CLAUDE,
-                max_tokens=JUDGE_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=JUDGE_TIMEOUT,
-            )
-            break
-        except openai.APIStatusError as err:
-            if err.status_code == 529 and attempt < JUDGE_MAX_RETRIES - 1:
-                print(
-                    f"  Judge overloaded, retrying in {JUDGE_RETRY_DELAY}s "
-                    f"(attempt {attempt + 1}/{JUDGE_MAX_RETRIES})..."
-                )
-                time.sleep(JUDGE_RETRY_DELAY)
-            else:
-                raise
-
-    raw = response.choices[0].message.content or ""
-    _record_usage(counter_callback, JUDGE_MODEL_CLAUDE, response)
+    raw = _adapter_openrouter(
+        model=JUDGE_MODEL_CLAUDE,
+        prompt=prompt,
+        api_key=api_key,
+        max_tokens=JUDGE_MAX_TOKENS,
+        timeout=JUDGE_TIMEOUT,
+        max_retries=JUDGE_MAX_RETRIES,
+        retry_delay=JUDGE_RETRY_DELAY,
+        counter_callback=counter_callback,
+    )
     data = _extract_json(raw)
     if data is None:
         return {
@@ -650,9 +654,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     # 4. Judge synthesizes (only when voters disagree or partial)
     print("  Voters disagree -- running judge...")
-    verdict = _run_judge(
-        prompt, votes, api_keys["openrouter"], counter_callback
-    )
+    verdict = _run_judge(prompt, votes, api_keys["openrouter"], counter_callback)
 
     # 5. Build result with vote metadata
     judge_reasoning = verdict.get("judge_reasoning", "")

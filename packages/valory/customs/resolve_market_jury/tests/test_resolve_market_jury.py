@@ -560,6 +560,7 @@ class TestCollectVotes:
             successes = [r for r in results if r.error is None]
             assert len(errors) == 1
             assert len(successes) == 1
+            assert errors[0].error is not None
             assert "API down" in errors[0].error
 
 

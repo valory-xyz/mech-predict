@@ -1667,13 +1667,27 @@ def _resolve_group_tool_hash(
 
     last_hash = _get_hash(len(group_rows) - 1)
 
+    # If either sample failed (gateway error), use whichever succeeded
+    if first_hash is None and last_hash is None:
+        return result  # both failed — leave all unknown
+    if first_hash is None:
+        # Earliest fetch failed — apply latest hash to all rows
+        for i in range(len(group_rows)):
+            result[i] = last_hash
+        return result
+    if last_hash is None:
+        # Latest fetch failed — apply earliest hash to all rows
+        for i in range(len(group_rows)):
+            result[i] = first_hash
+        return result
+
     if first_hash == last_hash:
         # No version change — apply to all rows
         for i in range(len(group_rows)):
             result[i] = first_hash
         return result
 
-    # Version changed mid-batch — binary search for boundary
+    # Both non-None but different — tool genuinely changed mid-batch
     log.info(
         "IPFS enrichment: tool version changed mid-batch (%s → %s), "
         "binary searching %d rows",
@@ -1729,17 +1743,30 @@ def _enrich_rows_with_ipfs_metadata(
         len(deliver_ids),
     )
 
-    # Step 2: Group rows by (mech, tool_name)
+    # Step 2: Group rows by (mech, tool_name), skipping rows without IPFS data
+    # Non-marketplace deliveries have no marketplaceDelivery record and
+    # therefore no ipfs_hash or mech address — they stay tool_version=None.
     groups: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+    skipped = 0
     for i, row in enumerate(rows):
         did = row.get("deliver_id", "")
         info = delivery_info.get(did, {})
-        mech = info.get("mech") or "unknown"
+        ipfs_hash = info.get("ipfs_hash")
+        mech = info.get("mech")
+        if not ipfs_hash or not mech:
+            skipped += 1
+            continue
         tool = row.get("tool_name", "unknown")
         key = (mech, tool)
         if key not in groups:
             groups[key] = []
         groups[key].append((i, row))
+
+    if skipped:
+        log.info(
+            "IPFS enrichment: skipped %d rows without marketplace delivery",
+            skipped,
+        )
 
     log.info(
         "IPFS enrichment: %d (mech, tool) groups from %d rows",

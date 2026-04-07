@@ -402,3 +402,80 @@ Separate dataset of 75 markets (50 Omen, 25 Polymarket) with zero overlap to the
 | Omen Brier delta | -24.5% | -15.9% |
 | Poly Brier delta | +0.5% | +13.9% |
 | Overconf-wrong reduction | 10→3 | 13→2 |
+
+### Fresh Data Validation (CI artifact, Brier-stratified sampling)
+
+Separate dataset of 60 markets (30 Omen, 30 Polymarket) from the CI benchmark flywheel artifact (68k rows). Uses updated Brier-stratified sampling (platform × outcome × brier_bucket). Seed 99, zero overlap with training/holdout.
+
+| Metric | Baseline | V1+R2 | Delta |
+|--------|----------|-------|-------|
+| Avg Brier | 0.3006 | 0.2667 | **-11.3%** |
+| Accuracy | 60.0% | 61.7% | +1.7pp |
+| Overconf-wrong | 10 | 4 | **-60%** |
+
+| Platform | Baseline Brier | V1+R2 Brier | Delta | Baseline Acc | V1+R2 Acc |
+|----------|---------------|-------------|-------|-------------|-----------|
+| omen | 0.2769 | 0.2412 | **-12.9%** | 63.3% | 66.7% |
+| polymarket | 0.3244 | 0.2923 | **-9.9%** | 56.7% | 56.7% |
+
+### Fresh Data Analysis
+
+- **First Polymarket improvement**: -9.9% Brier (previously flat or regressing on training/holdout)
+- Brier-stratified sampling ensures badly-calibrated predictions are represented, giving more realistic validation
+- Omen improvement consistent: -12.9% (vs -24.5% training, -15.9% holdout)
+- Overconf-wrong 10→4, Polymarket overconf-wrong 6→1
+
+### All Validations Summary
+
+| Dataset | n | Brier delta | Acc delta | Overconf-wrong |
+|---------|---|-------------|-----------|----------------|
+| Training | 100 | -15.3% | +5.0pp | 10→3 |
+| Holdout | 75 | -8.1% | -1.4pp | 13→2 |
+| Fresh (Brier-stratified) | 60 | -11.3% | +1.7pp | 10→4 |
+
+---
+
+## Phase 3: Prediction Prompt V2 (with R2 reasoning)
+
+Tested whether the prediction prompt could be improved now that R2 produces structured reasoning (EVENT/STATUS/EVIDENCE FOR/AGAINST/ASSESSMENT).
+
+### V2 Changes from V1
+
+1. Replaced "most resolve No" with category-specific base rates (product launches ~30%, narrow bands ~15-25%, govt announcements ~40-60%)
+2. Replaced hard caps (0.75, 0.80, 0.90) with evidence-based probability ranges (confirmed → 0.90-0.95, strong evidence → 0.65-0.85, weak → 0.30-0.50, none → 0.05-0.25)
+3. Added explicit narrow-band numeric question handling
+4. Softened absence-of-evidence from conclusive to directional signal
+5. Referenced R2's structure: "Focus on the STATUS and EVIDENCE sections"
+
+### V2 Results (prediction-only phase, R2 cached reasoning, training set n=100)
+
+| Metric | Baseline | V1+R2 | V2+R2 |
+|--------|----------|-------|-------|
+| Avg Brier | 0.2344 | 0.1985 (-15.3%) | 0.2018 (-13.9%) |
+| Accuracy | 70.0% | 75.0% | 74.0% |
+| Overconf-wrong | 10 | 5 | 3 |
+
+| Platform | Baseline Brier | V1+R2 Brier | V2+R2 Brier |
+|----------|---------------|-------------|-------------|
+| omen | 0.2965 | 0.2239 (-24.5%) | 0.2335 (-21.3%) |
+| polymarket | 0.1723 | 0.1731 (+0.5%) | 0.1702 (-1.2%) |
+
+### V2 Analysis
+
+- V2 trades Omen Brier (-21.3% vs -24.5%) for slightly better Polymarket (-1.2% vs +0.5%) and fewer overconf-wrong (3 vs 5)
+- Differences are marginal (1.4pp Brier, 1pp accuracy) — within noise on 100 markets
+- V1 remains the stronger prediction prompt overall
+
+### Decision: Keep V1+R2 as the winner. No further prediction prompt iteration needed.
+
+---
+
+## Final Winner: V1 (PREDICTION_PROMPT) + R2 (REASONING_PROMPT)
+
+| Metric | Baseline (prod) | Winner (V1+R2) | Delta |
+|--------|-----------------|----------------|-------|
+| Training Brier (n=100) | 0.2344 | 0.1985 | **-15.3%** |
+| Training Accuracy | 70.0% | 75.0% | **+5.0pp** |
+| Holdout Brier (n=75) | 0.2689 | 0.2473 | **-8.1%** |
+| Overconf-wrong (training) | 10 | 3 | **-70%** |
+| Overconf-wrong (holdout) | 13 | 2 | **-85%** |

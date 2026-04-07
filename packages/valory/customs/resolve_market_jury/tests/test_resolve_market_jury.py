@@ -538,7 +538,7 @@ class TestCollectVotes:
             assert len(results) == 2
 
     def test_handles_voter_failure(self) -> None:
-        """Failed voters are skipped, others still collected."""
+        """Failed voters are recorded as error stubs, others still collected."""
         call_count = 0
 
         def side_effect(*args: str, **kwargs: str) -> VoterResult:
@@ -553,8 +553,14 @@ class TestCollectVotes:
                 collect_votes,
             )
 
-            results = collect_votes("q?", ["a", "b"], _mock_api_keys())
-            assert len(results) == 1
+            results = collect_votes("q?", ["openai", "grok"], _mock_api_keys())
+            # Both voters appear in results: one error stub, one real vote.
+            assert len(results) == 2
+            errors = [r for r in results if r.error is not None]
+            successes = [r for r in results if r.error is None]
+            assert len(errors) == 1
+            assert len(successes) == 1
+            assert "API down" in errors[0].error
 
 
 class TestCastVote:

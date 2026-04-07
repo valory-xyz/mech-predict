@@ -285,7 +285,7 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
 
 
 # ---------------------------------------------------------------------------
-# Adapter: OpenRouter
+# OpenRouter adapter
 # ---------------------------------------------------------------------------
 
 
@@ -413,7 +413,9 @@ def collect_votes(
     results: List[VoterResult] = []
     with ThreadPoolExecutor(max_workers=len(voter_ids)) as pool:
         futures = {
-            pool.submit(cast_vote, voter_id, question, api_keys, counter_callback): voter_id
+            pool.submit(
+                cast_vote, voter_id, question, api_keys, counter_callback
+            ): voter_id
             for voter_id in voter_ids
         }
         for future in as_completed(futures):
@@ -516,6 +518,9 @@ def _has_consensus(votes: List[VoterResult]) -> bool:
     determinate verdict, AND those decided voters must unanimously agree on
     ``has_occurred``. This prevents 2-of-4 minority agreement from short-
     circuiting the judge.
+
+    :param votes: all voter results (including undecided / failed / invalid).
+    :return: True if decided voters form a strict majority and unanimously agree.
     """
     decided = _decided_votes(votes)
     # Need at least a strict majority of all voters to have decided.

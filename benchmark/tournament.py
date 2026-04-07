@@ -16,23 +16,27 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
 import logging
-import os
-import platform
 import re
 import signal
-import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv  # type: ignore[import-not-found]
 
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
+from benchmark.io import load_jsonl as load_markets
+from benchmark.tools import (
+    TOOL_REGISTRY,
+    ToolTimeout,
+    _can_use_sigalrm,
+    alarm_handler,
+    build_keychain,
+    load_tool_run,
+)
 
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 
@@ -123,136 +127,12 @@ TASK_DEADLINE = 240  # seconds, matches production
 
 
 # ---------------------------------------------------------------------------
-# Tool registry (duplicated from runner.py — will be extracted later)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ToolSpec:
-    """Specification for a prediction tool."""
-
-    module: str
-
-
-TOOL_REGISTRY: dict[str, ToolSpec] = {
-    "prediction-online": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
-    ),
-    "prediction-offline": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
-    ),
-    "claude-prediction-online": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
-    ),
-    "claude-prediction-offline": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
-    ),
-    "superforcaster": ToolSpec(
-        module="packages.valory.customs.superforcaster.superforcaster",
-    ),
-    "prediction-request-reasoning": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
-    ),
-    "prediction-request-reasoning-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
-    ),
-    "prediction-request-rag": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
-    ),
-    "prediction-request-rag-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
-    ),
-    "prediction-url-cot": ToolSpec(
-        module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
-    ),
-    "prediction-url-cot-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
-    ),
-    "prediction-offline-sme": ToolSpec(
-        module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",
-    ),
-    "prediction-online-sme": ToolSpec(
-        module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# API key management
-# ---------------------------------------------------------------------------
-
-
-def build_keychain() -> KeyChain:
-    """Build a KeyChain for tournament mode.
-
-    Sets return_source_content=true so tools capture their web content
-    into used_params for future cached replay.
-
-    :return: a KeyChain populated from environment variables.
-    """
-    services: dict[str, list[str]] = {
-        "openai": [os.environ.get("OPENAI_API_KEY", "")],
-        "anthropic": [os.environ.get("ANTHROPIC_API_KEY", "")],
-        "google_api_key": [os.environ.get("GOOGLE_API_KEY", "")],
-        "google_engine_id": [os.environ.get("GOOGLE_ENGINE_ID", "")],
-        "serperapi": [os.environ.get("SERPER_API_KEY", "")],
-        "openrouter": [os.environ.get("OPENROUTER_API_KEY", "")],
-        "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
-        # Tournament: capture source_content for future cached replay
-        "return_source_content": ["true"],
-    }
-    return KeyChain(services)
-
-
-# ---------------------------------------------------------------------------
-# Tool loading
-# ---------------------------------------------------------------------------
-
-_tool_cache: dict[str, Callable[..., Any]] = {}
-
-
-def load_tool_run(tool_name: str) -> Callable[..., Any]:
-    """Import and cache a tool's run() function."""
-    if tool_name in _tool_cache:
-        return _tool_cache[tool_name]
-
-    spec = TOOL_REGISTRY.get(tool_name)
-    if spec is None:
-        raise ValueError(
-            f"Unknown tool: {tool_name}. Available: {sorted(TOOL_REGISTRY)}"
-        )
-
-    module = importlib.import_module(spec.module)
-    run_fn: Callable[..., Any] = module.run
-    _tool_cache[tool_name] = run_fn
-    return run_fn
-
-
-# ---------------------------------------------------------------------------
-# Timeout
-# ---------------------------------------------------------------------------
-
-_HAS_SIGALRM = platform.system() != "Windows"
-
-
-def _can_use_sigalrm() -> bool:
-    """SIGALRM only works on UNIX from the main thread."""
-    return _HAS_SIGALRM and threading.current_thread() is threading.main_thread()
-
-
-class _ToolTimeout(Exception):
-    pass
-
-
-def _alarm_handler(signum: int, frame: Any) -> None:
-    raise _ToolTimeout("Tool execution timed out")
-
-
-# ---------------------------------------------------------------------------
 # Row ID generation
 # ---------------------------------------------------------------------------
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(
     tool_name: str, market_id: str, market_platform: str, model: str
 ) -> str:
@@ -302,7 +182,7 @@ def run_single(
 
     try:
         if use_alarm:
-            old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+            old_handler = signal.signal(signal.SIGALRM, alarm_handler)
             signal.alarm(timeout)
 
         result_tuple = run_fn(**kwargs)
@@ -323,7 +203,7 @@ def run_single(
             "source_content": source_content,
             **parsed,
         }
-    except _ToolTimeout:
+    except ToolTimeout:
         return {
             "p_yes": None,
             "p_no": None,
@@ -397,22 +277,6 @@ def build_output_row(
     }
 
 
-# ---------------------------------------------------------------------------
-# Dataset I/O
-# ---------------------------------------------------------------------------
-
-
-def load_markets(path: Path) -> list[dict[str, Any]]:
-    """Load open markets from JSONL."""
-    rows: list[dict[str, Any]] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
 def load_existing_row_ids(output_path: Path) -> set[str]:
     """Load row IDs of valid predictions for deduplication.
 
@@ -463,7 +327,7 @@ def run_tournament(
         len(markets) * len(tools),
     )
 
-    api_keys = build_keychain()
+    api_keys = build_keychain(return_source_content=True)
     existing_ids = load_existing_row_ids(output_path)
     if existing_ids:
         log.info(

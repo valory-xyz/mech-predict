@@ -55,6 +55,7 @@ from benchmark.datasets.fetch_production import (
     classify_category,
     parse_tool_response,
 )
+from benchmark.io import load_jsonl
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -558,6 +559,8 @@ def _call_anthropic(
 # ---------------------------------------------------------------------------
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(prefix: str, tool_name: str, question_text: str, model: str) -> str:
     """Deterministic row ID."""
     payload = f"{tool_name}:{model}:{question_text}"
@@ -600,14 +603,12 @@ def _log_replay_summary(
     )
 
     candidate_correct = 0
-    with open(candidate_path, encoding="utf-8") as cf_read:
-        for line in cf_read:
-            cr = json.loads(line.strip())
-            if cr["p_yes"] is not None:
-                if (cr["p_yes"] > 0.5 and cr["final_outcome"]) or (
-                    cr["p_yes"] < 0.5 and not cr["final_outcome"]
-                ):
-                    candidate_correct += 1
+    for cr in load_jsonl(candidate_path):
+        if cr["p_yes"] is not None:
+            if (cr["p_yes"] > 0.5 and cr["final_outcome"]) or (
+                cr["p_yes"] < 0.5 and not cr["final_outcome"]
+            ):
+                candidate_correct += 1
 
     baseline_acc = baseline_correct / total if total else 0
     candidate_acc = candidate_correct / n_scored if n_scored else 0
@@ -673,12 +674,7 @@ def replay(
             return
 
     # Load enriched dataset
-    sampled: list[dict[str, Any]] = []
-    with open(dataset, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                sampled.append(json.loads(line))
+    sampled: list[dict[str, Any]] = load_jsonl(dataset)
 
     if not sampled:
         log.warning("No rows in dataset")

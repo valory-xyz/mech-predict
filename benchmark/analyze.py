@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark.io import load_jsonl
+
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "report.md"
@@ -46,15 +48,9 @@ def load_history(path: Path) -> list[dict[str, Any]]:
     :param path: path to ``scores_history.jsonl``.
     :return: list of monthly summary dicts.
     """
-    entries: list[dict[str, Any]] = []
     if not path.exists():
-        return entries
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    return entries
+        return []
+    return load_jsonl(path)
 
 
 # ---------------------------------------------------------------------------
@@ -243,28 +239,43 @@ def section_best_predictions(scores: dict[str, Any], n: int = 10) -> str:
     return "\n".join(lines)
 
 
-def section_trend(history: list[dict[str, Any]]) -> str:
-    """Generate the trend section from monthly history snapshots.
+def section_trend(
+    history: list[dict[str, Any]],
+    scores: dict[str, Any] | None = None,
+) -> str:
+    """Generate the trend section from monthly history + current month.
 
     :param history: list of monthly snapshot dicts from scores_history.jsonl.
+    :param scores: current scores.json dict (appended as in-progress month).
     :return: markdown section string.
     """
+    # Build full trend: completed months + current month
+    trend: list[dict[str, Any]] = list(history)
+    if scores and scores.get("current_month") and scores.get("overall"):
+        trend.append(
+            {
+                "month": scores["current_month"],
+                "overall": scores["overall"],
+            }
+        )
+
     lines = ["## Trend", ""]
 
-    if not history:
+    if not trend:
         lines.append("No trend data available.")
         return "\n".join(lines)
 
-    for entry in history:
+    for entry in trend:
         overall = entry.get("overall", {})
         brier = overall.get("brier")
         n = overall.get("n", 0)
-        lines.append(f"- {entry['month']}: Brier {brier} (n={n})")
+        suffix = " *(in progress)*" if entry is trend[-1] and scores else ""
+        lines.append(f"- {entry['month']}: Brier {brier} (n={n}){suffix}")
 
     # Check for worsening
-    if len(history) >= 2:
-        prev = history[-2].get("overall", {}).get("brier")
-        curr = history[-1].get("overall", {}).get("brier")
+    if len(trend) >= 2:
+        prev = trend[-2].get("overall", {}).get("brier")
+        curr = trend[-1].get("overall", {}).get("brier")
         if prev is not None and curr is not None:
             delta = curr - prev
             if delta > TREND_WORSENING_THRESHOLD:
@@ -473,7 +484,7 @@ def generate_report(
         section_latency(scores),
         section_worst_predictions(scores),
         section_best_predictions(scores),
-        section_trend(history),
+        section_trend(history, scores),
         section_sample_size_warnings(scores),
     ]
 

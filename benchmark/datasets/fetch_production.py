@@ -25,12 +25,15 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
+from benchmark.io import append_jsonl
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -682,6 +685,7 @@ DELIVERS_BY_IDS_QUERY = """
     id
     marketplaceDelivery {
       ipfsHashBytes
+      mechServiceMultisig
     }
   }
 }
@@ -1330,6 +1334,8 @@ def _compute_config_hash(
     return h
 
 
+# TODO: unify _make_row_id across runner, tournament, prompt_replay
+# & fetch_production into benchmark/tools.py
 def _make_row_id(platform: str, deliver_id: str) -> str:
     """Generate a deterministic row ID from platform + deliver_id."""
     h = hashlib.sha256(f"{platform}:{deliver_id}".encode()).hexdigest()[:12]
@@ -1510,11 +1516,7 @@ def load_existing_row_ids(
 
 def append_rows(output_path: Path, rows: list[dict[str, Any]]) -> int:
     """Append rows to the output JSONL file. Returns count of rows written."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
-    return len(rows)
+    return append_jsonl(output_path, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1579,17 +1581,18 @@ def _match_and_build(
     )
 
 
-def _fetch_ipfs_hashes_for_deliver_ids(
+def _fetch_delivery_info(
     deliver_ids: list[str],
     marketplace_url: str,
-) -> dict[str, Optional[str]]:
-    """Query the subgraph for IPFS hashes by deliver IDs.
+) -> dict[str, dict[str, Optional[str]]]:
+    """Query the subgraph for IPFS hashes and mech addresses by deliver IDs.
 
     :param deliver_ids: list of deliver IDs to look up.
     :param marketplace_url: subgraph endpoint URL.
-    :return: dict mapping deliver_id to ipfs_hash (or None).
+    :return: dict mapping deliver_id to
+        ``{"ipfs_hash": ..., "mech": ...}``.
     """
-    result: dict[str, Optional[str]] = {}
+    result: dict[str, dict[str, Optional[str]]] = {}
     for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
         batch = deliver_ids[i : i + DEFAULT_BATCH_SIZE]
         ids_str = ", ".join(f'"{did}"' for did in batch)
@@ -1605,11 +1608,92 @@ def _fetch_ipfs_hashes_for_deliver_ids(
             data = resp.json().get("data", {}).get("delivers", [])
             for d in data:
                 mp = d.get("marketplaceDelivery") or {}
-                result[d["id"]] = mp.get("ipfsHashBytes")
+                result[d["id"]] = {
+                    "ipfs_hash": mp.get("ipfsHashBytes"),
+                    "mech": mp.get("mechServiceMultisig"),
+                }
         except Exception as e:
-            log.warning("Failed to fetch IPFS hashes from subgraph: %s", e)
+            log.warning("Failed to fetch delivery info from subgraph: %s", e)
             for did in batch:
-                result[did] = None
+                result[did] = {"ipfs_hash": None, "mech": None}
+
+    return result
+
+
+def _fetch_tool_hash(ipfs_hash: str) -> Optional[str]:
+    """Fetch tool_hash from IPFS metadata for a single delivery.
+
+    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
+    :return: tool_hash string, or None on failure.
+    """
+    metadata = fetch_ipfs_metadata(ipfs_hash)
+    if not metadata:
+        return None
+    return metadata.get("tool_hash")
+
+
+def _resolve_group_tool_hash(
+    group_rows: list[dict[str, Any]],
+    delivery_info: dict[str, dict[str, Optional[str]]],
+) -> dict[int, Optional[str]]:
+    """Resolve tool_hash for a (mech, tool) group using sample + binary search.
+
+    Samples the earliest and latest delivery in the group. If both return
+    the same tool_hash, applies it to all rows. If they differ (tool updated
+    mid-batch), uses binary search to find the boundary.
+
+    :param group_rows: rows in this group, sorted by timestamp.
+    :param delivery_info: mapping of deliver_id to ipfs_hash/mech info.
+    :return: dict mapping row index (in group_rows) to tool_hash.
+    """
+    result: dict[int, Optional[str]] = {}
+    if not group_rows:
+        return result
+
+    def _get_hash(idx: int) -> Optional[str]:
+        """Fetch tool_hash for the row at index idx."""
+        row = group_rows[idx]
+        info = delivery_info.get(row.get("deliver_id", ""), {})
+        ipfs_hash = info.get("ipfs_hash")
+        if not ipfs_hash:
+            return None
+        return _fetch_tool_hash(ipfs_hash)
+
+    # Sample earliest and latest
+    first_hash = _get_hash(0)
+    last_hash = _get_hash(len(group_rows) - 1) if len(group_rows) > 1 else first_hash
+
+    # If either sample failed (gateway error), use whichever succeeded.
+    # If both match (or one is None), apply uniformly — no binary search.
+    uniform_hash = None
+    if first_hash is None and last_hash is None:
+        return result  # both failed — leave all unknown
+    if first_hash is None or last_hash is None or first_hash == last_hash:
+        uniform_hash = first_hash or last_hash
+        for i in range(len(group_rows)):
+            result[i] = uniform_hash
+        return result
+
+    # Both non-None but different — tool genuinely changed mid-batch
+    log.info(
+        "IPFS enrichment: tool version changed mid-batch (%s → %s), "
+        "binary searching %d rows",
+        first_hash,
+        last_hash,
+        len(group_rows),
+    )
+    lo, hi = 0, len(group_rows) - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        mid_hash = _get_hash(mid)
+        if mid_hash == first_hash:
+            lo = mid
+        else:
+            hi = mid
+
+    # lo is last row with first_hash, hi is first row with last_hash
+    for i in range(len(group_rows)):
+        result[i] = first_hash if i <= lo else last_hash
 
     return result
 
@@ -1620,9 +1704,12 @@ def _enrich_rows_with_ipfs_metadata(
 ) -> None:
     """Enrich matched rows with tool_version and config_hash from IPFS.
 
-    Fetches IPFS hashes in batch from the subgraph, then fetches metadata
-    for each row that has a hash. Mutates rows in place. Failures are
-    silently skipped (rows keep tool_version=None, config_hash=None).
+    Groups deliveries by (mech_address, tool_name) and samples the
+    earliest + latest delivery per group to determine the tool_hash.
+    If a version change is detected mid-batch, binary searches for
+    the boundary. This reduces ~23K IPFS fetches to ~60-100.
+
+    Mutates rows in place. Failures are silently skipped.
 
     :param rows: list of production log row dicts (mutated in place).
     :param marketplace_url: subgraph endpoint URL.
@@ -1630,40 +1717,73 @@ def _enrich_rows_with_ipfs_metadata(
     if not rows:
         return
 
-    # Batch fetch IPFS hashes for all deliver IDs
+    # Step 1: Batch fetch IPFS hashes + mech addresses from subgraph
     deliver_ids = [r["deliver_id"] for r in rows if r.get("deliver_id")]
     if not deliver_ids:
         return
 
-    ipfs_hashes = _fetch_ipfs_hashes_for_deliver_ids(deliver_ids, marketplace_url)
-    has_hash = sum(1 for v in ipfs_hashes.values() if v)
+    delivery_info = _fetch_delivery_info(deliver_ids, marketplace_url)
+    has_hash = sum(1 for v in delivery_info.values() if v.get("ipfs_hash"))
     log.info(
-        "IPFS enrichment: %d/%d deliveries have hashes", has_hash, len(deliver_ids)
+        "IPFS enrichment: %d/%d deliveries have hashes",
+        has_hash,
+        len(deliver_ids),
     )
 
-    enriched = 0
-    for row in rows:
-        deliver_id = row.get("deliver_id", "")
-        ipfs_hash = ipfs_hashes.get(deliver_id)
-        if not ipfs_hash:
+    # Step 2: Group rows by (mech, tool_name), skipping rows without IPFS data
+    # Non-marketplace deliveries have no marketplaceDelivery record and
+    # therefore no ipfs_hash or mech address — they stay tool_version=None.
+    groups: dict[tuple[str, str], list[tuple[int, dict[str, Any]]]] = {}
+    skipped = 0
+    for i, row in enumerate(rows):
+        did = row.get("deliver_id", "")
+        info = delivery_info.get(did, {})
+        ipfs_hash = info.get("ipfs_hash")
+        mech = info.get("mech")
+        if not ipfs_hash or not mech:
+            skipped += 1
             continue
+        tool = row.get("tool_name", "unknown")
+        key = (mech, tool)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append((i, row))
 
-        metadata = fetch_ipfs_metadata(ipfs_hash)
-        if not metadata:
-            continue
-
-        tool_version = metadata.get("tool_hash")
-        params = metadata.get("params") or {}
-        config_hash = _compute_config_hash(
-            tool_version,
-            row.get("model"),
-            params.get("temperature"),
-            params.get("max_tokens"),
+    if skipped:
+        log.info(
+            "IPFS enrichment: skipped %d rows without marketplace delivery",
+            skipped,
         )
-        row["tool_version"] = tool_version
-        row["config_hash"] = config_hash
-        enriched += 1
-        time.sleep(IPFS_FETCH_DELAY)
+
+    log.info(
+        "IPFS enrichment: %d (mech, tool) groups from %d rows",
+        len(groups),
+        len(rows),
+    )
+
+    # Step 3: For each group, resolve tool_hash via sample + binary search
+    enriched = 0
+    for (_mech, _tool), indexed_rows in groups.items():
+        # Sort by delivery timestamp for correct binary search
+        indexed_rows.sort(
+            key=lambda x: x[1].get("predicted_at") or "",
+        )
+        group_rows = [r for _, r in indexed_rows]
+        group_indices = [i for i, _ in indexed_rows]
+
+        hash_map = _resolve_group_tool_hash(group_rows, delivery_info)
+
+        for local_idx, tool_hash in hash_map.items():
+            if tool_hash is None:
+                continue
+            row = rows[group_indices[local_idx]]
+            config_hash = _compute_config_hash(
+                tool_hash,
+                row.get("model"),
+            )
+            row["tool_version"] = tool_hash
+            row["config_hash"] = config_hash
+            enriched += 1
 
     log.info("IPFS enrichment: %d/%d rows enriched", enriched, len(rows))
 
@@ -1828,6 +1948,34 @@ def _update_platform_state(
         }
 
 
+def _run_scorer_update(
+    rows: list[dict[str, Any]],
+    scores_path: Path,
+    history_path: Path,
+) -> None:
+    """Run scorer.update() with fault isolation.
+
+    Adds the project root to sys.path if needed (supports running as
+    a script via ``python benchmark/datasets/fetch_production.py``).
+    Catches all exceptions so fetch never crashes due to scoring bugs.
+
+    :param rows: new production log rows.
+    :param scores_path: path to scores.json.
+    :param history_path: path to scores_history.jsonl.
+    """
+    try:
+        _root = str(Path(__file__).resolve().parent.parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.scorer import update as scorer_update
+
+        scorer_update(rows, scores_path, history_path)
+        log.info("Scores updated at %s", scores_path)
+    except Exception:
+        log.exception("Scorer update failed (non-fatal, fetch data is safe)")
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for fetch_production.
 
@@ -1963,14 +2111,7 @@ def main() -> None:
         log.info("Appended %d new rows to %s", written, output_path)
 
         # Incremental scoring — update accumulators in scores.json
-        try:
-            # pylint: disable-next=import-outside-toplevel
-            from benchmark.scorer import update as scorer_update
-
-            scorer_update(all_rows, args.scores, args.history)
-            log.info("Scores updated at %s", args.scores)
-        except Exception:
-            log.exception("Scorer update failed (non-fatal, fetch data is safe)")
+        _run_scorer_update(all_rows, args.scores, args.history)
     else:
         log.info("No new rows to write")
 

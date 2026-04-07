@@ -536,11 +536,12 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
         if len(reservoir) > LATENCY_RESERVOIR_SIZE:
             reservoir.pop(0)
 
-    # Worst / best 10
+    # Worst / best 10 (deduplicated by question_text)
     if is_valid:
         row_brier = brier_score(row["p_yes"], row["final_outcome"])
+        question = row.get("question_text", "")
         entry = {
-            "question_text": row.get("question_text", ""),
+            "question_text": question,
             "tool_name": tool,
             "p_yes": row["p_yes"],
             "final_outcome": row["final_outcome"],
@@ -548,13 +549,26 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
             "platform": platform,
             "category": category,
         }
+
         worst = scores["worst_10"]
-        worst.append(entry)
+        existing_worst = {e["question_text"]: e for e in worst}
+        if question in existing_worst:
+            if row_brier > existing_worst[question]["brier"]:
+                worst = [e for e in worst if e["question_text"] != question]
+                worst.append(entry)
+        else:
+            worst.append(entry)
         worst.sort(key=lambda x: x["brier"], reverse=True)
         scores["worst_10"] = worst[:WORST_BEST_SIZE]
 
         best = scores["best_10"]
-        best.append(entry)
+        existing_best = {e["question_text"]: e for e in best}
+        if question in existing_best:
+            if row_brier < existing_best[question]["brier"]:
+                best = [e for e in best if e["question_text"] != question]
+                best.append(entry)
+        else:
+            best.append(entry)
         best.sort(key=lambda x: x["brier"])
         scores["best_10"] = best[:WORST_BEST_SIZE]
 

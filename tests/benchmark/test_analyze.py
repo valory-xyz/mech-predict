@@ -34,7 +34,6 @@ from benchmark.analyze import (
     section_worst_predictions,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -85,7 +84,9 @@ class TestSectionOverall:
         assert "95%" in result
 
     def test_empty_dataset(self) -> None:
-        result = section_overall(_scores(brier=None, reliability=None, total=0, valid=0))
+        result = section_overall(
+            _scores(brier=None, reliability=None, total=0, valid=0)
+        )
         assert "No predictions to score" in result
 
     def test_all_invalid(self) -> None:
@@ -102,7 +103,9 @@ class TestSectionWeakSpots:
 
     def test_anti_predictive_label(self) -> None:
         """Brier > 0.5 should say 'anti-predictive'."""
-        s = _scores(by_category={"social": {"brier": 0.81, "n": 100, "reliability": 0.9}})
+        s = _scores(
+            by_category={"social": {"brier": 0.81, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "anti-predictive" in result
 
@@ -114,7 +117,9 @@ class TestSectionWeakSpots:
         assert "anti-predictive" not in result
 
     def test_no_weak_spots(self) -> None:
-        s = _scores(by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}})
+        s = _scores(
+            by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "No weak spots" in result
 
@@ -152,6 +157,22 @@ class TestSectionTrend:
         result = section_trend([])
         assert "No trend data" in result
 
+    def test_current_month_appended(self) -> None:
+        """Current month from scores.json appears in trend."""
+        scores = _scores(brier=0.28)
+        scores["current_month"] = "2026-04"
+        result = section_trend([], scores)
+        assert "2026-04" in result
+        assert "in progress" in result
+        assert "No trend data" not in result
+
+    def test_empty_history_with_scores(self) -> None:
+        """First run: no history but current month still shows."""
+        scores = _scores(brier=0.30)
+        scores["current_month"] = "2026-04"
+        result = section_trend([], scores)
+        assert "2026-04" in result
+
 
 # ---------------------------------------------------------------------------
 # section_sample_size_warnings
@@ -167,7 +188,9 @@ class TestSectionSampleSizeWarnings:
         assert "4 questions" in result
 
     def test_large_category_not_warned(self) -> None:
-        s = _scores(by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}})
+        s = _scores(
+            by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
+        )
         result = section_sample_size_warnings(s)
         assert "sufficient sample size" in result
 
@@ -180,17 +203,19 @@ class TestSectionSampleSizeWarnings:
 class TestSectionWorstPredictions:
 
     def test_renders_entries(self) -> None:
-        s = _scores(worst_10=[
-            {
-                "question_text": "Will X happen?",
-                "tool_name": "tool-a",
-                "p_yes": 0.95,
-                "final_outcome": False,
-                "brier": 0.9025,
-                "platform": "omen",
-                "category": "finance",
-            },
-        ])
+        s = _scores(
+            worst_10=[
+                {
+                    "question_text": "Will X happen?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.95,
+                    "final_outcome": False,
+                    "brier": 0.9025,
+                    "platform": "omen",
+                    "category": "finance",
+                },
+            ]
+        )
         result = section_worst_predictions(s)
         assert "Will X happen?" in result
         assert "0.9025" in result
@@ -204,17 +229,19 @@ class TestSectionWorstPredictions:
 class TestSectionBestPredictions:
 
     def test_renders_entries(self) -> None:
-        s = _scores(best_10=[
-            {
-                "question_text": "Will Y happen?",
-                "tool_name": "tool-b",
-                "p_yes": 0.98,
-                "final_outcome": True,
-                "brier": 0.0004,
-                "platform": "polymarket",
-                "category": "politics",
-            },
-        ])
+        s = _scores(
+            best_10=[
+                {
+                    "question_text": "Will Y happen?",
+                    "tool_name": "tool-b",
+                    "p_yes": 0.98,
+                    "final_outcome": True,
+                    "brier": 0.0004,
+                    "platform": "polymarket",
+                    "category": "politics",
+                },
+            ]
+        )
         result = section_best_predictions(s)
         assert "Will Y happen?" in result
         assert "0.0004" in result
@@ -232,9 +259,11 @@ class TestSectionBestPredictions:
 class TestSectionParseBreakdown:
 
     def test_renders_table(self) -> None:
-        s = _scores(parse_breakdown={
-            "tool-a": {"valid": 90, "malformed": 5, "error": 5},
-        })
+        s = _scores(
+            parse_breakdown={
+                "tool-a": {"valid": 90, "malformed": 5, "error": 5},
+            }
+        )
         result = section_parse_breakdown(s)
         assert "tool-a" in result
         assert "90" in result
@@ -252,9 +281,11 @@ class TestSectionParseBreakdown:
 class TestSectionLatency:
 
     def test_renders_table(self) -> None:
-        s = _scores(latency_reservoir={
-            "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
-        })
+        s = _scores(
+            latency_reservoir={
+                "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
+            }
+        )
         result = section_latency(s)
         assert "tool-a" in result
         assert "Median" in result
@@ -276,16 +307,28 @@ class TestGenerateReport:
             by_tool={"tool-a": {"brier": 0.3, "n": 50, "reliability": 1.0}},
             by_platform={"omen": {"brier": 0.4, "n": 50, "reliability": 1.0}},
             by_category={"crypto": {"brier": 0.2, "n": 50, "reliability": 1.0}},
-            worst_10=[{
-                "question_text": "Will X?", "tool_name": "tool-a",
-                "p_yes": 0.9, "final_outcome": True, "brier": 0.01,
-                "platform": "omen", "category": "crypto",
-            }],
-            best_10=[{
-                "question_text": "Will Y?", "tool_name": "tool-a",
-                "p_yes": 0.1, "final_outcome": False, "brier": 0.01,
-                "platform": "omen", "category": "crypto",
-            }],
+            worst_10=[
+                {
+                    "question_text": "Will X?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.9,
+                    "final_outcome": True,
+                    "brier": 0.01,
+                    "platform": "omen",
+                    "category": "crypto",
+                }
+            ],
+            best_10=[
+                {
+                    "question_text": "Will Y?",
+                    "tool_name": "tool-a",
+                    "p_yes": 0.1,
+                    "final_outcome": False,
+                    "brier": 0.01,
+                    "platform": "omen",
+                    "category": "crypto",
+                }
+            ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
         report = generate_report(s, history)

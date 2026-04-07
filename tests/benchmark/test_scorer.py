@@ -40,7 +40,6 @@ from benchmark.scorer import (
     update,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -112,9 +111,9 @@ class TestComputeGroupStats:
 
     def test_all_valid(self) -> None:
         rows = [
-            _row(p_yes=0.9, outcome=True),   # (0.9-1)²  = 0.01
-            _row(p_yes=0.8, outcome=False),   # (0.8-0)²  = 0.64
-            _row(p_yes=0.6, outcome=True),    # (0.6-1)²  = 0.16
+            _row(p_yes=0.9, outcome=True),  # (0.9-1)²  = 0.01
+            _row(p_yes=0.8, outcome=False),  # (0.8-0)²  = 0.64
+            _row(p_yes=0.6, outcome=True),  # (0.6-1)²  = 0.16
         ]
         stats = compute_group_stats(rows)
         expected_brier = round((0.01 + 0.64 + 0.16) / 3, 4)
@@ -204,7 +203,7 @@ class TestGroupByHorizon:
 
     def test_buckets(self) -> None:
         rows = [
-            _row(lead_days=3.0),   # short
+            _row(lead_days=3.0),  # short
             _row(lead_days=15.0),  # medium
             _row(lead_days=45.0),  # long
             _row(lead_days=None),  # unknown
@@ -257,9 +256,27 @@ class TestScore:
 
     def test_full_scoring(self) -> None:
         rows = [
-            _row(p_yes=0.9, outcome=True, tool="tool-a", platform="omen", category="crypto"),
-            _row(p_yes=0.8, outcome=False, tool="tool-a", platform="polymarket", category="politics"),
-            _row(p_yes=0.5, outcome=True, tool="tool-b", platform="omen", category="crypto"),
+            _row(
+                p_yes=0.9,
+                outcome=True,
+                tool="tool-a",
+                platform="omen",
+                category="crypto",
+            ),
+            _row(
+                p_yes=0.8,
+                outcome=False,
+                tool="tool-a",
+                platform="polymarket",
+                category="politics",
+            ),
+            _row(
+                p_yes=0.5,
+                outcome=True,
+                tool="tool-b",
+                platform="omen",
+                category="crypto",
+            ),
             _row(status="malformed", tool="tool-b", platform="omen", category="other"),
         ]
         result = score(rows)
@@ -293,10 +310,10 @@ class TestScore:
     def test_hand_calculated_brier(self) -> None:
         """Verify overall Brier against manual calculation."""
         rows = [
-            _row(p_yes=0.13, outcome=True),   # (0.13-1)² = 0.7569
-            _row(p_yes=0.90, outcome=True),   # (0.90-1)² = 0.01
+            _row(p_yes=0.13, outcome=True),  # (0.13-1)² = 0.7569
+            _row(p_yes=0.90, outcome=True),  # (0.90-1)² = 0.01
             _row(p_yes=0.80, outcome=False),  # (0.80-0)² = 0.64
-            _row(p_yes=0.60, outcome=True),   # (0.60-1)² = 0.16
+            _row(p_yes=0.60, outcome=True),  # (0.60-1)² = 0.16
             _row(p_yes=0.30, outcome=False),  # (0.30-0)² = 0.09
         ]
         result = score(rows)
@@ -306,8 +323,15 @@ class TestScore:
     def test_output_has_all_keys(self) -> None:
         result = score([_row()])
         expected_keys = [
-            "generated_at", "total_rows", "valid_rows", "overall",
-            "by_tool", "by_platform", "by_category", "by_horizon", "trend",
+            "generated_at",
+            "total_rows",
+            "valid_rows",
+            "overall",
+            "by_tool",
+            "by_platform",
+            "by_category",
+            "by_horizon",
+            "trend",
         ]
         for key in expected_keys:
             assert key in result, f"Missing key: {key}"
@@ -433,12 +457,15 @@ class TestIncrementalUpdate:
         assert reservoir[-1] == LATENCY_RESERVOIR_SIZE + 49
 
     def test_worst_10_maintained(self, tmp_path: Path) -> None:
-        """Worst 10 list keeps the highest Brier scores."""
+        """Worst 10 list keeps the highest Brier scores, deduplicated."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        # Create 15 rows with varying Brier scores
-        rows = [_row(p_yes=0.5 + i * 0.03, outcome=False) for i in range(15)]
+        # Create 15 rows with unique questions and varying Brier scores
+        rows = [
+            {**_row(p_yes=0.5 + i * 0.03, outcome=False), "question_text": f"Q{i}?"}
+            for i in range(15)
+        ]
         result = update(rows, scores_path, history_path)
 
         assert len(result["worst_10"]) == WORST_BEST_SIZE
@@ -447,16 +474,36 @@ class TestIncrementalUpdate:
         assert worst_briers == sorted(worst_briers, reverse=True)
 
     def test_best_10_maintained(self, tmp_path: Path) -> None:
-        """Best 10 list keeps the lowest Brier scores."""
+        """Best 10 list keeps the lowest Brier scores, deduplicated."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        rows = [_row(p_yes=0.5 + i * 0.03, outcome=True) for i in range(15)]
+        rows = [
+            {**_row(p_yes=0.5 + i * 0.03, outcome=True), "question_text": f"Q{i}?"}
+            for i in range(15)
+        ]
         result = update(rows, scores_path, history_path)
 
         assert len(result["best_10"]) == WORST_BEST_SIZE
         best_briers = [b["brier"] for b in result["best_10"]]
         assert best_briers == sorted(best_briers)
+
+    def test_worst_10_deduplicates_by_question(self, tmp_path: Path) -> None:
+        """Same question keeps only the worst Brier."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            {**_row(p_yes=0.9, outcome=False), "question_text": "Same Q?"},
+            {**_row(p_yes=0.8, outcome=False), "question_text": "Same Q?"},
+            {**_row(p_yes=0.7, outcome=False), "question_text": "Different Q?"},
+        ]
+        result = update(rows, scores_path, history_path)
+
+        questions = [w["question_text"] for w in result["worst_10"]]
+        assert questions.count("Same Q?") == 1
+        same_q = [w for w in result["worst_10"] if w["question_text"] == "Same Q?"][0]
+        assert same_q["brier"] == round(0.9**2, 4)  # worst of the two
 
     def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
         """Malformed rows count toward n but not valid_n or Brier."""
@@ -489,14 +536,24 @@ class TestMonthRollover:
 
         # First update in March
         with patch("benchmark.scorer.datetime") as mock_dt:
-            mock_dt.now.return_value = type("D", (), {
-                "strftime": lambda self, fmt: "2026-03" if fmt == "%Y-%m"
-                else "2026-03-15T10:00:00Z",
-            })()
-            mock_dt.side_effect = lambda *a, **k: type("D", (), {
-                "strftime": lambda self, fmt: "2026-03" if fmt == "%Y-%m"
-                else "2026-03-15T10:00:00Z",
-            })()
+            mock_dt.now.return_value = type(
+                "D",
+                (),
+                {
+                    "strftime": lambda self, fmt: (
+                        "2026-03" if fmt == "%Y-%m" else "2026-03-15T10:00:00Z"
+                    ),
+                },
+            )()
+            mock_dt.side_effect = lambda *a, **k: type(
+                "D",
+                (),
+                {
+                    "strftime": lambda self, fmt: (
+                        "2026-03" if fmt == "%Y-%m" else "2026-03-15T10:00:00Z"
+                    ),
+                },
+            )()
             update([_row()], scores_path, history_path)
 
         # Force current_month to March in the saved file
@@ -507,6 +564,7 @@ class TestMonthRollover:
         # Second update in April (real time)
         with patch("benchmark.scorer.datetime") as mock_dt:
             from datetime import datetime, timezone
+
             real_dt = datetime
             mock_dt.now.return_value = real_dt(2026, 4, 6, 12, tzinfo=timezone.utc)
             update([_row()], scores_path, history_path)
@@ -596,12 +654,21 @@ class TestRebuild:
         # Write two daily files with rows from different months
         f1 = logs_dir / "production_log_2026_03_15.jsonl"
         f1.write_text(
-            json.dumps(_row(p_yes=0.9, outcome=True, predicted_at="2026-03-15T10:00:00Z")) + "\n"
-            + json.dumps(_row(p_yes=0.8, outcome=False, predicted_at="2026-03-16T10:00:00Z")) + "\n"
+            json.dumps(
+                _row(p_yes=0.9, outcome=True, predicted_at="2026-03-15T10:00:00Z")
+            )
+            + "\n"
+            + json.dumps(
+                _row(p_yes=0.8, outcome=False, predicted_at="2026-03-16T10:00:00Z")
+            )
+            + "\n"
         )
         f2 = logs_dir / "production_log_2026_04_01.jsonl"
         f2.write_text(
-            json.dumps(_row(p_yes=0.7, outcome=True, predicted_at="2026-04-01T10:00:00Z")) + "\n"
+            json.dumps(
+                _row(p_yes=0.7, outcome=True, predicted_at="2026-04-01T10:00:00Z")
+            )
+            + "\n"
         )
 
         result = rebuild(logs_dir, scores_path, history_path)
@@ -652,9 +719,7 @@ class TestRebuild:
         history_path = tmp_path / "history.jsonl"
 
         legacy = logs_dir / "production_log_legacy.jsonl"
-        legacy.write_text(
-            json.dumps(_row(predicted_at="2026-03-01T10:00:00Z")) + "\n"
-        )
+        legacy.write_text(json.dumps(_row(predicted_at="2026-03-01T10:00:00Z")) + "\n")
 
         result = rebuild(logs_dir, scores_path, history_path)
         # Legacy file matched by production_log_*.jsonl glob

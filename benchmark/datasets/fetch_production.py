@@ -1661,30 +1661,17 @@ def _resolve_group_tool_hash(
 
     # Sample earliest and latest
     first_hash = _get_hash(0)
-    if len(group_rows) == 1:
-        result[0] = first_hash
-        return result
+    last_hash = _get_hash(len(group_rows) - 1) if len(group_rows) > 1 else first_hash
 
-    last_hash = _get_hash(len(group_rows) - 1)
-
-    # If either sample failed (gateway error), use whichever succeeded
+    # If either sample failed (gateway error), use whichever succeeded.
+    # If both match (or one is None), apply uniformly — no binary search.
+    uniform_hash = None
     if first_hash is None and last_hash is None:
         return result  # both failed — leave all unknown
-    if first_hash is None:
-        # Earliest fetch failed — apply latest hash to all rows
+    if first_hash is None or last_hash is None or first_hash == last_hash:
+        uniform_hash = first_hash or last_hash
         for i in range(len(group_rows)):
-            result[i] = last_hash
-        return result
-    if last_hash is None:
-        # Latest fetch failed — apply earliest hash to all rows
-        for i in range(len(group_rows)):
-            result[i] = first_hash
-        return result
-
-    if first_hash == last_hash:
-        # No version change — apply to all rows
-        for i in range(len(group_rows)):
-            result[i] = first_hash
+            result[i] = uniform_hash
         return result
 
     # Both non-None but different — tool genuinely changed mid-batch

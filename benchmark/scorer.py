@@ -479,6 +479,42 @@ def _ensure_and_accumulate(
     _accumulate_group(dimension[key], row)
 
 
+def _update_extreme_list(
+    entries: list[dict[str, Any]],
+    new_entry: dict[str, Any],
+    keep: str = "worst",
+) -> list[dict[str, Any]]:
+    """Update a deduplicated worst/best list with a new entry.
+
+    Keeps one entry per unique ``question_text``. For ``keep="worst"``,
+    replaces an existing entry only if the new Brier is higher. For
+    ``keep="best"``, replaces only if lower.
+
+    :param entries: current list of extreme entries.
+    :param new_entry: candidate entry to insert.
+    :param keep: ``"worst"`` to keep highest Brier, ``"best"`` for lowest.
+    :return: updated list, sorted and truncated to ``WORST_BEST_SIZE``.
+    """
+    question = new_entry["question_text"]
+    existing = {e["question_text"]: e for e in entries}
+    is_better = (
+        (lambda new, old: new > old)
+        if keep == "worst"
+        else (lambda new, old: new < old)
+    )
+
+    if question in existing:
+        if is_better(new_entry["brier"], existing[question]["brier"]):
+            entries = [e for e in entries if e["question_text"] != question]
+            entries.append(new_entry)
+    else:
+        entries.append(new_entry)
+
+    reverse = keep == "worst"
+    entries.sort(key=lambda x: x["brier"], reverse=reverse)
+    return entries[:WORST_BEST_SIZE]
+
+
 def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """Merge one row into all accumulator dimensions (mutates *scores*).
 
@@ -539,9 +575,8 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     # Worst / best 10 (deduplicated by question_text)
     if is_valid:
         row_brier = brier_score(row["p_yes"], row["final_outcome"])
-        question = row.get("question_text", "")
         entry = {
-            "question_text": question,
+            "question_text": row.get("question_text", ""),
             "tool_name": tool,
             "p_yes": row["p_yes"],
             "final_outcome": row["final_outcome"],
@@ -549,28 +584,16 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
             "platform": platform,
             "category": category,
         }
-
-        worst = scores["worst_10"]
-        existing_worst = {e["question_text"]: e for e in worst}
-        if question in existing_worst:
-            if row_brier > existing_worst[question]["brier"]:
-                worst = [e for e in worst if e["question_text"] != question]
-                worst.append(entry)
-        else:
-            worst.append(entry)
-        worst.sort(key=lambda x: x["brier"], reverse=True)
-        scores["worst_10"] = worst[:WORST_BEST_SIZE]
-
-        best = scores["best_10"]
-        existing_best = {e["question_text"]: e for e in best}
-        if question in existing_best:
-            if row_brier < existing_best[question]["brier"]:
-                best = [e for e in best if e["question_text"] != question]
-                best.append(entry)
-        else:
-            best.append(entry)
-        best.sort(key=lambda x: x["brier"])
-        scores["best_10"] = best[:WORST_BEST_SIZE]
+        scores["worst_10"] = _update_extreme_list(
+            scores["worst_10"],
+            entry,
+            keep="worst",
+        )
+        scores["best_10"] = _update_extreme_list(
+            scores["best_10"],
+            entry,
+            keep="best",
+        )
 
 
 def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:

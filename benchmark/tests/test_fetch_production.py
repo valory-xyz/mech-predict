@@ -152,40 +152,25 @@ class TestParseToolResponse:
 # ---------------------------------------------------------------------------
 
 
-class TestNegRiskOutcome:
-    """Tests for Polymarket neg-risk market outcome decoding.
+class TestPolymarketOutcome:
+    """Tests for Polymarket outcome decoding.
 
-    Normal markets: outcomes = ["No", "Yes"] → index 0 = No, index 1 = Yes
-    Neg-risk markets: outcomes = ["Yes", "No"] → index 0 = Yes, index 1 = No
+    winningIndex follows CLOB token order: 0 = Yes, 1 = No.
+    The subgraph outcomes array is unreliable and ignored.
     """
 
     @staticmethod
-    def _decode(outcomes: list[str], winning_index: int) -> bool:
+    def _decode(winning_index: int) -> bool:
         """Replicate the outcome decoding logic from fetch_polymarket_resolved."""
-        if outcomes and winning_index < len(outcomes):
-            return outcomes[winning_index].lower() == "yes"
-        return winning_index == 1
+        return winning_index == 0
 
-    def test_normal_yes(self) -> None:
-        """Test normal market yes outcome."""
-        assert self._decode(["No", "Yes"], 1) is True
+    def test_yes(self) -> None:
+        """winningIndex 0 = Yes."""
+        assert self._decode(0) is True
 
-    def test_normal_no(self) -> None:
-        """Test normal market no outcome."""
-        assert self._decode(["No", "Yes"], 0) is False
-
-    def test_neg_risk_yes(self) -> None:
-        """Outcomes inverted: index 0 = Yes."""
-        assert self._decode(["Yes", "No"], 0) is True
-
-    def test_neg_risk_no(self) -> None:
-        """Outcomes inverted: index 1 = No."""
-        assert self._decode(["Yes", "No"], 1) is False
-
-    def test_fallback_no_outcomes(self) -> None:
-        """Without outcomes array, falls back to winningIndex == 1."""
-        assert self._decode([], 1) is True
-        assert self._decode([], 0) is False
+    def test_no(self) -> None:
+        """winningIndex 1 = No."""
+        assert self._decode(1) is False
 
 
 # ---------------------------------------------------------------------------

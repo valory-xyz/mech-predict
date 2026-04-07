@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2069,6 +2070,12 @@ def main() -> None:
 
         # Incremental scoring — update accumulators in scores.json
         try:
+            # When run as `python benchmark/datasets/fetch_production.py`,
+            # the project root may not be on sys.path. Add it so that
+            # `from benchmark.scorer import ...` works.
+            _root = str(Path(__file__).resolve().parent.parent.parent)
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
             # pylint: disable-next=import-outside-toplevel
             from benchmark.scorer import update as scorer_update
 

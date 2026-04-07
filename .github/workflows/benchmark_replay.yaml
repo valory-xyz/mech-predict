@@ -1,0 +1,117 @@
+name: benchmark-replay
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  replay:
+    # Only run on PR comments starting with /benchmark, from authorized users
+    if: >-
+      github.event.issue.pull_request
+      && startsWith(github.event.comment.body, '/benchmark ')
+      && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      # Acknowledge the trigger
+      - name: React to comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content=eyes --silent
+
+      # Parse /benchmark <tool> [--phase X] [--sample N] [--seed S]
+      - name: Parse command
+        id: parse
+        run: |
+          BODY="${{ github.event.comment.body }}"
+          # Extract tool name (first arg after /benchmark)
+          TOOL=$(echo "$BODY" | awk '{print $2}')
+          echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
+
+          # Extract optional flags with defaults
+          PHASE=$(echo "$BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
+          echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+
+          SAMPLE=$(echo "$BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
+          echo "sample=$SAMPLE" >> "$GITHUB_OUTPUT"
+
+          SEED=$(echo "$BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+
+          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED"
+
+      # Checkout the PR branch
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests openai anthropic
+
+      # Download latest production log from flywheel
+      - name: Download production log
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name_is_regexp: true
+          name: benchmark-log-.*
+          path: benchmark/datasets/logs/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: fail
+
+      # Find the production log file
+      - name: Locate production log
+        id: log
+        run: |
+          LOG_FILE=$(ls -t benchmark/datasets/logs/*.jsonl | head -1)
+          echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
+          echo "Found production log: $LOG_FILE ($(wc -l < "$LOG_FILE") rows)"
+
+      # Enrich with caching
+      - name: Cache enriched dataset
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: benchmark/results/ci_enriched/
+          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
+
+      - name: Enrich dataset
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python -m benchmark.prompt_replay enrich \
+            --production-log "${{ steps.log.outputs.path }}" \
+            --tool "${{ steps.parse.outputs.tool }}" \
+            --sample-per-platform "${{ steps.parse.outputs.sample }}" \
+            --seed "${{ steps.parse.outputs.seed }}" \
+            --output benchmark/results/ci_enriched/dataset.jsonl
+
+      # Replay with PR's prompts
+      - name: Run replay
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+        run: |
+          python -m benchmark.prompt_replay replay \
+            --dataset benchmark/results/ci_enriched/dataset.jsonl \
+            --output-dir benchmark/results/ci_replay/ \
+            --phase "${{ steps.parse.outputs.phase }}"
+
+      # Compute metrics and post comment
+      - name: Post benchmark report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python -m benchmark.ci_replay \
+            --baseline benchmark/results/ci_replay/baseline.jsonl \
+            --candidate benchmark/results/ci_replay/candidate.jsonl \
+            --pr "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --triggered-by "${{ github.event.comment.user.login }}"

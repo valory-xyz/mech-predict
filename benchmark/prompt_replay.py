@@ -460,18 +460,33 @@ def enrich(
 # ---------------------------------------------------------------------------
 
 
+def _brier_bucket(p_yes: float, outcome: bool) -> str:
+    """Classify a prediction into a Brier-score bucket.
+
+    :param p_yes: predicted probability of Yes outcome.
+    :param outcome: actual outcome (True = Yes).
+    :return: "good", "moderate", or "poor".
+    """
+    brier = (p_yes - int(outcome)) ** 2
+    if brier <= 0.10:
+        return "good"
+    if brier <= 0.50:
+        return "moderate"
+    return "poor"
+
+
 def stratified_sample(
     rows: list[dict[str, Any]],
     sample_per_platform: int,
     seed: int,
 ) -> list[dict[str, Any]]:
-    """Sample rows with stratification by platform and outcome.
+    """Sample rows with stratification by platform, outcome, and Brier bucket.
 
-    Within each platform, splits rows by final_outcome (True/False),
-    then samples proportionally from each stratum.  This prevents
-    accidentally getting all-yes or all-no markets.
+    Each platform gets ``sample_per_platform`` rows (50:50 platform split).
+    Within each platform, rows are grouped by (outcome, brier_bucket) and
+    sampled proportionally, ensuring at least 1 row per non-empty stratum.
 
-    :param rows: list of row dicts with 'platform' and 'final_outcome' keys.
+    :param rows: list of row dicts with 'platform', 'final_outcome', 'p_yes'.
     :param sample_per_platform: max rows to sample per platform.
     :param seed: random seed for reproducibility.
     :return: list of sampled row dicts.
@@ -486,36 +501,80 @@ def stratified_sample(
     sampled: list[dict[str, Any]] = []
     for platform in sorted(by_platform):
         platform_rows = by_platform[platform]
-        n = min(sample_per_platform, len(platform_rows))
-        if n == 0:
+        budget = min(sample_per_platform, len(platform_rows))
+        if budget == 0:
             continue
 
-        # Split by outcome
-        yes_rows = [r for r in platform_rows if r["final_outcome"]]
-        no_rows = [r for r in platform_rows if not r["final_outcome"]]
+        # Group by (outcome, brier_bucket)
+        strata: dict[tuple[bool, str], list[dict[str, Any]]] = defaultdict(list)
+        for row in platform_rows:
+            outcome = row["final_outcome"]
+            bucket = _brier_bucket(row["p_yes"], outcome)
+            strata[(outcome, bucket)].append(row)
 
-        # Proportional allocation
-        yes_frac = len(yes_rows) / len(platform_rows) if platform_rows else 0.5
-        n_yes = max(1, min(len(yes_rows), round(n * yes_frac)))
-        n_no = max(1, min(len(no_rows), n - n_yes))
-        # Adjust if one stratum is too small
-        if n_yes > len(yes_rows):
-            n_yes = len(yes_rows)
-            n_no = min(len(no_rows), n - n_yes)
-        if n_no > len(no_rows):
-            n_no = len(no_rows)
-            n_yes = min(len(yes_rows), n - n_no)
+        # Proportional allocation with floor of 1 per non-empty stratum
+        non_empty = {k: v for k, v in strata.items() if v}
+        total_available = sum(len(v) for v in non_empty.values())
 
-        sampled.extend(rng.sample(yes_rows, n_yes))
-        sampled.extend(rng.sample(no_rows, n_no))
+        allocations: dict[tuple[bool, str], int] = {}
+        remaining_budget = budget
 
+        # First pass: give each stratum at least 1
+        for key, stratum_rows in non_empty.items():
+            allocations[key] = min(1, len(stratum_rows))
+            remaining_budget -= allocations[key]
+
+        # Second pass: distribute remaining proportionally
+        if remaining_budget > 0 and total_available > 0:
+            for key, stratum_rows in non_empty.items():
+                extra = round(
+                    remaining_budget * len(stratum_rows) / total_available
+                )
+                allocations[key] += extra
+
+            # Clamp to available and adjust
+            for key in non_empty:
+                allocations[key] = min(allocations[key], len(non_empty[key]))
+
+            # Ensure total matches budget (distribute remainder largest-first)
+            allocated = sum(allocations.values())
+            deficit = budget - allocated
+            if deficit > 0:
+                for key in sorted(
+                    non_empty,
+                    key=lambda k: len(non_empty[k]),
+                    reverse=True,
+                ):
+                    can_add = len(non_empty[key]) - allocations[key]
+                    add = min(deficit, can_add)
+                    allocations[key] += add
+                    deficit -= add
+                    if deficit == 0:
+                        break
+
+        # Sample from each stratum
+        platform_sampled = 0
+        for key in sorted(non_empty):
+            n = allocations[key]
+            if n > 0:
+                sampled.extend(rng.sample(non_empty[key], n))
+                platform_sampled += n
+
+        # Log breakdown
+        outcome_labels = {True: "yes", False: "no"}
+        detail_parts = []
+        for key in sorted(non_empty):
+            outcome, bucket = key
+            n = allocations[key]
+            detail_parts.append(
+                f"{outcome_labels[outcome]}/{bucket}={n}"
+            )
         log.info(
-            "Sampled %s: %d rows (%d yes, %d no) from %d available",
+            "Sampled %s: %d/%d rows [%s]",
             platform,
-            n_yes + n_no,
-            n_yes,
-            n_no,
+            platform_sampled,
             len(platform_rows),
+            ", ".join(detail_parts),
         )
 
     return sampled
@@ -1137,7 +1196,7 @@ def main() -> None:
         "--sample-per-platform",
         type=int,
         default=None,
-        help="Stratified sample N markets per platform before IPFS fetch (default: all)",
+        help="Stratified sample N rows per platform (distributed across outcome x brier strata) before IPFS fetch (default: all)",
     )
     enrich_parser.add_argument(
         "--seed",

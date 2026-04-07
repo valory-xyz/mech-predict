@@ -135,7 +135,7 @@ def step_filter_rows(
             if line:
                 all_rows.append(json.loads(line))
 
-    tail = all_rows if last_n is None else all_rows[-last_n:]
+    tail = all_rows if last_n == 0 else all_rows[-last_n:]
 
     filtered: list[dict[str, Any]] = [
         r
@@ -375,7 +375,7 @@ def main() -> None:
         default=DEFAULT_LAST_N,
         help=(
             f"Filter last N rows from production log (default: {DEFAULT_LAST_N}). "
-            "Omit or set to None to use all rows."
+            "Use 0 for all rows."
         ),
     )
 

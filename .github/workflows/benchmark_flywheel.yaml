@@ -43,7 +43,7 @@ jobs:
 
       # Download previous run's state + scores (if they exist)
       - name: Download previous benchmark data
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: benchmark-data
           path: benchmark/
@@ -114,7 +114,7 @@ jobs:
         run: pip install requests
 
       - name: Download previous open markets
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: tournament-markets
           path: benchmark/datasets/
@@ -188,7 +188,7 @@ jobs:
           path: benchmark/datasets/
 
       - name: Download previous tournament predictions
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: tournament-predictions
           path: benchmark/results/

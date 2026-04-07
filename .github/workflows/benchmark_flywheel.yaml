@@ -54,7 +54,7 @@ jobs:
       # Fetch writes daily log file + calls scorer.update() inline
       - name: Fetch production data
         run: |
-          python benchmark/datasets/fetch_production.py \
+          python -m benchmark.datasets.fetch_production \
             --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
       # Fallback: if inline scorer failed, run standalone rebuild
@@ -62,19 +62,19 @@ jobs:
         run: |
           if [ ! -f benchmark/results/scores.json ]; then
             echo "scores.json missing — running standalone scorer rebuild"
-            python benchmark/scorer.py --rebuild --logs-dir benchmark/datasets/logs/
+            python -m benchmark.scorer --rebuild --logs-dir benchmark/datasets/logs/
           fi
 
       # Analyze reads only scores.json + scores_history.jsonl
       - name: Analyze
-        run: python benchmark/analyze.py
+        run: python -m benchmark.analyze
 
       - name: Post summary to Slack
         if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
-        run: python benchmark/notify_slack.py --report benchmark/results/report.md
+        run: python -m benchmark.notify_slack --report benchmark/results/report.md
 
       # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data

@@ -53,7 +53,7 @@ DEFAULT_DELIVERY_RATE = 100
 # Voter / Judge configuration
 # ---------------------------------------------------------------------------
 
-VOTER_MODEL_OPENAI = "gpt-4.1-2025-04-14"
+VOTER_MODEL_OPENAI = "openai/gpt-4.1:online"
 VOTER_MODEL_GROK = "x-ai/grok-4.1-fast:online"
 VOTER_MODEL_GEMINI = "google/gemini-2.5-flash:online"
 VOTER_MODEL_CLAUDE = "anthropic/claude-haiku-4.5:online"
@@ -194,9 +194,9 @@ class VoterConfig:
 
 VOTER_CONFIG: Dict[str, VoterConfig] = {
     "openai": VoterConfig(
-        adapter="_adapter_openai",
+        adapter="_adapter_openrouter",
         model=VOTER_MODEL_OPENAI,
-        key_name="openai",
+        key_name="openrouter",
     ),
     "grok": VoterConfig(
         adapter="_adapter_openrouter",
@@ -311,61 +311,6 @@ def _record_usage(
         print(f"  Warning: counter_callback failed for {model}: {e}")
 
 
-def _adapter_openai(
-    voter_name: str,
-    model: str,
-    prompt: str,
-    api_key: str,
-    counter_callback: Optional[Callable] = None,
-) -> VoterResult:
-    """Run OpenAI voter with native web_search tool.
-
-    Uses the Responses API if available (openai >= 1.66), otherwise falls
-    back to a search-capable chat completions model.
-
-    :param voter_name: registry key for this voter.
-    :param model: OpenAI model name.
-    :param prompt: formatted voter prompt.
-    :param api_key: OpenAI API key.
-    :param counter_callback: optional token/cost accounting callback.
-    :return: parsed vote result.
-    """
-    client = openai.OpenAI(api_key=api_key)
-
-    # Try Responses API first (openai >= 1.66)
-    if hasattr(client, "responses"):
-        response = client.responses.create(
-            model=model,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            timeout=VOTER_TIMEOUT,
-        )
-        text_parts = []
-        for item in response.output:  # pragma: no branch
-            if hasattr(item, "text"):
-                text_parts.append(item.text)
-            elif hasattr(item, "content"):
-                for block in item.content:  # pragma: no branch
-                    if hasattr(block, "text"):
-                        text_parts.append(block.text)
-        raw = "\n".join(text_parts)
-        _record_usage(counter_callback, model, response)
-    else:
-        # Fallback: use search-capable model via chat completions
-        search_model = "gpt-4o-search-preview"
-        response_cc = client.chat.completions.create(
-            model=search_model,
-            max_tokens=VOTER_MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=VOTER_TIMEOUT,
-        )
-        raw = response_cc.choices[0].message.content or ""
-        model = search_model
-        _record_usage(counter_callback, model, response_cc)
-
-    return _parse_vote(raw, voter_name, model)
-
-
 # ---------------------------------------------------------------------------
 # Adapter: OpenRouter
 # ---------------------------------------------------------------------------
@@ -400,7 +345,6 @@ def _adapter_openrouter(
 
 
 _ADAPTERS: Dict[str, Callable] = {
-    "_adapter_openai": _adapter_openai,
     "_adapter_openrouter": _adapter_openrouter,
 }
 

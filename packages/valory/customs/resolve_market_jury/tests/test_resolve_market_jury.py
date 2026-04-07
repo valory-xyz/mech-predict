@@ -330,89 +330,6 @@ class TestRecordUsage:
 # ---------------------------------------------------------------------------
 
 
-class TestAdapterOpenai:
-    """Tests for OpenAI adapter."""
-
-    def test_responses_api(self) -> None:
-        """Uses Responses API when available."""
-        mock_client = MagicMock()
-        mock_item = MagicMock()
-        mock_item.text = '{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-        mock_item.content = None
-        mock_client.responses.create.return_value.output = [mock_item]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is True
-
-    def test_fallback_chat_completions(self) -> None:
-        """Falls back to chat completions when responses API missing."""
-        mock_client = MagicMock(spec=[])  # no 'responses' attr
-        mock_client.chat = MagicMock()
-        mock_client.chat.completions.create.return_value.choices = [
-            MagicMock(
-                message=MagicMock(
-                    content='{"is_valid": true, "has_occurred": false, "confidence": 0.8}'
-                )
-            )
-        ]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is False
-
-    def test_responses_api_nested_content(self) -> None:
-        """Handles response items with nested content blocks."""
-        mock_client = MagicMock()
-        inner_block = MagicMock()
-        inner_block.text = '{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-        outer_item = MagicMock(spec=[])  # no 'text' attr
-        outer_item.content = [inner_block]
-        mock_client.responses.create.return_value.output = [outer_item]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is True
-
-    def test_responses_api_mixed_items(self) -> None:
-        """Handles mix of items: some with text, some with content, some with neither."""
-        mock_client = MagicMock()
-        # Item with neither text nor content
-        skip_item = MagicMock(spec=[])  # no text, no content
-        # Item with content but inner block has no text
-        no_text_block = MagicMock(spec=[])  # no text attr
-        content_item = MagicMock(spec=[])
-        content_item.content = [no_text_block]
-        # Item with text (the actual response)
-        text_item = MagicMock()
-        text_item.text = '{"is_valid": true, "has_occurred": false, "confidence": 0.8}'
-        mock_client.responses.create.return_value.output = [
-            skip_item,
-            content_item,
-            text_item,
-        ]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is False
-
-
 class TestAdapterOpenrouter:
     """Tests for OpenRouter adapter."""
 
@@ -586,7 +503,7 @@ class TestCastVote:
         mock_result = _vote()
         mock_adapter = MagicMock(return_value=mock_result)
 
-        with patch(f"{MODULE}._ADAPTERS", {"_adapter_openai": mock_adapter}):
+        with patch(f"{MODULE}._ADAPTERS", {"_adapter_openrouter": mock_adapter}):
             from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
                 cast_vote,
             )

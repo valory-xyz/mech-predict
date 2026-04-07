@@ -135,7 +135,7 @@ def step_filter_rows(
             if line:
                 all_rows.append(json.loads(line))
 
-    tail = all_rows[-last_n:] if last_n else all_rows
+    tail = all_rows if last_n is None else all_rows[-last_n:]
 
     filtered: list[dict[str, Any]] = [
         r
@@ -259,19 +259,26 @@ def step_enrich_rows(
 def step_score_baseline(
     dataset_path: Path,
     output: Path,
+    tools: list[str],
 ) -> Scores:
     """Score the enriched dataset rows as the production baseline.
 
     Uses the p_yes/p_no/final_outcome already in the rows — no model re-run.
-    Only scores rows that made it into the enriched dataset (have source_content),
-    so the baseline covers exactly the same questions as the candidate.
+    Filters to rows matching *tools* so the baseline covers exactly the same
+    tool subset as the candidate replay.
 
     :param dataset_path: enriched replay dataset JSONL.
     :param output: path to write baseline scores JSON.
+    :param tools: tool names to include (must match --tools).
     :return: scores dict.
     """
-    log.info("=== SCORE BASELINE (production predictions) ===")
-    rows = load_rows(dataset_path)
+    log.info("=== SCORE BASELINE (production predictions, tools=%s) ===", tools)
+    all_rows = load_rows(dataset_path)
+    rows = [r for r in all_rows if r.get("tool_name") in tools]
+    if len(rows) < len(all_rows):
+        log.info(
+            "  Filtered %d → %d rows matching --tools", len(all_rows), len(rows)
+        )
     if not rows:
         log.warning("  No rows to score")
         return {"overall": {}, "by_tool": {}, "by_platform": {}, "by_category": {}}
@@ -366,7 +373,10 @@ def main() -> None:
         "--last-n",
         type=int,
         default=DEFAULT_LAST_N,
-        help=f"Filter last N rows from production log (default: {DEFAULT_LAST_N})",
+        help=(
+            f"Filter last N rows from production log (default: {DEFAULT_LAST_N}). "
+            "Omit or set to None to use all rows."
+        ),
     )
 
     # Baseline
@@ -452,7 +462,7 @@ def main() -> None:
             baseline_scores = json.load(f)
     else:
         baseline_scores_path = results_dir / "sweep_baseline_scores.json"
-        baseline_scores = step_score_baseline(dataset_path, baseline_scores_path)
+        baseline_scores = step_score_baseline(dataset_path, baseline_scores_path, tools)
 
     # ---------------------------------------------------------------
     # Step 3: Replay candidate + score

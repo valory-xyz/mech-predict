@@ -1121,13 +1121,10 @@ def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
             continue
 
         winning_index = int(resolution["winningIndex"])
-        outcomes = metadata.get("outcomes") or []
-        # Neg-risk markets have outcomes ["Yes", "No"] (inverted).
-        # Use the outcomes array to determine what the winning index means.
-        if outcomes and winning_index < len(outcomes):
-            outcome = outcomes[winning_index].lower() == "yes"
-        else:
-            outcome = winning_index == 1
+        # winningIndex follows CLOB token order: 0 = Yes, 1 = No.
+        # The subgraph outcomes array is unreliable (often ["No", "Yes"]),
+        # so we ignore it and use the index directly.
+        outcome = winning_index == 0
 
         data = {
             "outcome": outcome,

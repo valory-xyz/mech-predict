@@ -22,6 +22,11 @@ on:
         required: false
         type: boolean
         default: true
+      force_rebuild:
+        description: 'Discard cached scores and rebuild from fresh production logs'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   # -----------------------------------------------------------------------
@@ -43,13 +48,18 @@ jobs:
 
       # Download previous run's state + scores (if they exist)
       - name: Download previous benchmark data
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: benchmark-data
           path: benchmark/
           workflow: benchmark_flywheel.yaml
           if_no_artifact_found: warn
         continue-on-error: true
+
+      # Discard cached scores when force_rebuild is requested
+      - name: Clear cached scores (force rebuild)
+        if: github.event.inputs.force_rebuild == 'true'
+        run: rm -f benchmark/results/scores.json benchmark/results/scores_history.jsonl
 
       # Fetch writes daily log file + calls scorer.update() inline
       - name: Fetch production data
@@ -114,7 +124,7 @@ jobs:
         run: pip install requests
 
       - name: Download previous open markets
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: tournament-markets
           path: benchmark/datasets/
@@ -188,7 +198,7 @@ jobs:
           path: benchmark/datasets/
 
       - name: Download previous tournament predictions
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name: tournament-predictions
           path: benchmark/results/

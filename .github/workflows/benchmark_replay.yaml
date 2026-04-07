@@ -1,0 +1,186 @@
+name: benchmark-replay
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: 'Tool name to benchmark'
+        required: true
+        default: 'prediction-request-reasoning'
+      phase:
+        description: 'Replay phase'
+        required: false
+        default: 'prediction-only'
+      sample:
+        description: 'Sample size per platform'
+        required: false
+        default: '50'
+      seed:
+        description: 'Random seed'
+        required: false
+        default: '42'
+      pr:
+        description: 'PR number to post results on (optional)'
+        required: false
+        default: ''
+
+jobs:
+  replay:
+    # For issue_comment: only run on PR comments starting with /benchmark, from authorized users
+    # For workflow_dispatch: always run
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (
+        github.event.issue.pull_request
+        && startsWith(github.event.comment.body, '/benchmark ')
+        && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      # Acknowledge the trigger (issue_comment only)
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+            -f content=eyes --silent
+
+      # Parse inputs from comment or workflow_dispatch.
+      # SECURITY: github.event.comment.body is attacker-controlled. We pass it
+      # via env (not ${{ }} interpolation) to prevent shell injection — ${{ }}
+      # is macro-expanded before the shell runs, so malicious comment text
+      # would become part of the script. Env vars are treated as data, not code.
+      # We also whitelist-validate the tool name as defense-in-depth.
+      - name: Parse command
+        id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TOOL: ${{ github.event.inputs.tool }}
+          INPUT_PHASE: ${{ github.event.inputs.phase }}
+          INPUT_SAMPLE: ${{ github.event.inputs.sample }}
+          INPUT_SEED: ${{ github.event.inputs.seed }}
+          INPUT_PR: ${{ github.event.inputs.pr }}
+          ACTOR: ${{ github.actor }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TOOL="$INPUT_TOOL"
+            PHASE="$INPUT_PHASE"
+            SAMPLE="$INPUT_SAMPLE"
+            SEED="$INPUT_SEED"
+            PR="$INPUT_PR"
+            TRIGGERED_BY="$ACTOR"
+          else
+            TOOL=$(echo "$COMMENT_BODY" | awk '{print $2}')
+            PHASE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
+            SAMPLE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
+            SEED=$(echo "$COMMENT_BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
+            PR="$ISSUE_NUMBER"
+            TRIGGERED_BY="$COMMENT_USER"
+          fi
+
+          # Whitelist: tool name must be lowercase alphanumeric + hyphens only
+          if ! echo "$TOOL" | grep -qP '^[a-z0-9-]+$'; then
+            echo "::error::Invalid tool name: '$TOOL'. Must match [a-z0-9-]+"
+            exit 1
+          fi
+
+          echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
+          echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
+          echo "sample=$SAMPLE" >> "$GITHUB_OUTPUT"
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "triggered_by=$TRIGGERED_BY" >> "$GITHUB_OUTPUT"
+
+          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED, PR: $PR"
+
+      # Checkout — PR head for issue_comment, current branch for workflow_dispatch
+      - name: Checkout PR head
+        if: github.event_name == 'issue_comment'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - name: Checkout branch
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests openai anthropic
+
+      # Download latest production log from flywheel
+      - name: Download production log
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
+        with:
+          name_is_regexp: true
+          name: benchmark-log-.*
+          path: benchmark/datasets/logs/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: fail
+
+      # Find the production log file
+      - name: Locate production log
+        id: log
+        run: |
+          LOG_FILE=$(ls -t benchmark/datasets/logs/*.jsonl | head -1)
+          echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
+          echo "Found production log: $LOG_FILE ($(wc -l < "$LOG_FILE") rows)"
+
+      # Enrich with caching
+      - name: Cache enriched dataset
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: benchmark/results/ci_enriched/
+          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
+
+      - name: Enrich dataset
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python -m benchmark.prompt_replay enrich \
+            --production-log "${{ steps.log.outputs.path }}" \
+            --tool "${{ steps.parse.outputs.tool }}" \
+            --sample-per-platform "${{ steps.parse.outputs.sample }}" \
+            --seed "${{ steps.parse.outputs.seed }}" \
+            --output benchmark/results/ci_enriched/dataset.jsonl
+
+      # Replay with PR's prompts
+      - name: Run replay
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+        run: |
+          python -m benchmark.prompt_replay replay \
+            --dataset benchmark/results/ci_enriched/dataset.jsonl \
+            --output-dir benchmark/results/ci_replay/ \
+            --phase "${{ steps.parse.outputs.phase }}"
+
+      # Compute metrics and post comment (only if PR number is set)
+      - name: Post benchmark report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.parse.outputs.pr }}"
+          if [ -n "$PR" ]; then
+            python -m benchmark.ci_replay \
+              --baseline benchmark/results/ci_replay/baseline.jsonl \
+              --candidate benchmark/results/ci_replay/candidate.jsonl \
+              --pr "$PR" \
+              --repo "${{ github.repository }}" \
+              --triggered-by "${{ steps.parse.outputs.triggered_by }}"
+          else
+            python -m benchmark.ci_replay \
+              --baseline benchmark/results/ci_replay/baseline.jsonl \
+              --candidate benchmark/results/ci_replay/candidate.jsonl
+          fi

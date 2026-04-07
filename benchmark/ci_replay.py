@@ -57,7 +57,7 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             predicted_yes = p_yes > 0.5
             if predicted_yes == outcome:
                 correct += 1
-            if max(p_yes, 1 - p_yes) > 0.90 and predicted_yes != outcome:
+            if max(p_yes, 1 - p_yes) > 0.80 and predicted_yes != outcome:
                 overconf_wrong += 1
 
         return {

@@ -101,6 +101,9 @@ PREDICTION_USER_INPUT_RE = re.compile(
     r"<user_input>\s*(.*?)\s*</user_input>",
     re.DOTALL,
 )
+# Matches the OLD prediction prompt format stored in historical IPFS deliveries.
+# The current prompt uses "ESTIMATION STEPS" instead of "Carefully consider",
+# but replay always works with the original formatted prompt from production.
 PREDICTION_REASONING_RE = re.compile(
     r"The reasoning from the other AI is:\s*(.*?)\n\nCarefully consider",
     re.DOTALL,

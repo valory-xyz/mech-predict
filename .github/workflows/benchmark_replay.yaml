@@ -50,25 +50,46 @@ jobs:
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
             -f content=eyes --silent
 
-      # Parse inputs from comment or workflow_dispatch
+      # Parse inputs from comment or workflow_dispatch.
+      # SECURITY: github.event.comment.body is attacker-controlled. We pass it
+      # via env (not ${{ }} interpolation) to prevent shell injection — ${{ }}
+      # is macro-expanded before the shell runs, so malicious comment text
+      # would become part of the script. Env vars are treated as data, not code.
+      # We also whitelist-validate the tool name as defense-in-depth.
       - name: Parse command
         id: parse
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TOOL: ${{ github.event.inputs.tool }}
+          INPUT_PHASE: ${{ github.event.inputs.phase }}
+          INPUT_SAMPLE: ${{ github.event.inputs.sample }}
+          INPUT_SEED: ${{ github.event.inputs.seed }}
+          INPUT_PR: ${{ github.event.inputs.pr }}
+          ACTOR: ${{ github.actor }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TOOL="${{ github.event.inputs.tool }}"
-            PHASE="${{ github.event.inputs.phase }}"
-            SAMPLE="${{ github.event.inputs.sample }}"
-            SEED="${{ github.event.inputs.seed }}"
-            PR="${{ github.event.inputs.pr }}"
-            TRIGGERED_BY="${{ github.actor }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TOOL="$INPUT_TOOL"
+            PHASE="$INPUT_PHASE"
+            SAMPLE="$INPUT_SAMPLE"
+            SEED="$INPUT_SEED"
+            PR="$INPUT_PR"
+            TRIGGERED_BY="$ACTOR"
           else
-            BODY="${{ github.event.comment.body }}"
-            TOOL=$(echo "$BODY" | awk '{print $2}')
-            PHASE=$(echo "$BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
-            SAMPLE=$(echo "$BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
-            SEED=$(echo "$BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
-            PR="${{ github.event.issue.number }}"
-            TRIGGERED_BY="${{ github.event.comment.user.login }}"
+            TOOL=$(echo "$COMMENT_BODY" | awk '{print $2}')
+            PHASE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
+            SAMPLE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
+            SEED=$(echo "$COMMENT_BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
+            PR="$ISSUE_NUMBER"
+            TRIGGERED_BY="$COMMENT_USER"
+          fi
+
+          # Whitelist: tool name must be lowercase alphanumeric + hyphens only
+          if ! echo "$TOOL" | grep -qP '^[a-z0-9-]+$'; then
+            echo "::error::Invalid tool name: '$TOOL'. Must match [a-z0-9-]+"
+            exit 1
           fi
 
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
@@ -100,7 +121,7 @@ jobs:
 
       # Download latest production log from flywheel
       - name: Download production log
-        uses: dawidd6/action-download-artifact@v3
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
           name_is_regexp: true
           name: benchmark-log-.*

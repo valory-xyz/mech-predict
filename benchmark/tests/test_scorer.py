@@ -485,12 +485,15 @@ class TestIncrementalUpdate:
         assert reservoir[-1] == LATENCY_RESERVOIR_SIZE + 49
 
     def test_worst_10_maintained(self, tmp_path: Path) -> None:
-        """Worst 10 list keeps the highest Brier scores."""
+        """Worst 10 list keeps the highest Brier scores, deduplicated."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        # Create 15 rows with varying Brier scores
-        rows = [_row(p_yes=0.5 + i * 0.03, outcome=False) for i in range(15)]
+        # Create 15 rows with unique questions and varying Brier scores
+        rows = [
+            {**_row(p_yes=0.5 + i * 0.03, outcome=False), "question_text": f"Q{i}?"}
+            for i in range(15)
+        ]
         result = update(rows, scores_path, history_path)
 
         assert len(result["worst_10"]) == WORST_BEST_SIZE
@@ -499,16 +502,36 @@ class TestIncrementalUpdate:
         assert worst_briers == sorted(worst_briers, reverse=True)
 
     def test_best_10_maintained(self, tmp_path: Path) -> None:
-        """Best 10 list keeps the lowest Brier scores."""
+        """Best 10 list keeps the lowest Brier scores, deduplicated."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        rows = [_row(p_yes=0.5 + i * 0.03, outcome=True) for i in range(15)]
+        rows = [
+            {**_row(p_yes=0.5 + i * 0.03, outcome=True), "question_text": f"Q{i}?"}
+            for i in range(15)
+        ]
         result = update(rows, scores_path, history_path)
 
         assert len(result["best_10"]) == WORST_BEST_SIZE
         best_briers = [b["brier"] for b in result["best_10"]]
         assert best_briers == sorted(best_briers)
+
+    def test_worst_10_deduplicates_by_question(self, tmp_path: Path) -> None:
+        """Same question keeps only the worst Brier."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            {**_row(p_yes=0.9, outcome=False), "question_text": "Same Q?"},
+            {**_row(p_yes=0.8, outcome=False), "question_text": "Same Q?"},
+            {**_row(p_yes=0.7, outcome=False), "question_text": "Different Q?"},
+        ]
+        result = update(rows, scores_path, history_path)
+
+        questions = [w["question_text"] for w in result["worst_10"]]
+        assert questions.count("Same Q?") == 1
+        same_q = [w for w in result["worst_10"] if w["question_text"] == "Same Q?"][0]
+        assert same_q["brier"] == round(0.9**2, 4)  # worst of the two
 
     def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
         """Malformed rows count toward n but not valid_n or Brier."""
@@ -569,7 +592,6 @@ class TestMonthRollover:
 
         # Second update in April (real time)
         with patch("benchmark.scorer.datetime") as mock_dt:
-
             real_dt = datetime
             mock_dt.now.return_value = real_dt(2026, 4, 6, 12, tzinfo=timezone.utc)
             update([_row()], scores_path, history_path)

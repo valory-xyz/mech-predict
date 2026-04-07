@@ -165,6 +165,22 @@ class TestSectionTrend:
         result = section_trend([])
         assert "No trend data" in result
 
+    def test_current_month_appended(self) -> None:
+        """Current month from scores.json appears in trend."""
+        scores = _scores(brier=0.28)
+        scores["current_month"] = "2026-04"
+        result = section_trend([], scores)
+        assert "2026-04" in result
+        assert "in progress" in result
+        assert "No trend data" not in result
+
+    def test_empty_history_with_scores(self) -> None:
+        """First run: no history but current month still shows."""
+        scores = _scores(brier=0.30)
+        scores["current_month"] = "2026-04"
+        result = section_trend([], scores)
+        assert "2026-04" in result
+
 
 # ---------------------------------------------------------------------------
 # section_sample_size_warnings

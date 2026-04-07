@@ -23,8 +23,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from benchmark.score_tournament import (
     check_omen_resolutions,
     check_polymarket_resolutions,
@@ -75,8 +73,11 @@ def _prediction(
 
 
 class TestCheckOmenResolutions:
+    """Tests for check_omen_resolutions."""
+
     @patch("benchmark.score_tournament._post_graphql")
     def test_resolved_market(self, mock_gql: MagicMock) -> None:
+        """Test resolved market returns correct outcome."""
         mock_gql.return_value = {
             "fixedProductMarketMakers": [
                 {
@@ -112,6 +113,7 @@ class TestCheckOmenResolutions:
 
     @patch("benchmark.score_tournament._post_graphql")
     def test_unresolved_skipped(self, mock_gql: MagicMock) -> None:
+        """Test unresolved market is skipped."""
         mock_gql.return_value = {
             "fixedProductMarketMakers": [
                 {
@@ -127,8 +129,9 @@ class TestCheckOmenResolutions:
         assert len(result) == 0
 
     def test_empty_input(self) -> None:
+        """Test empty input returns empty dict."""
         result = check_omen_resolutions([])
-        assert result == {}
+        assert not result
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +140,11 @@ class TestCheckOmenResolutions:
 
 
 class TestCheckPolymarketResolutions:
+    """Tests for check_polymarket_resolutions."""
+
     @patch("benchmark.score_tournament.requests.get")
     def test_resolved_yes(self, mock_get: MagicMock) -> None:
+        """Test resolved Yes market returns True outcome."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
@@ -156,6 +162,7 @@ class TestCheckPolymarketResolutions:
 
     @patch("benchmark.score_tournament.requests.get")
     def test_resolved_no(self, mock_get: MagicMock) -> None:
+        """Test resolved No market returns False outcome."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
@@ -172,6 +179,7 @@ class TestCheckPolymarketResolutions:
 
     @patch("benchmark.score_tournament.requests.get")
     def test_unresolved_skipped(self, mock_get: MagicMock) -> None:
+        """Test unresolved market is skipped."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
@@ -206,8 +214,9 @@ class TestCheckPolymarketResolutions:
         assert result["cid_4"]["outcome"] is True  # 0.97 > 0.03 → Yes
 
     def test_empty_input(self) -> None:
+        """Test empty input returns empty dict."""
         result = check_polymarket_resolutions([])
-        assert result == {}
+        assert not result
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +235,7 @@ class TestScoreTournament:
         mock_poly: MagicMock,
         tmp_path: Path,
     ) -> None:
+        """Test scoring resolved markets produces correct output."""
         pred_path = tmp_path / "predictions.jsonl"
         out_path = tmp_path / "scored.jsonl"
 
@@ -245,7 +255,7 @@ class TestScoreTournament:
         score_tournament(pred_path, out_path)
 
         # Both predictions should be scored
-        scored = [json.loads(l) for l in out_path.read_text().strip().split("\n")]
+        scored = [json.loads(line) for line in out_path.read_text().strip().split("\n")]
         assert len(scored) == 2
         assert all(s["final_outcome"] is True for s in scored)
         assert all(s["resolved_at"] is not None for s in scored)
@@ -261,6 +271,7 @@ class TestScoreTournament:
         mock_poly: MagicMock,
         tmp_path: Path,
     ) -> None:
+        """Test already resolved predictions are skipped."""
         pred_path = tmp_path / "predictions.jsonl"
         out_path = tmp_path / "scored.jsonl"
 
@@ -338,6 +349,7 @@ class TestScoreTournament:
         mock_poly: MagicMock,
         tmp_path: Path,
     ) -> None:
+        """Test prediction lead time is computed correctly."""
         pred_path = tmp_path / "predictions.jsonl"
         out_path = tmp_path / "scored.jsonl"
 
@@ -366,8 +378,11 @@ class TestScoreTournament:
 # ---------------------------------------------------------------------------
 
 
-class TestLoadPredictions:
+class TestLoadPredictions:  # pylint: disable=too-few-public-methods
+    """Tests for load_predictions."""
+
     def test_load(self, tmp_path: Path) -> None:
+        """Test loading predictions from JSONL file."""
         f = tmp_path / "preds.jsonl"
         f.write_text(
             json.dumps(_prediction("r1")) + "\n" + json.dumps(_prediction("r2")) + "\n"

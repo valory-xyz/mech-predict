@@ -19,17 +19,16 @@
 """Tests for benchmark/datasets/fetch_production.py"""
 
 import json
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-import time
-
 from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
     PENDING_MAX_AGE_DAYS,
-    PROBABILITY_SUM_TOLERANCE,
     ResolvedMarkets,
     _compute_config_hash,
     _extract_question_title,
@@ -61,6 +60,7 @@ class TestParseToolResponse:
     """Tests for toolResponse JSON parsing."""
 
     def test_valid_json(self) -> None:
+        """Test valid JSON response parsing."""
         resp = parse_tool_response('{"p_yes": 0.72, "p_no": 0.28, "confidence": 0.85}')
         assert resp["prediction_parse_status"] == "valid"
         assert resp["p_yes"] == 0.72
@@ -68,6 +68,7 @@ class TestParseToolResponse:
         assert resp["confidence"] == 0.85
 
     def test_valid_json_with_newlines(self) -> None:
+        """Test valid JSON with newline formatting."""
         resp = parse_tool_response(
             '{\n  "p_yes": 0.82,\n  "p_no": 0.18,\n  "confidence": 0.85\n}'
         )
@@ -86,15 +87,18 @@ class TestParseToolResponse:
         assert resp["p_yes"] == 0.72
 
     def test_null_response(self) -> None:
+        """Test None response handling."""
         resp = parse_tool_response(None)
         assert resp["prediction_parse_status"] == "missing_fields"
         assert resp["p_yes"] is None
 
     def test_empty_string(self) -> None:
+        """Test empty string handling."""
         resp = parse_tool_response("")
         assert resp["prediction_parse_status"] == "missing_fields"
 
     def test_ipfs_error(self) -> None:
+        """Test IPFS error detection."""
         resp = parse_tool_response(
             "Request data could not be retrieved from IPFS "
             "(detail: Failed to download: bafyxyz)"
@@ -111,10 +115,12 @@ class TestParseToolResponse:
         assert resp["p_yes"] == 0.7
 
     def test_malformed_missing_p_no(self) -> None:
+        """Test malformed response with missing p_no."""
         resp = parse_tool_response('{"p_yes": 0.72}')
         assert resp["prediction_parse_status"] == "malformed"
 
     def test_malformed_out_of_range(self) -> None:
+        """Test malformed response with out-of-range values."""
         resp = parse_tool_response('{"p_yes": 5.0, "p_no": -4.0}')
         assert resp["prediction_parse_status"] == "malformed"
 
@@ -130,10 +136,12 @@ class TestParseToolResponse:
         assert resp["prediction_parse_status"] == "malformed"
 
     def test_unparseable_garbage(self) -> None:
+        """Test unparseable garbage input."""
         resp = parse_tool_response("not json at all")
         assert resp["prediction_parse_status"] == "malformed"
 
     def test_no_confidence_field(self) -> None:
+        """Test response without confidence field."""
         resp = parse_tool_response('{"p_yes": 0.5, "p_no": 0.5}')
         assert resp["prediction_parse_status"] == "valid"
         assert resp["confidence"] is None
@@ -159,17 +167,19 @@ class TestNegRiskOutcome:
         return winning_index == 1
 
     def test_normal_yes(self) -> None:
+        """Test normal market yes outcome."""
         assert self._decode(["No", "Yes"], 1) is True
 
     def test_normal_no(self) -> None:
+        """Test normal market no outcome."""
         assert self._decode(["No", "Yes"], 0) is False
 
     def test_neg_risk_yes(self) -> None:
-        """outcomes inverted: index 0 = Yes."""
+        """Outcomes inverted: index 0 = Yes."""
         assert self._decode(["Yes", "No"], 0) is True
 
     def test_neg_risk_no(self) -> None:
-        """outcomes inverted: index 1 = No."""
+        """Outcomes inverted: index 1 = No."""
         assert self._decode(["Yes", "No"], 1) is False
 
     def test_fallback_no_outcomes(self) -> None:
@@ -184,6 +194,7 @@ class TestNegRiskOutcome:
 
 
 class TestMatchDelivery:
+    """Tests for _match_delivery."""
 
     @staticmethod
     def _make_markets() -> ResolvedMarkets:
@@ -201,6 +212,7 @@ class TestMatchDelivery:
         return markets
 
     def test_match_by_market_id(self) -> None:
+        """Test matching delivery by market ID."""
         markets = self._make_markets()
         delivery = {"market_id": "0xabc", "question_title": "totally different"}
         market, confidence = _match_delivery(delivery, markets)
@@ -209,16 +221,19 @@ class TestMatchDelivery:
         assert confidence == 1.0
 
     def test_market_id_takes_priority_over_title(self) -> None:
+        """Test market ID takes priority over title."""
         markets = self._make_markets()
         delivery = {
             "market_id": "0xabc",
             "question_title": "Will the president win the next election?",
         }
         # market_id 0xabc → outcome True, even though title matches 0xdef (False)
-        market, confidence = _match_delivery(delivery, markets)
+        market, _confidence = _match_delivery(delivery, markets)
+        assert market is not None
         assert market["outcome"] is True
 
     def test_exact_title_match(self) -> None:
+        """Test exact title match."""
         markets = self._make_markets()
         delivery = {
             "market_id": None,
@@ -230,6 +245,7 @@ class TestMatchDelivery:
         assert confidence == 1.0
 
     def test_prefix_match(self) -> None:
+        """Test prefix title match."""
         markets = self._make_markets()
         delivery = {
             "market_id": None,
@@ -244,10 +260,11 @@ class TestMatchDelivery:
         markets = ResolvedMarkets()
         markets.add(None, "Will it", {"outcome": True, "resolved_at_ts": 100})
         delivery = {"market_id": None, "question_title": "Will it rain in London?"}
-        market, confidence = _match_delivery(delivery, markets)
+        market, _confidence = _match_delivery(delivery, markets)
         assert market is None
 
     def test_no_match(self) -> None:
+        """Test no match returns None."""
         markets = self._make_markets()
         delivery = {"market_id": None, "question_title": "Completely unrelated"}
         market, confidence = _match_delivery(delivery, markets)
@@ -280,18 +297,22 @@ class TestPolymarketResolutionFilter:
         return int(resolved_at_ts) > resolved_after
 
     def test_resolved_after_cutoff_included(self) -> None:
+        """Test resolved after cutoff is included."""
         bet = {"question": {"resolution": {"blockTimestamp": "1000"}}}
         assert self._filter_bet(bet, 999) is True
 
     def test_resolved_at_cutoff_excluded(self) -> None:
+        """Test resolved at cutoff is excluded."""
         bet = {"question": {"resolution": {"blockTimestamp": "1000"}}}
         assert self._filter_bet(bet, 1000) is False
 
     def test_resolved_before_cutoff_excluded(self) -> None:
+        """Test resolved before cutoff is excluded."""
         bet = {"question": {"resolution": {"blockTimestamp": "500"}}}
         assert self._filter_bet(bet, 999) is False
 
     def test_unresolved_excluded(self) -> None:
+        """Test unresolved bet is excluded."""
         bet = {"question": {"resolution": None}}
         assert self._filter_bet(bet, 0) is False
 
@@ -302,6 +323,7 @@ class TestPolymarketResolutionFilter:
 
 
 class TestClassifyCategory:
+    """Tests for classify_category."""
 
     @pytest.mark.parametrize(
         "question,expected",
@@ -320,9 +342,11 @@ class TestClassifyCategory:
         ],
     )
     def test_known_categories(self, question: str, expected: str) -> None:
+        """Test known category classification."""
         assert classify_category(question) == expected
 
     def test_unknown_falls_back_to_other(self) -> None:
+        """Test unknown question falls back to other."""
         assert classify_category("Will something random happen?") == "other"
 
     def test_word_boundary_prevents_substring_match(self) -> None:
@@ -330,6 +354,7 @@ class TestClassifyCategory:
         assert classify_category("Will something happen?") == "other"
 
     def test_case_insensitive(self) -> None:
+        """Test case-insensitive classification."""
         assert classify_category("WILL BITCOIN HIT $100K?") == "finance"
 
 
@@ -339,8 +364,10 @@ class TestClassifyCategory:
 
 
 class TestParseRequestContext:
+    """Tests for _parse_request_context."""
 
     def test_schema_v2(self) -> None:
+        """Test schema v2 request context parsing."""
         content = json.dumps(
             {
                 "prompt": "...",
@@ -361,14 +388,17 @@ class TestParseRequestContext:
         assert ctx["market_prob"] == 0.65
 
     def test_schema_v1_no_context(self) -> None:
+        """Test schema v1 without request context."""
         content = json.dumps({"prompt": "...", "tool": "test", "nonce": "abc"})
-        assert _parse_request_context(content) == {}
+        assert not _parse_request_context(content)
 
     def test_empty_string(self) -> None:
-        assert _parse_request_context("") == {}
+        """Test empty string handling."""
+        assert not _parse_request_context("")
 
     def test_invalid_json(self) -> None:
-        assert _parse_request_context("not json") == {}
+        """Test invalid JSON input."""
+        assert not _parse_request_context("not json")
 
 
 # ---------------------------------------------------------------------------
@@ -377,19 +407,24 @@ class TestParseRequestContext:
 
 
 class TestExtractQuestionTitle:
+    """Tests for _extract_question_title."""
 
     def test_simple(self) -> None:
+        """Test simple question title extraction."""
         assert _extract_question_title("Will X happen?") == "Will X happen?"
 
     def test_with_separator(self) -> None:
+        """Test question title with separator."""
         raw = f"Will X happen?{QUESTION_DATA_SEPARATOR}extra data"
         assert _extract_question_title(raw) == "Will X happen?"
 
     def test_empty(self) -> None:
+        """Test empty string extraction."""
         assert _extract_question_title("") == ""
 
     def test_none(self) -> None:
-        assert _extract_question_title(None) == ""
+        """Test None input extraction."""
+        assert _extract_question_title(None) == ""  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -398,8 +433,10 @@ class TestExtractQuestionTitle:
 
 
 class TestBuildRow:
+    """Tests for build_row."""
 
     def test_full_row(self) -> None:
+        """Test building a full row with all fields."""
         # Use realistic timestamps: delivery at March 28, resolution at March 30
         delivery_ts = 1774900000  # ~2026-03-28
         request_ts = delivery_ts - 50  # 50 seconds earlier
@@ -433,6 +470,7 @@ class TestBuildRow:
         assert row["category"] == "finance"
 
     def test_missing_request_timestamp(self) -> None:
+        """Test row with missing request timestamp."""
         delivery = {
             "deliver_id": "0xdef",
             "timestamp": 1000,
@@ -461,21 +499,25 @@ class TestComputeConfigHash:
     """Tests for _compute_config_hash."""
 
     def test_deterministic(self) -> None:
+        """Test config hash is deterministic."""
         h1 = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 4096)
         h2 = _compute_config_hash("bafyabc", "gpt-4.1", 0.7, 4096)
         assert h1 == h2
 
     def test_differs_on_model_change(self) -> None:
+        """Test config hash differs on model change."""
         h1 = _compute_config_hash("bafyabc", "gpt-4.1")
         h2 = _compute_config_hash("bafyabc", "gpt-4o")
         assert h1 != h2
 
     def test_differs_on_tool_hash_change(self) -> None:
+        """Test config hash differs on tool hash change."""
         h1 = _compute_config_hash("bafyabc", "gpt-4.1")
         h2 = _compute_config_hash("bafydef", "gpt-4.1")
         assert h1 != h2
 
     def test_none_inputs_returns_none(self) -> None:
+        """Test None inputs return None."""
         assert _compute_config_hash(None, None) is None
 
     def test_zero_temperature_not_treated_as_none(self) -> None:
@@ -510,6 +552,7 @@ class TestBuildRowWithMetadata:
         }
 
     def test_with_metadata(self) -> None:
+        """Test build_row with IPFS metadata."""
         metadata = {
             "tool_hash": "bafyabc123",
             "params": {"temperature": 0.7, "max_tokens": 4096},
@@ -527,6 +570,7 @@ class TestBuildRowWithMetadata:
         assert "prompt_template" not in row
 
     def test_without_metadata(self) -> None:
+        """Test build_row without IPFS metadata."""
         row = build_row(
             self._delivery(),
             {"outcome": True, "resolved_at_ts": 1774900000 + 86400},
@@ -544,20 +588,24 @@ class TestBuildRowWithMetadata:
 
 
 class TestResolvedMarkets:
+    """Tests for ResolvedMarkets."""
 
     def test_len_counts_by_title(self) -> None:
+        """Test len counts markets by title."""
         m = ResolvedMarkets()
         m.add("0x1", "Question A", {"outcome": True})
         m.add("0x2", "Question B", {"outcome": False})
         assert len(m) == 2
 
     def test_bool_true_when_populated(self) -> None:
+        """Test bool is True when populated."""
         m = ResolvedMarkets()
         assert not m
         m.add(None, "Question A", {"outcome": True})
         assert m
 
     def test_add_with_id_only(self) -> None:
+        """Test adding market with ID only."""
         m = ResolvedMarkets()
         m.add("0x1", "", {"outcome": True})
         # title is empty so by_title is empty, but by_id has an entry
@@ -571,8 +619,10 @@ class TestResolvedMarkets:
 
 
 class TestIncrementalState:
+    """Tests for incremental state persistence."""
 
     def test_round_trip(self, tmp_path: Path) -> None:
+        """Test state save and load round trip."""
         state_path = tmp_path / ".fetch_state.json"
         state = {
             "omen": {
@@ -586,31 +636,40 @@ class TestIncrementalState:
         assert loaded == state
 
     def test_missing_file(self, tmp_path: Path) -> None:
+        """Test loading from missing file."""
         assert load_fetch_state(tmp_path / "nonexistent.json") == {}
 
     def test_corrupt_file(self, tmp_path: Path) -> None:
+        """Test loading from corrupt file."""
         state_path = tmp_path / ".fetch_state.json"
         state_path.write_text("not json")
         assert load_fetch_state(state_path) == {}
 
 
 class TestDeduplication:
+    """Tests for row deduplication."""
 
     def test_load_ids_from_file(self, tmp_path: Path) -> None:
+        """Test loading row IDs from file."""
         log_path = tmp_path / "log.jsonl"
-        log_path.write_text('{"row_id": "a"}\n' '{"row_id": "b"}\n' '{"row_id": "c"}\n')
+        log_path.write_text(
+            '{"row_id": "a"}\n' + '{"row_id": "b"}\n' + '{"row_id": "c"}\n'
+        )
         ids = _load_ids_from_file(log_path)
         assert ids == {"a", "b", "c"}
 
     def test_empty_file(self, tmp_path: Path) -> None:
+        """Test loading from empty file."""
         log_path = tmp_path / "log.jsonl"
         log_path.write_text("")
         assert _load_ids_from_file(log_path) == set()
 
     def test_missing_file(self, tmp_path: Path) -> None:
+        """Test loading from missing file."""
         assert _load_ids_from_file(tmp_path / "nope.jsonl") == set()
 
     def test_row_id_deterministic(self) -> None:
+        """Test row ID generation is deterministic."""
         id1 = _make_row_id("omen", "0xabc")
         id2 = _make_row_id("omen", "0xabc")
         id3 = _make_row_id("polymarket", "0xabc")
@@ -627,14 +686,14 @@ class TestDailyLogPath:
     """Tests for daily_log_path helper."""
 
     def test_returns_dated_filename(self) -> None:
-        from datetime import datetime, timezone
+        """Test returns dated filename."""
 
         d = datetime(2026, 4, 6, 12, 0, 0, tzinfo=timezone.utc)
         result = daily_log_path(Path("/tmp/logs"), d)
         assert result == Path("/tmp/logs/production_log_2026_04_06.jsonl")
 
     def test_defaults_to_today(self) -> None:
-        from datetime import datetime, timezone
+        """Test defaults to today date."""
 
         today = datetime.now(timezone.utc).strftime("%Y_%m_%d")
         result = daily_log_path(Path("/tmp/logs"))
@@ -668,7 +727,6 @@ class TestDailyLogRotation:
 
     def test_dedup_reads_todays_file_only(self, tmp_path: Path) -> None:
         """Normal dedup (state_loss=False) reads only today's file."""
-        from datetime import datetime, timedelta, timezone
 
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
@@ -686,7 +744,6 @@ class TestDailyLogRotation:
 
     def test_dedup_reads_7_days_on_state_loss(self, tmp_path: Path) -> None:
         """State-loss recovery reads the last DEDUP_LOOKBACK_DAYS files."""
-        from datetime import datetime, timedelta, timezone
 
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
@@ -778,6 +835,7 @@ class TestMatchAndBuild:
     """Tests for _match_and_build and pending delivery logic."""
 
     def test_matched_delivery_becomes_row(self) -> None:
+        """Test matched delivery becomes a row."""
         markets = ResolvedMarkets()
         markets.add(
             "0xm1",
@@ -792,6 +850,7 @@ class TestMatchAndBuild:
         assert rows[0]["p_yes"] == 0.7
 
     def test_unmatched_delivery_goes_to_pending(self) -> None:
+        """Test unmatched delivery goes to pending."""
         markets = ResolvedMarkets()  # empty — no resolved markets
         deliveries = [_make_delivery(deliver_id="0xd1")]
 
@@ -801,8 +860,11 @@ class TestMatchAndBuild:
         assert pending[0]["deliver_id"] == "0xd1"
 
     def test_pending_delivery_matched_on_retry(self) -> None:
-        """Simulates: delivery created in run 1 (unmatched),
-        market resolves, run 2 retries and matches."""
+        """Simulate pending delivery matched on retry.
+
+        Delivery created in run 1 (unmatched),
+        market resolves, run 2 retries and matches.
+        """
         # Run 1: no resolved markets
         deliveries = [_make_delivery(deliver_id="0xd1")]
         _, pending, _, _, _, _ = _match_and_build(
@@ -841,6 +903,7 @@ class TestMatchAndBuild:
         assert len(pending) == 0  # not pending either — already emitted
 
     def test_mixed_matched_and_unmatched(self) -> None:
+        """Test mixed matched and unmatched deliveries."""
         markets = ResolvedMarkets()
         markets.add(
             None,
@@ -881,10 +944,11 @@ class TestPendingAgeCap:
         assert delivery["timestamp"] <= cutoff
 
 
-class TestPendingInState:
+class TestPendingInState:  # pylint: disable=too-few-public-methods
     """Tests that pending deliveries round-trip through state file."""
 
     def test_pending_persisted_and_loaded(self, tmp_path: Path) -> None:
+        """Test pending deliveries persisted and loaded."""
         state_path = tmp_path / ".fetch_state.json"
         pending = [_make_delivery(deliver_id="0xpending1")]
         state = {

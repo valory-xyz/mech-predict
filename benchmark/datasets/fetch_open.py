@@ -25,6 +25,7 @@ from typing import Any, Optional
 import requests
 
 from benchmark.datasets.fetch_production import classify_category
+from benchmark.io import append_jsonl, load_existing_ids
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -410,27 +411,9 @@ def fetch_polymarket_open(
 # ---------------------------------------------------------------------------
 
 
-def load_existing_ids(path: Path) -> set[str]:
+def _load_existing_market_ids(path: Path) -> set[str]:
     """Load market IDs from an existing JSONL file for dedup."""
-    ids: set[str] = set()
-    if not path.exists():
-        return ids
-    for line in path.read_text(encoding="utf-8").strip().split("\n"):
-        if not line:
-            continue
-        try:
-            ids.add(json.loads(line)["id"])
-        except (json.JSONDecodeError, KeyError):
-            continue
-    return ids
-
-
-def append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Append rows to a JSONL file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return load_existing_ids(path, key="id")
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +464,7 @@ def main() -> None:
     args = parser.parse_args()
 
     output_path = Path(args.output)
-    existing_ids = set() if args.dry_run else load_existing_ids(output_path)
+    existing_ids = set() if args.dry_run else _load_existing_market_ids(output_path)
 
     # ---- Fetch markets ----
     all_markets: list[dict[str, Any]] = []

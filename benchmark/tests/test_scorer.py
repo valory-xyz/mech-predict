@@ -16,14 +16,13 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Tests for benchmark/scorer.py"""
+"""Tests for benchmark/scorer.py."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-
-import pytest
 
 from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
@@ -79,20 +78,26 @@ def _row(
 
 
 class TestBrierScore:
+    """Tests for brier_score."""
 
     def test_perfect_prediction_yes(self) -> None:
+        """Test perfect prediction for yes outcome."""
         assert brier_score(1.0, True) == 0.0
 
     def test_perfect_prediction_no(self) -> None:
+        """Test perfect prediction for no outcome."""
         assert brier_score(0.0, False) == 0.0
 
     def test_worst_prediction_yes(self) -> None:
+        """Test worst prediction for yes outcome."""
         assert brier_score(0.0, True) == 1.0
 
     def test_worst_prediction_no(self) -> None:
+        """Test worst prediction for no outcome."""
         assert brier_score(1.0, False) == 1.0
 
     def test_random_guessing(self) -> None:
+        """Test random guessing gives 0.25."""
         assert brier_score(0.5, True) == 0.25
         assert brier_score(0.5, False) == 0.25
 
@@ -108,8 +113,10 @@ class TestBrierScore:
 
 
 class TestComputeGroupStats:
+    """Tests for compute_group_stats."""
 
     def test_all_valid(self) -> None:
+        """Test stats with all valid rows."""
         rows = [
             _row(p_yes=0.9, outcome=True),  # (0.9-1)²  = 0.01
             _row(p_yes=0.8, outcome=False),  # (0.8-0)²  = 0.64
@@ -122,6 +129,7 @@ class TestComputeGroupStats:
         assert stats["n"] == 3
 
     def test_mixed_valid_and_malformed(self) -> None:
+        """Test stats with mixed valid and malformed rows."""
         rows = [
             _row(p_yes=0.5, outcome=True),
             _row(status="malformed"),
@@ -134,6 +142,7 @@ class TestComputeGroupStats:
         assert stats["brier"] == 0.25
 
     def test_all_invalid(self) -> None:
+        """Test stats with all invalid rows."""
         rows = [_row(status="malformed"), _row(status="error")]
         stats = compute_group_stats(rows)
         assert stats["brier"] is None
@@ -141,6 +150,7 @@ class TestComputeGroupStats:
         assert stats["n"] == 2
 
     def test_empty(self) -> None:
+        """Test stats with empty input."""
         stats = compute_group_stats([])
         assert stats["brier"] is None
         assert stats["reliability"] is None
@@ -153,21 +163,26 @@ class TestComputeGroupStats:
 
 
 class TestClassifyHorizon:
+    """Tests for classify_horizon."""
 
     def test_short(self) -> None:
+        """Test short horizon classification."""
         assert classify_horizon(0.5) == "short_lt_7d"
         assert classify_horizon(6.9) == "short_lt_7d"
 
     def test_medium(self) -> None:
+        """Test medium horizon classification."""
         assert classify_horizon(7.0) == "medium_7_30d"
         assert classify_horizon(15.0) == "medium_7_30d"
         assert classify_horizon(30.0) == "medium_7_30d"
 
     def test_long(self) -> None:
+        """Test long horizon classification."""
         assert classify_horizon(30.1) == "long_gt_30d"
         assert classify_horizon(90.0) == "long_gt_30d"
 
     def test_none(self) -> None:
+        """Test None lead days returns unknown."""
         assert classify_horizon(None) == "unknown"
 
 
@@ -177,8 +192,10 @@ class TestClassifyHorizon:
 
 
 class TestGroupBy:
+    """Tests for group_by."""
 
     def test_groups_by_tool(self) -> None:
+        """Test grouping rows by tool name."""
         rows = [
             _row(tool="tool-a"),
             _row(tool="tool-a"),
@@ -189,6 +206,7 @@ class TestGroupBy:
         assert len(groups["tool-b"]) == 1
 
     def test_missing_key_goes_to_unknown(self) -> None:
+        """Test missing key groups to unknown."""
         rows = [{"other_field": "x"}]
         groups = group_by(rows, "tool_name")
         assert "unknown" in groups
@@ -199,9 +217,11 @@ class TestGroupBy:
 # ---------------------------------------------------------------------------
 
 
-class TestGroupByHorizon:
+class TestGroupByHorizon:  # pylint: disable=too-few-public-methods
+    """Tests for group_by_horizon."""
 
     def test_buckets(self) -> None:
+        """Test horizon bucketing."""
         rows = [
             _row(lead_days=3.0),  # short
             _row(lead_days=15.0),  # medium
@@ -224,8 +244,10 @@ class TestGroupByHorizon:
 
 
 class TestGroupByMonth:
+    """Tests for group_by_month."""
 
     def test_monthly_trend(self) -> None:
+        """Test monthly trend grouping."""
         rows = [
             _row(predicted_at="2026-01-10T10:00:00Z"),
             _row(predicted_at="2026-01-20T10:00:00Z"),
@@ -238,9 +260,10 @@ class TestGroupByMonth:
         assert trend[1]["n"] == 1
 
     def test_null_predicted_at_excluded(self) -> None:
+        """Test null predicted_at rows are excluded."""
         rows = [
             _row(predicted_at="2026-03-01T10:00:00Z"),
-            _row(predicted_at=None),
+            _row(predicted_at=None),  # type: ignore[arg-type]
         ]
         trend = group_by_month(rows)
         assert len(trend) == 1
@@ -253,8 +276,10 @@ class TestGroupByMonth:
 
 
 class TestScore:
+    """Tests for score."""
 
     def test_full_scoring(self) -> None:
+        """Test full scoring pipeline."""
         rows = [
             _row(
                 p_yes=0.9,
@@ -302,6 +327,7 @@ class TestScore:
         assert result["by_category"]["crypto"]["n"] == 2
 
     def test_empty_input(self) -> None:
+        """Test scoring with empty input."""
         result = score([])
         assert result["total_rows"] == 0
         assert result["valid_rows"] == 0
@@ -321,6 +347,7 @@ class TestScore:
         assert result["overall"]["brier"] == expected
 
     def test_output_has_all_keys(self) -> None:
+        """Test output contains all expected keys."""
         result = score([_row()])
         expected_keys = [
             "generated_at",
@@ -343,6 +370,7 @@ class TestScore:
 
 
 class TestIncrementalUpdate:
+    """Tests for incremental update."""
 
     def test_empty_scores_initialized(self, tmp_path: Path) -> None:
         """First update with no existing scores creates accumulators."""
@@ -528,6 +556,7 @@ class TestIncrementalUpdate:
 
 
 class TestMonthRollover:
+    """Tests for month rollover logic."""
 
     def test_new_month_creates_snapshot(self, tmp_path: Path) -> None:
         """When month changes, old month is snapshot to history."""
@@ -563,8 +592,6 @@ class TestMonthRollover:
 
         # Second update in April (real time)
         with patch("benchmark.scorer.datetime") as mock_dt:
-            from datetime import datetime, timezone
-
             real_dt = datetime
             mock_dt.now.return_value = real_dt(2026, 4, 6, 12, tzinfo=timezone.utc)
             update([_row()], scores_path, history_path)
@@ -634,7 +661,7 @@ class TestMonthRollover:
 
     def test_load_history_missing_file(self, tmp_path: Path) -> None:
         """load_history returns empty list for missing file."""
-        assert load_history(tmp_path / "nope.jsonl") == []
+        assert not load_history(tmp_path / "nope.jsonl")
 
 
 # ---------------------------------------------------------------------------
@@ -643,6 +670,7 @@ class TestMonthRollover:
 
 
 class TestRebuild:
+    """Tests for rebuild."""
 
     def test_rebuild_from_archive_files(self, tmp_path: Path) -> None:
         """Rebuild reads all log files and produces valid scores."""
@@ -732,8 +760,10 @@ class TestRebuild:
 
 
 class TestToolVersionBreakdown:
+    """Tests for tool version breakdown."""
 
     def test_groups_by_version(self, tmp_path: Path) -> None:
+        """Test grouping by tool version."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
@@ -750,6 +780,7 @@ class TestToolVersionBreakdown:
         assert result["by_tool_version"]["t1 | v2"]["n"] == 1
 
     def test_null_version_grouped_as_unknown(self, tmp_path: Path) -> None:
+        """Test null version grouped as unknown."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
@@ -761,8 +792,10 @@ class TestToolVersionBreakdown:
 
 
 class TestConfigBreakdown:
+    """Tests for config breakdown."""
 
     def test_groups_by_config(self, tmp_path: Path) -> None:
+        """Test grouping by config hash."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
@@ -779,6 +812,7 @@ class TestConfigBreakdown:
         assert result["by_config"]["t1 | def456"]["n"] == 1
 
     def test_null_config_grouped_as_unknown(self, tmp_path: Path) -> None:
+        """Test null config grouped as unknown."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 

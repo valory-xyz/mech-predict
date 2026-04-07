@@ -27,6 +27,7 @@ DEFAULT_OUTPUT = Path(__file__).parent / "results" / "report.md"
 
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
+BSS_HARMFUL_THRESHOLD = 0.0
 RELIABILITY_ISSUE_THRESHOLD = 0.90
 SAMPLE_SIZE_WARNING = 20
 TREND_WORSENING_THRESHOLD = 0.02
@@ -68,13 +69,20 @@ def section_overall(scores: dict[str, Any]) -> str:
     brier_str = str(o["brier"]) if o["brier"] is not None else "N/A"
     acc_str = f"{o['accuracy']:.0%}" if o.get("accuracy") is not None else "N/A"
     sharp_str = f"{o['sharpness']:.4f}" if o.get("sharpness") is not None else "N/A"
+    bss = o.get("brier_skill_score")
+    bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+    baseline_str = str(o.get("baseline_brier", "N/A"))
     lines = [
         "## Overall",
         "",
         f"- Predictions scored: {scores['valid_rows']} / {scores['total_rows']}"
         f" ({rel_str} reliability)",
         f"- Overall Brier: {brier_str}",
-        "  - 0.0 = perfect, 0.25 = random guessing, 1.0 = maximally wrong",
+        f"- Baseline Brier: {baseline_str}"
+        " (naive predictor using observed base rate)",
+        f"- Brier Skill Score: {bss_str}",
+        "  - BSS > 0 = better than base rate, BSS = 0 = no skill,"
+        " BSS < 0 = worse than base rate",
         f"- Accuracy: {acc_str}",
         f"- Sharpness: {sharp_str}",
         "  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
@@ -111,8 +119,10 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
         sharp = (
             f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
         )
+        bss = stats.get("brier_skill_score")
+        bss_str = f", BSS: {bss:+.4f}" if bss is not None else ""
         lines.append(
-            f"{i}. **{tool}** — Brier: {brier}, Acc: {acc},"
+            f"{i}. **{tool}** — Brier: {brier}{bss_str}, Acc: {acc},"
             f" Sharp: {sharp} (n={stats['n']}){flags}"
         )
 
@@ -127,7 +137,18 @@ def section_platform(scores: dict[str, Any]) -> str:
         platforms.items(),
         key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
     ):
-        lines.append(f"- **{platform}**: Brier: {stats['brier']} (n={stats['n']})")
+        baseline = stats.get("baseline_brier")
+        bss = stats.get("brier_skill_score")
+        yes_rate = stats.get("outcome_yes_rate")
+        parts = [f"Brier: {stats['brier']}"]
+        if baseline is not None:
+            parts.append(f"baseline: {baseline}")
+        if bss is not None:
+            parts.append(f"BSS: {bss:+.4f}")
+        if yes_rate is not None:
+            parts.append(f"yes rate: {yes_rate:.0%}")
+        parts.append(f"n={stats['n']}")
+        lines.append(f"- **{platform}**: {', '.join(parts)}")
     return "\n".join(lines)
 
 
@@ -143,6 +164,7 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
     ]:
         for name, stats in (scores.get(section_key) or {}).items():
             brier = stats.get("brier")
+            bss = stats.get("brier_skill_score")
             if brier is not None and brier > BRIER_WEAK_THRESHOLD:
                 found = True
                 label = (
@@ -154,11 +176,19 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
                     f"- **{name}** ({section_name}): Brier {brier:.4f} (n={stats['n']})"
                     f" — {label}"
                 )
+            elif bss is not None and bss < BSS_HARMFUL_THRESHOLD:
+                baseline = stats.get("baseline_brier", "?")
+                if stats.get("decision_worthy", True):
+                    found = True
+                    lines.append(
+                        f"- **{name}** ({section_name}): BSS {bss:+.4f}"
+                        f" — worse than base-rate predictor"
+                        f" (Brier {brier} vs baseline {baseline},"
+                        f" n={stats['n']})"
+                    )
 
     if not found:
-        lines.append(
-            f"No weak spots detected (all Brier scores below {BRIER_WEAK_THRESHOLD})."
-        )
+        lines.append("No weak spots detected.")
 
     return "\n".join(lines)
 
@@ -314,8 +344,8 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     lines = [
         "## Tool × Platform",
         "",
-        "| Tool | Platform | Brier | Accuracy | Sharpness | n |",
-        "|------|----------|-------|----------|-----------|---|",
+        "| Tool | Platform | Brier | BSS | Accuracy | Sharpness | n |",
+        "|------|----------|-------|-----|----------|-----------|---|",
     ]
     for key, stats in sorted(
         data.items(),
@@ -325,13 +355,16 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
         tool = parts[0] if parts else key
         platform = parts[1] if len(parts) > 1 else "?"
         brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        bss = stats.get("brier_skill_score")
+        bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
         acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
         sharp = (
             f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
         )
         label = _sample_label(stats)
         lines.append(
-            f"| {tool} | {platform} | {brier} | {acc} | {sharp} | {stats['n']}{label} |"
+            f"| {tool} | {platform} | {brier} | {bss_str} | {acc}"
+            f" | {sharp} | {stats['n']}{label} |"
         )
 
     return "\n".join(lines)
@@ -449,6 +482,47 @@ def section_latency(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def section_base_rates(scores: dict[str, Any]) -> str:
+    """Generate the base rate summary section per platform."""
+    platforms = scores.get("by_platform", {})
+    if not platforms:
+        return "## Base Rates\n\nNo platform data available."
+
+    header = "| Platform | Yes Rate | No Rate | Baseline Brier | Always-No Brier |"
+    separator = "|----------|----------|---------|----------------|-----------------|"
+    lines = [
+        "## Base Rates",
+        "",
+        header,
+        separator,
+    ]
+    for platform, stats in sorted(platforms.items()):
+        yes_rate = stats.get("outcome_yes_rate")
+        if yes_rate is None:
+            continue
+        no_rate = 1 - yes_rate
+        baseline = stats.get("baseline_brier", 0)
+        always_no_brier = round(yes_rate, 4)
+        lines.append(
+            f"| {platform} | {yes_rate:.0%} | {no_rate:.0%}"
+            f" | {baseline} | {always_no_brier} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "- **Baseline Brier**: Brier score of a predictor that always"
+            " outputs the observed base rate (best no-skill strategy)",
+            "- **Always-No Brier**: Brier score of a predictor that always"
+            " outputs p_yes=0.0",
+            "- Tools should score below the baseline to demonstrate"
+            " predictive skill (BSS > 0)",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
@@ -474,6 +548,7 @@ def generate_report(
     sections = [
         f"# Benchmark Report — {date}",
         section_overall(scores),
+        section_base_rates(scores),
         section_tool_ranking(scores),
         section_platform(scores),
         section_tool_platform(scores),

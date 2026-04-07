@@ -359,6 +359,7 @@ def _empty_group() -> dict[str, Any]:
         "brier_sum": 0.0,
         "correct_count": 0,
         "sharpness_sum": 0.0,
+        "outcome_yes_count": 0,
     }
 
 
@@ -410,6 +411,8 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         if (p_yes > 0.5) == outcome:
             group["correct_count"] += 1
         group["sharpness_sum"] += abs(p_yes - 0.5)
+        if outcome:
+            group["outcome_yes_count"] += 1
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -441,11 +444,20 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
             decision_worthy=False,
         )
     else:
-        result["brier"] = round(group["brier_sum"] / valid_n, 4)
+        brier = round(group["brier_sum"] / valid_n, 4)
+        yes_rate = group["outcome_yes_count"] / valid_n
+        baseline_brier = round(yes_rate * (1 - yes_rate), 4)
+        result["brier"] = brier
         result["accuracy"] = round(group["correct_count"] / valid_n, 4)
         result["sharpness"] = round(group["sharpness_sum"] / valid_n, 4)
         result["reliability"] = round(valid_n / n, 4)
         result["decision_worthy"] = valid_n >= MIN_SAMPLE_SIZE
+        result["outcome_yes_rate"] = round(yes_rate, 4)
+        result["baseline_brier"] = baseline_brier
+        if baseline_brier > 0:
+            result["brier_skill_score"] = round(1 - (brier / baseline_brier), 4)
+        else:
+            result["brier_skill_score"] = None
     return result
 
 
@@ -711,6 +723,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
             "brier_sum": data["overall"]["brier_sum"],
             "correct_count": data["overall"]["correct_count"],
             "sharpness_sum": data["overall"]["sharpness_sum"],
+            "outcome_yes_count": data["overall"].get("outcome_yes_count", 0),
         },
     }
     for dim in (
@@ -730,6 +743,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
                 "brier_sum": group["brier_sum"],
                 "correct_count": group["correct_count"],
                 "sharpness_sum": group["sharpness_sum"],
+                "outcome_yes_count": group.get("outcome_yes_count", 0),
             }
 
     # Restore calibration accumulators
@@ -791,7 +805,12 @@ def update(
         **finalized["overall"],
         **{
             k: scores["overall"][k]
-            for k in ("brier_sum", "correct_count", "sharpness_sum")
+            for k in (
+                "brier_sum",
+                "correct_count",
+                "sharpness_sum",
+                "outcome_yes_count",
+            )
         },
     }
     for dim in (
@@ -807,7 +826,13 @@ def update(
             output[dim][key] = {
                 **finalized[dim][key],
                 **{
-                    k: group[k] for k in ("brier_sum", "correct_count", "sharpness_sum")
+                    k: group[k]
+                    for k in (
+                        "brier_sum",
+                        "correct_count",
+                        "sharpness_sum",
+                        "outcome_yes_count",
+                    )
                 },
             }
     # Preserve raw calibration accumulators alongside derived
@@ -889,7 +914,12 @@ def rebuild(
         **finalized["overall"],
         **{
             k: scores["overall"][k]
-            for k in ("brier_sum", "correct_count", "sharpness_sum")
+            for k in (
+                "brier_sum",
+                "correct_count",
+                "sharpness_sum",
+                "outcome_yes_count",
+            )
         },
     }
     for dim in (
@@ -905,7 +935,13 @@ def rebuild(
             output[dim][key] = {
                 **finalized[dim][key],
                 **{
-                    k: group[k] for k in ("brier_sum", "correct_count", "sharpness_sum")
+                    k: group[k]
+                    for k in (
+                        "brier_sum",
+                        "correct_count",
+                        "sharpness_sum",
+                        "outcome_yes_count",
+                    )
                 },
             }
     output["_calibration_accum"] = scores["calibration"]

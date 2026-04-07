@@ -769,3 +769,135 @@ class TestRun:
             parsed = json.loads(result[0])
             assert parsed["is_valid"] is False
             assert parsed["n_successful"] == 0
+
+    def test_all_error_stubs_trigger_failure(self) -> None:
+        """If every voter errors, the failure path is taken and the judge is skipped."""
+        keys = _mock_api_keys()
+        all_errored = [
+            _vote(voter="v1", error="boom"),
+            _vote(voter="v2", error="timeout"),
+        ]
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=all_errored),
+            patch(f"{MODULE}._run_judge") as mock_judge,
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            mock_judge.assert_not_called()
+            parsed = json.loads(result[0])
+            assert parsed["is_valid"] is False
+            assert parsed["n_successful"] == 0
+            assert parsed["judge_reasoning"] == "All voters failed."
+            # Error stubs are preserved in the response for debuggability.
+            assert len(parsed["votes"]) == 2
+
+    def test_n_successful_excludes_error_stubs_consensus(self) -> None:
+        """n_successful counts only voters whose error is None (consensus path)."""
+        keys = _mock_api_keys()
+        # 3 successful + 1 errored -- successful voters unanimously agree, so
+        # _has_consensus returns True and the judge is skipped.
+        votes = [
+            _vote(voter="v1", has_occurred=True),
+            _vote(voter="v2", has_occurred=True),
+            _vote(voter="v3", has_occurred=True),
+            _vote(voter="v4", error="crashed"),
+        ]
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=votes),
+            patch(f"{MODULE}._run_judge") as mock_judge,
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            mock_judge.assert_not_called()
+            parsed = json.loads(result[0])
+            assert parsed["n_successful"] == 3  # not 4 -- error stub excluded
+            assert len(parsed["votes"]) == 4  # all voters still in result
+
+    def test_n_successful_excludes_error_stubs_judge(self) -> None:
+        """n_successful counts only voters whose error is None (judge path)."""
+        keys = _mock_api_keys()
+        # 2 disagreeing successful + 1 errored -- triggers judge.
+        votes = [
+            _vote(voter="v1", has_occurred=True),
+            _vote(voter="v2", has_occurred=False),
+            _vote(voter="v3", error="crashed"),
+        ]
+        judge_verdict = {
+            "is_valid": True,
+            "is_determinable": True,
+            "has_occurred": True,
+            "judge_reasoning": "sided with v1",
+        }
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=votes),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            parsed = json.loads(result[0])
+            assert parsed["n_successful"] == 2  # not 3 -- error stub excluded
+            assert len(parsed["votes"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestCounterCallbackConcurrency:
+    """Tests for the thread-safety guarantee around counter_callback."""
+
+    def test_counter_callback_lock_is_held_during_invocation(self) -> None:
+        """_adapter_openrouter holds COUNTER_CALLBACK_LOCK while invoking the callback.
+
+        We verify this by asserting the lock is locked from inside the callback.
+        This is a direct contract check -- no threads needed.
+        """
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            COUNTER_CALLBACK_LOCK,
+            _adapter_openrouter,
+        )
+
+        held_during_call = {"value": False}
+
+        def inspecting_callback(**kwargs: Any) -> None:
+            # acquire(blocking=False) returns False iff the lock is already held.
+            held_during_call["value"] = not COUNTER_CALLBACK_LOCK.acquire(
+                blocking=False
+            )
+            if not held_during_call["value"]:
+                COUNTER_CALLBACK_LOCK.release()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="{}"))
+        ]
+        mock_client.chat.completions.create.return_value.usage = MagicMock(
+            prompt_tokens=1, completion_tokens=1, cost=0.001
+        )
+
+        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
+            _adapter_openrouter(
+                model="anthropic/claude-haiku-4.5:online",
+                prompt="p",
+                api_key="k",
+                max_tokens=10,
+                timeout=1,
+                max_retries=1,
+                retry_delay=0,
+                counter_callback=inspecting_callback,
+            )
+
+        assert held_during_call["value"] is True

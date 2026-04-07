@@ -27,12 +27,15 @@ tuple shape, same JSON result schema ({is_valid, is_determinable, has_occurred})
 
 import functools
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
+
+COUNTER_CALLBACK_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Types (mech tool contract)
@@ -340,16 +343,17 @@ def _adapter_openrouter(
     # web-search surcharge or routing markup).
     usage = getattr(response, "usage", None)
     if counter_callback is not None and usage is not None:
-        try:
-            counter_callback(
-                model=model,
-                token_counter=_noop_token_counter,
-                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-                call_cost=getattr(usage, "cost", None),
-            )
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"  Warning: counter_callback failed for {model}: {e}")
+        with COUNTER_CALLBACK_LOCK:
+            try:
+                counter_callback(
+                    model=model,
+                    token_counter=_noop_token_counter,
+                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                    call_cost=getattr(usage, "cost", None),
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                print(f"  Warning: counter_callback failed for {model}: {e}")
 
     return raw
 
@@ -460,8 +464,9 @@ def _run_judge(
     :param counter_callback: optional token/cost accounting callback.
     :return: judge verdict dict.
     """
+    successful = _successful_votes(votes)
     formatted_votes = ""
-    for i, v in enumerate(votes, 1):
+    for i, v in enumerate(successful, 1):
         vote_data = {
             "is_valid": v.is_valid,
             "is_determinable": v.is_determinable,
@@ -499,6 +504,15 @@ def _run_judge(
 # ---------------------------------------------------------------------------
 
 
+def _successful_votes(votes: List[VoterResult]) -> List[VoterResult]:
+    """Filter to votes whose voter did not error out.
+
+    :param votes: all voter results (including error stubs).
+    :return: voter results with ``error is None``.
+    """
+    return [v for v in votes if v.error is None]
+
+
 def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     """Filter to votes that are valid and determinable."""
     return [
@@ -531,6 +545,7 @@ def _has_consensus(votes: List[VoterResult]) -> bool:
 
 def _build_consensus_result(votes: List[VoterResult]) -> dict:
     """Build result from unanimous votes (skip judge)."""
+    successful = _successful_votes(votes)
     decided = _decided_votes(votes)
     return {
         "is_valid": True,
@@ -540,7 +555,7 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
         "judge_reasoning": "Voter majority consensus -- judge skipped.",
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
-        "n_successful": len(votes),
+        "n_successful": len(successful),
         "n_decided": len(decided),
     }
 
@@ -631,14 +646,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     # 1. Fan out to voters (parallel)
     print(f"Collecting votes from {voters}...")
     votes = collect_votes(prompt, voters, api_keys, counter_callback)
+    successful = _successful_votes(votes)
 
     # 2. Early exit: no successful votes
-    if not votes:
+    if not successful:
         result: Dict[str, Any] = {
             "is_valid": False,
             "is_determinable": False,
             "has_occurred": None,
-            "votes": [],
+            "votes": [asdict(v) for v in votes],
             "judge_reasoning": "All voters failed.",
             "agreement_ratio": 0.0,
             "n_voters": len(voters),
@@ -682,7 +698,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "judge_reasoning": judge_reasoning,
         "agreement_ratio": _compute_agreement(votes),
         "n_voters": len(voters),
-        "n_successful": len(votes),
+        "n_successful": len(successful),
         "n_decided": len(_decided_votes(votes)),
     }
 

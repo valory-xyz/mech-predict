@@ -32,7 +32,6 @@ from benchmark.score_tournament import (
     score_tournament,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -233,9 +232,7 @@ class TestScoreTournament:
         # Two predictions for same market (different tools)
         p1 = _prediction(row_id="tourn_a_1", market_address="0xabc")
         p2 = _prediction(row_id="tourn_b_2", market_address="0xabc")
-        pred_path.write_text(
-            json.dumps(p1) + "\n" + json.dumps(p2) + "\n"
-        )
+        pred_path.write_text(json.dumps(p1) + "\n" + json.dumps(p2) + "\n")
 
         mock_omen.return_value = {
             "0xabc": {
@@ -373,8 +370,7 @@ class TestLoadPredictions:
     def test_load(self, tmp_path: Path) -> None:
         f = tmp_path / "preds.jsonl"
         f.write_text(
-            json.dumps(_prediction("r1")) + "\n"
-            + json.dumps(_prediction("r2")) + "\n"
+            json.dumps(_prediction("r1")) + "\n" + json.dumps(_prediction("r2")) + "\n"
         )
         rows = load_predictions(f)
         assert len(rows) == 2

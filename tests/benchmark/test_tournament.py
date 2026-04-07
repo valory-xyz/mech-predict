@@ -158,8 +158,7 @@ class TestJsonlIO:
     def test_load_markets(self, tmp_path: Path) -> None:
         f = tmp_path / "markets.jsonl"
         f.write_text(
-            json.dumps(_market("m1")) + "\n"
-            + json.dumps(_market("m2")) + "\n"
+            json.dumps(_market("m1")) + "\n" + json.dumps(_market("m2")) + "\n"
         )
         markets = load_markets(f)
         assert len(markets) == 2
@@ -272,8 +271,10 @@ class TestRunTournament:
         markets_path = tmp_path / "markets.jsonl"
         output_path = tmp_path / "predictions.jsonl"
         markets_path.write_text(
-            json.dumps(_market("omen_0x1", "Will A?")) + "\n"
-            + json.dumps(_market("omen_0x2", "Will B?")) + "\n"
+            json.dumps(_market("omen_0x1", "Will A?"))
+            + "\n"
+            + json.dumps(_market("omen_0x2", "Will B?"))
+            + "\n"
         )
 
         run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
@@ -328,9 +329,7 @@ class TestRunTournament:
         markets_path.write_text(json.dumps(_market("omen_0x1")) + "\n")
 
         # First run — malformed result
-        mock_run.return_value = _run_result(
-            p_yes=None, p_no=None, status="malformed"
-        )
+        mock_run.return_value = _run_result(p_yes=None, p_no=None, status="malformed")
         run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
         assert mock_run.call_count == 1
 

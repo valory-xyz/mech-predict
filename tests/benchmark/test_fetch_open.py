@@ -32,7 +32,6 @@ from benchmark.datasets.fetch_open import (
     load_existing_ids,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -155,9 +154,7 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_basic_fetch(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_basic_fetch(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -176,9 +173,7 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_skips_neg_risk(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_skips_neg_risk(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -192,17 +187,13 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_skips_resolved(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_skips_resolved(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
         """Market with price >= 0.99 is effectively resolved."""
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            _poly_market(prices='["1.0", "0.0"]')
-        ]
+        mock_resp.json.return_value = [_poly_market(prices='["1.0", "0.0"]')]
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
@@ -211,9 +202,7 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_liquidity_filter(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_liquidity_filter(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -240,10 +229,7 @@ class TestJsonlIO:
 
     def test_load_existing_ids(self, tmp_path: Path) -> None:
         f = tmp_path / "markets.jsonl"
-        f.write_text(
-            '{"id": "omen_0x1"}\n'
-            '{"id": "poly_abc"}\n'
-        )
+        f.write_text('{"id": "omen_0x1"}\n' '{"id": "poly_abc"}\n')
         ids = load_existing_ids(f)
         assert ids == {"omen_0x1", "poly_abc"}
 

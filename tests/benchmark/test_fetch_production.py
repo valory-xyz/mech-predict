@@ -61,9 +61,7 @@ class TestParseToolResponse:
     """Tests for toolResponse JSON parsing."""
 
     def test_valid_json(self) -> None:
-        resp = parse_tool_response(
-            '{"p_yes": 0.72, "p_no": 0.28, "confidence": 0.85}'
-        )
+        resp = parse_tool_response('{"p_yes": 0.72, "p_no": 0.28, "confidence": 0.85}')
         assert resp["prediction_parse_status"] == "valid"
         assert resp["p_yes"] == 0.72
         assert resp["p_no"] == 0.28
@@ -122,17 +120,13 @@ class TestParseToolResponse:
 
     def test_regex_fallback(self) -> None:
         """Regex extraction works when JSON is wrapped in extra text."""
-        resp = parse_tool_response(
-            'Here is the result: {"p_yes": 0.6, "p_no": 0.4}'
-        )
+        resp = parse_tool_response('Here is the result: {"p_yes": 0.6, "p_no": 0.4}')
         assert resp["prediction_parse_status"] == "valid"
         assert resp["p_yes"] == 0.6
 
     def test_regex_also_validates_sum(self) -> None:
         """Regex path should also reject incoherent probabilities."""
-        resp = parse_tool_response(
-            'Result: {"p_yes": 0.8, "p_no": 0.8}'
-        )
+        resp = parse_tool_response('Result: {"p_yes": 0.8, "p_no": 0.8}')
         assert resp["prediction_parse_status"] == "malformed"
 
     def test_unparseable_garbage(self) -> None:
@@ -347,18 +341,20 @@ class TestClassifyCategory:
 class TestParseRequestContext:
 
     def test_schema_v2(self) -> None:
-        content = json.dumps({
-            "prompt": "...",
-            "tool": "superforcaster",
-            "schema_version": "2.0",
-            "request_context": {
-                "market_id": "0xabc",
-                "type": "polymarket",
-                "market_prob": 0.65,
-                "market_liquidity_usd": 1234.56,
-                "market_close_at": "2026-04-01T00:00:00Z",
-            },
-        })
+        content = json.dumps(
+            {
+                "prompt": "...",
+                "tool": "superforcaster",
+                "schema_version": "2.0",
+                "request_context": {
+                    "market_id": "0xabc",
+                    "type": "polymarket",
+                    "market_prob": 0.65,
+                    "market_liquidity_usd": 1234.56,
+                    "market_close_at": "2026-04-01T00:00:00Z",
+                },
+            }
+        )
         ctx = _parse_request_context(content)
         assert ctx["market_id"] == "0xabc"
         assert ctx["market_type"] == "polymarket"
@@ -602,11 +598,7 @@ class TestDeduplication:
 
     def test_load_ids_from_file(self, tmp_path: Path) -> None:
         log_path = tmp_path / "log.jsonl"
-        log_path.write_text(
-            '{"row_id": "a"}\n'
-            '{"row_id": "b"}\n'
-            '{"row_id": "c"}\n'
-        )
+        log_path.write_text('{"row_id": "a"}\n' '{"row_id": "b"}\n' '{"row_id": "c"}\n')
         ids = _load_ids_from_file(log_path)
         assert ids == {"a", "b", "c"}
 
@@ -660,9 +652,7 @@ class TestDailyLogRotation:
         rows = [{"row_id": "r1", "data": "x"}, {"row_id": "r2", "data": "y"}]
         append_rows(output, rows)
         assert output.exists()
-        lines = [
-            json.loads(ln) for ln in output.read_text().strip().split("\n")
-        ]
+        lines = [json.loads(ln) for ln in output.read_text().strip().split("\n")]
         assert len(lines) == 2
         assert {ln["row_id"] for ln in lines} == {"r1", "r2"}
 
@@ -789,7 +779,11 @@ class TestMatchAndBuild:
 
     def test_matched_delivery_becomes_row(self) -> None:
         markets = ResolvedMarkets()
-        markets.add("0xm1", "Will Bitcoin hit $100k by June?", {"outcome": True, "resolved_at_ts": 2000})
+        markets.add(
+            "0xm1",
+            "Will Bitcoin hit $100k by June?",
+            {"outcome": True, "resolved_at_ts": 2000},
+        )
         deliveries = [_make_delivery(deliver_id="0xd1")]
 
         rows, pending, _, _, _, _ = _match_and_build(deliveries, markets, set(), "omen")
@@ -811,34 +805,56 @@ class TestMatchAndBuild:
         market resolves, run 2 retries and matches."""
         # Run 1: no resolved markets
         deliveries = [_make_delivery(deliver_id="0xd1")]
-        _, pending, _, _, _, _ = _match_and_build(deliveries, ResolvedMarkets(), set(), "omen")
+        _, pending, _, _, _, _ = _match_and_build(
+            deliveries, ResolvedMarkets(), set(), "omen"
+        )
         assert len(pending) == 1
 
         # Run 2: market resolved
         markets = ResolvedMarkets()
-        markets.add(None, "Will Bitcoin hit $100k by June?", {"outcome": True, "resolved_at_ts": 2000})
-        rows, still_pending, _, _, _, _ = _match_and_build(pending, markets, set(), "omen")
+        markets.add(
+            None,
+            "Will Bitcoin hit $100k by June?",
+            {"outcome": True, "resolved_at_ts": 2000},
+        )
+        rows, still_pending, _, _, _, _ = _match_and_build(
+            pending, markets, set(), "omen"
+        )
         assert len(rows) == 1
         assert len(still_pending) == 0
 
     def test_already_emitted_row_not_duplicated(self) -> None:
         """If a delivery was already emitted (row_id in existing_ids), skip it."""
         markets = ResolvedMarkets()
-        markets.add(None, "Will Bitcoin hit $100k by June?", {"outcome": True, "resolved_at_ts": 2000})
+        markets.add(
+            None,
+            "Will Bitcoin hit $100k by June?",
+            {"outcome": True, "resolved_at_ts": 2000},
+        )
         delivery = _make_delivery(deliver_id="0xd1")
         existing = {_make_row_id("omen", "0xd1")}
 
-        rows, pending, _, _, _, _ = _match_and_build([delivery], markets, existing, "omen")
+        rows, pending, _, _, _, _ = _match_and_build(
+            [delivery], markets, existing, "omen"
+        )
         assert len(rows) == 0
         assert len(pending) == 0  # not pending either — already emitted
 
     def test_mixed_matched_and_unmatched(self) -> None:
         markets = ResolvedMarkets()
-        markets.add(None, "Will Bitcoin hit $100k by June?", {"outcome": True, "resolved_at_ts": 2000})
+        markets.add(
+            None,
+            "Will Bitcoin hit $100k by June?",
+            {"outcome": True, "resolved_at_ts": 2000},
+        )
         deliveries = [
-            _make_delivery(deliver_id="0xd1", question_title="Will Bitcoin hit $100k by June?"),
+            _make_delivery(
+                deliver_id="0xd1", question_title="Will Bitcoin hit $100k by June?"
+            ),
             _make_delivery(deliver_id="0xd2", question_title="Will ETH hit $5k?"),
-            _make_delivery(deliver_id="0xd3", question_title="Will Bitcoin hit $100k by June?"),
+            _make_delivery(
+                deliver_id="0xd3", question_title="Will Bitcoin hit $100k by June?"
+            ),
         ]
 
         rows, pending, _, _, _, _ = _match_and_build(deliveries, markets, set(), "omen")

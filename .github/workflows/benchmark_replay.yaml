@@ -3,52 +3,93 @@ name: benchmark-replay
 on:
   issue_comment:
     types: [created]
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: 'Tool name to benchmark'
+        required: true
+        default: 'prediction-request-reasoning'
+      phase:
+        description: 'Replay phase'
+        required: false
+        default: 'prediction-only'
+      sample:
+        description: 'Sample size per platform'
+        required: false
+        default: '50'
+      seed:
+        description: 'Random seed'
+        required: false
+        default: '42'
+      pr:
+        description: 'PR number to post results on (optional)'
+        required: false
+        default: ''
 
 jobs:
   replay:
-    # Only run on PR comments starting with /benchmark, from authorized users
+    # For issue_comment: only run on PR comments starting with /benchmark, from authorized users
+    # For workflow_dispatch: always run
     if: >-
-      github.event.issue.pull_request
-      && startsWith(github.event.comment.body, '/benchmark ')
-      && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+      github.event_name == 'workflow_dispatch'
+      || (
+        github.event.issue.pull_request
+        && startsWith(github.event.comment.body, '/benchmark ')
+        && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
     runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     steps:
-      # Acknowledge the trigger
+      # Acknowledge the trigger (issue_comment only)
       - name: React to comment
+        if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
             -f content=eyes --silent
 
-      # Parse /benchmark <tool> [--phase X] [--sample N] [--seed S]
+      # Parse inputs from comment or workflow_dispatch
       - name: Parse command
         id: parse
         run: |
-          BODY="${{ github.event.comment.body }}"
-          # Extract tool name (first arg after /benchmark)
-          TOOL=$(echo "$BODY" | awk '{print $2}')
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TOOL="${{ github.event.inputs.tool }}"
+            PHASE="${{ github.event.inputs.phase }}"
+            SAMPLE="${{ github.event.inputs.sample }}"
+            SEED="${{ github.event.inputs.seed }}"
+            PR="${{ github.event.inputs.pr }}"
+            TRIGGERED_BY="${{ github.actor }}"
+          else
+            BODY="${{ github.event.comment.body }}"
+            TOOL=$(echo "$BODY" | awk '{print $2}')
+            PHASE=$(echo "$BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
+            SAMPLE=$(echo "$BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
+            SEED=$(echo "$BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
+            PR="${{ github.event.issue.number }}"
+            TRIGGERED_BY="${{ github.event.comment.user.login }}"
+          fi
+
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
-
-          # Extract optional flags with defaults
-          PHASE=$(echo "$BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
           echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
-
-          SAMPLE=$(echo "$BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
           echo "sample=$SAMPLE" >> "$GITHUB_OUTPUT"
-
-          SEED=$(echo "$BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
           echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "triggered_by=$TRIGGERED_BY" >> "$GITHUB_OUTPUT"
 
-          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED"
+          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED, PR: $PR"
 
-      # Checkout the PR branch
+      # Checkout — PR head for issue_comment, current branch for workflow_dispatch
       - name: Checkout PR head
+        if: github.event_name == 'issue_comment'
         uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ github.event.issue.number }}/head
+
+      - name: Checkout branch
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -104,14 +145,21 @@ jobs:
             --output-dir benchmark/results/ci_replay/ \
             --phase "${{ steps.parse.outputs.phase }}"
 
-      # Compute metrics and post comment
+      # Compute metrics and post comment (only if PR number is set)
       - name: Post benchmark report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python -m benchmark.ci_replay \
-            --baseline benchmark/results/ci_replay/baseline.jsonl \
-            --candidate benchmark/results/ci_replay/candidate.jsonl \
-            --pr "${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}" \
-            --triggered-by "${{ github.event.comment.user.login }}"
+          PR="${{ steps.parse.outputs.pr }}"
+          if [ -n "$PR" ]; then
+            python -m benchmark.ci_replay \
+              --baseline benchmark/results/ci_replay/baseline.jsonl \
+              --candidate benchmark/results/ci_replay/candidate.jsonl \
+              --pr "$PR" \
+              --repo "${{ github.repository }}" \
+              --triggered-by "${{ steps.parse.outputs.triggered_by }}"
+          else
+            python -m benchmark.ci_replay \
+              --baseline benchmark/results/ci_replay/baseline.jsonl \
+              --candidate benchmark/results/ci_replay/candidate.jsonl
+          fi

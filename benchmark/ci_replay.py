@@ -21,7 +21,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 from collections import defaultdict
@@ -75,16 +74,21 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return overall
 
 
-def _fmt_delta(baseline_val: float | None, candidate_val: float | None, lower_is_better: bool = True) -> str:
+def _fmt_delta(
+    baseline_val: float | None,
+    candidate_val: float | None,
+    lower_is_better: bool = True,
+) -> str:
     """Format a delta cell with arrow indicator."""
     if baseline_val is None or candidate_val is None or baseline_val == 0:
         return "N/A"
     delta_pct = (candidate_val - baseline_val) / abs(baseline_val) * 100
-    improved = (delta_pct < 0) if lower_is_better else (delta_pct > 0)
     return f"{delta_pct:+.1f}%"
 
 
-def _fmt_metric_row(name: str, b_val: Any, c_val: Any, fmt: str, lower_is_better: bool = True) -> str:
+def _fmt_metric_row(
+    name: str, b_val: Any, c_val: Any, fmt: str, lower_is_better: bool = True
+) -> str:
     """Format a single metric row for the markdown table."""
     if b_val is None:
         b_str = "N/A"
@@ -113,9 +117,27 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
     lines = [
         "| Metric | Baseline (prod) | Candidate (PR) | Delta |",
         "|--------|-----------------|----------------|-------|",
-        _fmt_metric_row("Brier score", baseline["brier"], candidate["brier"], "float", lower_is_better=True),
-        _fmt_metric_row("Accuracy", baseline["accuracy"], candidate["accuracy"], "pct", lower_is_better=False),
-        _fmt_metric_row("Overconf-wrong", baseline["overconf_wrong"], candidate["overconf_wrong"], "int", lower_is_better=True),
+        _fmt_metric_row(
+            "Brier score",
+            baseline["brier"],
+            candidate["brier"],
+            "float",
+            lower_is_better=True,
+        ),
+        _fmt_metric_row(
+            "Accuracy",
+            baseline["accuracy"],
+            candidate["accuracy"],
+            "pct",
+            lower_is_better=False,
+        ),
+        _fmt_metric_row(
+            "Overconf-wrong",
+            baseline["overconf_wrong"],
+            candidate["overconf_wrong"],
+            "int",
+            lower_is_better=True,
+        ),
     ]
     return "\n".join(lines)
 
@@ -148,8 +170,12 @@ def format_report(
     if len(all_platforms) > 1:
         detail_lines = ["<details><summary>Per-platform breakdown</summary>", ""]
         for plat in all_platforms:
-            b_plat = b_platforms.get(plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0})
-            c_plat = c_platforms.get(plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0})
+            b_plat = b_platforms.get(
+                plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0}
+            )
+            c_plat = c_platforms.get(
+                plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0}
+            )
             detail_lines.append(f"### {plat.title()} (n={b_plat['n']})")
             detail_lines.append("")
             detail_lines.append(_metrics_table(b_plat, c_plat))
@@ -184,13 +210,16 @@ def post_or_update_comment(report: str, pr_number: int, repo: str) -> None:
     # Find existing benchmark comment
     result = subprocess.run(
         [
-            "gh", "api",
+            "gh",
+            "api",
             f"repos/{repo}/issues/{pr_number}/comments",
-            "--paginate", "--jq",
+            "--paginate",
+            "--jq",
             '[.[] | select(.body | contains("<!-- benchmark-result -->")) | .id] | first',
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     existing_id = result.stdout.strip()
 
@@ -198,10 +227,13 @@ def post_or_update_comment(report: str, pr_number: int, repo: str) -> None:
         # Update existing comment
         subprocess.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{repo}/issues/comments/{existing_id}",
-                "-X", "PATCH",
-                "-f", f"body={report}",
+                "-X",
+                "PATCH",
+                "-f",
+                f"body={report}",
                 "--silent",
             ],
             check=True,
@@ -211,9 +243,11 @@ def post_or_update_comment(report: str, pr_number: int, repo: str) -> None:
         # Create new comment
         subprocess.run(
             [
-                "gh", "api",
+                "gh",
+                "api",
                 f"repos/{repo}/issues/{pr_number}/comments",
-                "-f", f"body={report}",
+                "-f",
+                f"body={report}",
                 "--silent",
             ],
             check=True,
@@ -227,23 +261,33 @@ def main() -> None:
         description="Compute benchmark metrics and optionally post PR comment.",
     )
     parser.add_argument(
-        "--baseline", type=Path, required=True,
+        "--baseline",
+        type=Path,
+        required=True,
         help="Path to baseline.jsonl from replay",
     )
     parser.add_argument(
-        "--candidate", type=Path, required=True,
+        "--candidate",
+        type=Path,
+        required=True,
         help="Path to candidate.jsonl from replay",
     )
     parser.add_argument(
-        "--pr", type=int, default=None,
+        "--pr",
+        type=int,
+        default=None,
         help="PR number to post comment on",
     )
     parser.add_argument(
-        "--repo", type=str, default=None,
+        "--repo",
+        type=str,
+        default=None,
         help="GitHub repo (owner/repo)",
     )
     parser.add_argument(
-        "--triggered-by", type=str, default=None,
+        "--triggered-by",
+        type=str,
+        default=None,
         help="GitHub username who triggered the benchmark",
     )
 

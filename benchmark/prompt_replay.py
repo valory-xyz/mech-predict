@@ -207,9 +207,7 @@ def _extract_reasoning_prompt_components(
     if TWO_STAGE_SEPARATOR not in formatted_prompt:
         return None
 
-    reasoning_half, prediction_half = formatted_prompt.split(
-        TWO_STAGE_SEPARATOR, 1
-    )
+    reasoning_half, prediction_half = formatted_prompt.split(TWO_STAGE_SEPARATOR, 1)
 
     up_match = REASONING_USER_PROMPT_RE.search(reasoning_half)
     ai_match = REASONING_ADDITIONAL_INFO_RE.search(reasoning_half)
@@ -527,9 +525,7 @@ def stratified_sample(
         # Second pass: distribute remaining proportionally
         if remaining_budget > 0 and total_available > 0:
             for key, stratum_rows in non_empty.items():
-                extra = round(
-                    remaining_budget * len(stratum_rows) / total_available
-                )
+                extra = round(remaining_budget * len(stratum_rows) / total_available)
                 allocations[key] += extra
 
             # Clamp to available and adjust
@@ -540,11 +536,8 @@ def stratified_sample(
             allocated = sum(allocations.values())
             deficit = budget - allocated
             if deficit > 0:
-                for key in sorted(
-                    non_empty,
-                    key=lambda k: len(non_empty[k]),
-                    reverse=True,
-                ):
+                sizes = {k: len(v) for k, v in non_empty.items()}
+                for key in sorted(sizes, key=sizes.__getitem__, reverse=True):
                     can_add = len(non_empty[key]) - allocations[key]
                     add = min(deficit, can_add)
                     allocations[key] += add
@@ -566,9 +559,7 @@ def stratified_sample(
         for key in sorted(non_empty):
             outcome, bucket = key
             n = allocations[key]
-            detail_parts.append(
-                f"{outcome_labels[outcome]}/{bucket}={n}"
-            )
+            detail_parts.append(f"{outcome_labels[outcome]}/{bucket}={n}")
         log.info(
             "Sampled %s: %d/%d rows [%s]",
             platform,
@@ -726,9 +717,7 @@ def parse_xml_prediction_response(
     }
     for key in tags:
         try:
-            value_str = (
-                response_text.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
-            )
+            value_str = response_text.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
             tags[key] = float(value_str)
         except (IndexError, ValueError):
             pass
@@ -755,9 +744,7 @@ def parse_xml_prediction_response(
     }
 
 
-def parse_response(
-    response_text: Optional[str], tool_name: str
-) -> dict[str, Any]:
+def parse_response(response_text: Optional[str], tool_name: str) -> dict[str, Any]:
     """Route to the correct response parser based on tool name.
 
     :param response_text: raw LLM response string.
@@ -888,12 +875,15 @@ def _replay_reasoning_tool(
             USER_INPUT=row["extracted_user_prompt"],
             REASONING=row["extracted_reasoning"],
         )
-        return call_llm(
-            model=model,
-            system_prompt=system_prompt,
-            user_prompt=formatted,
-            api_key=api_key,
-        ), None
+        return (
+            call_llm(
+                model=model,
+                system_prompt=system_prompt,
+                user_prompt=formatted,
+                api_key=api_key,
+            ),
+            None,
+        )
 
     # Phase "reasoning-only" or "both" — re-run stage 1
     reasoning_formatted = reasoning_prompt_tpl.format(
@@ -921,12 +911,15 @@ def _replay_reasoning_tool(
         USER_INPUT=row["extracted_user_prompt"],
         REASONING=reasoning,
     )
-    return call_llm(
-        model=model,
-        system_prompt=system_prompt,
-        user_prompt=formatted,
-        api_key=api_key,
-    ), reasoning
+    return (
+        call_llm(
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=formatted,
+            api_key=api_key,
+        ),
+        reasoning,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -934,7 +927,7 @@ def _replay_reasoning_tool(
 # ---------------------------------------------------------------------------
 
 
-def replay(
+def replay(  # pylint: disable=too-many-statements
     dataset: Path,
     output_dir: Path,
     model: str,
@@ -965,8 +958,6 @@ def replay(
             PREDICTION_PROMPT,
             REASONING_PROMPT,
             SYSTEM_PROMPT,
-        )
-        from packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning import (  # pylint: disable=import-outside-toplevel
             parser_reasoning_response,
         )
 

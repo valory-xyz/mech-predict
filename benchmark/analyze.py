@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark.io import load_jsonl
+
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "report.md"
@@ -46,15 +48,9 @@ def load_history(path: Path) -> list[dict[str, Any]]:
     :param path: path to ``scores_history.jsonl``.
     :return: list of monthly summary dicts.
     """
-    entries: list[dict[str, Any]] = []
     if not path.exists():
-        return entries
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    return entries
+        return []
+    return load_jsonl(path)
 
 
 # ---------------------------------------------------------------------------

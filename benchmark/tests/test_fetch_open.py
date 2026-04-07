@@ -23,15 +23,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from benchmark.datasets.fetch_open import (
-    append_jsonl,
     fetch_omen_open,
     fetch_polymarket_open,
-    load_existing_ids,
 )
-
+from benchmark.io import append_jsonl, load_existing_ids
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,6 +67,7 @@ def _poly_market(
     neg_risk: bool = False,
     end_date: str = "2026-06-01T00:00:00Z",
 ) -> dict[str, Any]:
+    """Build a mock Polymarket market response."""
     return {
         "conditionId": condition_id,
         "question": question,
@@ -94,6 +91,7 @@ class TestFetchOmenOpen:
 
     @patch("benchmark.datasets.fetch_open._post_graphql")
     def test_basic_fetch(self, mock_gql: MagicMock) -> None:
+        """Test basic Omen market fetch returns normalized records."""
         mock_gql.return_value = {
             "fixedProductMarketMakers": [
                 _omen_fpmm("0x001", "Will BTC hit 100k?"),
@@ -110,6 +108,7 @@ class TestFetchOmenOpen:
 
     @patch("benchmark.datasets.fetch_open._post_graphql")
     def test_skips_non_binary(self, mock_gql: MagicMock) -> None:
+        """Test that non-binary markets are skipped."""
         fpmm = _omen_fpmm()
         fpmm["outcomes"] = ["A", "B", "C"]  # Not binary
         mock_gql.return_value = {"fixedProductMarketMakers": [fpmm]}
@@ -119,6 +118,7 @@ class TestFetchOmenOpen:
 
     @patch("benchmark.datasets.fetch_open._post_graphql")
     def test_skips_empty_title(self, mock_gql: MagicMock) -> None:
+        """Test that markets with empty titles are skipped."""
         fpmm = _omen_fpmm()
         fpmm["title"] = ""
         mock_gql.return_value = {"fixedProductMarketMakers": [fpmm]}
@@ -128,6 +128,7 @@ class TestFetchOmenOpen:
 
     @patch("benchmark.datasets.fetch_open._post_graphql")
     def test_max_markets_limit(self, mock_gql: MagicMock) -> None:
+        """Test that max_markets parameter limits results."""
         fpmms = [_omen_fpmm(f"0x{i:03x}", f"Q{i}") for i in range(20)]
         mock_gql.return_value = {"fixedProductMarketMakers": fpmms}
 
@@ -136,6 +137,7 @@ class TestFetchOmenOpen:
 
     @patch("benchmark.datasets.fetch_open._post_graphql")
     def test_missing_prices_sets_prob_none(self, mock_gql: MagicMock) -> None:
+        """Test that missing prices result in None probability."""
         fpmm = _omen_fpmm()
         fpmm["outcomeTokenMarginalPrices"] = None
         mock_gql.return_value = {"fixedProductMarketMakers": [fpmm]}
@@ -155,9 +157,8 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_basic_fetch(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_basic_fetch(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
+        """Test basic Polymarket fetch returns normalized records."""
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -176,9 +177,8 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_skips_neg_risk(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_skips_neg_risk(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
+        """Test that negRisk markets are skipped."""
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -192,17 +192,13 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_skips_resolved(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_skips_resolved(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
         """Market with price >= 0.99 is effectively resolved."""
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            _poly_market(prices='["1.0", "0.0"]')
-        ]
+        mock_resp.json.return_value = [_poly_market(prices='["1.0", "0.0"]')]
         mock_resp.raise_for_status = MagicMock()
         mock_get.return_value = mock_resp
 
@@ -211,9 +207,8 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_liquidity_filter(
-        self, mock_tag: MagicMock, mock_get: MagicMock
-    ) -> None:
+    def test_liquidity_filter(self, mock_tag: MagicMock, mock_get: MagicMock) -> None:
+        """Test that markets below min_liquidity are filtered out."""
         mock_tag.return_value = 42
 
         mock_resp = MagicMock()
@@ -239,19 +234,19 @@ class TestJsonlIO:
     """Tests for JSONL loading and writing."""
 
     def test_load_existing_ids(self, tmp_path: Path) -> None:
+        """Test loading existing IDs from a JSONL file."""
         f = tmp_path / "markets.jsonl"
-        f.write_text(
-            '{"id": "omen_0x1"}\n'
-            '{"id": "poly_abc"}\n'
-        )
-        ids = load_existing_ids(f)
+        f.write_text('{"id": "omen_0x1"}\n' + '{"id": "poly_abc"}\n')
+        ids = load_existing_ids(f, key="id")
         assert ids == {"omen_0x1", "poly_abc"}
 
     def test_load_existing_ids_empty(self, tmp_path: Path) -> None:
+        """Test loading IDs from a non-existent file returns empty set."""
         f = tmp_path / "markets.jsonl"
-        assert load_existing_ids(f) == set()
+        assert load_existing_ids(f, key="id") == set()
 
     def test_append_jsonl(self, tmp_path: Path) -> None:
+        """Test appending records to a JSONL file."""
         f = tmp_path / "out.jsonl"
         append_jsonl(f, [{"id": "a"}, {"id": "b"}])
         lines = f.read_text().strip().split("\n")
@@ -259,6 +254,7 @@ class TestJsonlIO:
         assert json.loads(lines[0])["id"] == "a"
 
     def test_append_preserves_existing(self, tmp_path: Path) -> None:
+        """Test that appending preserves existing file content."""
         f = tmp_path / "out.jsonl"
         f.write_text('{"id": "existing"}\n')
         append_jsonl(f, [{"id": "new"}])

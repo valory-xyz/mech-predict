@@ -53,6 +53,7 @@ from benchmark.datasets.fetch_production import (
     fetch_polymarket_resolved,
     parse_tool_response,
 )
+from benchmark.io import load_jsonl, write_jsonl
 from benchmark.prompt_replay import (
     ADDITIONAL_INFO_RE,
     USER_PROMPT_RE,
@@ -429,11 +430,8 @@ def _report_breakdown(rows: list[dict[str, Any]]) -> None:
 
 def _write_jsonl(rows: list[dict[str, Any]], output: Path) -> None:
     """Write rows to JSONL file."""
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row) + "\n")
-    log.info("Written %d rows to %s", len(rows), output)
+    n = write_jsonl(output, rows)
+    log.info("Written %d rows to %s", n, output)
 
 
 # ---------------------------------------------------------------------------
@@ -518,12 +516,7 @@ def sample_and_enrich(
 ) -> None:
     """Load pool, stratified sample, IPFS fetch, output enriched JSONL."""
     # Load pool
-    pool: list[dict[str, Any]] = []
-    with open(pool_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                pool.append(json.loads(line))
+    pool: list[dict[str, Any]] = load_jsonl(pool_path)
 
     log.info("Loaded %d rows from pool %s", len(pool), pool_path)
     _report_breakdown(pool)

@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from benchmark.tools import TOOL_REGISTRY
+
 log = logging.getLogger(__name__)
 
 SUMMARY_SYSTEM_PROMPT = """\
@@ -49,22 +51,7 @@ Rules:
 MODEL = "gpt-4.1-mini"
 
 
-# Tools we serve — keep in sync with TOOL_REGISTRY in tournament.py.
-OUR_TOOLS: set[str] = {
-    "prediction-online",
-    "prediction-offline",
-    "claude-prediction-online",
-    "claude-prediction-offline",
-    "superforcaster",
-    "prediction-request-reasoning",
-    "prediction-request-reasoning-claude",
-    "prediction-request-rag",
-    "prediction-request-rag-claude",
-    "prediction-url-cot",
-    "prediction-url-cot-claude",
-    "prediction-offline-sme",
-    "prediction-online-sme",
-}
+OUR_TOOLS: set[str] = set(TOOL_REGISTRY)
 
 
 def _tool_ownership_context(report_text: str) -> str:

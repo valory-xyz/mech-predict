@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark.io import load_jsonl as load_rows
+
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -31,22 +33,6 @@ WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80
 MIN_SAMPLE_SIZE = 30
-
-
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-
-
-def load_rows(path: Path) -> list[dict[str, Any]]:
-    """Load rows from a JSONL file."""
-    rows: list[dict[str, Any]] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
 
 
 # ---------------------------------------------------------------------------

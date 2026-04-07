@@ -1934,6 +1934,34 @@ def _update_platform_state(
         }
 
 
+def _run_scorer_update(
+    rows: list[dict[str, Any]],
+    scores_path: Path,
+    history_path: Path,
+) -> None:
+    """Run scorer.update() with fault isolation.
+
+    Adds the project root to sys.path if needed (supports running as
+    a script via ``python benchmark/datasets/fetch_production.py``).
+    Catches all exceptions so fetch never crashes due to scoring bugs.
+
+    :param rows: new production log rows.
+    :param scores_path: path to scores.json.
+    :param history_path: path to scores_history.jsonl.
+    """
+    try:
+        _root = str(Path(__file__).resolve().parent.parent.parent)
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.scorer import update as scorer_update
+
+        scorer_update(rows, scores_path, history_path)
+        log.info("Scores updated at %s", scores_path)
+    except Exception:
+        log.exception("Scorer update failed (non-fatal, fetch data is safe)")
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for fetch_production.
 
@@ -2069,20 +2097,7 @@ def main() -> None:
         log.info("Appended %d new rows to %s", written, output_path)
 
         # Incremental scoring — update accumulators in scores.json
-        try:
-            # When run as `python benchmark/datasets/fetch_production.py`,
-            # the project root may not be on sys.path. Add it so that
-            # `from benchmark.scorer import ...` works.
-            _root = str(Path(__file__).resolve().parent.parent.parent)
-            if _root not in sys.path:
-                sys.path.insert(0, _root)
-            # pylint: disable-next=import-outside-toplevel
-            from benchmark.scorer import update as scorer_update
-
-            scorer_update(all_rows, args.scores, args.history)
-            log.info("Scores updated at %s", args.scores)
-        except Exception:
-            log.exception("Scorer update failed (non-fatal, fetch data is safe)")
+        _run_scorer_update(all_rows, args.scores, args.history)
     else:
         log.info("No new rows to write")
 

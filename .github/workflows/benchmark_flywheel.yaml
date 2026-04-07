@@ -57,6 +57,14 @@ jobs:
           python benchmark/datasets/fetch_production.py \
             --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
+      # Fallback: if inline scorer failed, run standalone rebuild
+      - name: Score (fallback)
+        run: |
+          if [ ! -f benchmark/results/scores.json ]; then
+            echo "scores.json missing — running standalone scorer rebuild"
+            python benchmark/scorer.py --rebuild --logs-dir benchmark/datasets/logs/
+          fi
+
       # Analyze reads only scores.json + scores_history.jsonl
       - name: Analyze
         run: python benchmark/analyze.py

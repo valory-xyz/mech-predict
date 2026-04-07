@@ -165,11 +165,11 @@ class TestPolymarketOutcome:
         return winning_index == 0
 
     def test_yes(self) -> None:
-        """winningIndex 0 = Yes."""
+        """Winning index 0 maps to Yes."""
         assert self._decode(0) is True
 
     def test_no(self) -> None:
-        """winningIndex 1 = No."""
+        """Winning index 1 maps to No."""
         assert self._decode(1) is False
 
 

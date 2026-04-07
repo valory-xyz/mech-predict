@@ -53,10 +53,11 @@ DEFAULT_DELIVERY_RATE = 100
 # Voter / Judge configuration
 # ---------------------------------------------------------------------------
 
-OPENAI_MODEL = "gpt-4.1-2025-04-14"
-GROK_MODEL = "x-ai/grok-4.1-fast"
-GEMINI_MODEL = "google/gemini-2.5-flash"
-JUDGE_MODEL = "claude-sonnet-4"
+VOTER_MODEL_OPENAI = "gpt-4.1-2025-04-14"
+VOTER_MODEL_GROK = "x-ai/grok-4.1-fast:online"
+VOTER_MODEL_GEMINI = "google/gemini-2.5-flash:online"
+VOTER_MODEL_CLAUDE = "anthropic/claude-haiku-4.5:online"
+JUDGE_MODEL_CLAUDE = "anthropic/claude-sonnet-4:online"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -76,7 +77,7 @@ ALLOWED_TOOLS = [
 ]
 
 TOOL_TO_ENGINE = {
-    "resolve-market-jury-v1": JUDGE_MODEL,
+    "resolve-market-jury-v1": JUDGE_MODEL_CLAUDE,
 }
 
 
@@ -189,37 +190,32 @@ class VoterConfig:
     adapter: str  # "_adapter_openai" or "_adapter_openrouter"
     model: str  # model name / slug
     key_name: str  # KeyChain service name
-    search_cost: float  # estimated per-call search cost in USD
 
 
-VOTER_REGISTRY: Dict[str, VoterConfig] = {
+VOTER_CONFIG: Dict[str, VoterConfig] = {
     "openai": VoterConfig(
         adapter="_adapter_openai",
-        model=OPENAI_MODEL,
+        model=VOTER_MODEL_OPENAI,
         key_name="openai",
-        search_cost=0.01,
     ),
     "grok": VoterConfig(
         adapter="_adapter_openrouter",
-        model=GROK_MODEL,
+        model=VOTER_MODEL_GROK,
         key_name="openrouter",
-        search_cost=0.005,
     ),
     "gemini": VoterConfig(
         adapter="_adapter_openrouter",
-        model=GEMINI_MODEL,
+        model=VOTER_MODEL_GEMINI,
         key_name="openrouter",
-        search_cost=0.014,
     ),
     "claude": VoterConfig(
         adapter="_adapter_openrouter",
-        model="anthropic/claude-haiku-4.5",
+        model=VOTER_MODEL_CLAUDE,
         key_name="openrouter",
-        search_cost=0.01,
     ),
 }
 
-DEFAULT_VOTERS = ["openai", "grok", "gemini", "claude"]
+DEFAULT_VOTERS: List[str] = list(VOTER_CONFIG.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +289,34 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
 # ---------------------------------------------------------------------------
 
 
+def _record_usage(
+    counter_callback: Optional[Callable],
+    model: str,
+    response: Any,
+) -> None:
+    """Record token usage from an API response into the counter callback."""
+    if counter_callback is None:
+        return
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    try:
+        counter_callback(
+            model=model,
+            token_counter=lambda *_a, **_kw: 0,
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        print(f"  Warning: counter_callback failed for {model}: {e}")
+
+
 def _adapter_openai(
     voter_name: str,
     model: str,
     prompt: str,
     api_key: str,
+    counter_callback: Optional[Callable] = None,
 ) -> VoterResult:
     """Run OpenAI voter with native web_search tool.
 
@@ -308,6 +327,7 @@ def _adapter_openai(
     :param model: OpenAI model name.
     :param prompt: formatted voter prompt.
     :param api_key: OpenAI API key.
+    :param counter_callback: optional token/cost accounting callback.
     :return: parsed vote result.
     """
     client = openai.OpenAI(api_key=api_key)
@@ -329,6 +349,7 @@ def _adapter_openai(
                     if hasattr(block, "text"):
                         text_parts.append(block.text)
         raw = "\n".join(text_parts)
+        _record_usage(counter_callback, model, response)
     else:
         # Fallback: use search-capable model via chat completions
         search_model = "gpt-4o-search-preview"
@@ -340,12 +361,13 @@ def _adapter_openai(
         )
         raw = response_cc.choices[0].message.content or ""
         model = search_model
+        _record_usage(counter_callback, model, response_cc)
 
     return _parse_vote(raw, voter_name, model)
 
 
 # ---------------------------------------------------------------------------
-# Adapter: OpenRouter (any model with :online search)
+# Adapter: OpenRouter
 # ---------------------------------------------------------------------------
 
 
@@ -354,18 +376,27 @@ def _adapter_openrouter(
     model: str,
     prompt: str,
     api_key: str,
+    counter_callback: Optional[Callable] = None,
 ) -> VoterResult:
-    """Run OpenRouter voter with :online search plugin."""
+    """Run OpenRouter voter.
+
+    :param voter_name: registry key for this voter.
+    :param model: OpenRouter model slug.
+    :param prompt: formatted voter prompt.
+    :param api_key: OpenRouter API key.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: parsed vote result.
+    """
     client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    model_online = model if ":online" in model else f"{model}:online"
     response = client.chat.completions.create(
-        model=model_online,
+        model=model,
         max_tokens=VOTER_MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
         timeout=VOTER_TIMEOUT,
     )
     raw = response.choices[0].message.content or ""
-    return _parse_vote(raw, voter_name, model_online)
+    _record_usage(counter_callback, model, response)
+    return _parse_vote(raw, voter_name, model)
 
 
 _ADAPTERS: Dict[str, Callable] = {
@@ -383,9 +414,17 @@ def cast_vote(
     voter_name: str,
     question: str,
     api_keys: Any,
+    counter_callback: Optional[Callable] = None,
 ) -> VoterResult:
-    """Uniform entry point -- delegates to provider-specific adapter."""
-    config = VOTER_REGISTRY[voter_name]
+    """Uniform entry point -- delegates to provider-specific adapter.
+
+    :param voter_name: registry key for this voter.
+    :param question: market question.
+    :param api_keys: KeyChain object.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: parsed vote result.
+    """
+    config = VOTER_CONFIG[voter_name]
     api_key = api_keys[config.key_name]
     prompt = VOTER_PROMPT.format(question=question)
     adapter_fn = _ADAPTERS[config.adapter]
@@ -394,6 +433,7 @@ def cast_vote(
         model=config.model,
         prompt=prompt,
         api_key=api_key,
+        counter_callback=counter_callback,
     )
 
 
@@ -401,12 +441,22 @@ def collect_votes(
     question: str,
     voter_names: List[str],
     api_keys: Any,
+    counter_callback: Optional[Callable] = None,
 ) -> List[VoterResult]:
-    """Fan out to all voters in parallel, collect results."""
+    """Fan out to all voters in parallel, collect results.
+
+    :param question: market question.
+    :param voter_names: list of voter registry keys to use.
+    :param api_keys: KeyChain object.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: list of voter results.
+    """
     results: List[VoterResult] = []
     with ThreadPoolExecutor(max_workers=len(voter_names)) as pool:
         futures = {
-            pool.submit(cast_vote, name, question, api_keys): name
+            pool.submit(
+                cast_vote, name, question, api_keys, counter_callback
+            ): name
             for name in voter_names
         }
         for future in as_completed(futures):
@@ -434,8 +484,16 @@ def _run_judge(
     question: str,
     votes: List[VoterResult],
     api_key: str,
+    counter_callback: Optional[Callable] = None,
 ) -> dict:
-    """Judge -- synthesizes voter results into final verdict via OpenRouter."""
+    """Judge -- synthesizes voter results into final verdict via OpenRouter.
+
+    :param question: market question.
+    :param votes: voter results to synthesize.
+    :param api_key: OpenRouter API key.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: judge verdict dict.
+    """
     formatted_votes = ""
     for i, v in enumerate(votes, 1):
         vote_data = {
@@ -450,12 +508,11 @@ def _run_judge(
 
     prompt = JUDGE_PROMPT.format(question=question, votes=formatted_votes)
     client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    judge_model = f"anthropic/{JUDGE_MODEL}:online"
 
     for attempt in range(JUDGE_MAX_RETRIES):  # pragma: no branch
         try:
             response = client.chat.completions.create(
-                model=judge_model,
+                model=JUDGE_MODEL_CLAUDE,
                 max_tokens=JUDGE_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
                 timeout=JUDGE_TIMEOUT,
@@ -472,6 +529,7 @@ def _run_judge(
                 raise
 
     raw = response.choices[0].message.content or ""
+    _record_usage(counter_callback, JUDGE_MODEL_CLAUDE, response)
     data = _extract_json(raw)
     if data is None:
         return {
@@ -592,23 +650,24 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if tool not in ALLOWED_TOOLS:
         raise ValueError(f"Tool {tool} is not supported. Allowed: {ALLOWED_TOOLS}")
 
+    voters = DEFAULT_VOTERS
+
     # Cost calculation mode
     if delivery_rate == 0:
         if not counter_callback:
             raise ValueError(
                 "A delivery rate of `0` was passed, but no counter callback was given."
             )
+        voter_models = tuple(VOTER_CONFIG[name].model for name in voters)
         max_cost = counter_callback(
             max_cost=True,
-            models_calls=(OPENAI_MODEL,) * N_VOTER_CALLS + (JUDGE_MODEL,),
+            models_calls=voter_models + (JUDGE_MODEL_CLAUDE,),
         )
         return max_cost
 
-    selected_voters = DEFAULT_VOTERS
-
     # 1. Fan out to voters (parallel)
-    print(f"Collecting votes from {selected_voters}...")
-    votes = collect_votes(prompt, selected_voters, api_keys)
+    print(f"Collecting votes from {voters}...")
+    votes = collect_votes(prompt, voters, api_keys, counter_callback)
 
     # 2. Early exit: no successful votes
     if not votes:
@@ -619,17 +678,17 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             "votes": [],
             "judge_reasoning": "All voters failed.",
             "agreement_ratio": 0.0,
-            "n_voters": len(selected_voters),
+            "n_voters": len(voters),
             "n_successful": 0,
             "n_decided": 0,
         }
         return json.dumps(result), "All voters failed.", None, counter_callback, None
 
-    voter_models = [VOTER_REGISTRY[v].model for v in selected_voters]
+    voter_models = [VOTER_CONFIG[v].model for v in voters]
     used_params = {
-        "model": JUDGE_MODEL,
+        "model": JUDGE_MODEL_CLAUDE,
         "voter_models": voter_models,
-        "n_voters": len(selected_voters),
+        "n_voters": len(voters),
     }
 
     # 3. Majority consensus early exit (cost saving -- skip judge)
@@ -647,7 +706,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     # 4. Judge synthesizes (only when voters disagree or partial)
     print("  Voters disagree -- running judge...")
-    verdict = _run_judge(prompt, votes, api_keys["openrouter"])
+    verdict = _run_judge(
+        prompt, votes, api_keys["openrouter"], counter_callback
+    )
 
     # 5. Build result with vote metadata
     judge_reasoning = verdict.get("judge_reasoning", "")
@@ -658,7 +719,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "votes": [asdict(v) for v in votes],
         "judge_reasoning": judge_reasoning,
         "agreement_ratio": _compute_agreement(votes),
-        "n_voters": len(selected_voters),
+        "n_voters": len(voters),
         "n_successful": len(votes),
         "n_decided": len(_decided_votes(votes)),
     }

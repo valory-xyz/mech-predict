@@ -33,6 +33,7 @@ from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     _extract_json,
     _has_consensus,
     _parse_vote,
+    _record_usage,
     run,
 )
 
@@ -284,6 +285,47 @@ class TestComputeAgreement:
 
 
 # ---------------------------------------------------------------------------
+# _record_usage
+# ---------------------------------------------------------------------------
+
+
+class TestRecordUsage:
+    """Tests for the counter_callback usage recording helper."""
+
+    def test_no_callback_is_noop(self) -> None:
+        """Returns silently when no callback is provided."""
+        _record_usage(None, "model", MagicMock())  # should not raise
+
+    def test_no_usage_is_noop(self) -> None:
+        """Returns silently when response has no usage."""
+        cb = MagicMock()
+        response = MagicMock(spec=[])  # no 'usage' attr
+        _record_usage(cb, "model", response)
+        cb.assert_not_called()
+
+    def test_records_tokens(self) -> None:
+        """Forwards token counts to callback."""
+        cb = MagicMock()
+        response = MagicMock()
+        response.usage.prompt_tokens = 100
+        response.usage.completion_tokens = 50
+        _record_usage(cb, "model-x", response)
+        cb.assert_called_once()
+        kwargs = cb.call_args.kwargs
+        assert kwargs["model"] == "model-x"
+        assert kwargs["input_tokens"] == 100
+        assert kwargs["output_tokens"] == 50
+
+    def test_callback_exception_is_swallowed(self) -> None:
+        """Exceptions in callback are caught and logged."""
+        cb = MagicMock(side_effect=ValueError("bad model"))
+        response = MagicMock()
+        response.usage.prompt_tokens = 10
+        response.usage.completion_tokens = 5
+        _record_usage(cb, "model", response)  # should not raise
+
+
+# ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------
 
@@ -374,8 +416,8 @@ class TestAdapterOpenai:
 class TestAdapterOpenrouter:
     """Tests for OpenRouter adapter."""
 
-    def test_appends_online(self) -> None:
-        """Appends :online to model slug."""
+    def test_passes_model_through(self) -> None:
+        """Passes the full model slug (including :online) through as-is."""
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
             MagicMock(
@@ -390,26 +432,12 @@ class TestAdapterOpenrouter:
                 _adapter_openrouter,
             )
 
-            result = _adapter_openrouter("grok", "x-ai/grok", "prompt", "key")
-            call_args = mock_client.chat.completions.create.call_args
-            assert ":online" in call_args.kwargs["model"]
-            assert result.has_occurred is True
-
-    def test_already_online(self) -> None:
-        """Does not double-append :online."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content='{"is_valid": true}'))
-        ]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openrouter,
+            result = _adapter_openrouter(
+                "grok", "x-ai/grok-4.1-fast:online", "prompt", "key"
             )
-
-            _adapter_openrouter("grok", "model:online", "prompt", "key")
             call_args = mock_client.chat.completions.create.call_args
-            assert call_args.kwargs["model"] == "model:online"
+            assert call_args.kwargs["model"] == "x-ai/grok-4.1-fast:online"
+            assert result.has_occurred is True
 
 
 # ---------------------------------------------------------------------------

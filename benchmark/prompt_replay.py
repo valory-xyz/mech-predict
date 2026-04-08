@@ -109,6 +109,17 @@ PREDICTION_REASONING_RE = re.compile(
     re.DOTALL,
 )
 
+# Extraction from RAG-family formatted prompts (XML-tagged, not backtick-fenced)
+RAG_USER_PROMPT_RE = re.compile(r"<user_prompt>\s*(.*?)\s*</user_prompt>", re.DOTALL)
+RAG_ADDITIONAL_INFO_RE = re.compile(
+    r"<additional_information>\s*(.*?)\s*</additional_information>", re.DOTALL
+)
+
+# Extraction from superforcaster formatted prompts
+SF_QUESTION_RE = re.compile(r"Question:\n(.*?)\n\nToday's date:", re.DOTALL)
+SF_TODAY_RE = re.compile(r"Today's date:\s*(.*)")
+SF_SOURCES_RE = re.compile(r"<background>(.*?)</background>", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # IPFS helpers (adapted from sweep.py / fetch_production.py)
@@ -228,6 +239,46 @@ def _extract_reasoning_prompt_components(
     }
 
 
+def _extract_rag_prompt_components(
+    formatted_prompt: str,
+) -> Optional[dict[str, str]]:
+    """Extract components from RAG-family XML-tagged prompts.
+
+    :param formatted_prompt: the full IPFS prompt string.
+    :return: dict of extracted components, or None if extraction fails.
+    """
+    up_match = RAG_USER_PROMPT_RE.search(formatted_prompt)
+    ai_match = RAG_ADDITIONAL_INFO_RE.search(formatted_prompt)
+    if not up_match:
+        return None
+    return {
+        "user_prompt": up_match.group(1).strip(),
+        "additional_information": ai_match.group(1).strip() if ai_match else "",
+    }
+
+
+def _extract_superforcaster_prompt_components(
+    formatted_prompt: str,
+) -> Optional[dict[str, str]]:
+    """Extract components from superforcaster Question/background prompts.
+
+    :param formatted_prompt: the full IPFS prompt string.
+    :return: dict of extracted components, or None if extraction fails.
+    """
+    q_match = SF_QUESTION_RE.search(formatted_prompt)
+    s_match = SF_SOURCES_RE.search(formatted_prompt)
+    t_match = SF_TODAY_RE.search(formatted_prompt)
+    if not q_match:
+        return None
+    result: dict[str, str] = {
+        "user_prompt": q_match.group(1).strip(),
+        "additional_information": s_match.group(1).strip() if s_match else "",
+    }
+    if t_match:
+        result["today"] = t_match.group(1).strip()
+    return result
+
+
 def extract_prompt_components(
     formatted_prompt: str,
     tool_name: str = "prediction-online",
@@ -241,7 +292,13 @@ def extract_prompt_components(
     if tool_name.startswith("prediction-request-reasoning"):
         return _extract_reasoning_prompt_components(formatted_prompt)
 
-    # Default: prediction-online / superforcaster format
+    if tool_name.startswith("prediction-request-rag"):
+        return _extract_rag_prompt_components(formatted_prompt)
+
+    if tool_name == "superforcaster":
+        return _extract_superforcaster_prompt_components(formatted_prompt)
+
+    # Default: prediction-online format
     up_match = USER_PROMPT_RE.search(formatted_prompt)
     ai_match = ADDITIONAL_INFO_RE.search(formatted_prompt)
 
@@ -299,6 +356,9 @@ def _fetch_and_extract_prompts(
             enriched_row["extracted_reasoning"] = components["reasoning"]
         if "user_input" in components:
             enriched_row["extracted_user_input"] = components["user_input"]
+        # Superforcaster stores the original date
+        if "today" in components:
+            enriched_row["extracted_today"] = components["today"]
         enriched.append(enriched_row)
 
         if (i + 1) % 10 == 0:
@@ -756,6 +816,8 @@ def parse_response(response_text: Optional[str], tool_name: str) -> dict[str, An
     """
     if tool_name.startswith("prediction-request-reasoning"):
         return parse_xml_prediction_response(response_text)
+    if tool_name.startswith("prediction-request-rag"):
+        return parse_xml_prediction_response(response_text)
     return parse_tool_response(response_text)
 
 
@@ -954,6 +1016,8 @@ def replay(  # pylint: disable=too-many-statements
 
     tool_name = sampled[0]["tool_name"]
     is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
+    is_rag_tool = tool_name.startswith("prediction-request-rag")
+    is_superforcaster = tool_name == "superforcaster"
 
     # Import prompt templates from the appropriate tool module
     if is_reasoning_tool:
@@ -965,6 +1029,19 @@ def replay(  # pylint: disable=too-many-statements
         )
 
         system_prompt = SYSTEM_PROMPT
+    elif is_rag_tool:
+        from packages.napthaai.customs.prediction_request_rag.prediction_request_rag import (  # pylint: disable=import-outside-toplevel
+            PREDICTION_PROMPT,
+            SYSTEM_PROMPT,
+        )
+
+        system_prompt = SYSTEM_PROMPT
+    elif is_superforcaster:
+        from packages.valory.customs.superforcaster.superforcaster import (  # pylint: disable=import-outside-toplevel
+            PREDICTION_PROMPT,
+        )
+
+        system_prompt = "You are a helpful assistant."
     else:
         from packages.valory.customs.prediction_request.prediction_request import (  # pylint: disable=import-outside-toplevel
             PREDICTION_PROMPT,
@@ -1054,11 +1131,23 @@ def replay(  # pylint: disable=too-many-statements
                     parser_reasoning_response=parser_reasoning_response,
                 )
             else:
-                # Single-stage tool (prediction-online, etc.)
-                formatted_prompt = PREDICTION_PROMPT.format(
-                    user_prompt=row["extracted_user_prompt"],
-                    additional_information=row["extracted_additional_information"],
-                )
+                # Single-stage tool (prediction-online, superforcaster, RAG)
+                if is_rag_tool:
+                    formatted_prompt = PREDICTION_PROMPT.format(
+                        USER_PROMPT=row["extracted_user_prompt"],
+                        ADDITIONAL_INFORMATION=row["extracted_additional_information"],
+                    )
+                elif is_superforcaster:
+                    formatted_prompt = PREDICTION_PROMPT.format(
+                        question=row["extracted_user_prompt"],
+                        today=row.get("extracted_today", ""),
+                        sources=row["extracted_additional_information"],
+                    )
+                else:
+                    formatted_prompt = PREDICTION_PROMPT.format(
+                        user_prompt=row["extracted_user_prompt"],
+                        additional_information=row["extracted_additional_information"],
+                    )
                 response_text = call_llm(
                     model=model,
                     system_prompt=system_prompt,

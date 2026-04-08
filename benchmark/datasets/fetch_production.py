@@ -846,6 +846,7 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
         "market_prob": ctx.get("market_prob"),
         "market_liquidity_usd": ctx.get("market_liquidity_usd"),
         "market_close_at": ctx.get("market_close_at"),
+        "market_spread": ctx.get("market_spread"),
     }
 
 
@@ -900,6 +901,7 @@ def fetch_deliveries(
                 "market_prob": ctx.get("market_prob"),
                 "market_liquidity_usd": ctx.get("market_liquidity_usd"),
                 "market_close_at": ctx.get("market_close_at"),
+                "market_spread": ctx.get("market_spread"),
             }
         )
 
@@ -1400,6 +1402,7 @@ def build_row(
         "prediction_parse_status": parsed["prediction_parse_status"],
         "market_prob_at_prediction": delivery.get("market_prob"),
         "market_liquidity_at_prediction": delivery.get("market_liquidity_usd"),
+        "market_spread_at_prediction": delivery.get("market_spread"),
         "market_close_at": delivery.get("market_close_at"),
         "final_outcome": market["outcome"],
         "requested_at": _ts_to_iso(request_ts),

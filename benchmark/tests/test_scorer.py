@@ -48,6 +48,9 @@ from benchmark.scorer import (
 # ---------------------------------------------------------------------------
 
 
+_ROW_COUNTER = 0
+
+
 def _row(
     p_yes: float = 0.5,
     outcome: bool = True,
@@ -62,9 +65,15 @@ def _row(
     market_prob: float | None = None,
     market_liquidity: float | None = None,
     market_spread: float | None = None,
+    row_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
+    global _ROW_COUNTER
+    if row_id is None:
+        _ROW_COUNTER += 1
+        row_id = f"test_row_{_ROW_COUNTER}"
     return {
+        "row_id": row_id,
         "prediction_parse_status": status,
         "p_yes": p_yes if status == "valid" else None,
         "p_no": (1 - p_yes) if status == "valid" else None,
@@ -1148,3 +1157,77 @@ class TestEdgeBatchScore:
         assert "by_liquidity" in result
         assert "hard" in result["by_difficulty"]
         assert "low" in result["by_liquidity"]
+
+
+# ---------------------------------------------------------------------------
+# Dedup in update()
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateDedup:
+    """Tests for row_id deduplication in update()."""
+
+    def test_duplicate_rows_not_double_counted(self, tmp_path: Path) -> None:
+        """Same rows passed twice produce same result as single pass."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.7, outcome=True, row_id="r1"),
+            _row(p_yes=0.3, outcome=False, row_id="r2"),
+        ]
+
+        # First pass
+        result1 = update(rows, scores_path, history_path)
+        assert result1["overall"]["n"] == 2
+
+        # Second pass with same rows — should be skipped
+        result2 = update(rows, scores_path, history_path)
+        assert result2["overall"]["n"] == 2, (
+            f"Expected 2 after dedup, got {result2['overall']['n']}"
+        )
+        assert result2["overall"]["brier"] == result1["overall"]["brier"]
+
+    def test_new_rows_added_after_dedup(self, tmp_path: Path) -> None:
+        """New rows are added, duplicates are skipped."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        batch1 = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        batch2 = [
+            _row(p_yes=0.7, outcome=True, row_id="r1"),   # duplicate
+            _row(p_yes=0.4, outcome=False, row_id="r3"),   # new
+        ]
+
+        update(batch1, scores_path, history_path)
+        result = update(batch2, scores_path, history_path)
+
+        assert result["overall"]["n"] == 2, (
+            f"Expected 2 (r1 + r3), got {result['overall']['n']}"
+        )
+
+    def test_scored_row_ids_persisted(self, tmp_path: Path) -> None:
+        """scored_row_ids are saved to scores.json and loaded on resume."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        update(rows, scores_path, history_path)
+
+        # Check the saved file
+        saved = json.loads(scores_path.read_text())
+        assert "scored_row_ids" in saved
+        assert "r1" in saved["scored_row_ids"]
+
+    def test_rows_without_row_id_always_counted(self, tmp_path: Path) -> None:
+        """Rows without row_id are always accumulated (no dedup possible)."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        row_no_id = _row(p_yes=0.7, outcome=True, row_id="")
+        row_no_id.pop("row_id")  # remove the key entirely
+
+        update([row_no_id], scores_path, history_path)
+        result = update([row_no_id], scores_path, history_path)
+        # Without row_id, can't dedup — both passes count
+        assert result["overall"]["n"] == 2

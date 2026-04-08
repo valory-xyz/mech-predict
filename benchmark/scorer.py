@@ -526,6 +526,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "latency_reservoir": {},
         "worst_10": [],
         "best_10": [],
+        "scored_row_ids": set(),
     }
 
 
@@ -935,6 +936,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores["latency_reservoir"] = data.get("latency_reservoir", {})
     scores["worst_10"] = data.get("worst_10", [])
     scores["best_10"] = data.get("best_10", [])
+    scores["scored_row_ids"] = set(data.get("scored_row_ids", []))
 
     return scores
 
@@ -970,8 +972,24 @@ def update(
     else:
         scores = _empty_scores(today_month)
 
+    scored_ids: set[str] = scores.get("scored_row_ids", set())
+    skipped = 0
     for row in new_rows:
+        row_id = row.get("row_id")
+        if row_id and row_id in scored_ids:
+            skipped += 1
+            continue
         _accumulate_row(scores, row)
+        if row_id:
+            scored_ids.add(row_id)
+    scores["scored_row_ids"] = scored_ids
+
+    if skipped:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Skipped %d duplicate rows (already scored)", skipped
+        )
 
     # Write raw accumulators (for future incremental loads)
     finalized = _finalize_scores(scores)
@@ -1008,6 +1026,7 @@ def update(
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
+    output["scored_row_ids"] = sorted(scores.get("scored_row_ids", set()))
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1077,6 +1096,9 @@ def rebuild(
     scores = _empty_scores(last_month)
     for row in months[last_month]:
         _accumulate_row(scores, row)
+        row_id = row.get("row_id")
+        if row_id:
+            scores["scored_row_ids"].add(row_id)
 
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use
@@ -1111,6 +1133,7 @@ def rebuild(
                 **{k: group[k] for k in _accum_keys},
             }
     output["_calibration_accum"] = scores["calibration"]
+    output["scored_row_ids"] = sorted(scores.get("scored_row_ids", set()))
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))

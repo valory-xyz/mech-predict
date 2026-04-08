@@ -814,9 +814,7 @@ def parse_response(response_text: Optional[str], tool_name: str) -> dict[str, An
     :param tool_name: tool name to determine parsing strategy.
     :return: dict with p_yes, p_no, confidence, prediction_parse_status.
     """
-    if tool_name.startswith("prediction-request-reasoning"):
-        return parse_xml_prediction_response(response_text)
-    if tool_name.startswith("prediction-request-rag"):
+    if tool_name.startswith(("prediction-request-reasoning", "prediction-request-rag")):
         return parse_xml_prediction_response(response_text)
     return parse_tool_response(response_text)
 

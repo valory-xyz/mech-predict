@@ -135,7 +135,7 @@ jobs:
       - name: Locate production log
         id: log
         run: |
-          LOG_FILE=$(find benchmark/datasets/logs/ -name '*.jsonl' -type f | head -1)
+          LOG_FILE=$(find benchmark/datasets/logs/ -name '*.jsonl' -type f -print0 | xargs -0 ls -t | head -1)
           echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
           echo "Found production log: $LOG_FILE ($(wc -l < "$LOG_FILE") rows)"
 

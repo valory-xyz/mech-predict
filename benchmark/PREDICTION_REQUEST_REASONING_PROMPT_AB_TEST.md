@@ -578,7 +578,19 @@ Note: V1 numbers are from phase-both (PR #198). V3b prediction-only holds origin
 
 ### V3b Results — phase-both (n=100, R2 reasoning + V3b prediction)
 
-*Running — results pending...*
+| Platform | Baseline Brier | V1+R2 Brier | V3b+R2 Brier |
+|----------|---------------|-------------|-------------|
+| omen | 0.2785 | 0.2560 (-8.1%) | 0.2724 (-2.2%) |
+| polymarket | 0.2604 | 0.2714 (+4.2%) | **0.2215 (-14.9%)** |
+| overall | 0.2695 | 0.2637 (-2.1%) | **0.2470 (-8.3%)** |
+
+| Metric | Baseline | V1+R2 | V3b+R2 |
+|--------|----------|-------|--------|
+| Accuracy | 63.0% | — | 64.0% |
+| Overconf-wrong (p>=0.80) | 12 | — | 5 |
+| Markets improved | — | — | 33 |
+| Markets worsened | — | — | 44 |
+| Markets same | — | — | 23 |
 
 ### V3b Analysis
 
@@ -587,3 +599,10 @@ Note: V1 numbers are from phase-both (PR #198). V3b prediction-only holds origin
 - **Overall improved**: -4.8% (vs V1's -2.1%)
 - The numeric threshold override is the key change — explicitly allows confident predictions on price/temperature/count questions, bypassing caps that were dragging well-calibrated Polymarket predictions toward 0.5
 - Removing confidence coupling had minimal effect (was already rare in practice)
+
+**Phase-both confirms:**
+- Polymarket regression fully eliminated: V1's +4.2% → V3b's **-14.9%** improvement
+- Overall improved from -2.1% to **-8.3%**
+- Omen improvement weaker (-2.2% vs V1's -8.1%) — R2 reasoning regeneration introduces LLM variance; Omen's "will X happen by date Y?" questions are more sensitive to reasoning phrasing differences
+- Overconfident-wrong predictions halved: 12 → 5
+- Awaiting CI benchmark for independent validation

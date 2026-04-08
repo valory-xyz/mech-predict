@@ -45,6 +45,78 @@ def brier_score(p_yes: float, outcome: bool) -> float:
     return (p_yes - (1.0 if outcome else 0.0)) ** 2
 
 
+def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
+    """Compute edge over market for a single prediction.
+
+    Edge = market_brier - tool_brier. Positive means the tool's prediction
+    was closer to the outcome than the market's price.
+
+    :param p_yes: tool's predicted probability.
+    :param market_prob: market probability at prediction time.
+    :param outcome: actual outcome (True = yes).
+    :return: edge score (positive = tool beat market).
+    """
+    outcome_val = 1.0 if outcome else 0.0
+    market_brier = (market_prob - outcome_val) ** 2
+    tool_brier = (p_yes - outcome_val) ** 2
+    return market_brier - tool_brier
+
+
+def _is_edge_eligible(row: dict[str, Any]) -> bool:
+    """Check if a row has all fields needed for edge-over-market calculation."""
+    return (
+        row.get("prediction_parse_status") == "valid"
+        and row.get("final_outcome") is not None
+        and row.get("p_yes") is not None
+        and row.get("market_prob_at_prediction") is not None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Difficulty and liquidity classification
+# ---------------------------------------------------------------------------
+
+# Thresholds are initial values from PROPOSAL.md. Adjust after inspecting
+# the actual data distribution from the first scorer run.
+DIFFICULTY_THRESHOLDS = (0.15, 0.3)
+LIQUIDITY_THRESHOLDS = (500.0, 5000.0)
+
+
+def classify_difficulty(market_prob: float | None) -> str:
+    """Classify market difficulty based on distance from 0.5.
+
+    Uses market_prob_at_prediction (not final market price).
+
+    :param market_prob: market probability at prediction time.
+    :return: difficulty bucket name.
+    """
+    if market_prob is None:
+        return "unknown"
+    distance = abs(market_prob - 0.5)
+    lo, hi = DIFFICULTY_THRESHOLDS
+    if distance < lo:
+        return "hard"
+    if distance <= hi:
+        return "medium"
+    return "easy"
+
+
+def classify_liquidity(liquidity_usd: float | None) -> str:
+    """Classify market liquidity into buckets.
+
+    :param liquidity_usd: market liquidity in USD at prediction time.
+    :return: liquidity bucket name.
+    """
+    if liquidity_usd is None:
+        return "unknown"
+    lo, hi = LIQUIDITY_THRESHOLDS
+    if liquidity_usd < lo:
+        return "low"
+    if liquidity_usd <= hi:
+        return "medium"
+    return "high"
+
+
 def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute Brier score and reliability for a group of rows.
 
@@ -97,6 +169,20 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     sharpness = sum(abs(r["p_yes"] - 0.5) for r in valid) / len(valid)
 
+    # Edge over market — only for rows with market_prob_at_prediction
+    edge_rows = [r for r in valid if r.get("market_prob_at_prediction") is not None]
+    if edge_rows:
+        edges = [
+            edge_score(r["p_yes"], r["market_prob_at_prediction"], r["final_outcome"])
+            for r in edge_rows
+        ]
+        edge_avg = round(sum(edges) / len(edges), 4)
+        edge_positive = sum(1 for e in edges if e > 0)
+        edge_pos_rate = round(edge_positive / len(edges), 4)
+    else:
+        edge_avg = None
+        edge_pos_rate = None
+
     return {
         "brier": round(avg_brier, 4),
         "accuracy": round(accuracy, 4),
@@ -105,6 +191,9 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "n": total,
         "valid_n": len(valid),
         "decision_worthy": worthy,
+        "edge": edge_avg,
+        "edge_n": len(edge_rows),
+        "edge_positive_rate": edge_pos_rate,
     }
 
 
@@ -309,6 +398,20 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Per-horizon
     by_horizon = group_by_horizon(rows)
 
+    # Per-difficulty (requires market_prob_at_prediction)
+    difficulty_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        d = classify_difficulty(row.get("market_prob_at_prediction"))
+        difficulty_groups[d].append(row)
+    by_difficulty = {k: compute_group_stats(g) for k, g in difficulty_groups.items()}
+
+    # Per-liquidity (requires market_liquidity_at_prediction)
+    liquidity_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        liq = classify_liquidity(row.get("market_liquidity_at_prediction"))
+        liquidity_groups[liq].append(row)
+    by_liquidity = {k: compute_group_stats(g) for k, g in liquidity_groups.items()}
+
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
 
@@ -329,6 +432,33 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for tool, group in group_by(rows, "tool_name").items()
     }
 
+    # Edge eligibility reporting
+    n_edge_eligible = sum(1 for r in rows if _is_edge_eligible(r))
+    n_missing_market_prob = sum(
+        1
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is not None
+        and r.get("p_yes") is not None
+        and r.get("market_prob_at_prediction") is None
+    )
+    n_invalid_parse = total - sum(
+        1
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is not None
+        and r.get("p_yes") is not None
+    )
+    edge_eligibility = {
+        "n_total": total,
+        "n_eligible": n_edge_eligible,
+        "n_excluded": total - n_edge_eligible,
+        "exclusion_reasons": {
+            "missing_market_prob": n_missing_market_prob,
+            "invalid_prediction": n_invalid_parse,
+        },
+    }
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_rows": total,
@@ -338,11 +468,14 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform": by_platform,
         "by_category": by_category,
         "by_horizon": by_horizon,
+        "by_difficulty": by_difficulty,
+        "by_liquidity": by_liquidity,
         "by_tool_platform": by_tool_platform,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "trend": trend,
         "calibration": calibration,
         "calibration_by_tool": calibration_by_tool,
+        "edge_eligibility": edge_eligibility,
     }
 
 
@@ -360,6 +493,9 @@ def _empty_group() -> dict[str, Any]:
         "correct_count": 0,
         "sharpness_sum": 0.0,
         "outcome_yes_count": 0,
+        "edge_sum": 0.0,
+        "edge_n": 0,
+        "edge_positive_count": 0,
     }
 
 
@@ -380,6 +516,8 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_tool_platform": {},
         "by_tool_version": {},
         "by_config": {},
+        "by_difficulty": {},
+        "by_liquidity": {},
         "calibration": {
             _bin_label(lo, hi): {"count": 0, "outcome_sum": 0, "predicted_sum": 0.0}
             for lo, hi in CALIBRATION_BINS
@@ -413,6 +551,14 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         group["sharpness_sum"] += abs(p_yes - 0.5)
         if outcome:
             group["outcome_yes_count"] += 1
+        # Edge over market
+        market_prob = row.get("market_prob_at_prediction")
+        if market_prob is not None:
+            edge = edge_score(p_yes, market_prob, outcome)
+            group["edge_sum"] += edge
+            group["edge_n"] += 1
+            if edge > 0:
+                group["edge_positive_count"] += 1
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -458,6 +604,18 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
             result["brier_skill_score"] = round(1 - (brier / baseline_brier), 4)
         else:
             result["brier_skill_score"] = None
+
+    # Edge over market — derived from edge accumulators
+    edge_n = group.get("edge_n", 0)
+    result["edge_n"] = edge_n
+    if edge_n > 0:
+        result["edge"] = round(group["edge_sum"] / edge_n, 4)
+        result["edge_positive_rate"] = round(
+            group["edge_positive_count"] / edge_n, 4
+        )
+    else:
+        result["edge"] = None
+        result["edge_positive_rate"] = None
     return result
 
 
@@ -535,6 +693,12 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
     _ensure_and_accumulate(scores["by_config"], f"{tool} | {config_hash}", row)
+
+    difficulty = classify_difficulty(row.get("market_prob_at_prediction"))
+    _ensure_and_accumulate(scores["by_difficulty"], difficulty, row)
+
+    liquidity = classify_liquidity(row.get("market_liquidity_at_prediction"))
+    _ensure_and_accumulate(scores["by_liquidity"], liquidity, row)
 
     # Calibration buckets
     is_valid = (
@@ -618,8 +782,19 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_tool_platform",
         "by_tool_version",
         "by_config",
+        "by_difficulty",
+        "by_liquidity",
     ):
         result[dim] = {k: _derive_group(v) for k, v in scores[dim].items()}
+
+    # Edge eligibility from accumulators
+    overall_n = scores["overall"]["n"]
+    overall_edge_n = scores["overall"].get("edge_n", 0)
+    result["edge_eligibility"] = {
+        "n_total": overall_n,
+        "n_eligible": overall_edge_n,
+        "n_excluded": overall_n - overall_edge_n,
+    }
 
     # Calibration — derive avg_predicted, realized_rate, gap
     cal_result = []
@@ -714,17 +889,23 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     if "current_month" not in data or "brier_sum" not in data.get("overall", {}):
         return None
 
+    def _restore_group(g: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "n": g["n"],
+            "valid_n": g["valid_n"],
+            "brier_sum": g["brier_sum"],
+            "correct_count": g["correct_count"],
+            "sharpness_sum": g["sharpness_sum"],
+            "outcome_yes_count": g.get("outcome_yes_count", 0),
+            "edge_sum": g.get("edge_sum", 0.0),
+            "edge_n": g.get("edge_n", 0),
+            "edge_positive_count": g.get("edge_positive_count", 0),
+        }
+
     scores: dict[str, Any] = {
         "current_month": data["current_month"],
         "generated_at": data.get("generated_at", ""),
-        "overall": {
-            "n": data["overall"]["n"],
-            "valid_n": data["overall"]["valid_n"],
-            "brier_sum": data["overall"]["brier_sum"],
-            "correct_count": data["overall"]["correct_count"],
-            "sharpness_sum": data["overall"]["sharpness_sum"],
-            "outcome_yes_count": data["overall"].get("outcome_yes_count", 0),
-        },
+        "overall": _restore_group(data["overall"]),
     }
     for dim in (
         "by_tool",
@@ -734,17 +915,12 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_tool_platform",
         "by_tool_version",
         "by_config",
+        "by_difficulty",
+        "by_liquidity",
     ):
         scores[dim] = {}
         for key, group in data.get(dim, {}).items():
-            scores[dim][key] = {
-                "n": group["n"],
-                "valid_n": group["valid_n"],
-                "brier_sum": group["brier_sum"],
-                "correct_count": group["correct_count"],
-                "sharpness_sum": group["sharpness_sum"],
-                "outcome_yes_count": group.get("outcome_yes_count", 0),
-            }
+            scores[dim][key] = _restore_group(group)
 
     # Restore calibration accumulators
     if "_calibration_accum" in data:
@@ -801,17 +977,18 @@ def update(
     finalized = _finalize_scores(scores)
     # Merge accumulators into the output so next load can resume
     output = dict(finalized)
+    _accum_keys = (
+        "brier_sum",
+        "correct_count",
+        "sharpness_sum",
+        "outcome_yes_count",
+        "edge_sum",
+        "edge_n",
+        "edge_positive_count",
+    )
     output["overall"] = {
         **finalized["overall"],
-        **{
-            k: scores["overall"][k]
-            for k in (
-                "brier_sum",
-                "correct_count",
-                "sharpness_sum",
-                "outcome_yes_count",
-            )
-        },
+        **{k: scores["overall"][k] for k in _accum_keys},
     }
     for dim in (
         "by_tool",
@@ -821,19 +998,13 @@ def update(
         "by_tool_platform",
         "by_tool_version",
         "by_config",
+        "by_difficulty",
+        "by_liquidity",
     ):
         for key, group in scores[dim].items():
             output[dim][key] = {
                 **finalized[dim][key],
-                **{
-                    k: group[k]
-                    for k in (
-                        "brier_sum",
-                        "correct_count",
-                        "sharpness_sum",
-                        "outcome_yes_count",
-                    )
-                },
+                **{k: group[k] for k in _accum_keys},
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
@@ -910,17 +1081,18 @@ def rebuild(
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use
     output = dict(finalized)
+    _accum_keys = (
+        "brier_sum",
+        "correct_count",
+        "sharpness_sum",
+        "outcome_yes_count",
+        "edge_sum",
+        "edge_n",
+        "edge_positive_count",
+    )
     output["overall"] = {
         **finalized["overall"],
-        **{
-            k: scores["overall"][k]
-            for k in (
-                "brier_sum",
-                "correct_count",
-                "sharpness_sum",
-                "outcome_yes_count",
-            )
-        },
+        **{k: scores["overall"][k] for k in _accum_keys},
     }
     for dim in (
         "by_tool",
@@ -930,19 +1102,13 @@ def rebuild(
         "by_tool_platform",
         "by_tool_version",
         "by_config",
+        "by_difficulty",
+        "by_liquidity",
     ):
         for key, group in scores[dim].items():
             output[dim][key] = {
                 **finalized[dim][key],
-                **{
-                    k: group[k]
-                    for k in (
-                        "brier_sum",
-                        "correct_count",
-                        "sharpness_sum",
-                        "outcome_yes_count",
-                    )
-                },
+                **{k: group[k] for k in _accum_keys},
             }
     output["_calibration_accum"] = scores["calibration"]
 

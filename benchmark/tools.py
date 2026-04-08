@@ -12,9 +12,10 @@ import os
 import platform
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
-from packages.valory.skills.task_execution.utils.apis import KeyChain
+if TYPE_CHECKING:
+    from packages.valory.skills.task_execution.utils.apis import KeyChain
 
 # ---------------------------------------------------------------------------
 # Tool registry
@@ -82,7 +83,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 # ---------------------------------------------------------------------------
 
 
-def build_keychain(*, return_source_content: bool = False) -> KeyChain:
+def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
     """Build a KeyChain from environment variables.
 
     Each service gets a single-key list.  Missing keys become empty strings
@@ -93,6 +94,10 @@ def build_keychain(*, return_source_content: bool = False) -> KeyChain:
         (default) tools skip capture (replay mode).
     :return: a KeyChain populated from environment variables.
     """
+    from packages.valory.skills.task_execution.utils.apis import (  # pylint: disable=import-outside-toplevel
+        KeyChain,
+    )
+
     services: dict[str, list[str]] = {
         "openai": [os.environ.get("OPENAI_API_KEY", "")],
         "anthropic": [os.environ.get("ANTHROPIC_API_KEY", "")],

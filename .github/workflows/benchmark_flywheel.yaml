@@ -79,13 +79,6 @@ jobs:
       - name: Analyze
         run: python -m benchmark.analyze
 
-      - name: Post summary to Slack
-        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
-        env:
-          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
-        run: python -m benchmark.notify_slack --report benchmark/results/report.md
-
       # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
@@ -97,6 +90,25 @@ jobs:
             benchmark/results/scores_history.jsonl
             benchmark/results/report.md
           retention-days: 90
+
+      - name: Resolve report artifact URL
+        id: artifact-url
+        run: |
+          AID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name=="benchmark-data") | .id' 2>/dev/null || true)
+          if [ -n "$AID" ]; then
+            echo "url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/$AID" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Post summary to Slack
+        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+          REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
+        run: python -m benchmark.notify_slack --report benchmark/results/report.md
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

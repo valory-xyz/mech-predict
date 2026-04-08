@@ -35,6 +35,10 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 • `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "overconfident", "anti-predictive")
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
+*Platform performance:*
+• `platform` — Brier `X.XX`, BSS `±X.XX` (interpret: >0 = skillful, <0 = worse than base rate), n=X
+(list all platforms)
+
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
@@ -84,7 +88,7 @@ def summarize_report(report_text: str, api_key: str) -> str:
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 400,
+            "max_tokens": 500,
             "temperature": 0.2,
         }
     ).encode()
@@ -103,8 +107,18 @@ def summarize_report(report_text: str, api_key: str) -> str:
     return body["choices"][0]["message"]["content"].strip()
 
 
-def _build_run_url() -> str | None:
-    """Build a GitHub Actions run URL from environment variables."""
+def _build_report_url() -> str | None:
+    """Build a link to the benchmark report artifact.
+
+    Prefers ``REPORT_ARTIFACT_URL`` (set by a prior workflow step that
+    queries the API after uploading the artifact).  Falls back to the
+    generic run URL when the exact artifact link isn't available.
+
+    :return: URL string, or None if not running in CI.
+    """
+    artifact_url = os.environ.get("REPORT_ARTIFACT_URL")
+    if artifact_url:
+        return artifact_url
     server = os.environ.get("GITHUB_SERVER_URL")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_id = os.environ.get("GITHUB_RUN_ID")
@@ -164,9 +178,9 @@ def main() -> None:
     summary = f"{heading}\n\n{summarize_report(report_text, api_key)}"
 
     # Append link to full report if running in GitHub Actions
-    run_url = _build_run_url()
-    if run_url:
-        summary += f"\n<{run_url}|Full report>"
+    report_url = _build_report_url()
+    if report_url:
+        summary += f"\n<{report_url}|Full report>"
 
     if args.dry_run:
         print(summary)

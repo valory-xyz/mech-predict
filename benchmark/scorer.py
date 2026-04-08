@@ -412,6 +412,26 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         liquidity_groups[liq].append(row)
     by_liquidity = {k: compute_group_stats(g) for k, g in liquidity_groups.items()}
 
+    # Platform × difficulty cross breakdown
+    pd_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        plat = row.get("platform", "unknown")
+        diff = classify_difficulty(row.get("market_prob_at_prediction"))
+        pd_groups[f"{plat} | {diff}"].append(row)
+    by_platform_difficulty = {
+        k: compute_group_stats(g) for k, g in pd_groups.items()
+    }
+
+    # Platform × liquidity cross breakdown
+    pl_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        plat = row.get("platform", "unknown")
+        liq = classify_liquidity(row.get("market_liquidity_at_prediction"))
+        pl_groups[f"{plat} | {liq}"].append(row)
+    by_platform_liquidity = {
+        k: compute_group_stats(g) for k, g in pl_groups.items()
+    }
+
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
 
@@ -470,6 +490,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_horizon": by_horizon,
         "by_difficulty": by_difficulty,
         "by_liquidity": by_liquidity,
+        "by_platform_difficulty": by_platform_difficulty,
+        "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "trend": trend,
@@ -518,6 +540,8 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_config": {},
         "by_difficulty": {},
         "by_liquidity": {},
+        "by_platform_difficulty": {},
+        "by_platform_liquidity": {},
         "calibration": {
             _bin_label(lo, hi): {"count": 0, "outcome_sum": 0, "predicted_sum": 0.0}
             for lo, hi in CALIBRATION_BINS
@@ -701,6 +725,13 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     liquidity = classify_liquidity(row.get("market_liquidity_at_prediction"))
     _ensure_and_accumulate(scores["by_liquidity"], liquidity, row)
 
+    _ensure_and_accumulate(
+        scores["by_platform_difficulty"], f"{platform} | {difficulty}", row
+    )
+    _ensure_and_accumulate(
+        scores["by_platform_liquidity"], f"{platform} | {liquidity}", row
+    )
+
     # Calibration buckets
     is_valid = (
         row.get("prediction_parse_status") == "valid"
@@ -785,6 +816,8 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_config",
         "by_difficulty",
         "by_liquidity",
+        "by_platform_difficulty",
+        "by_platform_liquidity",
     ):
         result[dim] = {k: _derive_group(v) for k, v in scores[dim].items()}
 
@@ -918,6 +951,8 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_config",
         "by_difficulty",
         "by_liquidity",
+        "by_platform_difficulty",
+        "by_platform_liquidity",
     ):
         scores[dim] = {}
         for key, group in data.get(dim, {}).items():
@@ -1018,6 +1053,8 @@ def update(
         "by_config",
         "by_difficulty",
         "by_liquidity",
+        "by_platform_difficulty",
+        "by_platform_liquidity",
     ):
         for key, group in scores[dim].items():
             output[dim][key] = {
@@ -1126,6 +1163,8 @@ def rebuild(
         "by_config",
         "by_difficulty",
         "by_liquidity",
+        "by_platform_difficulty",
+        "by_platform_liquidity",
     ):
         for key, group in scores[dim].items():
             output[dim][key] = {

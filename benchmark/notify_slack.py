@@ -107,8 +107,16 @@ def summarize_report(report_text: str, api_key: str) -> str:
     return body["choices"][0]["message"]["content"].strip()
 
 
-def _build_run_url() -> str | None:
-    """Build a GitHub Actions run URL from environment variables."""
+def _build_report_url() -> str | None:
+    """Build a link to the benchmark report artifact.
+
+    Prefers ``REPORT_ARTIFACT_URL`` (set by a prior workflow step that
+    queries the API after uploading the artifact).  Falls back to the
+    generic run URL when the exact artifact link isn't available.
+    """
+    artifact_url = os.environ.get("REPORT_ARTIFACT_URL")
+    if artifact_url:
+        return artifact_url
     server = os.environ.get("GITHUB_SERVER_URL")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_id = os.environ.get("GITHUB_RUN_ID")
@@ -168,9 +176,9 @@ def main() -> None:
     summary = f"{heading}\n\n{summarize_report(report_text, api_key)}"
 
     # Append link to full report if running in GitHub Actions
-    run_url = _build_run_url()
-    if run_url:
-        summary += f"\n<{run_url}|Full report>"
+    report_url = _build_report_url()
+    if report_url:
+        summary += f"\n<{report_url}|Full report>"
 
     if args.dry_run:
         print(summary)

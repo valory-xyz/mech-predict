@@ -479,3 +479,111 @@ Tested whether the prediction prompt could be improved now that R2 produces stru
 | Holdout Brier (n=75) | 0.2689 | 0.2473 | **-8.1%** |
 | Overconf-wrong (training) | 10 | 3 | **-70%** |
 | Overconf-wrong (holdout) | 13 | 2 | **-85%** |
+
+---
+
+## Post-PR#194: Corrected Polymarket Outcomes
+
+> **Important:** PR #194 fixed an inverted-outcome bug in `fetch_production.py` for Polymarket markets. All Polymarket Brier deltas above were computed against wrong ground truth. The sections below use corrected data from the post-#194 production log (68,987 rows, flywheel run [24123952342](https://github.com/valory-xyz/mech-predict/actions/runs/24123952342)).
+
+### Corrected Baseline (V1+R2, phase both, n=100, 50/platform, seed 42)
+
+From PR #198 revalidation comment — re-ran V1 PREDICTION_PROMPT + R2 REASONING_PROMPT against corrected outcomes:
+
+| Platform | Baseline Brier | V1+R2 Brier | Delta |
+|----------|---------------|-------------|-------|
+| omen | 0.2785 | 0.2560 | **-8.1%** |
+| polymarket | 0.2604 | 0.2714 | **+4.2% (regressed)** |
+| overall | 0.2695 | 0.2637 | -2.1% |
+
+**Polymarket regression confirmed** on corrected data: 13 better, 24 worse, 13 same. Calibration rules over-fitted to Omen overconfidence patterns at Polymarket's expense.
+
+---
+
+## V3: Loosen All Calibration Rules (PREDICTION_PROMPT only)
+
+### Changes from V1
+
+1. Removed "Most 'will X happen by date Y?' questions resolve No" base-rate prior
+2. Replaced with "Consider what base rate is reasonable for this category, without assuming a default direction"
+3. Removed 0.75 hard cap for "likely without confirmation"
+4. Softened 0.80/0.90 from "requires" to "should be supported by"
+5. Removed confidence coupling rule (confidence < 0.5 → p_yes 0.20-0.80)
+6. Expanded numeric threshold bullet
+
+### V3 Results (prediction-only, R2 reasoning held fixed, n=100)
+
+| Platform | Baseline Brier | V1 Brier | V3 Brier |
+|----------|---------------|----------|----------|
+| omen | 0.2785 | 0.2560 (-8.1%) | 0.2759 (-0.9%) |
+| polymarket | 0.2604 | 0.2714 (+4.2%) | 0.2723 (+4.6%) |
+| overall | 0.2695 | 0.2637 (-2.1%) | 0.2741 (+1.7%) |
+
+### V3 Analysis
+
+- **Failed.** Loosening all calibration rules destroyed the Omen improvement (from -8.1% to -0.9%) without fixing Polymarket (+4.6%, same as V1).
+- The "most resolve No" prior and hard caps are doing critical work for Omen overconfidence — removing them loses that benefit.
+- Polymarket regression is not caused by the caps being too tight — it persists even when they're removed.
+- **Not a viable direction.** Need targeted changes, not blanket loosening.
+
+Note: V3 was tested prediction-only (holds R2 reasoning fixed). V1 numbers are from phase-both (PR #198). Not directly comparable, but the direction is clear.
+
+---
+
+## V3b: Keep V1 + Numeric Threshold Override (PREDICTION_PROMPT only)
+
+### Changes from V1
+
+Minimal, targeted changes:
+1. **Removed** confidence coupling rule (`confidence < 0.5 → keep p_yes 0.20-0.80`) — pure dampening with no calibration benefit
+2. **Expanded** numeric threshold bullet into an explicit cap override: "If the value is far from the threshold, a confident prediction (below 0.15 or above 0.85) is appropriate regardless of the caps above"
+3. All other V1 rules kept intact (base-rate prior, 0.75/0.80/0.90 caps, absence-of-evidence signal)
+
+### Full V3b prompt
+
+```
+You will be evaluating the likelihood of an event based on a user's question and reasoning provided by another AI. Your performance is evaluated according to the Brier score.
+The user's question is: <user_input> {USER_INPUT} </user_input>
+
+The reasoning from the other AI is: {REASONING}
+
+ESTIMATION STEPS (follow in order):
+1. Identify the event category (regulatory, product launch, political, legal, scientific, financial, etc.).
+2. State a base-rate probability for this category. Most "will X happen by date Y?" questions resolve No.
+3. Evaluate the reasoning quality: Does it cite specific, verifiable evidence (dates, sources, confirmed actions), or is it general plausibility and speculation?
+4. Adjust from the base rate using only concrete evidence in the reasoning. Stay close to the base rate if the reasoning is vague or mixed.
+
+CALIBRATION CHECKS (apply before outputting scores):
+- If the reasoning says the event already occurred or is confirmed, high p_yes is justified.
+- If the reasoning concludes "likely" but cites no confirmation it has happened, p_yes should not exceed 0.75.
+- p_yes above 0.90 requires the reasoning to cite verified completion (signed, awarded, published, enacted). Plans and intentions are not completions.
+- p_yes above 0.80 requires strong, specific evidence in the reasoning, not just coherent argumentation.
+- For numeric threshold questions (price, temperature, count, rating): compare the current value directly to the threshold and let the gap determine your probability. If the value is far from the threshold, a confident prediction (below 0.15 or above 0.85) is appropriate regardless of the caps above.
+- Absence of expected evidence in the reasoning (e.g., no mention of an announcement that should exist if the event occurred) is a signal the event has not happened.
+```
+
+### V3b Results — prediction-only (n=100, R2 reasoning held fixed)
+
+| Platform | Baseline Brier | V1 Brier | V3b Brier |
+|----------|---------------|----------|-----------|
+| omen | 0.2785 | 0.2560 (-8.1%) | 0.2572 (-7.7%) |
+| polymarket | 0.2604 | 0.2714 (+4.2%) | **0.2558 (-1.8%)** |
+| overall | 0.2695 | 0.2637 (-2.1%) | **0.2565 (-4.8%)** |
+
+| Metric | Baseline | V3b |
+|--------|----------|-----|
+| Accuracy | 63.0% | 64.0% |
+
+Note: V1 numbers are from phase-both (PR #198). V3b prediction-only holds original production reasoning fixed. Not directly comparable, but Polymarket regression is eliminated.
+
+### V3b Results — phase-both (n=100, R2 reasoning + V3b prediction)
+
+*Running — results pending...*
+
+### V3b Analysis
+
+- **Polymarket regression eliminated**: flipped from V1's +4.2% to V3b's -1.8% improvement
+- **Omen improvement preserved**: -7.7% (vs V1's -8.1% — within noise)
+- **Overall improved**: -4.8% (vs V1's -2.1%)
+- The numeric threshold override is the key change — explicitly allows confident predictions on price/temperature/count questions, bypassing caps that were dragging well-calibrated Polymarket predictions toward 0.5
+- Removing confidence coupling had minimal effect (was already rare in practice)

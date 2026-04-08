@@ -379,8 +379,7 @@ CALIBRATION CHECKS (apply before outputting scores):
 - If the reasoning concludes "likely" but cites no confirmation it has happened, p_yes should not exceed 0.75.
 - p_yes above 0.90 requires the reasoning to cite verified completion (signed, awarded, published, enacted). Plans and intentions are not completions.
 - p_yes above 0.80 requires strong, specific evidence in the reasoning, not just coherent argumentation.
-- If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
-- For numeric threshold questions (price, temperature, count), compare the current value to the threshold rather than relying on narrative reasoning.
+- For numeric threshold questions (price, temperature, count, rating): compare the current value directly to the threshold and let the gap determine your probability. If the value is far from the threshold, a confident prediction (below 0.15 or above 0.85) is appropriate regardless of the caps above.
 - Absence of expected evidence in the reasoning (e.g., no mention of an announcement that should exist if the event occurred) is a signal the event has not happened.
 
 Provide your final scores in the following format: <p_yes>probability between 0 and 1</p_yes> <p_no>probability between 0 and 1</p_no>

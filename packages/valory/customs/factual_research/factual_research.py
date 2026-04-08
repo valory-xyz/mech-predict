@@ -178,9 +178,12 @@ class PredictionResult(BaseModel):
 # Mech-protocol types
 # ---------------------------------------------------------------------------
 
-client: Optional[OpenAI] = None
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 # 3 LLM calls: reframe → synthesise → estimate
@@ -215,7 +218,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         return execute()
 
@@ -228,25 +231,23 @@ def with_key_rotation(func: Callable) -> Callable:
 
 
 class OpenAIClientManager:
-    """Context manager that creates / closes the module-level OpenAI client."""
+    """Context manager that creates and closes a local OpenAI client."""
 
     def __init__(self, api_key: str):
         """Initializes with API key."""
         self.api_key = api_key
+        self._client: Optional[OpenAI] = None
 
     def __enter__(self) -> OpenAI:
         """Initializes and returns the OpenAI client."""
-        global client
-        if client is None:
-            client = OpenAI(api_key=self.api_key)
-        return client
+        self._client = OpenAI(api_key=self.api_key)
+        return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the OpenAI client."""
-        global client
-        if client is not None:
-            client.close()
-            client = None
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
 
 def count_tokens(text: str, model: str) -> int:
@@ -424,6 +425,7 @@ OUTPUT:
 
 
 def _parse_completion(
+    client: OpenAI,
     model: str,
     messages: List[Dict[str, str]],
     response_format: Any,
@@ -439,6 +441,8 @@ def _parse_completion(
     response conforms to the supplied Pydantic schema — no fragile
     JSON-in-prompt parsing or regex extraction needed.
 
+    :param client: The OpenAI client instance.
+    :type client: OpenAI
     :param model: The OpenAI model name to use.
     :type model: str
     :param messages: List of message dicts with 'role' and 'content' keys.
@@ -459,8 +463,6 @@ def _parse_completion(
     :return: Tuple of (parsed_model_instance, counter_callback).
     :rtype: Tuple[Any, Optional[Callable]]
     """
-    if not client:
-        raise RuntimeError("OpenAI client not initialised")
 
     attempt = 0
     while attempt < retries:
@@ -491,10 +493,6 @@ def _parse_completion(
                 )
 
             return parsed, counter_callback
-        except (openai.LengthFinishReasonError, ValueError) as e:
-            print(f"[factual_research] Attempt {attempt + 1} failed: {e}")
-            time.sleep(delay)
-            attempt += 1
         except Exception as e:
             print(f"[factual_research] Attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
@@ -560,23 +558,48 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 )
 
 
-def _fetch_page_content(
-    url: str, max_words: int = _MAX_PAGE_WORDS, timeout: int = 10
-) -> Optional[str]:
-    """Fetch a URL and extract its main text content.
+def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
+    """Extract main text from HTML via readability + markdownify.
 
-    Uses ``readability-lxml`` to isolate the main article content, then
-    ``markdownify`` to convert it to clean Markdown text.
+    :param html: Raw HTML string.
+    :type html: str
+    :param max_words: Maximum number of words to keep.
+    :type max_words: int
+
+    :return: Cleaned text content, or None on failure.
+    :rtype: Optional[str]
+    """
+    cleaned = _SCRIPT_STYLE_PATTERN.sub("", html)
+    cleaned = _IMG_TAG_PATTERN.sub("", cleaned)
+    article_html = ReadabilityDocument(cleaned).summary()
+    text = md(article_html, heading_style="ATX", strip=["img", "figure"])
+    if not text or not text.strip():
+        return None
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]) + " […]"
+    return text.strip()
+
+
+def _fetch_page_content(
+    url: str,
+    mode: str = "cleaned",
+    max_words: int = _MAX_PAGE_WORDS,
+    timeout: int = 10,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch a URL and return (cleaned_text, raw_or_cleaned_for_capture).
 
     :param url: The URL to fetch.
     :type url: str
+    :param mode: ``"cleaned"`` stores extracted text; ``"raw"`` stores HTML.
+    :type mode: str
     :param max_words: Maximum number of words to keep.
     :type max_words: int
     :param timeout: Request timeout in seconds.
     :type timeout: int
 
-    :return: Extracted text content, or None on failure.
-    :rtype: Optional[str]
+    :return: Tuple of (cleaned text for pipeline, content to store for replay).
+    :rtype: Tuple[Optional[str], Optional[str]]
     """
     try:
         resp = requests.get(
@@ -585,33 +608,21 @@ def _fetch_page_content(
             headers={"User-Agent": "Mozilla/5.0 (compatible; MechBot/1.0)"},
         )
         if resp.status_code != 200:
-            return None
-        # Skip non-HTML responses (PDFs, images, etc.)
+            return None, None
         content_type = resp.headers.get("Content-Type", "")
         if "text/html" not in content_type:
-            return None
+            return None, None
 
         html = resp.text
-        # Strip scripts/styles/images before readability
-        html = _SCRIPT_STYLE_PATTERN.sub("", html)
-        html = _IMG_TAG_PATTERN.sub("", html)
+        text = _clean_html(html, max_words=max_words)
+        if not text:
+            return None, None
 
-        # Extract main content with readability
-        article_html = ReadabilityDocument(html).summary()
-        # Convert to clean markdown text
-        text = md(article_html, heading_style="ATX", strip=["img", "figure"])
-        if not text or not text.strip():
-            return None
-
-        # Truncate to max_words
-        words = text.split()
-        if len(words) > max_words:
-            text = " ".join(words[:max_words]) + " […]"
-
-        return text.strip()
+        capture = html if mode == "raw" else text
+        return text, capture
     except Exception as e:
         print(f"[factual_research] Failed to fetch {url}: {e}")
-        return None
+        return None, None
 
 
 def _format_evidence(all_results: List[Dict[str, str]]) -> str:
@@ -702,10 +713,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     # -- API keys --
     openai_api_key = kwargs["api_keys"]["openai"]
-    serper_api_key = kwargs["api_keys"]["serperapi"]
-    source_links: Optional[Dict[str, str]] = kwargs.get("source_links", None)
+    source_content: Optional[Dict[str, Any]] = kwargs.get("source_content", None)
+    return_source_content = (
+        kwargs["api_keys"].get("return_source_content", "false") == "true"
+    )
+    source_content_mode = kwargs["api_keys"].get("source_content_mode", "cleaned")
+    if source_content_mode not in ("cleaned", "raw"):
+        raise ValueError(
+            f"Invalid source_content_mode: {source_content_mode!r}. "
+            "Must be 'cleaned' or 'raw'."
+        )
 
-    with OpenAIClientManager(openai_api_key):
+    with OpenAIClientManager(openai_api_key) as llm_client:
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
@@ -726,6 +745,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         sub_q_result: SubQuestions
         sub_q_result, counter_callback = _parse_completion(
+            client=llm_client,
             model=model,
             messages=reframe_messages,
             response_format=SubQuestions,
@@ -747,19 +767,29 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         all_evidence: List[Dict[str, str]] = []
         seen_links: set = set()
 
-        if source_links:
+        captured_source_content: Dict[str, Any] = {}
+
+        if source_content is not None:
             # Cached replay mode: use pre-fetched content instead of live search
-            print("[factual_research] Using provided source_links (cached replay).")
-            for url, content in source_links.items():
-                all_evidence.append(
-                    {
-                        "title": url,
-                        "link": url,
-                        "snippet": "",
-                        "content": content,
-                    }
-                )
+            print("[factual_research] Using provided source_content (cached replay).")
+            captured_source_content = source_content
+            for item in source_content.get("serper_results", []):
+                all_evidence.append(item)
+            # Attach scraped page content from cache
+            mode = source_content.get("mode", "cleaned")
+            pages = source_content.get("pages", {})
+            for ev in all_evidence:
+                cached = pages.get(ev["link"])
+                if cached is None:
+                    continue
+                if mode == "raw":
+                    text = _clean_html(cached)
+                    if text:
+                        ev["content"] = text
+                else:
+                    ev["content"] = cached
         else:
+            serper_api_key = kwargs["api_keys"]["serperapi"]
             with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = {
                     pool.submit(_search_serper, sq, serper_api_key, num_results=3): sq
@@ -775,27 +805,46 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     except Exception as e:
                         print(f"[factual_research] Search failed for '{sq}': {e}")
 
+            # Snapshot serper results before scraping mutates items
+            serper_results_snapshot = [
+                {k: v for k, v in ev.items() if k != "content"} for ev in all_evidence
+            ]
+
             # Scrape actual page content for the top results
             MAX_PAGES_TO_SCRAPE = 6
+            captured_pages: Dict[str, str] = {}
             items_to_scrape = all_evidence[:MAX_PAGES_TO_SCRAPE]
             with ThreadPoolExecutor(max_workers=6) as pool:
                 future_to_item = {
-                    pool.submit(_fetch_page_content, item["link"]): item
+                    pool.submit(
+                        _fetch_page_content,
+                        item["link"],
+                        mode=source_content_mode,
+                    ): item
                     for item in items_to_scrape
                 }
                 scraped = 0
                 for scrape_fut in as_completed(future_to_item):
                     item = future_to_item[scrape_fut]
                     try:
-                        page_text = scrape_fut.result()
-                        if page_text:
-                            item["content"] = page_text
+                        text, capture = scrape_fut.result()
+                        if text:
+                            item["content"] = text
                             scraped += 1
+                        if capture:
+                            captured_pages[item["link"]] = capture
                     except Exception as e:
                         print(
                             f"[factual_research] Scrape failed for '{item['link']}': {e}"
                         )
             print(f"[factual_research] Scraped {scraped}/{len(all_evidence)} pages.")
+
+            # Capture source content for replay
+            captured_source_content = {
+                "mode": source_content_mode,
+                "serper_results": serper_results_snapshot,
+                "pages": captured_pages,
+            }
 
         # Cap evidence so we don't blow the synthesis context window
         MAX_EVIDENCE_ITEMS = 20
@@ -841,6 +890,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         briefing: FactualBriefing
         briefing, counter_callback = _parse_completion(
+            client=llm_client,
             model=model,
             messages=synthesis_messages,
             response_format=FactualBriefing,
@@ -873,6 +923,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         prediction: PredictionResult
         prediction, counter_callback = _parse_completion(
+            client=llm_client,
             model=model,
             messages=estimate_messages,
             response_format=PredictionResult,
@@ -910,4 +961,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"--- REASONING ---\n{prediction.reasoning}"
         )
 
-        return result, full_prompt_used, None, counter_callback
+        used_params: Dict[str, Any] = {
+            "model": model,
+            "temperature": temperature,
+        }
+        if return_source_content:
+            used_params["source_content"] = captured_source_content
+
+        return result, full_prompt_used, None, counter_callback, used_params

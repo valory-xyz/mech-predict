@@ -28,8 +28,11 @@ from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
     WORST_BEST_SIZE,
     brier_score,
+    classify_difficulty,
     classify_horizon,
+    classify_liquidity,
     compute_group_stats,
+    edge_score,
     group_by,
     group_by_horizon,
     group_by_month,
@@ -37,6 +40,7 @@ from benchmark.scorer import (
     rebuild,
     score,
     update,
+    _is_edge_eligible,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,6 +59,9 @@ def _row(
     predicted_at: str = "2026-03-15T10:00:00Z",
     tool_version: str | None = None,
     config_hash: str | None = None,
+    market_prob: float | None = None,
+    market_liquidity: float | None = None,
+    market_spread: float | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
     return {
@@ -69,6 +76,9 @@ def _row(
         "predicted_at": predicted_at,
         "tool_version": tool_version,
         "config_hash": config_hash,
+        "market_prob_at_prediction": market_prob,
+        "market_liquidity_at_prediction": market_liquidity,
+        "market_spread_at_prediction": market_spread,
     }
 
 
@@ -820,3 +830,321 @@ class TestConfigBreakdown:
         result = update(rows, scores_path, history_path)
 
         assert "t1 | unknown" in result["by_config"]
+
+
+# ---------------------------------------------------------------------------
+# edge_score
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeScore:
+    """Tests for edge_score."""
+
+    def test_tool_beats_market(self) -> None:
+        """Positive edge when tool is closer to outcome than market."""
+        # Outcome=True, tool says 0.9, market says 0.6
+        # market_brier = (0.6-1)^2 = 0.16, tool_brier = (0.9-1)^2 = 0.01
+        edge = edge_score(0.9, 0.6, True)
+        assert round(edge, 4) == 0.15
+
+    def test_market_beats_tool(self) -> None:
+        """Negative edge when market is closer to outcome than tool."""
+        # Outcome=False, tool says 0.7, market says 0.4
+        # market_brier = (0.4-0)^2 = 0.16, tool_brier = (0.7-0)^2 = 0.49
+        edge = edge_score(0.7, 0.4, False)
+        assert round(edge, 4) == -0.33
+
+    def test_tool_equals_market(self) -> None:
+        """Zero edge when tool and market agree."""
+        edge = edge_score(0.6, 0.6, True)
+        assert edge == 0.0
+
+    def test_both_wrong_outcome_true(self) -> None:
+        """Both predict low but outcome is True — less wrong tool wins."""
+        # market=0.3, tool=0.4, outcome=True
+        # market_brier = (0.3-1)^2 = 0.49, tool_brier = (0.4-1)^2 = 0.36
+        edge = edge_score(0.4, 0.3, True)
+        assert round(edge, 4) == 0.13
+
+    def test_both_wrong_outcome_false(self) -> None:
+        """Both predict high but outcome is False — less wrong tool wins."""
+        # market=0.8, tool=0.6, outcome=False
+        # market_brier = 0.64, tool_brier = 0.36
+        edge = edge_score(0.6, 0.8, False)
+        assert round(edge, 4) == 0.28
+
+
+# ---------------------------------------------------------------------------
+# _is_edge_eligible
+# ---------------------------------------------------------------------------
+
+
+class TestIsEdgeEligible:
+    """Tests for _is_edge_eligible."""
+
+    def test_eligible_row(self) -> None:
+        """Row with all required fields is eligible."""
+        row = _row(p_yes=0.7, outcome=True, market_prob=0.6)
+        assert _is_edge_eligible(row)
+
+    def test_missing_market_prob(self) -> None:
+        """Row without market_prob is not eligible."""
+        row = _row(p_yes=0.7, outcome=True)
+        assert not _is_edge_eligible(row)
+
+    def test_invalid_parse(self) -> None:
+        """Malformed prediction is not eligible."""
+        row = _row(status="malformed", market_prob=0.6)
+        assert not _is_edge_eligible(row)
+
+    def test_no_outcome(self) -> None:
+        """Row without outcome is not eligible."""
+        row = _row(p_yes=0.7, market_prob=0.6)
+        row["final_outcome"] = None
+        assert not _is_edge_eligible(row)
+
+
+# ---------------------------------------------------------------------------
+# classify_difficulty
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyDifficulty:
+    """Tests for classify_difficulty."""
+
+    def test_hard(self) -> None:
+        """Market near 50/50 is hard."""
+        assert classify_difficulty(0.55) == "hard"
+        assert classify_difficulty(0.45) == "hard"
+
+    def test_medium(self) -> None:
+        """Market between thresholds is medium."""
+        assert classify_difficulty(0.75) == "medium"
+        assert classify_difficulty(0.25) == "medium"
+
+    def test_easy(self) -> None:
+        """Market far from 50/50 is easy."""
+        assert classify_difficulty(0.9) == "easy"
+        assert classify_difficulty(0.1) == "easy"
+
+    def test_none(self) -> None:
+        """None returns unknown."""
+        assert classify_difficulty(None) == "unknown"
+
+    def test_boundary_hard_medium(self) -> None:
+        """Exact boundary: |0.65-0.5|=0.15 is medium (>= lo)."""
+        assert classify_difficulty(0.65) == "medium"
+        assert classify_difficulty(0.35) == "medium"
+
+    def test_boundary_medium_easy(self) -> None:
+        """Near boundary: |0.8-0.5|≈0.3 falls to easy due to float precision."""
+        # abs(0.8 - 0.5) = 0.30000000000000004 > 0.3 → easy
+        assert classify_difficulty(0.8) == "easy"
+        # 0.79 is clearly medium
+        assert classify_difficulty(0.79) == "medium"
+
+
+# ---------------------------------------------------------------------------
+# classify_liquidity
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyLiquidity:
+    """Tests for classify_liquidity."""
+
+    def test_low(self) -> None:
+        """Below threshold is low."""
+        assert classify_liquidity(6.0) == "low"
+        assert classify_liquidity(499.99) == "low"
+
+    def test_medium(self) -> None:
+        """Between thresholds is medium."""
+        assert classify_liquidity(500.0) == "medium"
+        assert classify_liquidity(3000.0) == "medium"
+
+    def test_high(self) -> None:
+        """Above threshold is high."""
+        assert classify_liquidity(5001.0) == "high"
+
+    def test_none(self) -> None:
+        """None returns unknown."""
+        assert classify_liquidity(None) == "unknown"
+
+    def test_boundary(self) -> None:
+        """Exact boundary: 5000 is medium (<= hi)."""
+        assert classify_liquidity(5000.0) == "medium"
+
+
+# ---------------------------------------------------------------------------
+# Edge in compute_group_stats (batch path)
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeInGroupStats:
+    """Tests for edge metrics in compute_group_stats."""
+
+    def test_edge_with_market_prob(self) -> None:
+        """Edge is computed when market_prob is available."""
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),   # edge > 0
+            _row(p_yes=0.3, outcome=False, market_prob=0.4),   # edge > 0
+        ]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 2
+        assert result["edge"] is not None
+        assert result["edge"] > 0
+        assert result["edge_positive_rate"] == 1.0
+
+    def test_edge_without_market_prob(self) -> None:
+        """Edge is null when no rows have market_prob."""
+        rows = [_row(p_yes=0.7, outcome=True)]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 0
+        assert result["edge"] is None
+        assert result["edge_positive_rate"] is None
+
+    def test_edge_mixed(self) -> None:
+        """Edge computed only from rows that have market_prob."""
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),  # eligible
+            _row(p_yes=0.7, outcome=True),                    # not eligible
+        ]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 1
+        assert result["valid_n"] == 2  # both valid for Brier
+        assert result["edge"] is not None
+
+    def test_brier_unchanged_by_edge(self) -> None:
+        """Adding market_prob doesn't change Brier computation."""
+        rows_without = [_row(p_yes=0.7, outcome=True)]
+        rows_with = [_row(p_yes=0.7, outcome=True, market_prob=0.5)]
+        stats_without = compute_group_stats(rows_without)
+        stats_with = compute_group_stats(rows_with)
+        assert stats_without["brier"] == stats_with["brier"]
+        assert stats_without["accuracy"] == stats_with["accuracy"]
+
+
+# ---------------------------------------------------------------------------
+# Edge in incremental path
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeIncremental:
+    """Tests for edge metrics in incremental update path."""
+
+    def test_incremental_edge(self, tmp_path: Path) -> None:
+        """Edge accumulators work through update()."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),
+            _row(p_yes=0.3, outcome=True, market_prob=0.7),
+        ]
+        result = update(rows, scores_path, history_path)
+        assert result["overall"]["edge_n"] == 2
+        assert result["overall"]["edge"] is not None
+
+    def test_incremental_no_edge(self, tmp_path: Path) -> None:
+        """No edge when no market_prob."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(p_yes=0.7, outcome=True)]
+        result = update(rows, scores_path, history_path)
+        assert result["overall"]["edge_n"] == 0
+        assert result["overall"]["edge"] is None
+
+    def test_resume_with_old_scores(self, tmp_path: Path) -> None:
+        """Old scores.json without edge fields loads gracefully."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        # Write old-format scores.json (no edge fields)
+        old_scores = {
+            "current_month": "2026-04",
+            "generated_at": "2026-04-08T00:00:00Z",
+            "overall": {
+                "n": 10,
+                "valid_n": 9,
+                "brier_sum": 2.0,
+                "correct_count": 6,
+                "sharpness_sum": 1.5,
+                "outcome_yes_count": 5,
+                "brier": 0.22,
+                "accuracy": 0.67,
+                "sharpness": 0.17,
+                "reliability": 0.9,
+                "decision_worthy": False,
+            },
+            "by_tool": {},
+            "by_platform": {},
+            "by_category": {},
+            "by_horizon": {},
+            "by_tool_platform": {},
+            "by_tool_version": {},
+            "by_config": {},
+            "calibration": {},
+            "parse_breakdown": {},
+            "latency_reservoir": {},
+            "worst_10": [],
+            "best_10": [],
+        }
+        scores_path.write_text(json.dumps(old_scores))
+
+        # Add a new row with market_prob
+        rows = [_row(p_yes=0.8, outcome=True, market_prob=0.5)]
+        result = update(rows, scores_path, history_path)
+
+        # Old rows didn't have edge, new one does
+        assert result["overall"]["edge_n"] == 1
+        assert result["overall"]["n"] == 11
+
+    def test_difficulty_and_liquidity_dimensions(self, tmp_path: Path) -> None:
+        """by_difficulty and by_liquidity dimensions are populated."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.55, market_liquidity=6.0),
+            _row(p_yes=0.8, outcome=True, market_prob=0.85, market_liquidity=1000.0),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "hard" in result["by_difficulty"]
+        assert "easy" in result["by_difficulty"]
+        assert "low" in result["by_liquidity"]
+        assert "medium" in result["by_liquidity"]
+
+
+# ---------------------------------------------------------------------------
+# Edge in batch score()
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeBatchScore:
+    """Tests for edge metrics in batch score()."""
+
+    def test_score_includes_edge_eligibility(self) -> None:
+        """score() output includes edge_eligibility section."""
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.5),
+            _row(p_yes=0.6, outcome=False),
+        ]
+        result = score(rows)
+        elig = result["edge_eligibility"]
+        assert elig["n_total"] == 2
+        assert elig["n_eligible"] == 1
+        assert elig["n_excluded"] == 1
+        assert elig["exclusion_reasons"]["missing_market_prob"] == 1
+
+    def test_score_includes_difficulty_and_liquidity(self) -> None:
+        """score() output includes by_difficulty and by_liquidity."""
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.55, market_liquidity=6.0),
+        ]
+        result = score(rows)
+        assert "by_difficulty" in result
+        assert "by_liquidity" in result
+        assert "hard" in result["by_difficulty"]
+        assert "low" in result["by_liquidity"]

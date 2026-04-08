@@ -29,8 +29,12 @@ import openai
 import requests
 from tiktoken import encoding_for_model
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 N_MODEL_CALLS = 1
@@ -68,7 +72,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -161,13 +165,14 @@ def count_tokens(text: str, model: str) -> int:
 
 
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "limit_max_tokens": 4096,
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
 ALLOWED_TOOLS = ["superforcaster"]
 ALLOWED_MODELS = [DEFAULT_OPENAI_MODEL]
+MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
 
@@ -183,7 +188,6 @@ Question:
 {question}
 
 Today's date: {today}
-Your pretraining knowledge cutoff: October 2023
 
 We have retrieved the following information for this question:
 <background>{sources}</background>
@@ -215,6 +219,11 @@ negativity bias and sensationalism bias by considering reasons to why your provi
 might be biased or exaggerated. Think like a superforecaster. Use <thinking></thinking> tags
 for this section of your response.
 
+CALIBRATION (mandatory before any probability):
+- State a base-rate probability for this event category and justify it.
+- Adjust from the base rate using specific evidence only.
+- Missing expected evidence (no announcement found, no confirmation) is a NO signal.
+
 5. Output an initial probability (prediction) as a single number between 0 and 1 given steps 1-4.
 Use <tentative></tentative> tags.
 
@@ -227,6 +236,19 @@ Recall that your performance will be evaluated according to the Brier score. Be 
 probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
 or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors
 that inform your final forecast. Use <thinking></thinking> tags for this portion of your response.
+
+BEFORE FINAL ANSWER — apply all three checks:
+
+1. EVIDENCE BAR: If sources confirm the event already occurred, high p_yes is fine.
+   If not: p_yes > 0.90 needs verified commitment (signed, awarded, published).
+   p_yes > 0.80 needs strong specific evidence, not plausibility or reputation.
+   Plans, proposals, and intentions are not completed actions.
+
+2. CONFIDENCE COUPLING: If confidence < 0.3, keep p_yes between 0.30-0.70.
+   If confidence < 0.5, keep p_yes between 0.20-0.80.
+
+3. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the current
+   value and compare to the threshold. A large gap overrides sentiment or forecasts.
 
 7. Output your final prediction (a number between 0 and 1 with an asterisk at the beginning and
 end of the decimal) in <answer></answer> tags.
@@ -382,7 +404,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return max_cost
 
     openai_api_key = kwargs["api_keys"]["openai"]
-    serper_api_key = kwargs["api_keys"]["serperapi"]
+    source_content = kwargs.get("source_content", None)
+    return_source_content = (
+        kwargs["api_keys"].get("return_source_content", "false") == "true"
+    )
+    source_content_mode = kwargs["api_keys"].get("source_content_mode", "cleaned")
+    if source_content_mode not in ("cleaned", "raw"):
+        raise ValueError(
+            f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+        )
     with OpenAIClientManager(openai_api_key) as llm_client:
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
@@ -393,15 +423,29 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         question = extract_question(prompt)
 
-        print("Fetching additional sources...")
-        serper_response = fetch_additional_sources(question, serper_api_key)
-        sources_data = serper_response.json()
-        print(f"Additional sources fetched: {sources_data}")
-        # choose top 5 results
-        organic_data = sources_data.get("organic", [])[:5]
-        misc_data = sources_data.get("peopleAlsoAsk", [])
-        print("Formating sources...")
-        sources = format_sources_data(organic_data, misc_data)
+        if source_content is not None:
+            print("Using provided source content (cached replay)...")
+            captured_source_content = source_content
+            serper_data = source_content.get("serper_response", source_content)
+            organic_data = serper_data.get("organic", [])[:MAX_SOURCES]
+            misc_data = serper_data.get("peopleAlsoAsk", [])
+            sources = format_sources_data(organic_data, misc_data)
+        else:
+            serper_api_key = kwargs["api_keys"]["serperapi"]
+            print("Fetching additional sources...")
+            serper_response = fetch_additional_sources(question, serper_api_key)
+            sources_data = serper_response.json()
+            # mode tag included for consistency across tools; content is identical
+            # regardless of mode since Serper returns structured JSON, not HTML
+            captured_source_content = {
+                "mode": source_content_mode,
+                "serper_response": sources_data,
+            }
+            print(f"Additional sources fetched: {sources_data}")
+            organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
+            misc_data = sources_data.get("peopleAlsoAsk", [])
+            print("Formating sources...")
+            sources = format_sources_data(organic_data, misc_data)
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(
@@ -424,4 +468,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             counter_callback=counter_callback,
         )
 
-        return extracted_block, prediction_prompt, None, counter_callback
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if return_source_content:
+            used_params["source_content"] = captured_source_content
+        return extracted_block, prediction_prompt, None, counter_callback, used_params

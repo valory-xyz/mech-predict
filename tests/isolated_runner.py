@@ -54,8 +54,8 @@ BENCHMARKS_MODULE_FILE = "benchmarks.py"
 APIS_MODULE_NAME = "task_execution_apis"
 BENCHMARKS_MODULE_NAME = "task_execution_benchmarks"
 
-# Expected response tuple length from tool `run()` calls
-EXPECTED_RESPONSE_LENGTH = 5
+# Expected response tuple lengths from tool `run()` calls
+EXPECTED_RESPONSE_LENGTHS = (5, 6)
 
 # Prediction response fields that must appear in deliver_msg
 PREDICTION_FIELDS = ("p_yes", "p_no", "confidence", "info_utility")
@@ -136,11 +136,26 @@ def _load_utils(project_root: str) -> Tuple[Any, Any]:
     return apis_mod.KeyChain, benchmarks_mod.TokenCounterCallback
 
 
+def _collect_keys(env_var: str) -> List[str]:
+    """Collect API keys. Plural env var (JSON array) takes precedence over singular."""
+    plural = os.environ.get(f"{env_var}S", "")
+    if plural:
+        try:
+            keys = json.loads(plural)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"{env_var}S must be a JSON array (e.g. '[\"key1\",\"key2\"]'), got: {plural[:50]}"
+            ) from e
+        return [k for k in keys if k]
+    single = os.environ.get(env_var, "")
+    return [single] if single else [""]
+
+
 def build_keychain(keychain_cls: Any, service_to_env_var: Dict[str, str]) -> Any:
     """Build a KeyChain from environment variables."""
     return keychain_cls(
         {
-            service: [os.environ.get(env_var, "")]
+            service: _collect_keys(env_var)
             for service, env_var in service_to_env_var.items()
         }
     )
@@ -164,7 +179,11 @@ def _validate_deliver_msg(deliver_msg: str, validate_prediction: bool) -> List[s
 
 
 def _validate_response_types(response: tuple) -> List[str]:
-    """Validate the types of response elements [1] through [4]."""
+    """Validate the types of response elements.
+
+    5-tuple (no key rotation): (result, prompt, tx_data, callback, used_params)
+    6-tuple (key rotation):    (result, prompt, tx_data, callback, used_params, api_keys)
+    """
     errors: List[str] = []
     if not isinstance(response[1], str):
         errors.append("Response[1] must be a string.")
@@ -172,8 +191,10 @@ def _validate_response_types(response: tuple) -> List[str]:
         errors.append("Response[2] must be a dictionary or None.")
     if response[3] is not None and type(response[3]).__name__ != TOKEN_COUNTER_CLASS_NAME:
         errors.append(f"Response[3] must be a {TOKEN_COUNTER_CLASS_NAME} or None.")
-    if type(response[4]).__name__ != KEYCHAIN_CLASS_NAME:
-        errors.append(f"Response[4] must be a {KEYCHAIN_CLASS_NAME} object.")
+    if not (isinstance(response[4], dict) or response[4] is None):
+        errors.append("Response[4] must be a dict (used_params) or None.")
+    if len(response) == 6 and type(response[5]).__name__ != KEYCHAIN_CLASS_NAME:
+        errors.append(f"Response[5] must be a {KEYCHAIN_CLASS_NAME} object.")
     return errors
 
 
@@ -181,8 +202,8 @@ def validate_response(response: Any, validate_prediction: bool = True) -> List[s
     """Validate a tool response. Returns a list of error strings (empty = pass)."""
     if not isinstance(response, tuple):
         return ["Response of the tool must be a tuple."]
-    if len(response) != EXPECTED_RESPONSE_LENGTH:
-        return [f"Response must have {EXPECTED_RESPONSE_LENGTH} elements, got {len(response)}."]
+    if len(response) not in EXPECTED_RESPONSE_LENGTHS:
+        return [f"Response must have {EXPECTED_RESPONSE_LENGTHS} elements, got {len(response)}."]
 
     errors: List[str] = []
     deliver_msg = response[0]
@@ -196,7 +217,10 @@ def validate_response(response: Any, validate_prediction: bool = True) -> List[s
 
 def _check_required_env_vars(required_env_vars: List[str]) -> List[str]:
     """Return list of missing env var names (empty if all present)."""
-    return [var for var in required_env_vars if not os.environ.get(var)]
+    return [
+        var for var in required_env_vars
+        if not os.environ.get(var) and not os.environ.get(f"{var}S")
+    ]
 
 
 def _make_error_result(errors: List[str]) -> Dict[str, Any]:

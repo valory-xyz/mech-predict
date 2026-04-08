@@ -119,8 +119,12 @@ STOP_WORDS = STOP_WORDS.union(punctuation)
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 WORD_RE = re.compile(r"\w+")
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -206,7 +210,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -482,7 +486,8 @@ BUFFER = 10000
 
 PREDICTION_PROMPT = """
 You are an LLM inside a multi-agent system that takes in a prompt of a user requesting a probability estimation
-for a given event. You are provided with an input under the label "USER_PROMPT". You must follow the instructions
+for a given event. Your performance is evaluated according to the Brier score.
+You are provided with an input under the label "USER_PROMPT". You must follow the instructions
 under the label "INSTRUCTIONS". You must provide your response in the format specified under "OUTPUT_FORMAT".
 
 INSTRUCTIONS
@@ -490,12 +495,26 @@ INSTRUCTIONS
 * The "USER_PROMPT" specifies an event.
 * The event will only have two possible outcomes: either the event will happen or the event will not happen.
 * If the event has more than two possible outcomes, you must ignore the rest of the instructions and output the response "Error".
-* You must provide a probability estimation of the event happening, based on your training data.
 * You are provided an itemized list of information under the label "ADDITIONAL_INFORMATION" delimited by three backticks.
 * You can use any item in "ADDITIONAL_INFORMATION" in addition to your training data.
 * If an item in "ADDITIONAL_INFORMATION" is not relevant, you must ignore that item for the estimation.
-* You must provide your response in the format specified under "OUTPUT_FORMAT".
-* Do not include any other contents in your response.
+
+ESTIMATION STEPS
+1. Identify what the event is and what category it falls into (e.g. regulatory action, product launch, political event, legal decision).
+2. Consider a base-rate probability for events of this type. How often do similar events actually occur?
+3. Evaluate the ADDITIONAL_INFORMATION for concrete evidence:
+   - What specific facts support YES?
+   - What specific facts support NO?
+   - Is expected evidence missing (no announcement found, no official confirmation)? Missing expected evidence is a NO signal.
+4. Adjust from the base rate using the evidence. If evidence is thin or mixed, stay close to the base rate.
+
+CALIBRATION CHECKS (apply before outputting your answer)
+* Most "will X happen by date Y?" questions resolve NO. The base rate for a specific announced action happening within a short deadline is low unless there is direct evidence it already occurred.
+* If sources confirm the event already occurred or was completed, high p_yes is justified — do not second-guess confirmed facts.
+* Otherwise: p_yes > 0.90 requires verified commitment (signed, awarded, published). Plans and intentions are not completions.
+* Otherwise: p_yes > 0.80 requires strong, specific evidence — not just plausibility or reputation.
+* For stock prices, earnings, weather, and other measurable outcomes: use the data in ADDITIONAL_INFORMATION directly. Compare current values to thresholds and estimate based on recent trends and volatility. The "most resolve NO" prior does not apply to these.
+* If your confidence is low (< 0.5), keep p_yes between 0.20 and 0.80.
 
 USER_PROMPT:
 ```
@@ -737,10 +756,19 @@ def process_in_batches(
             yield futures
 
 
-def extract_texts(urls: List[str], num_words: Optional[int]) -> List[ExtendedDocument]:
+def extract_texts(
+    urls: List[str],
+    num_words: Optional[int],
+    source_content_mode: str = "cleaned",
+) -> Tuple[List[ExtendedDocument], Dict[str, Any]]:
     """Extract texts from URLs"""
     max_allowed = 5
     extracted_docs: List[ExtendedDocument] = []
+    raw_source_content: Dict[str, Any] = {
+        "mode": source_content_mode,
+        "pages": {},
+        "pdfs": {},
+    }
     count = 0
     stop = False
     for batch in process_in_batches(urls=urls):
@@ -754,8 +782,13 @@ def extract_texts(urls: List[str], num_words: Optional[int]) -> List[ExtendedDoc
                     # Check if URL ends with .pdf or content starts with %PDF
                     if url.endswith(".pdf") or result.content[:4] == b"%PDF":
                         doc = extract_text_from_pdf(url, num_words=num_words)
+                        raw_source_content["pdfs"][url] = doc.text if doc else ""
                     else:
                         doc = extract_text(html=result.text, num_words=num_words)
+                        if source_content_mode == "raw":
+                            raw_source_content["pages"][url] = result.text
+                        else:
+                            raw_source_content["pages"][url] = doc.text if doc else ""
             except requests.exceptions.ReadTimeout:
                 print(f"Request timed out: {url}.")
             except Exception as e:
@@ -769,7 +802,7 @@ def extract_texts(urls: List[str], num_words: Optional[int]) -> List[ExtendedDoc
                 break
         if stop:
             break
-    return extracted_docs
+    return extracted_docs, raw_source_content
 
 
 def extract_json_string(text: str) -> str:
@@ -899,8 +932,9 @@ def fetch_additional_information(
     num_urls: int,
     num_words: int,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
-) -> Tuple[str, Any]:
+    source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
+) -> Tuple[str, Dict[str, Any], Any]:
     """Fetch additional information."""
     url_query_prompt = URL_QUERY_PROMPT.format(
         user_prompt=user_prompt, num_queries=DEFAULT_NUM_QUERIES
@@ -924,7 +958,7 @@ def fetch_additional_information(
         print(f"Fetch multi queries with retry failed with exception: {e}")
         json_data = {"queries": [user_prompt]}
 
-    if not source_links:
+    if source_content is None:
         # remove empty queries, including ""
         queries = json_data["queries"]
         queries = [query for query in queries if query.strip() != ""]
@@ -952,14 +986,21 @@ def fetch_additional_information(
                 engine=google_engine,
                 num=num_urls,
             )
-        docs = extract_texts(urls, num_words)
+        docs, raw_source_content = extract_texts(urls, num_words, source_content_mode)
     else:
+        raw_source_content = source_content
         docs = []
-        for url, content in islice(source_links.items(), 3):
-            doc = extract_text(html=content, num_words=num_words)
+        mode = source_content.get("mode", "cleaned")
+        for url, content in islice(source_content.get("pages", {}).items(), 3):
+            if mode == "raw":
+                doc = extract_text(html=content, num_words=num_words)
+            else:
+                doc = ExtendedDocument(text=content, url=url)
             if doc and doc.text != "":
                 doc.url = url
                 docs.append(doc)
+        for url, text in source_content.get("pdfs", {}).items():
+            docs.append(ExtendedDocument(text=text, url=url))
 
     if len(docs) > MAX_NR_DOCS:
         # truncate the split_docs to the first MAX_NR_DOCS documents
@@ -971,7 +1012,7 @@ def fetch_additional_information(
             for i, doc in enumerate(docs)
         ]
     )
-    return additional_information, counter_callback
+    return additional_information, raw_source_content, counter_callback
 
 
 def _tokenize_words(text: str) -> List[str]:
@@ -1110,23 +1151,33 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         if tool not in ALLOWED_TOOLS:
             raise ValueError(f"Tool {tool} is not supported.")
 
+        return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
         active_prompt = PREDICTION_PROMPT
         additional_information = ""
+        source_content: Dict[str, Any] = {}
         if tool in ["prediction-online", "claude-prediction-online"]:
-            additional_information, counter_callback = fetch_additional_information(
-                llm_client,
-                user_prompt,
-                engine,
-                temperature,
-                max_tokens,
-                google_api_key,
-                google_engine_id,
-                serper_api_key,
-                search_provider,
-                num_urls,
-                num_words,  # type: ignore
-                counter_callback=counter_callback,
-                source_links=kwargs.get("source_links", None),
+            additional_information, source_content, counter_callback = (
+                fetch_additional_information(
+                    llm_client,
+                    user_prompt,
+                    engine,
+                    temperature,
+                    max_tokens,
+                    google_api_key,
+                    google_engine_id,
+                    serper_api_key,
+                    search_provider,
+                    num_urls,
+                    num_words,  # type: ignore
+                    counter_callback=counter_callback,
+                    source_content=kwargs.get("source_content", None),
+                    source_content_mode=source_content_mode,
+                )
             )
         elif "claude" not in engine:
             # used improved prompt in all models except the Claude ones
@@ -1164,4 +1215,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             counter_callback=counter_callback,
         )
 
-        return extracted_block, prediction_prompt, None, counter_callback
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_words": num_words,
+        }
+        if return_source_content:
+            used_params["source_content"] = source_content
+        return extracted_block, prediction_prompt, None, counter_callback, used_params

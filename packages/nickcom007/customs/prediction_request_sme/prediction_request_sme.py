@@ -208,8 +208,12 @@ task question: "Will the air strike conflict in Sudan be resolved by 13 Septembe
 """
 
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -261,7 +265,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -379,10 +383,15 @@ def process_in_batches(
             yield futures
 
 
-def extract_texts(urls: List[str], num_words: int = 300) -> List[Dict]:
+def extract_texts(
+    urls: List[str],
+    num_words: int = 300,
+    source_content_mode: str = "cleaned",
+) -> Tuple[List[Dict], Dict[str, Any]]:
     """Extract texts from URLs"""
     max_allowed = 5
     extracted_texts = []
+    raw_source_content: Dict[str, Any] = {"mode": source_content_mode, "pages": {}}
     count = 0
     stop = False
     for batch in process_in_batches(urls=urls):
@@ -393,6 +402,10 @@ def extract_texts(urls: List[str], num_words: int = 300) -> List[Dict]:
                     continue
                 doc: Dict = {}
                 text = extract_text(html=result.text, num_words=num_words)
+                if source_content_mode == "raw":
+                    raw_source_content["pages"][url] = result.text
+                else:
+                    raw_source_content["pages"][url] = text if text else ""
                 doc["text"] = text
                 doc["url"] = url
                 extracted_texts.append(doc)
@@ -406,7 +419,7 @@ def extract_texts(urls: List[str], num_words: int = 300) -> List[Dict]:
                 print(f"An error occurred: {e}")
         if stop:
             break
-    return extracted_texts
+    return extracted_texts, raw_source_content
 
 
 def fetch_additional_information(
@@ -422,14 +435,15 @@ def fetch_additional_information(
     num_urls: int,
     num_words: int,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
-) -> Tuple[str, Optional[Callable[[int, int, str], None]]]:
+    source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
+) -> Tuple[str, Dict[str, Any], Optional[Callable[[int, int, str], None]]]:
     """Fetch additional information."""
 
     url_query_prompt = URL_QUERY_PROMPT.format(user_prompt=prompt)
     moderation_result = client.moderations.create(input=url_query_prompt)
     if moderation_result.results[0].flagged:
-        return "", counter_callback
+        return "", {}, counter_callback
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": url_query_prompt},
@@ -445,7 +459,7 @@ def fetch_additional_information(
     )
     json_data = json.loads(response.choices[0].message.content)
 
-    if not source_links:
+    if source_content is None:
         # Determine which search provider to use
         if search_provider == "serper":
             if not serper_api_key:
@@ -464,17 +478,17 @@ def fetch_additional_information(
                 api_key=google_api_key,
                 engine=google_engine,
             )
-        texts = extract_texts(urls, num_words)
+        texts, raw_source_content = extract_texts(urls, num_words, source_content_mode)
     else:
+        raw_source_content = source_content
         texts = []
-        for url, content in islice(source_links.items(), 3):
-            doc: dict = {}
-            text = (
-                extract_text(html=content, num_words=num_words),
-                url,
-            )
-            doc["text"] = text
-            doc["url"] = url
+        mode = source_content.get("mode", "cleaned")
+        for url, content in islice(source_content.get("pages", {}).items(), 3):
+            if mode == "raw":
+                text = extract_text(html=content, num_words=num_words)
+            else:
+                text = content
+            doc: dict = {"text": text, "url": url}
             texts.append(doc)
     # Format the additional information
     additional_information = "\n".join(
@@ -491,7 +505,7 @@ def fetch_additional_information(
             token_counter=count_tokens,
         )
 
-    return additional_information, counter_callback
+    return additional_information, raw_source_content, counter_callback
 
 
 def get_sme_role(
@@ -567,7 +581,7 @@ def adjust_additional_information(
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:
@@ -593,7 +607,7 @@ def run(
         prompt = kwargs["prompt"]
         max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
-        source_links = kwargs.get("source_links", None)
+        source_content = kwargs.get("source_content", None)
         num_urls = kwargs.get("num_urls", NUM_URLS_EXTRACT)
         num_words = kwargs.get("num_words", DEFAULT_NUM_WORDS)
         api_keys = kwargs.get("api_keys", {})
@@ -616,24 +630,34 @@ def run(
             print("Using default SME introduction.")
             sme_introduction = "You are a helpful assistant."
 
+        return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
         if tool.startswith("prediction-online"):
-            additional_information, counter_callback = fetch_additional_information(
-                llm_client,
-                prompt=prompt,
-                engine=engine,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                google_api_key=google_api_key,
-                google_engine=google_engine_id,
-                serper_api_key=serper_api_key,
-                search_provider=search_provider,
-                num_urls=num_urls,
-                num_words=num_words,
-                counter_callback=counter_callback,
-                source_links=source_links,
+            additional_information, source_content, counter_callback = (
+                fetch_additional_information(
+                    llm_client,
+                    prompt=prompt,
+                    engine=engine,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    google_api_key=google_api_key,
+                    google_engine=google_engine_id,
+                    serper_api_key=serper_api_key,
+                    search_provider=search_provider,
+                    num_urls=num_urls,
+                    num_words=num_words,
+                    counter_callback=counter_callback,
+                    source_content=source_content,
+                    source_content_mode=source_content_mode,
+                )
             )
         else:
             additional_information = None
+            source_content = {}
         if additional_information:
             additional_information = adjust_additional_information(
                 prompt=prompt,
@@ -645,12 +669,21 @@ def run(
             user_prompt=prompt, additional_information=additional_information
         )
         moderation_result = llm_client.moderations.create(input=prediction_prompt)
+        used_params = {
+            "model": engine,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+        }
+        if return_source_content:
+            used_params["source_content"] = source_content
         if moderation_result.results[0].flagged:
             return (
                 "Moderation flagged the prompt as in violation of terms.",
                 prediction_prompt,
                 None,
                 counter_callback,
+                used_params,
             )
         messages = [
             {"role": "system", "content": sme_introduction},
@@ -678,4 +711,5 @@ def run(
             prediction_prompt,
             None,
             counter_callback,
+            used_params,
         )

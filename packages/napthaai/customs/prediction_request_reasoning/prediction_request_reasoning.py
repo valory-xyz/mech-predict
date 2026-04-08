@@ -26,7 +26,6 @@ import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
-from itertools import islice
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import PyPDF2
@@ -43,8 +42,12 @@ from readability import Document as ReadabilityDocument
 from requests.exceptions import RequestException, TooManyRedirects
 from tiktoken import Encoding, encoding_for_model, get_encoding
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 MaxCostResponse = float
 
 
@@ -129,7 +132,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -360,16 +363,24 @@ After you have written all {NUM_QUERIES} search queries, please submit your fina
 
 
 PREDICTION_PROMPT = """
-You will be evaluating the likelihood of an event based on a user's question and reasoning provided by another AI.
+You will be evaluating the likelihood of an event based on a user's question and reasoning provided by another AI. Your performance is evaluated according to the Brier score.
 The user's question is: <user_input> {USER_INPUT} </user_input>
 
 The reasoning from the other AI is: {REASONING}
 
-Carefully consider the user's question and the provided reasoning. Then, think through the following:
- - The probability that the event specified in the user's question will happen (p_yes)
- - The probability that the event will not happen (p_no)
- - Your confidence level in your prediction
- - How useful the reasoning was in helping you make your prediction (info_utility)
+ESTIMATION STEPS (follow in order):
+1. Identify the event category (regulatory, product launch, political, legal, scientific, financial, etc.).
+2. State a base-rate probability for this category. Most "will X happen by date Y?" questions resolve No.
+3. Evaluate the reasoning quality: Does it cite specific, verifiable evidence (dates, sources, confirmed actions), or is it general plausibility and speculation?
+4. Adjust from the base rate using only concrete evidence in the reasoning. Stay close to the base rate if the reasoning is vague or mixed.
+
+CALIBRATION CHECKS (apply before outputting scores):
+- If the reasoning says the event already occurred or is confirmed, high p_yes is justified.
+- If the reasoning concludes "likely" but cites no confirmation it has happened, p_yes should not exceed 0.75.
+- p_yes above 0.90 requires the reasoning to cite verified completion (signed, awarded, published, enacted). Plans and intentions are not completions.
+- p_yes above 0.80 requires strong, specific evidence in the reasoning, not just coherent argumentation.
+- For numeric threshold questions (price, temperature, count, rating): compare the current value directly to the threshold and let the gap determine your probability. If the value is far from the threshold, a confident prediction (below 0.15 or above 0.85) is appropriate regardless of the caps above.
+- Absence of expected evidence in the reasoning (e.g., no mention of an announcement that should exist if the event occurred) is a signal the event has not happened.
 
 Provide your final scores in the following format: <p_yes>probability between 0 and 1</p_yes> <p_no>probability between 0 and 1</p_no>
 your confidence level between 0 and 1 <info_utility>utility of the reasoning between 0 and 1</info_utility>
@@ -389,13 +400,17 @@ REASONING_PROMPT = """
 Here is the user's question: {USER_PROMPT}
 Here is some additional information that may be relevant to answering the question: <additional_information> {ADDITIONAL_INFOMATION} </additional_information>
 
-Please carefully read the user's question and the additional information provided. Think through the problem step-by-step, taking into account:
+Please carefully read the user's question and the additional information provided. Structure your reasoning as follows:
 
-- The key details from the user's question, such as the specific event they are asking about and the date by which they want to know if it will occur
-- Any relevant facts or context provided in the additional information that could help inform your reasoning
-- Your own knowledge and analytical capabilities to reason through the likelihood of the event happening by the specified date
+1. EVENT: What specific event is being asked about, and what is the deadline?
+2. STATUS: Based on the additional information, has this event already occurred or been confirmed? If yes, cite the specific source. If no, state that clearly.
+3. EVIDENCE FOR (YES): List concrete facts from the additional information that support the event happening. Only include verifiable claims with sources.
+4. EVIDENCE AGAINST (NO): List concrete facts that argue against. Importantly, if you would expect to find confirmation of the event but the additional information contains none, state this as evidence against.
+5. ASSESSMENT: Weigh the evidence. Distinguish between "the event is confirmed/completed" vs "the event seems plausible but unconfirmed." For questions about numeric thresholds (prices, temperatures, counts, ratings), compare the current or most recent value directly to the threshold and state the gap.
 
-Explain your thought process and show your reasoning for why you believe the event either will or will not occur by the given date. Provide your response inside tags.
+Focus on what the additional information actually says. Do not speculate beyond the provided evidence. If the additional information is thin or irrelevant, say so explicitly rather than filling gaps with assumptions.
+
+Provide your response inside tags.
 <reasoning></reasoning>
 """
 
@@ -680,10 +695,17 @@ def extract_text(
 
 
 def extract_texts(
-    urls: List[str], num_words: Optional[int] = None
-) -> List[ExtendedDocument]:
+    urls: List[str],
+    num_words: Optional[int] = None,
+    source_content_mode: str = "cleaned",
+) -> Tuple[List[ExtendedDocument], Dict[str, Any]]:
     """Extract texts from URLs with improved error handling, excluding failed URLs."""
     extracted_texts = []
+    raw_source_content: Dict[str, Any] = {
+        "mode": source_content_mode,
+        "pages": {},
+        "pdfs": {},
+    }
     for batch in process_in_batches(urls=urls) or []:
         for future, url in batch:
             if future is None:
@@ -696,11 +718,15 @@ def extract_texts(
                 if isinstance(result, requests.Response) and result.status_code == 200:
                     # Check if URL ends with .pdf or content starts with %PDF
                     is_pdf = url.endswith(".pdf") or result.content[:4] == b"%PDF"
-                    doc = (
-                        extract_text_from_pdf(url, num_words=num_words)
-                        if is_pdf
-                        else extract_text(html=result.text, num_words=num_words)
-                    )
+                    if is_pdf:
+                        doc = extract_text_from_pdf(url, num_words=num_words)
+                        raw_source_content["pdfs"][url] = doc.text if doc else ""
+                    else:
+                        doc = extract_text(html=result.text, num_words=num_words)
+                        if source_content_mode == "raw":
+                            raw_source_content["pages"][url] = result.text
+                        else:
+                            raw_source_content["pages"][url] = doc.text if doc else ""
 
                     if doc:
                         doc.url = url
@@ -708,7 +734,7 @@ def extract_texts(
             except Exception as e:
                 print(f"Error processing {url}: {e}")
                 continue
-    return extracted_texts
+    return extracted_texts, raw_source_content
 
 
 def process_in_batches(
@@ -1027,12 +1053,13 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
     serper_api_key: Optional[str],
     search_provider: str,
     counter_callback: Optional[Callable[[int, int, str], None]] = None,
-    source_links: Optional[Dict] = None,
+    source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
     temperature: float = LLM_SETTINGS["gpt-4.1-2025-04-14"]["temperature"],
     max_tokens: int = LLM_SETTINGS["gpt-4.1-2025-04-14"]["default_max_tokens"],
-) -> Tuple[str, List[str], Optional[Callable[[int, int, str], None]]]:
+) -> Tuple[str, Dict[str, Any], List[str], Optional[Callable[[int, int, str], None]]]:
     """Fetch additional information from the web."""
     # generate multiple queries for fetching information from the web
     try:
@@ -1051,7 +1078,7 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
         queries = [prompt]
 
     # get the top URLs for the queries
-    if not source_links:
+    if source_content is None:
         # Determine which search provider to use
         if search_provider == "serper":
             if not serper_api_key:
@@ -1077,16 +1104,24 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
         urls = list(set(urls))
 
         # Extract text and dates from the URLs
-        docs = extract_texts(
+        docs, raw_source_content = extract_texts(
             urls=urls,
+            source_content_mode=source_content_mode,
         )
     else:
+        raw_source_content = source_content
         docs = []
-        for url, content in islice(source_links.items(), num_urls or len(source_links)):
-            doc = extract_text(html=content)
+        mode = source_content.get("mode", "cleaned")
+        for url, content in source_content.get("pages", {}).items():
+            if mode == "raw":
+                doc = extract_text(html=content)
+            else:
+                doc = ExtendedDocument(text=content, url=url)
             if doc:
                 doc.url = url
                 docs.append(doc)
+        for url, text in source_content.get("pdfs", {}).items():
+            docs.append(ExtendedDocument(text=text, url=url))
 
     # Remove None values from the list
     docs = [doc for doc in docs if doc]
@@ -1157,7 +1192,7 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
         ]
     )
 
-    return additional_information, queries, counter_callback
+    return additional_information, raw_source_content, queries, counter_callback
 
 
 def extract_question(prompt: str) -> str:
@@ -1174,7 +1209,9 @@ def extract_question(prompt: str) -> str:
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
+def run(  # pylint: disable=too-many-statements
+    **kwargs: Any,
+) -> Union[MaxCostResponse, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     model = kwargs.get("model")
@@ -1226,8 +1263,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         if tool not in ALLOWED_TOOLS:
             raise ValueError(f"Tool {tool} not supported.")
 
+        return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
         (
             additional_information,
+            source_content,
             _,
             counter_callback,
         ) = fetch_additional_information(
@@ -1240,7 +1284,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             serper_api_key=serper_api_key,
             search_provider=search_provider,
             counter_callback=counter_callback,
-            source_links=kwargs.get("source_links", None),
+            source_content=kwargs.get("source_content", None),
+            source_content_mode=source_content_mode,
             num_urls=num_urls,
             num_queries=num_queries,
             temperature=temperature,
@@ -1280,17 +1325,34 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_queries": num_queries,
+        }
+        if return_source_content:
+            used_params["source_content"] = source_content
+
         if not response_prediction or response_prediction.content is None:
             return (
                 "Response Prediction Not Valid",
                 prediction_prompt,
                 None,
                 counter_callback,
+                used_params,
             )
 
         prediction = parser_prediction_response(response_prediction.content)
         if not prediction:
-            return "Prediction Not Valid", prediction_prompt, None, counter_callback
+            return (
+                "Prediction Not Valid",
+                prediction_prompt,
+                None,
+                counter_callback,
+                used_params,
+            )
 
         if counter_callback:
             counter_callback(
@@ -1305,4 +1367,5 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             reasoning_prompt + "////" + prediction_prompt,
             None,
             counter_callback,
+            used_params,
         )

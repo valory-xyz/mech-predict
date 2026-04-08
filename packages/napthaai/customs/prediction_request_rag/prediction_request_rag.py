@@ -23,7 +23,6 @@ import json
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
-from itertools import islice
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import PyPDF2
@@ -40,8 +39,12 @@ from readability import Document as ReadabilityDocument
 from requests.exceptions import RequestException, TooManyRedirects
 from tiktoken import encoding_for_model, get_encoding
 
-MechResponseWithKeys = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any, Any]
-MechResponse = Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
 
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -115,7 +118,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 return execute()
             except Exception as e:
                 print(f"Unexpected error: {e}")
-                return str(e), "", None, None, api_keys
+                return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -331,6 +334,30 @@ Carefully consider the user's question and the additional information provided. 
 - The probability that the event will not happen (p_no)
 - Your confidence level in your prediction
 - How useful was the additional information in allowing you to make a prediction (info_utility)
+
+BEFORE ESTIMATING — follow these steps:
+
+1. CALIBRATION: State a base-rate probability for this event category and
+   justify it. Adjust UP or DOWN from the base rate using specific evidence
+   only. Missing expected evidence (no announcement found, no confirmation)
+   is a strong NO signal — absence of evidence is evidence of absence when
+   you would expect to find it.
+
+2. EVIDENCE BAR — apply strictly:
+   - p_yes > 0.95 requires the event to be ALREADY CONFIRMED in the sources.
+     If it hasn't happened yet, p_yes must be below 0.95.
+   - p_yes > 0.85 needs strong specific evidence of near-certain completion.
+   - p_yes > 0.70 needs concrete evidence, not plausibility or reputation.
+   - Plans, proposals, and intentions are NOT completed actions.
+   - "Will X happen by [date]" questions: unless sources confirm X already
+     happened, treat 0.50 as a reasonable starting point.
+
+3. CONFIDENCE COUPLING: If confidence < 0.3, keep p_yes between 0.30-0.70.
+   If confidence < 0.5, keep p_yes between 0.20-0.80.
+
+4. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the
+   current value and compare to the threshold. A large gap overrides
+   sentiment or forecasts.
 
 Provide your final scores in the following format: <p_yes>probability between 0 and 1</p_yes> <p_no>probability between 0 and 1</p_no>
 your confidence level between 0 and 1 <info_utility>utility of the additional information between 0 and 1</info_utility>
@@ -663,10 +690,17 @@ def process_in_batches(
 
 
 def extract_texts(
-    urls: List[str], num_words: Optional[int] = None
-) -> List[ExtendedDocument]:
+    urls: List[str],
+    num_words: Optional[int] = None,
+    source_content_mode: str = "cleaned",
+) -> Tuple[List[ExtendedDocument], Dict[str, Any]]:
     """Extract texts from URLs with improved error handling, excluding failed URLs."""
     extracted_texts = []
+    raw_source_content: Dict[str, Any] = {
+        "mode": source_content_mode,
+        "pages": {},
+        "pdfs": {},
+    }
     for batch in process_in_batches(urls=urls) or []:
         for future, url in batch:
             if future is None:
@@ -679,11 +713,15 @@ def extract_texts(
                 if isinstance(result, requests.Response) and result.status_code == 200:
                     # Check if URL ends with .pdf or content starts with %PDF
                     is_pdf = url.endswith(".pdf") or result.content[:4] == b"%PDF"
-                    doc = (
-                        extract_text_from_pdf(url, num_words=num_words)
-                        if is_pdf
-                        else extract_text(html=result.text, num_words=num_words)
-                    )
+                    if is_pdf:
+                        doc = extract_text_from_pdf(url, num_words=num_words)
+                        raw_source_content["pdfs"][url] = doc.text if doc else ""
+                    else:
+                        doc = extract_text(html=result.text, num_words=num_words)
+                        if source_content_mode == "raw":
+                            raw_source_content["pages"][url] = result.text
+                        else:
+                            raw_source_content["pages"][url] = doc.text if doc else ""
 
                     if doc:
                         doc.url = url
@@ -691,7 +729,7 @@ def extract_texts(
             except Exception as e:
                 print(f"Error processing {url}: {e}")
                 continue
-    return extracted_texts
+    return extracted_texts, raw_source_content
 
 
 def find_similar_chunks(
@@ -794,7 +832,7 @@ def recursive_character_text_splitter(
     return [text[i : i + max_tokens] for i in range(0, len(text), max_tokens - overlap)]
 
 
-def fetch_additional_information(
+def fetch_additional_information(  # pylint: disable=too-many-statements
     client: "LLMClient",
     client_embedding: Optional["LLMClient"],
     prompt: str,
@@ -804,12 +842,13 @@ def fetch_additional_information(
     serper_api_key: Optional[str],
     search_provider: str,
     counter_callback: Optional[Callable] = None,
-    source_links: Optional[Dict] = None,
+    source_content: Optional[Dict[str, Any]] = None,
+    source_content_mode: str = "cleaned",
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
     temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
     max_tokens: int = LLM_SETTINGS["claude-4-sonnet-20250514"]["default_max_tokens"],
-) -> Tuple[str, Optional[Callable[..., None]]]:
+) -> Tuple[str, Dict[str, Any], Optional[Callable[..., None]]]:
     """Fetch additional information to help answer the user prompt."""
     # generate multiple queries for fetching information from the web
 
@@ -829,7 +868,7 @@ def fetch_additional_information(
         queries = [prompt]
 
     # get the top URLs for the queries
-    if not source_links:
+    if source_content is None:
         # Determine which search provider to use
         if search_provider == "serper":
             if not serper_api_key:
@@ -855,16 +894,24 @@ def fetch_additional_information(
         urls = list(set(urls))
 
         # Extract text and dates from the URLs
-        docs = extract_texts(
+        docs, raw_source_content = extract_texts(
             urls=urls,
+            source_content_mode=source_content_mode,
         )
     else:
+        raw_source_content = source_content
         docs = []
-        for url, content in islice(source_links.items(), num_urls or len(source_links)):
-            doc = extract_text(html=content)
+        mode = source_content.get("mode", "cleaned")
+        for url, content in source_content.get("pages", {}).items():
+            if mode == "raw":
+                doc = extract_text(html=content)
+            else:
+                doc = ExtendedDocument(text=content, url=url)
             if doc:
                 doc.url = url
                 docs.append(doc)
+        for url, text in source_content.get("pdfs", {}).items():
+            docs.append(ExtendedDocument(text=text, url=url))
 
     # Remove None values from the list
     docs = [doc for doc in docs if doc]
@@ -918,7 +965,7 @@ def fetch_additional_information(
         ]
     )
 
-    return additional_information, counter_callback
+    return additional_information, raw_source_content, counter_callback
 
 
 def extract_question(prompt: str) -> str:
@@ -955,7 +1002,7 @@ def parser_prediction_response(response: str) -> str:
 @with_key_rotation
 def run(
     **kwargs: Any,
-) -> Union[float, Tuple[Optional[str], Any, Optional[Dict[str, Any]], Any]]:
+) -> Union[float, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     model = kwargs.get("model")
@@ -1007,21 +1054,30 @@ def run(
         if tool not in ALLOWED_TOOLS:
             raise ValueError(f"Tool {tool} not supported.")
 
-        additional_information, counter_callback = fetch_additional_information(
-            client=llm_client,
-            client_embedding=embedding_client,
-            prompt=prompt,
-            model=model,
-            google_api_key=google_api_key,
-            google_engine_id=google_engine_id,
-            serper_api_key=serper_api_key,
-            search_provider=search_provider,
-            counter_callback=counter_callback,
-            source_links=kwargs.get("source_links", None),
-            num_urls=num_urls,
-            num_queries=num_queries,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        return_source_content = api_keys.get("return_source_content", "false") == "true"
+        source_content_mode = api_keys.get("source_content_mode", "cleaned")
+        if source_content_mode not in ("cleaned", "raw"):
+            raise ValueError(
+                f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+            )
+        additional_information, source_content, counter_callback = (
+            fetch_additional_information(
+                client=llm_client,
+                client_embedding=embedding_client,
+                prompt=prompt,
+                model=model,
+                google_api_key=google_api_key,
+                google_engine_id=google_engine_id,
+                serper_api_key=serper_api_key,
+                search_provider=search_provider,
+                counter_callback=counter_callback,
+                source_content=kwargs.get("source_content", None),
+                source_content_mode=source_content_mode,
+                num_urls=num_urls,
+                num_queries=num_queries,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         )
 
         # Generate the prediction prompt
@@ -1042,12 +1098,23 @@ def run(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "num_urls": num_urls,
+            "num_queries": num_queries,
+        }
+        if return_source_content:
+            used_params["source_content"] = source_content
+
         if not response or response.content is None:
             return (
                 "Response Not Valid",
                 prediction_prompt,
                 None,
                 counter_callback,
+                used_params,
             )
 
         if counter_callback:
@@ -1059,4 +1126,4 @@ def run(
             )
 
         results = parser_prediction_response(response.content)
-        return results, prediction_prompt, None, counter_callback
+        return results, prediction_prompt, None, counter_callback, used_params

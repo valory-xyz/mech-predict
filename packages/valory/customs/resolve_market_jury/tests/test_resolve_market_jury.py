@@ -20,18 +20,19 @@
 """Unit tests for resolve_market_jury."""
 
 import json
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     VoterResult,
-    _all_agree,
     _build_consensus_result,
     _compute_agreement,
     _decided_votes,
     _extract_json,
+    _has_consensus,
+    _noop_token_counter,
     _parse_vote,
     run,
 )
@@ -150,6 +151,20 @@ class TestParseVote:
         assert result.has_occurred is None
         assert result.confidence == 0.0
 
+    def test_indeterminable_forces_null_answer(self) -> None:
+        """Voter saying is_determinable=false must have has_occurred=None."""
+        raw = json.dumps(
+            {
+                "is_determinable": False,
+                "has_occurred": True,
+                "confidence": 0.9,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.is_determinable is False
+        assert result.has_occurred is None
+        assert result.confidence == 0.5
+
 
 # ---------------------------------------------------------------------------
 # Consensus helpers
@@ -182,7 +197,7 @@ class TestDecidedVotes:
 
 
 class TestAllAgree:
-    """Tests for _all_agree consensus check."""
+    """Tests for _has_consensus consensus check."""
 
     @pytest.mark.parametrize(
         "votes, expected",
@@ -199,18 +214,38 @@ class TestAllAgree:
                 ],
                 True,
             ),
+            (
+                [
+                    _vote(has_occurred=True),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                ],
+                False,
+            ),
+            (
+                [
+                    _vote(has_occurred=True),
+                    _vote(has_occurred=True),
+                    _vote(is_determinable=False),
+                    _vote(is_determinable=False),
+                ],
+                False,
+            ),
         ],
         ids=[
             "unanimous_yes",
             "unanimous_no",
             "disagreement",
             "single",
-            "ignores_indet",
+            "ignores_indet_minority",
+            "minority_decided_rejected",
+            "half_decided_rejected",
         ],
     )
-    def test_all_agree(self, votes: list, expected: bool) -> None:
+    def test_has_consensus(self, votes: list, expected: bool) -> None:
         """Check consensus detection."""
-        assert _all_agree(votes) is expected
+        assert _has_consensus(votes) is expected
 
 
 class TestBuildConsensusResult:
@@ -250,132 +285,138 @@ class TestComputeAgreement:
 
 
 # ---------------------------------------------------------------------------
-# Adapters
+# _adapter_openrouter usage recording
 # ---------------------------------------------------------------------------
 
 
-class TestAdapterOpenai:
-    """Tests for OpenAI adapter."""
+class TestAdapterOpenrouterUsageRecording:
+    """Tests for the counter_callback recording inside _adapter_openrouter."""
 
-    def test_responses_api(self) -> None:
-        """Uses Responses API when available."""
+    def _make_client(
+        self, *, usage: Any, content: str = '{"is_valid": true}'
+    ) -> MagicMock:
+        """Build a mocked openai client returning a single response."""
         mock_client = MagicMock()
-        mock_item = MagicMock()
-        mock_item.text = '{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-        mock_item.content = None
-        mock_client.responses.create.return_value.output = [mock_item]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is True
-
-    def test_fallback_chat_completions(self) -> None:
-        """Falls back to chat completions when responses API missing."""
-        mock_client = MagicMock(spec=[])  # no 'responses' attr
-        mock_client.chat = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
-            MagicMock(
-                message=MagicMock(
-                    content='{"is_valid": true, "has_occurred": false, "confidence": 0.8}'
-                )
-            )
+            MagicMock(message=MagicMock(content=content))
         ]
+        mock_client.chat.completions.create.return_value.usage = usage
+        return mock_client
+
+    def _call(self, mock_client: MagicMock, counter_callback: Any) -> None:
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _adapter_openrouter,
+        )
 
         with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
+            _adapter_openrouter(
+                model="model-x",
+                prompt="p",
+                api_key="k",
+                max_tokens=100,
+                timeout=1,
+                max_attempts=1,
+                retry_delay=0,
+                counter_callback=counter_callback,
             )
 
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is False
+    def test_no_callback_is_noop(self) -> None:
+        """When no callback is provided, nothing is recorded."""
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens", "cost"])
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+        usage.cost = 0.01
+        self._call(self._make_client(usage=usage), counter_callback=None)
+        # no assertion needed -- if anything tried to call the callback, this would crash
 
-    def test_responses_api_nested_content(self) -> None:
-        """Handles response items with nested content blocks."""
+    def test_no_usage_is_noop(self) -> None:
+        """When response has no usage, callback is not called."""
+        cb = MagicMock()
         mock_client = MagicMock()
-        inner_block = MagicMock()
-        inner_block.text = '{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-        outer_item = MagicMock(spec=[])  # no 'text' attr
-        outer_item.content = [inner_block]
-        mock_client.responses.create.return_value.output = [outer_item]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
-
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is True
-
-    def test_responses_api_mixed_items(self) -> None:
-        """Handles mix of items: some with text, some with content, some with neither."""
-        mock_client = MagicMock()
-        # Item with neither text nor content
-        skip_item = MagicMock(spec=[])  # no text, no content
-        # Item with content but inner block has no text
-        no_text_block = MagicMock(spec=[])  # no text attr
-        content_item = MagicMock(spec=[])
-        content_item.content = [no_text_block]
-        # Item with text (the actual response)
-        text_item = MagicMock()
-        text_item.text = '{"is_valid": true, "has_occurred": false, "confidence": 0.8}'
-        mock_client.responses.create.return_value.output = [
-            skip_item,
-            content_item,
-            text_item,
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content='{"is_valid": true}'))
         ]
+        mock_client.chat.completions.create.return_value.usage = None
+        self._call(mock_client, counter_callback=cb)
+        cb.assert_not_called()
 
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openai,
-            )
+    def test_forwards_tokens_and_call_cost(self) -> None:
+        """Forwards token counts and usage.cost as call_cost."""
+        cb = MagicMock()
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens", "cost"])
+        usage.prompt_tokens = 100
+        usage.completion_tokens = 50
+        usage.cost = 0.025
+        self._call(self._make_client(usage=usage), counter_callback=cb)
+        cb.assert_called_once()
+        kwargs = cb.call_args.kwargs
+        assert kwargs["model"] == "model-x"
+        assert kwargs["input_tokens"] == 100
+        assert kwargs["output_tokens"] == 50
+        assert kwargs["call_cost"] == 0.025
 
-            result = _adapter_openai("openai", "gpt-4.1", "prompt", "key")
-            assert result.has_occurred is False
+    def test_call_cost_none_when_usage_has_no_cost(self) -> None:
+        """When usage.cost is missing, call_cost is None."""
+        cb = MagicMock()
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        usage.prompt_tokens = 100
+        usage.completion_tokens = 50
+        self._call(self._make_client(usage=usage), counter_callback=cb)
+        kwargs = cb.call_args.kwargs
+        assert kwargs["call_cost"] is None
+
+    def test_callback_exception_is_swallowed(self) -> None:
+        """Exceptions in callback are caught and logged."""
+        cb = MagicMock(side_effect=ValueError("bad model"))
+        usage = MagicMock(spec=["prompt_tokens", "completion_tokens"])
+        usage.prompt_tokens = 10
+        usage.completion_tokens = 5
+        self._call(
+            self._make_client(usage=usage), counter_callback=cb
+        )  # should not raise
+
+    def test_noop_token_counter_returns_zero(self) -> None:
+        """The placeholder counter ignores arguments and returns 0."""
+        assert _noop_token_counter() == 0
+        assert _noop_token_counter("any text", "any model") == 0
+        assert _noop_token_counter(text="x", model="y") == 0
+
+
+# ---------------------------------------------------------------------------
+# Adapters
+# ---------------------------------------------------------------------------
 
 
 class TestAdapterOpenrouter:
     """Tests for OpenRouter adapter."""
 
-    def test_appends_online(self) -> None:
-        """Appends :online to model slug."""
+    def test_passes_model_through(self) -> None:
+        """Passes the full model slug (including :online) through as-is."""
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
             MagicMock(
-                message=MagicMock(
-                    content='{"is_valid": true, "has_occurred": true, "confidence": 0.9}'
-                )
+                message=MagicMock(content='{"is_valid": true, "has_occurred": true}')
             )
         ]
+        mock_client.chat.completions.create.return_value.usage = None
 
         with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
             from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
                 _adapter_openrouter,
             )
 
-            result = _adapter_openrouter("grok", "x-ai/grok", "prompt", "key")
-            call_args = mock_client.chat.completions.create.call_args
-            assert ":online" in call_args.kwargs["model"]
-            assert result.has_occurred is True
-
-    def test_already_online(self) -> None:
-        """Does not double-append :online."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value.choices = [
-            MagicMock(message=MagicMock(content='{"is_valid": true}'))
-        ]
-
-        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _adapter_openrouter,
+            raw = _adapter_openrouter(
+                model="x-ai/grok-4.1-fast:online",
+                prompt="prompt",
+                api_key="key",
+                max_tokens=100,
+                timeout=1,
+                max_attempts=1,
+                retry_delay=0,
             )
-
-            _adapter_openrouter("grok", "model:online", "prompt", "key")
             call_args = mock_client.chat.completions.create.call_args
-            assert call_args.kwargs["model"] == "model:online"
+            assert call_args.kwargs["model"] == "x-ai/grok-4.1-fast:online"
+            assert '"is_valid": true' in raw
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +538,7 @@ class TestCollectVotes:
             assert len(results) == 2
 
     def test_handles_voter_failure(self) -> None:
-        """Failed voters are skipped, others still collected."""
+        """Failed voters are recorded as error stubs, others still collected."""
         call_count = 0
 
         def side_effect(*args: str, **kwargs: str) -> VoterResult:
@@ -512,26 +553,37 @@ class TestCollectVotes:
                 collect_votes,
             )
 
-            results = collect_votes("q?", ["a", "b"], _mock_api_keys())
-            assert len(results) == 1
+            results = collect_votes("q?", ["openai", "grok"], _mock_api_keys())
+            # Both voters appear in results: one error stub, one real vote.
+            assert len(results) == 2
+            errors = [r for r in results if r.error is not None]
+            successes = [r for r in results if r.error is None]
+            assert len(errors) == 1
+            assert len(successes) == 1
+            assert errors[0].error is not None
+            assert "API down" in errors[0].error
 
 
 class TestCastVote:
     """Tests for the cast_vote facade."""
 
     def test_delegates_to_adapter(self) -> None:
-        """cast_vote looks up registry and calls adapter."""
-        mock_result = _vote()
-        mock_adapter = MagicMock(return_value=mock_result)
+        """cast_vote looks up registry, calls adapter, and parses raw text."""
+        raw_json = (
+            '{"is_valid": true, "is_determinable": true, "has_occurred": true, '
+            '"confidence": 0.9, "reasoning": "test", "sources": ["http://x"]}'
+        )
+        mock_adapter = MagicMock(return_value=raw_json)
 
-        with patch(f"{MODULE}._ADAPTERS", {"_adapter_openai": mock_adapter}):
+        with patch(f"{MODULE}._ADAPTERS", {"_adapter_openrouter": mock_adapter}):
             from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
                 cast_vote,
             )
 
             keys = _mock_api_keys()
             result = cast_vote("openai", "question?", keys)
-            assert result is mock_result
+            assert isinstance(result, VoterResult)
+            assert result.has_occurred is True
             mock_adapter.assert_called_once()
 
 
@@ -717,3 +769,135 @@ class TestRun:
             parsed = json.loads(result[0])
             assert parsed["is_valid"] is False
             assert parsed["n_successful"] == 0
+
+    def test_all_error_stubs_trigger_failure(self) -> None:
+        """If every voter errors, the failure path is taken and the judge is skipped."""
+        keys = _mock_api_keys()
+        all_errored = [
+            _vote(voter="v1", error="boom"),
+            _vote(voter="v2", error="timeout"),
+        ]
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=all_errored),
+            patch(f"{MODULE}._run_judge") as mock_judge,
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            mock_judge.assert_not_called()
+            parsed = json.loads(result[0])
+            assert parsed["is_valid"] is False
+            assert parsed["n_successful"] == 0
+            assert parsed["judge_reasoning"] == "All voters failed."
+            # Error stubs are preserved in the response for debuggability.
+            assert len(parsed["votes"]) == 2
+
+    def test_n_successful_excludes_error_stubs_consensus(self) -> None:
+        """n_successful counts only voters whose error is None (consensus path)."""
+        keys = _mock_api_keys()
+        # 3 successful + 1 errored -- successful voters unanimously agree, so
+        # _has_consensus returns True and the judge is skipped.
+        votes = [
+            _vote(voter="v1", has_occurred=True),
+            _vote(voter="v2", has_occurred=True),
+            _vote(voter="v3", has_occurred=True),
+            _vote(voter="v4", error="crashed"),
+        ]
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=votes),
+            patch(f"{MODULE}._run_judge") as mock_judge,
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            mock_judge.assert_not_called()
+            parsed = json.loads(result[0])
+            assert parsed["n_successful"] == 3  # not 4 -- error stub excluded
+            assert len(parsed["votes"]) == 4  # all voters still in result
+
+    def test_n_successful_excludes_error_stubs_judge(self) -> None:
+        """n_successful counts only voters whose error is None (judge path)."""
+        keys = _mock_api_keys()
+        # 2 disagreeing successful + 1 errored -- triggers judge.
+        votes = [
+            _vote(voter="v1", has_occurred=True),
+            _vote(voter="v2", has_occurred=False),
+            _vote(voter="v3", error="crashed"),
+        ]
+        judge_verdict = {
+            "is_valid": True,
+            "is_determinable": True,
+            "has_occurred": True,
+            "judge_reasoning": "sided with v1",
+        }
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=votes),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            parsed = json.loads(result[0])
+            assert parsed["n_successful"] == 2  # not 3 -- error stub excluded
+            assert len(parsed["votes"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+
+class TestCounterCallbackConcurrency:
+    """Tests for the thread-safety guarantee around counter_callback."""
+
+    def test_counter_callback_lock_is_held_during_invocation(self) -> None:
+        """_adapter_openrouter holds COUNTER_CALLBACK_LOCK while invoking the callback.
+
+        We verify this by asserting the lock is locked from inside the callback.
+        This is a direct contract check -- no threads needed.
+        """
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            COUNTER_CALLBACK_LOCK,
+            _adapter_openrouter,
+        )
+
+        held_during_call = {"value": False}
+
+        def inspecting_callback(**kwargs: Any) -> None:
+            # acquire(blocking=False) returns False iff the lock is already held.
+            held_during_call["value"] = not COUNTER_CALLBACK_LOCK.acquire(
+                blocking=False
+            )
+            if not held_during_call["value"]:
+                COUNTER_CALLBACK_LOCK.release()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content="{}"))
+        ]
+        mock_client.chat.completions.create.return_value.usage = MagicMock(
+            prompt_tokens=1, completion_tokens=1, cost=0.001
+        )
+
+        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
+            _adapter_openrouter(
+                model="anthropic/claude-haiku-4.5:online",
+                prompt="p",
+                api_key="k",
+                max_tokens=10,
+                timeout=1,
+                max_attempts=1,
+                retry_delay=0,
+                counter_callback=inspecting_callback,
+            )
+
+        assert held_during_call["value"] is True

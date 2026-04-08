@@ -18,8 +18,8 @@
 # ------------------------------------------------------------------------------
 """Multi-model jury tool for resolving prediction markets.
 
-Fans out a market question to N independent AI voters (each with native web search),
-then an Anthropic Claude judge synthesizes the final verdict.
+Fans out a market question to N independent AI voters (each with web search),
+then an AI judge synthesizes the final verdict.
 
 Drop-in replacement for resolve_market_reasoning -- same input kwargs, same output
 tuple shape, same JSON result schema ({is_valid, is_determinable, has_occurred}).
@@ -27,12 +27,15 @@ tuple shape, same JSON result schema ({is_valid, is_determinable, has_occurred})
 
 import functools
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
+
+COUNTER_CALLBACK_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Types (mech tool contract)
@@ -53,29 +56,32 @@ DEFAULT_DELIVERY_RATE = 100
 # Voter / Judge configuration
 # ---------------------------------------------------------------------------
 
-OPENAI_MODEL = "gpt-4.1-2025-04-14"
-GROK_MODEL = "x-ai/grok-4.1-fast"
-GEMINI_MODEL = "google/gemini-2.5-flash"
-JUDGE_MODEL = "claude-sonnet-4"
+VOTER_MODEL_OPENAI = "openai/gpt-4.1:online"
+VOTER_MODEL_GROK = "x-ai/grok-4.1-fast:online"
+VOTER_MODEL_GEMINI = "google/gemini-2.5-flash:online"
+VOTER_MODEL_CLAUDE = "anthropic/claude-haiku-4.5:online"
+JUDGE_MODEL_CLAUDE = "anthropic/claude-sonnet-4:online"
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-N_VOTER_CALLS = 4  # default number of voters
-N_JUDGE_CALLS = 1
-N_MODEL_CALLS = N_VOTER_CALLS + N_JUDGE_CALLS
 
-VOTER_TIMEOUT = 120  # seconds per voter API call
+VOTER_MAX_ATTEMPTS = 1
+VOTER_MAX_TOKENS = 1024
+VOTER_RETRY_DELAY = 5
+VOTER_TIMEOUT = 120
+JUDGE_MAX_ATTEMPTS = 3
+JUDGE_MAX_TOKENS = 4096
+JUDGE_RETRY_DELAY = 5
 JUDGE_TIMEOUT = 120
-JUDGE_MAX_RETRIES = 3
-JUDGE_RETRY_DELAY = 5  # seconds
 
 ALLOWED_TOOLS = [
     "resolve-market-jury-v1",
 ]
 
-TOOL_TO_ENGINE = {
-    "resolve-market-jury-v1": JUDGE_MODEL,
-}
+
+def _noop_token_counter(*_args: Any, **_kwargs: Any) -> int:
+    """No-op token counter passed to TokenCounterCallback."""
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -184,40 +190,35 @@ class VoterResult:
 class VoterConfig:
     """Configuration for a single voter."""
 
-    adapter: str  # "_adapter_openai" or "_adapter_openrouter"
-    model: str  # model name / slug
-    key_name: str  # KeyChain service name
-    search_cost: float  # estimated per-call search cost in USD
+    adapter: str
+    model: str
+    api_key_id: str
 
 
-VOTER_REGISTRY: Dict[str, VoterConfig] = {
+VOTER_CONFIG: Dict[str, VoterConfig] = {
     "openai": VoterConfig(
-        adapter="_adapter_openai",
-        model=OPENAI_MODEL,
-        key_name="openai",
-        search_cost=0.01,
+        adapter="_adapter_openrouter",
+        model=VOTER_MODEL_OPENAI,
+        api_key_id="openrouter",
     ),
     "grok": VoterConfig(
         adapter="_adapter_openrouter",
-        model=GROK_MODEL,
-        key_name="openrouter",
-        search_cost=0.005,
+        model=VOTER_MODEL_GROK,
+        api_key_id="openrouter",
     ),
     "gemini": VoterConfig(
         adapter="_adapter_openrouter",
-        model=GEMINI_MODEL,
-        key_name="openrouter",
-        search_cost=0.014,
+        model=VOTER_MODEL_GEMINI,
+        api_key_id="openrouter",
     ),
     "claude": VoterConfig(
         adapter="_adapter_openrouter",
-        model="anthropic/claude-haiku-4.5",
-        key_name="openrouter",
-        search_cost=0.01,
+        model=VOTER_MODEL_CLAUDE,
+        api_key_id="openrouter",
     ),
 }
 
-DEFAULT_VOTERS = ["openai", "grok", "gemini", "claude"]
+DEFAULT_VOTERS: List[str] = list(VOTER_CONFIG.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +267,12 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
     is_determinable = data.get("is_determinable")
     confidence = float(data.get("confidence", 0.0))
 
-    # Enforce consistency: null answer means not determinable
+    # Enforce consistency between fields
     if has_occurred is None:
         is_determinable = False
+        confidence = min(confidence, 0.5)
+    if is_determinable is False:
+        has_occurred = None
         confidence = min(confidence, 0.5)
 
     return VoterResult(
@@ -284,85 +288,77 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
 
 
 # ---------------------------------------------------------------------------
-# Adapter: OpenAI (native web_search tool)
-# ---------------------------------------------------------------------------
-
-
-def _adapter_openai(
-    voter_name: str,
-    model: str,
-    prompt: str,
-    api_key: str,
-) -> VoterResult:
-    """Run OpenAI voter with native web_search tool.
-
-    Uses the Responses API if available (openai >= 1.66), otherwise falls
-    back to a search-capable chat completions model.
-
-    :param voter_name: registry key for this voter.
-    :param model: OpenAI model name.
-    :param prompt: formatted voter prompt.
-    :param api_key: OpenAI API key.
-    :return: parsed vote result.
-    """
-    client = openai.OpenAI(api_key=api_key)
-
-    # Try Responses API first (openai >= 1.66)
-    if hasattr(client, "responses"):
-        response = client.responses.create(
-            model=model,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            timeout=VOTER_TIMEOUT,
-        )
-        text_parts = []
-        for item in response.output:  # pragma: no branch
-            if hasattr(item, "text"):
-                text_parts.append(item.text)
-            elif hasattr(item, "content"):
-                for block in item.content:  # pragma: no branch
-                    if hasattr(block, "text"):
-                        text_parts.append(block.text)
-        raw = "\n".join(text_parts)
-    else:
-        # Fallback: use search-capable model via chat completions
-        search_model = "gpt-4o-search-preview"
-        response_cc = client.chat.completions.create(
-            model=search_model,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=VOTER_TIMEOUT,
-        )
-        raw = response_cc.choices[0].message.content or ""
-        model = search_model
-
-    return _parse_vote(raw, voter_name, model)
-
-
-# ---------------------------------------------------------------------------
-# Adapter: OpenRouter (any model with :online search)
+# OpenRouter adapter
 # ---------------------------------------------------------------------------
 
 
 def _adapter_openrouter(
-    voter_name: str,
     model: str,
     prompt: str,
     api_key: str,
-) -> VoterResult:
-    """Run OpenRouter voter with :online search plugin."""
+    max_tokens: int,
+    timeout: int,
+    max_attempts: int,
+    retry_delay: int,
+    counter_callback: Optional[Callable] = None,
+) -> str:
+    """Make an OpenRouter chat completion call and return the raw text.
+
+    Records token usage + per-call surcharge to ``counter_callback``.
+    Retries on 529 (overloaded) errors up to ``max_attempts`` attempts.
+
+    :param model: OpenRouter model slug.
+    :param prompt: prompt to send.
+    :param api_key: OpenRouter API key.
+    :param max_tokens: max output tokens.
+    :param timeout: per-request timeout in seconds.
+    :param max_attempts: total attempts (>=1). Only 529 errors trigger a retry.
+    :param retry_delay: seconds to sleep between retry attempts.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: raw text from the response (may be empty string).
+    """
     client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    model_online = model if ":online" in model else f"{model}:online"
-    response = client.chat.completions.create(
-        model=model_online,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=VOTER_TIMEOUT,
-    )
+    for attempt in range(max_attempts):  # pragma: no branch
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout,
+            )
+            break
+        except openai.APIStatusError as err:
+            if err.status_code == 529 and attempt < max_attempts - 1:
+                print(
+                    f"  {model} overloaded, retrying in {retry_delay}s "
+                    f"(attempt {attempt + 1}/{max_attempts})..."
+                )
+                time.sleep(retry_delay)
+            else:
+                raise
     raw = response.choices[0].message.content or ""
-    return _parse_vote(raw, voter_name, model_online)
+
+    # Forward token usage and real call cost to the callback so that
+    # total_cost matches what OpenRouter billed (including any
+    # web-search surcharge or routing markup).
+    usage = getattr(response, "usage", None)
+    if counter_callback is not None and usage is not None:
+        with COUNTER_CALLBACK_LOCK:
+            try:
+                counter_callback(
+                    model=model,
+                    token_counter=_noop_token_counter,
+                    input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                    output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                    call_cost=getattr(usage, "cost", None),
+                )
+            except Exception as e:  # pylint: disable=broad-except
+                print(f"  Warning: counter_callback failed for {model}: {e}")
+
+    return raw
 
 
 _ADAPTERS: Dict[str, Callable] = {
-    "_adapter_openai": _adapter_openai,
     "_adapter_openrouter": _adapter_openrouter,
 }
 
@@ -373,48 +369,79 @@ _ADAPTERS: Dict[str, Callable] = {
 
 
 def cast_vote(
-    voter_name: str,
+    voter_id: str,
     question: str,
     api_keys: Any,
+    counter_callback: Optional[Callable] = None,
 ) -> VoterResult:
-    """Uniform entry point -- delegates to provider-specific adapter."""
-    config = VOTER_REGISTRY[voter_name]
-    api_key = api_keys[config.key_name]
+    """Uniform entry point -- delegates to provider-specific adapter.
+
+    :param voter_id: registry key for this voter.
+    :param question: market question.
+    :param api_keys: KeyChain object.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: parsed vote result.
+    """
+    config = VOTER_CONFIG[voter_id]
+    api_key = api_keys[config.api_key_id]
     prompt = VOTER_PROMPT.format(question=question)
+    model = config.model
     adapter_fn = _ADAPTERS[config.adapter]
-    return adapter_fn(
-        voter_name=voter_name,
-        model=config.model,
+    raw = adapter_fn(
+        model=model,
         prompt=prompt,
         api_key=api_key,
+        max_tokens=VOTER_MAX_TOKENS,
+        timeout=VOTER_TIMEOUT,
+        max_attempts=VOTER_MAX_ATTEMPTS,
+        retry_delay=VOTER_RETRY_DELAY,
+        counter_callback=counter_callback,
     )
+    return _parse_vote(raw, voter_id, model)
 
 
 def collect_votes(
     question: str,
-    voter_names: List[str],
+    voter_ids: List[str],
     api_keys: Any,
+    counter_callback: Optional[Callable] = None,
 ) -> List[VoterResult]:
-    """Fan out to all voters in parallel, collect results."""
+    """Fan out to all voters in parallel, collect results.
+
+    :param question: market question.
+    :param voter_ids: list of voter registry keys to use.
+    :param api_keys: KeyChain object.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: list of voter results.
+    """
     results: List[VoterResult] = []
-    with ThreadPoolExecutor(max_workers=len(voter_names)) as pool:
+    with ThreadPoolExecutor(max_workers=len(voter_ids)) as pool:
         futures = {
-            pool.submit(cast_vote, name, question, api_keys): name
-            for name in voter_names
+            pool.submit(
+                cast_vote, voter_id, question, api_keys, counter_callback
+            ): voter_id
+            for voter_id in voter_ids
         }
         for future in as_completed(futures):
-            name = futures[future]
+            voter_id = futures[future]
             try:
                 result = future.result(timeout=VOTER_TIMEOUT + 30)
-                results.append(result)
                 print(
-                    f"  Voter [{name}]: "
+                    f"  Voter [{voter_id}]: "
                     f"has_occurred={result.has_occurred}, "
                     f"is_determinable={result.is_determinable}, "
                     f"confidence={result.confidence}"
                 )
             except Exception as e:  # pylint: disable=broad-except
-                print(f"  Voter [{name}] failed: {e}")
+                print(f"  Voter [{voter_id}] failed: {e}")
+                result = VoterResult(
+                    voter=voter_id,
+                    model=VOTER_CONFIG[voter_id].model,
+                    error=str(e),
+                )
+
+            results.append(result)
+
     return results
 
 
@@ -427,10 +454,19 @@ def _run_judge(
     question: str,
     votes: List[VoterResult],
     api_key: str,
+    counter_callback: Optional[Callable] = None,
 ) -> dict:
-    """Judge -- synthesizes voter results into final verdict via OpenRouter."""
+    """Judge -- synthesizes voter results into final verdict via OpenRouter.
+
+    :param question: market question.
+    :param votes: voter results to synthesize.
+    :param api_key: OpenRouter API key.
+    :param counter_callback: optional token/cost accounting callback.
+    :return: judge verdict dict.
+    """
+    successful = _successful_votes(votes)
     formatted_votes = ""
-    for i, v in enumerate(votes, 1):
+    for i, v in enumerate(successful, 1):
         vote_data = {
             "is_valid": v.is_valid,
             "is_determinable": v.is_determinable,
@@ -442,28 +478,16 @@ def _run_judge(
         formatted_votes += f"\nVoter {i}:\n{json.dumps(vote_data, indent=2)}\n"
 
     prompt = JUDGE_PROMPT.format(question=question, votes=formatted_votes)
-    client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    judge_model = f"anthropic/{JUDGE_MODEL}:online"
-
-    for attempt in range(JUDGE_MAX_RETRIES):  # pragma: no branch
-        try:
-            response = client.chat.completions.create(
-                model=judge_model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=JUDGE_TIMEOUT,
-            )
-            break
-        except openai.APIStatusError as err:
-            if err.status_code == 529 and attempt < JUDGE_MAX_RETRIES - 1:
-                print(
-                    f"  Judge overloaded, retrying in {JUDGE_RETRY_DELAY}s "
-                    f"(attempt {attempt + 1}/{JUDGE_MAX_RETRIES})..."
-                )
-                time.sleep(JUDGE_RETRY_DELAY)
-            else:
-                raise
-
-    raw = response.choices[0].message.content or ""
+    raw = _adapter_openrouter(
+        model=JUDGE_MODEL_CLAUDE,
+        prompt=prompt,
+        api_key=api_key,
+        max_tokens=JUDGE_MAX_TOKENS,
+        timeout=JUDGE_TIMEOUT,
+        max_attempts=JUDGE_MAX_ATTEMPTS,
+        retry_delay=JUDGE_RETRY_DELAY,
+        counter_callback=counter_callback,
+    )
     data = _extract_json(raw)
     if data is None:
         return {
@@ -480,6 +504,15 @@ def _run_judge(
 # ---------------------------------------------------------------------------
 
 
+def _successful_votes(votes: List[VoterResult]) -> List[VoterResult]:
+    """Filter to votes whose voter did not error out.
+
+    :param votes: all voter results (including error stubs).
+    :return: voter results with ``error is None``.
+    """
+    return [v for v in votes if v.error is None]
+
+
 def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     """Filter to votes that are valid and determinable."""
     return [
@@ -491,26 +524,39 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     ]
 
 
-def _all_agree(votes: List[VoterResult]) -> bool:
-    """Check if all decided votes unanimously agree on has_occurred."""
+def _has_consensus(votes: List[VoterResult]) -> bool:
+    """Check whether decided voters form a strict majority and all agree.
+
+    Undecided / failed / invalid voters count against the threshold: a strict
+    majority of *all* voters (not just decided ones) must have produced a
+    determinate verdict, AND those decided voters must unanimously agree on
+    ``has_occurred``. This prevents 2-of-4 minority agreement from short-
+    circuiting the judge.
+
+    :param votes: all voter results (including undecided / failed / invalid).
+    :return: True if decided voters form a strict majority and unanimously agree.
+    """
     decided = _decided_votes(votes)
-    if len(decided) < 2:
+    # Need at least a strict majority of all voters to have decided.
+    if len(decided) < 2 or len(decided) <= len(votes) / 2:
         return False
     return all(v.has_occurred == decided[0].has_occurred for v in decided)
 
 
 def _build_consensus_result(votes: List[VoterResult]) -> dict:
     """Build result from unanimous votes (skip judge)."""
+    successful = _successful_votes(votes)
     decided = _decided_votes(votes)
     return {
         "is_valid": True,
         "is_determinable": True,
         "has_occurred": decided[0].has_occurred,
         "votes": [asdict(v) for v in votes],
-        "judge_reasoning": "Unanimous voter consensus -- judge skipped.",
+        "judge_reasoning": "Voter majority consensus -- judge skipped.",
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
-        "n_successful": len(decided),
+        "n_successful": len(successful),
+        "n_decided": len(decided),
     }
 
 
@@ -582,6 +628,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if tool not in ALLOWED_TOOLS:
         raise ValueError(f"Tool {tool} is not supported. Allowed: {ALLOWED_TOOLS}")
 
+    voters = DEFAULT_VOTERS
+    voter_models = [VOTER_CONFIG[v].model for v in voters]
+
     # Cost calculation mode
     if delivery_rate == 0:
         if not counter_callback:
@@ -590,42 +639,43 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             )
         max_cost = counter_callback(
             max_cost=True,
-            models_calls=(OPENAI_MODEL,) * N_VOTER_CALLS + (JUDGE_MODEL,),
+            models_calls=tuple(voter_models) + (JUDGE_MODEL_CLAUDE,),
         )
         return max_cost
 
-    selected_voters = DEFAULT_VOTERS
-
     # 1. Fan out to voters (parallel)
-    print(f"Collecting votes from {selected_voters}...")
-    votes = collect_votes(prompt, selected_voters, api_keys)
+    print(f"Collecting votes from {voters}...")
+    votes = collect_votes(prompt, voters, api_keys, counter_callback)
+    successful = _successful_votes(votes)
 
     # 2. Early exit: no successful votes
-    if not votes:
+    if not successful:
         result: Dict[str, Any] = {
             "is_valid": False,
             "is_determinable": False,
             "has_occurred": None,
-            "votes": [],
+            "votes": [asdict(v) for v in votes],
             "judge_reasoning": "All voters failed.",
             "agreement_ratio": 0.0,
-            "n_voters": len(selected_voters),
+            "n_voters": len(voters),
             "n_successful": 0,
+            "n_decided": 0,
         }
         return json.dumps(result), "All voters failed.", None, counter_callback, None
 
-    voter_models = [VOTER_REGISTRY[v].model for v in selected_voters]
-    used_params = {
-        "model": JUDGE_MODEL,
+    used_params: Dict[str, Any] = {
+        "model": JUDGE_MODEL_CLAUDE,
         "voter_models": voter_models,
-        "n_voters": len(selected_voters),
+        "n_voters": len(voters),
     }
 
-    # 3. Unanimous early exit (cost saving -- skip judge)
-    if _all_agree(votes):
-        print("  Unanimous consensus -- skipping judge.")
+    # 3. Majority consensus early exit (cost saving -- skip judge)
+    if _has_consensus(votes):
+        print("  Voter majority consensus -- skipping judge.")
         result = _build_consensus_result(votes)
-        used_params["model"] = voter_models[0]  # judge was not called
+        # Judge was not called -- record the voters that actually contributed
+        # to the verdict instead of pinning a single misleading model id.
+        used_params["model"] = None
         return (
             json.dumps(result),
             result["judge_reasoning"],
@@ -636,7 +686,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     # 4. Judge synthesizes (only when voters disagree or partial)
     print("  Voters disagree -- running judge...")
-    verdict = _run_judge(prompt, votes, api_keys["openrouter"])
+    verdict = _run_judge(prompt, votes, api_keys["openrouter"], counter_callback)
 
     # 5. Build result with vote metadata
     judge_reasoning = verdict.get("judge_reasoning", "")
@@ -647,8 +697,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "votes": [asdict(v) for v in votes],
         "judge_reasoning": judge_reasoning,
         "agreement_ratio": _compute_agreement(votes),
-        "n_voters": len(selected_voters),
-        "n_successful": len(votes),
+        "n_voters": len(voters),
+        "n_successful": len(successful),
+        "n_decided": len(_decided_votes(votes)),
     }
 
     return json.dumps(result), judge_reasoning, None, counter_callback, used_params

@@ -315,7 +315,7 @@ class TestAdapterOpenrouterUsageRecording:
                 api_key="k",
                 max_tokens=100,
                 timeout=1,
-                max_retries=1,
+                max_attempts=1,
                 retry_delay=0,
                 counter_callback=counter_callback,
             )
@@ -411,7 +411,7 @@ class TestAdapterOpenrouter:
                 api_key="key",
                 max_tokens=100,
                 timeout=1,
-                max_retries=1,
+                max_attempts=1,
                 retry_delay=0,
             )
             call_args = mock_client.chat.completions.create.call_args
@@ -895,7 +895,7 @@ class TestCounterCallbackConcurrency:
                 api_key="k",
                 max_tokens=10,
                 timeout=1,
-                max_retries=1,
+                max_attempts=1,
                 retry_delay=0,
                 counter_callback=inspecting_callback,
             )

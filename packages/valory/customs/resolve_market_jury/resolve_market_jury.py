@@ -65,11 +65,11 @@ JUDGE_MODEL_CLAUDE = "anthropic/claude-sonnet-4:online"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
-VOTER_MAX_RETRIES = 1
+VOTER_MAX_ATTEMPTS = 1
 VOTER_MAX_TOKENS = 1024
 VOTER_RETRY_DELAY = 5
 VOTER_TIMEOUT = 120
-JUDGE_MAX_RETRIES = 3
+JUDGE_MAX_ATTEMPTS = 3
 JUDGE_MAX_TOKENS = 4096
 JUDGE_RETRY_DELAY = 5
 JUDGE_TIMEOUT = 120
@@ -298,27 +298,27 @@ def _adapter_openrouter(
     api_key: str,
     max_tokens: int,
     timeout: int,
-    max_retries: int,
+    max_attempts: int,
     retry_delay: int,
     counter_callback: Optional[Callable] = None,
 ) -> str:
     """Make an OpenRouter chat completion call and return the raw text.
 
     Records token usage + per-call surcharge to ``counter_callback``.
-    Retries on 529 (overloaded) errors up to ``max_retries`` attempts.
+    Retries on 529 (overloaded) errors up to ``max_attempts`` attempts.
 
     :param model: OpenRouter model slug.
     :param prompt: prompt to send.
     :param api_key: OpenRouter API key.
     :param max_tokens: max output tokens.
     :param timeout: per-request timeout in seconds.
-    :param max_retries: total attempts (>=1). Only 529 errors trigger a retry.
+    :param max_attempts: total attempts (>=1). Only 529 errors trigger a retry.
     :param retry_delay: seconds to sleep between retry attempts.
     :param counter_callback: optional token/cost accounting callback.
     :return: raw text from the response (may be empty string).
     """
     client = openai.OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL)
-    for attempt in range(max_retries):  # pragma: no branch
+    for attempt in range(max_attempts):  # pragma: no branch
         try:
             response = client.chat.completions.create(
                 model=model,
@@ -328,10 +328,10 @@ def _adapter_openrouter(
             )
             break
         except openai.APIStatusError as err:
-            if err.status_code == 529 and attempt < max_retries - 1:
+            if err.status_code == 529 and attempt < max_attempts - 1:
                 print(
                     f"  {model} overloaded, retrying in {retry_delay}s "
-                    f"(attempt {attempt + 1}/{max_retries})..."
+                    f"(attempt {attempt + 1}/{max_attempts})..."
                 )
                 time.sleep(retry_delay)
             else:
@@ -393,7 +393,7 @@ def cast_vote(
         api_key=api_key,
         max_tokens=VOTER_MAX_TOKENS,
         timeout=VOTER_TIMEOUT,
-        max_retries=VOTER_MAX_RETRIES,
+        max_attempts=VOTER_MAX_ATTEMPTS,
         retry_delay=VOTER_RETRY_DELAY,
         counter_callback=counter_callback,
     )
@@ -484,7 +484,7 @@ def _run_judge(
         api_key=api_key,
         max_tokens=JUDGE_MAX_TOKENS,
         timeout=JUDGE_TIMEOUT,
-        max_retries=JUDGE_MAX_RETRIES,
+        max_attempts=JUDGE_MAX_ATTEMPTS,
         retry_delay=JUDGE_RETRY_DELAY,
         counter_callback=counter_callback,
     )

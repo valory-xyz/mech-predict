@@ -35,6 +35,10 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 • `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "overconfident", "anti-predictive")
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
+*Platform performance:*
+• `platform` — Brier `X.XX`, BSS `±X.XX` (interpret: >0 = skillful, <0 = worse than base rate), n=X
+(list all platforms)
+
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
@@ -84,7 +88,7 @@ def summarize_report(report_text: str, api_key: str) -> str:
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 400,
+            "max_tokens": 500,
             "temperature": 0.2,
         }
     ).encode()

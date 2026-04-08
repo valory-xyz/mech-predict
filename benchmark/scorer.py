@@ -452,8 +452,24 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for tool, group in group_by(rows, "tool_name").items()
     }
 
-    # Edge eligibility reporting
+    # Edge eligibility reporting — mutually exclusive exclusion reasons
     n_edge_eligible = sum(1 for r in rows if _is_edge_eligible(r))
+    n_invalid_parse = sum(
+        1 for r in rows if r.get("prediction_parse_status") != "valid"
+    )
+    n_missing_outcome = sum(
+        1
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is None
+    )
+    n_missing_p_yes = sum(
+        1
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is not None
+        and r.get("p_yes") is None
+    )
     n_missing_market_prob = sum(
         1
         for r in rows
@@ -462,20 +478,15 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         and r.get("p_yes") is not None
         and r.get("market_prob_at_prediction") is None
     )
-    n_invalid_parse = total - sum(
-        1
-        for r in rows
-        if r.get("prediction_parse_status") == "valid"
-        and r.get("final_outcome") is not None
-        and r.get("p_yes") is not None
-    )
     edge_eligibility = {
         "n_total": total,
         "n_eligible": n_edge_eligible,
         "n_excluded": total - n_edge_eligible,
         "exclusion_reasons": {
+            "invalid_parse": n_invalid_parse,
+            "missing_outcome": n_missing_outcome,
+            "missing_p_yes": n_missing_p_yes,
             "missing_market_prob": n_missing_market_prob,
-            "invalid_prediction": n_invalid_parse,
         },
     }
 
@@ -1122,11 +1133,17 @@ def rebuild(
     sorted_months = sorted(months.keys())
     last_month = sorted_months[-1]
 
+    # Collect all row_ids across all months for dedup on subsequent update() calls
+    all_row_ids: set[str] = set()
+
     # Process all months except the last one as snapshots
     for month in sorted_months[:-1]:
         scores = _empty_scores(month)
         for row in months[month]:
             _accumulate_row(scores, row)
+            row_id = row.get("row_id")
+            if row_id:
+                all_row_ids.add(row_id)
         _snapshot_month(scores, history_path)
 
     # The last month becomes the current scores.json
@@ -1135,7 +1152,8 @@ def rebuild(
         _accumulate_row(scores, row)
         row_id = row.get("row_id")
         if row_id:
-            scores["scored_row_ids"].add(row_id)
+            all_row_ids.add(row_id)
+    scores["scored_row_ids"] = all_row_ids
 
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use

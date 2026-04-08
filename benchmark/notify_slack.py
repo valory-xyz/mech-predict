@@ -113,6 +113,8 @@ def _build_report_url() -> str | None:
     Prefers ``REPORT_ARTIFACT_URL`` (set by a prior workflow step that
     queries the API after uploading the artifact).  Falls back to the
     generic run URL when the exact artifact link isn't available.
+
+    :return: URL string, or None if not running in CI.
     """
     artifact_url = os.environ.get("REPORT_ARTIFACT_URL")
     if artifact_url:

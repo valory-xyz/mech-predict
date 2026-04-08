@@ -27,6 +27,7 @@ from unittest.mock import patch
 from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
     WORST_BEST_SIZE,
+    _is_edge_eligible,
     brier_score,
     classify_difficulty,
     classify_horizon,
@@ -40,7 +41,6 @@ from benchmark.scorer import (
     rebuild,
     score,
     update,
-    _is_edge_eligible,
 )
 
 # ---------------------------------------------------------------------------

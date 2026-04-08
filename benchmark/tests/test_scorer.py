@@ -995,8 +995,8 @@ class TestEdgeInGroupStats:
     def test_edge_with_market_prob(self) -> None:
         """Edge is computed when market_prob is available."""
         rows = [
-            _row(p_yes=0.9, outcome=True, market_prob=0.6),   # edge > 0
-            _row(p_yes=0.3, outcome=False, market_prob=0.4),   # edge > 0
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),  # edge > 0
+            _row(p_yes=0.3, outcome=False, market_prob=0.4),  # edge > 0
         ]
         result = compute_group_stats(rows)
         assert result["edge_n"] == 2
@@ -1016,7 +1016,7 @@ class TestEdgeInGroupStats:
         """Edge computed only from rows that have market_prob."""
         rows = [
             _row(p_yes=0.9, outcome=True, market_prob=0.6),  # eligible
-            _row(p_yes=0.7, outcome=True),                    # not eligible
+            _row(p_yes=0.7, outcome=True),  # not eligible
         ]
         result = compute_group_stats(rows)
         assert result["edge_n"] == 1
@@ -1163,7 +1163,7 @@ class TestEdgeBatchScore:
 
 
 # ---------------------------------------------------------------------------
-# Dedup in update()
+# Row-ID deduplication
 # ---------------------------------------------------------------------------
 
 
@@ -1186,9 +1186,9 @@ class TestUpdateDedup:
 
         # Second pass with same rows — should be skipped
         result2 = update(rows, scores_path, history_path)
-        assert result2["overall"]["n"] == 2, (
-            f"Expected 2 after dedup, got {result2['overall']['n']}"
-        )
+        assert (
+            result2["overall"]["n"] == 2
+        ), f"Expected 2 after dedup, got {result2['overall']['n']}"
         assert result2["overall"]["brier"] == result1["overall"]["brier"]
 
     def test_new_rows_added_after_dedup(self, tmp_path: Path) -> None:
@@ -1198,16 +1198,16 @@ class TestUpdateDedup:
 
         batch1 = [_row(p_yes=0.7, outcome=True, row_id="r1")]
         batch2 = [
-            _row(p_yes=0.7, outcome=True, row_id="r1"),   # duplicate
-            _row(p_yes=0.4, outcome=False, row_id="r3"),   # new
+            _row(p_yes=0.7, outcome=True, row_id="r1"),  # duplicate
+            _row(p_yes=0.4, outcome=False, row_id="r3"),  # new
         ]
 
         update(batch1, scores_path, history_path)
         result = update(batch2, scores_path, history_path)
 
-        assert result["overall"]["n"] == 2, (
-            f"Expected 2 (r1 + r3), got {result['overall']['n']}"
-        )
+        assert (
+            result["overall"]["n"] == 2
+        ), f"Expected 2 (r1 + r3), got {result['overall']['n']}"
 
     def test_scored_row_ids_persisted(self, tmp_path: Path) -> None:
         """scored_row_ids are saved to scores.json and loaded on resume."""

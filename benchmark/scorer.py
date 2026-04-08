@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import glob as glob_mod
 import json
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -418,9 +419,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         plat = row.get("platform", "unknown")
         diff = classify_difficulty(row.get("market_prob_at_prediction"))
         pd_groups[f"{plat} | {diff}"].append(row)
-    by_platform_difficulty = {
-        k: compute_group_stats(g) for k, g in pd_groups.items()
-    }
+    by_platform_difficulty = {k: compute_group_stats(g) for k, g in pd_groups.items()}
 
     # Platform × liquidity cross breakdown
     pl_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -428,9 +427,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         plat = row.get("platform", "unknown")
         liq = classify_liquidity(row.get("market_liquidity_at_prediction"))
         pl_groups[f"{plat} | {liq}"].append(row)
-    by_platform_liquidity = {
-        k: compute_group_stats(g) for k, g in pl_groups.items()
-    }
+    by_platform_liquidity = {k: compute_group_stats(g) for k, g in pl_groups.items()}
 
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
@@ -646,9 +643,7 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     result["edge_n"] = edge_n
     if edge_n > 0:
         result["edge"] = round(group["edge_sum"] / edge_n, 4)
-        result["edge_positive_rate"] = round(
-            group["edge_positive_count"] / edge_n, 4
-        )
+        result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
     else:
         result["edge"] = None
         result["edge_positive_rate"] = None
@@ -1031,8 +1026,6 @@ def update(
     scores["scored_row_ids"] = scored_ids
 
     if skipped:
-        import logging
-
         logging.getLogger(__name__).warning(
             "Skipped %d duplicate rows (already scored)", skipped
         )

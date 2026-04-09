@@ -1032,19 +1032,27 @@ def update(
 
     scored_ids: set[str] = scores.get("scored_row_ids", set())
     skipped = 0
+    no_id = 0
     for row in new_rows:
         row_id = row.get("row_id")
-        if row_id and row_id in scored_ids:
+        if not row_id:
+            no_id += 1
+            _accumulate_row(scores, row)
+            continue
+        if row_id in scored_ids:
             skipped += 1
             continue
         _accumulate_row(scores, row)
-        if row_id:
-            scored_ids.add(row_id)
+        scored_ids.add(row_id)
     scores["scored_row_ids"] = scored_ids
 
     if skipped:
         logging.getLogger(__name__).warning(
             "Skipped %d duplicate rows (already scored)", skipped
+        )
+    if no_id:
+        logging.getLogger(__name__).warning(
+            "%d rows without row_id cannot be deduplicated", no_id
         )
 
     # Write raw accumulators (for future incremental loads)

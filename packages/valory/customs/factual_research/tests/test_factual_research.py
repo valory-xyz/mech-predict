@@ -21,7 +21,7 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -123,8 +123,15 @@ def _make_mock_api_keys(
     return mock
 
 
-def _make_mock_parse_completion() -> MagicMock:
-    """Create a mock _parse_completion that returns appropriate Pydantic models."""
+def _make_mock_parse_completion() -> List[Tuple[Any, None]]:
+    """Return an explicit side_effect list for the 3 _parse_completion calls.
+
+    The pipeline calls _parse_completion exactly 3 times in this order:
+    reframe → synthesise → estimate. Using a static list instead of a
+    counter-based dispatcher makes the test fail loudly if the pipeline
+    ever reorders or adds a call, instead of silently returning the wrong
+    model.
+    """
     sub_q = SubQuestions(sub_questions=["What is the status of X?"])
     briefing = FactualBriefing(
         sub_answers=[
@@ -145,20 +152,11 @@ def _make_mock_parse_completion() -> MagicMock:
         confidence=0.7,
         info_utility=0.8,
     )
-
-    call_count = 0
-
-    def side_effect(*args: Any, **kwargs: Any) -> Any:
-        nonlocal call_count
-        call_count += 1
-        cb = kwargs.get("counter_callback") or (args[9] if len(args) > 9 else None)
-        if call_count == 1:
-            return sub_q, cb
-        if call_count == 2:
-            return briefing, cb
-        return prediction, cb
-
-    return MagicMock(side_effect=side_effect)
+    return [
+        (sub_q, None),
+        (briefing, None),
+        (prediction, None),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +395,7 @@ class TestRunSourceContent:
             {"title": "R1", "link": "https://example.com/1", "snippet": "S1"},
         ]
         mock_fetch.return_value = ("Cleaned text", "Cleaned text")
-        mock_parse.side_effect = _make_mock_parse_completion().side_effect
+        mock_parse.side_effect = _make_mock_parse_completion()
 
         result = run(
             tool="factual_research",
@@ -429,7 +427,7 @@ class TestRunSourceContent:
         mock_client = MagicMock()
         mock_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_mgr.return_value.__exit__ = MagicMock(return_value=False)
-        mock_parse.side_effect = _make_mock_parse_completion().side_effect
+        mock_parse.side_effect = _make_mock_parse_completion()
 
         cached = {
             "mode": "cleaned",
@@ -468,7 +466,7 @@ class TestRunSourceContent:
         mock_client = MagicMock()
         mock_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_mgr.return_value.__exit__ = MagicMock(return_value=False)
-        mock_parse.side_effect = _make_mock_parse_completion().side_effect
+        mock_parse.side_effect = _make_mock_parse_completion()
         mock_clean.return_value = "Re-cleaned text"
 
         cached = {
@@ -510,7 +508,7 @@ class TestRunSourceContent:
             {"title": "R1", "link": "https://example.com/1", "snippet": "S1"},
         ]
         mock_fetch.return_value = ("Cleaned", "Cleaned")
-        mock_parse.side_effect = _make_mock_parse_completion().side_effect
+        mock_parse.side_effect = _make_mock_parse_completion()
 
         result = run(
             tool="factual_research",
@@ -530,7 +528,7 @@ class TestParseCompletionRetry:
 
     @patch(f"{FR_MODULE}.time.sleep")
     def test_retries_then_succeeds(self, mock_sleep: MagicMock) -> None:
-        """Fail twice, succeed on the third attempt; verify 3 calls made."""
+        """Fail twice with retryable errors, succeed on the third attempt."""
         mock_client = MagicMock()
 
         # Build a successful response for the third attempt
@@ -547,9 +545,11 @@ class TestParseCompletionRetry:
         mock_response.choices = [mock_choice]
         mock_response.usage = mock_usage
 
+        # ValueError is in the retryable set (covers pydantic ValidationError
+        # and the inline "Model refused…" raise).
         mock_client.beta.chat.completions.parse.side_effect = [
-            RuntimeError("fail 1"),
-            RuntimeError("fail 2"),
+            ValueError("fail 1"),
+            ValueError("fail 2"),
             mock_response,
         ]
 
@@ -568,9 +568,9 @@ class TestParseCompletionRetry:
 
     @patch(f"{FR_MODULE}.time.sleep")
     def test_retries_exhausted_raises(self, mock_sleep: MagicMock) -> None:
-        """All retries fail; final attempt raises RuntimeError."""
+        """All retries fail with retryable errors; raises RuntimeError."""
         mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.side_effect = RuntimeError("nope")
+        mock_client.beta.chat.completions.parse.side_effect = ValueError("nope")
 
         with pytest.raises(RuntimeError, match="Failed to get structured LLM"):
             _parse_completion(
@@ -584,6 +584,30 @@ class TestParseCompletionRetry:
 
         assert mock_client.beta.chat.completions.parse.call_count == 3
         assert mock_sleep.call_count == 3
+
+    @patch(f"{FR_MODULE}.time.sleep")
+    def test_non_retryable_exception_propagates(
+        self, mock_sleep: MagicMock
+    ) -> None:
+        """Non-retryable exceptions (e.g. AttributeError) surface immediately."""
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse.side_effect = AttributeError(
+            "bug"
+        )
+
+        with pytest.raises(AttributeError, match="bug"):
+            _parse_completion(
+                client=mock_client,
+                model="gpt-4.1-2025-04-14",
+                messages=[{"role": "user", "content": "test"}],
+                response_format=SubQuestions,
+                retries=3,
+                delay=1,
+            )
+
+        # First failure should propagate — no retries, no sleeps.
+        assert mock_client.beta.chat.completions.parse.call_count == 1
+        assert mock_sleep.call_count == 0
 
 
 class TestNoGlobalClient:

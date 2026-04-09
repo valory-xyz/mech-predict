@@ -508,7 +508,19 @@ def _parse_completion(
                 )
 
             return parsed, counter_callback
-        except Exception as e:
+        except (
+            openai.APIConnectionError,
+            openai.RateLimitError,
+            openai.InternalServerError,
+            ValueError,
+        ) as e:
+            # Retry only transient failures and model-side issues:
+            #   - APIConnectionError (includes APITimeoutError) — network blips
+            #   - RateLimitError / InternalServerError — OpenAI-side retryable
+            #   - ValueError — covers pydantic ValidationError (e.g. p_yes+p_no
+            #     sum check) and the inline "Model refused…" raise above
+            # Programming bugs (AttributeError, KeyError, BadRequestError, etc.)
+            # are intentionally not caught so they surface immediately.
             print(f"[factual_research] Attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
             attempt += 1
@@ -866,18 +878,21 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         if len(all_evidence) > MAX_EVIDENCE_ITEMS:
             all_evidence = all_evidence[:MAX_EVIDENCE_ITEMS]
 
-        evidence_text = _format_evidence(all_evidence)
-
-        # Hard-trim evidence text to stay within a reasonable token budget
+        # Hard-trim evidence to stay within a reasonable token budget. Drop
+        # trailing (least-relevant, Serper orders by relevance) items until
+        # the joined text fits. Item-level trimming avoids uneven tokens-per-
+        # char across URL-heavy vs prose sections and never cuts mid-item.
         MAX_EVIDENCE_TOKENS = 3000
-        ev_tokens = count_tokens(evidence_text, model)
-        if ev_tokens > MAX_EVIDENCE_TOKENS:
-            # Truncate to roughly MAX_EVIDENCE_TOKENS by character ratio
-            ratio = MAX_EVIDENCE_TOKENS / ev_tokens
-            truncated_len = int(len(evidence_text) * ratio)
-            evidence_text = (
-                evidence_text[:truncated_len] + "\n\n[… evidence truncated …]"
-            )
+        original_count = len(all_evidence)
+        evidence_text = _format_evidence(all_evidence)
+        while (
+            all_evidence
+            and count_tokens(evidence_text, model) > MAX_EVIDENCE_TOKENS
+        ):
+            all_evidence.pop()
+            evidence_text = _format_evidence(all_evidence)
+        if len(all_evidence) < original_count:
+            evidence_text += "\n\n[… evidence truncated …]"
 
         print(
             f"[factual_research] Gathered {len(all_evidence)} evidence items ({count_tokens(evidence_text, model)} tokens)."

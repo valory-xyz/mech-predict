@@ -407,40 +407,6 @@ Edge positive rate = count(edge_i > 0) / n_edge_eligible
 
 A tool can have negative aggregate edge but > 50% positive rate. This means it beats the market on most questions but loses bigger when it loses — the magnitude of losses exceeds the magnitude of wins.
 
-### Diagnostic edge metrics
-
-**Conditional accuracy when disagreeing** — when the tool disagrees with the market enough to trigger a trade, is the tool or market closer to the truth?
-
-```
-For edge-eligible rows where |p_yes - market_prob| > DISAGREEMENT_THRESHOLD (0.03):
-    tool_distance   = |p_yes - outcome|
-    market_distance = |market_prob - outcome|
-    tool_wins if tool_distance < market_distance
-
-Conditional accuracy = tool_wins / n_disagreements
-```
-
-**Disagreement-stratified Brier** — Brier computed separately per trade-size bucket:
-
-```
-disagreement = |p_yes - market_prob|
-
-no_trade:    disagreement ≤ 0.03
-small_trade: 0.03 < disagreement ≤ 0.10
-large_trade: disagreement > 0.10
-```
-
-**Directional bias** — when the tool disagrees and loses, does it over- or underestimate?
-
-```
-For rows where tool_distance > market_distance (tool lost):
-    bias_i = p_yes - outcome_val
-
-Directional bias = mean(bias_i)
-```
-
-Positive = overestimates, negative = underestimates.
-
 ### Overconfident-wrong (ci_replay.py only)
 
 Used in PR-comment replay comparisons. Counts predictions where the tool was confident and wrong:

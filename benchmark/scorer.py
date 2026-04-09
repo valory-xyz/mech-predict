@@ -50,16 +50,6 @@ _ACCUM_KEYS = (
     "edge_sum",
     "edge_n",
     "edge_positive_count",
-    "disagree_count",
-    "disagree_tool_wins",
-    "bias_sum",
-    "bias_n",
-    "disagree_brier_no_trade_sum",
-    "disagree_n_no_trade",
-    "disagree_brier_small_trade_sum",
-    "disagree_n_small_trade",
-    "disagree_brier_large_trade_sum",
-    "disagree_n_large_trade",
 )
 
 
@@ -133,12 +123,6 @@ def log_loss_score(p_yes: float, outcome: bool) -> float:
     return -math.log(1 - p)
 
 
-# Thresholds for disagreement-stratified Brier.
-# TODO: decide final values — these are provisional.
-DISAGREEMENT_THRESHOLD = 0.03
-DISAGREEMENT_T2 = 0.10
-
-
 def _is_edge_eligible(row: dict[str, Any]) -> bool:
     """Check if a row has all fields needed for edge-over-market calculation."""
     return (
@@ -197,20 +181,16 @@ def classify_liquidity(liquidity_usd: float | None) -> str:
 def _compute_edge_diagnostics(
     edge_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Compute diagnostic metrics for edge-eligible rows.
+    """Compute edge-over-market metrics for edge-eligible rows.
 
     :param edge_rows: valid rows that have market_prob_at_prediction.
-    :return: dict with edge, edge_positive_rate, conditional_accuracy, etc.
+    :return: dict with edge, edge_n, edge_positive_rate.
     """
     if not edge_rows:
         return {
             "edge": None,
             "edge_n": 0,
             "edge_positive_rate": None,
-            "conditional_accuracy": None,
-            "conditional_n": 0,
-            "directional_bias": None,
-            "disagreement_brier": None,
         }
 
     edges = [
@@ -221,64 +201,10 @@ def _compute_edge_diagnostics(
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
-    disagree_count = 0
-    disagree_tool_wins = 0
-    bias_sum = 0.0
-    bias_n = 0
-    disagree_brier: dict[str, dict[str, float | int]] = {
-        "no_trade": {"brier_sum": 0.0, "n": 0},
-        "small_trade": {"brier_sum": 0.0, "n": 0},
-        "large_trade": {"brier_sum": 0.0, "n": 0},
-    }
-    for r in edge_rows:
-        p_yes = r["p_yes"]
-        market_prob = r["market_prob_at_prediction"]
-        outcome = r["final_outcome"]
-        outcome_val = 1.0 if outcome else 0.0
-        disagreement = abs(p_yes - market_prob)
-        tool_dist = abs(p_yes - outcome_val)
-        market_dist = abs(market_prob - outcome_val)
-        row_brier = brier_score(p_yes, outcome)
-
-        if disagreement <= DISAGREEMENT_THRESHOLD:
-            bucket = "no_trade"
-        elif disagreement <= DISAGREEMENT_T2:
-            bucket = "small_trade"
-        else:
-            bucket = "large_trade"
-        disagree_brier[bucket]["brier_sum"] += row_brier
-        disagree_brier[bucket]["n"] += 1
-
-        if disagreement > DISAGREEMENT_THRESHOLD:
-            disagree_count += 1
-            if tool_dist < market_dist:
-                disagree_tool_wins += 1
-            elif tool_dist > market_dist:
-                bias_sum += p_yes - outcome_val
-                bias_n += 1
-
-    cond_acc = round(disagree_tool_wins / disagree_count, 4) if disagree_count else None
-    dir_bias = round(bias_sum / bias_n, 4) if bias_n else None
-
-    disagree_brier_out: dict[str, dict[str, Any]] = {}
-    for bk, bv in disagree_brier.items():
-        bn = int(bv["n"])
-        if bn > 0:
-            disagree_brier_out[bk] = {
-                "brier": round(bv["brier_sum"] / bn, 4),
-                "n": bn,
-            }
-        else:
-            disagree_brier_out[bk] = {"brier": None, "n": 0}
-
     return {
         "edge": edge_avg,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
-        "conditional_accuracy": cond_acc,
-        "conditional_n": disagree_count,
-        "directional_bias": dir_bias,
-        "disagreement_brier": disagree_brier_out,
     }
 
 
@@ -308,10 +234,6 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "edge": None,
         "edge_n": 0,
         "edge_positive_rate": None,
-        "conditional_accuracy": None,
-        "conditional_n": 0,
-        "directional_bias": None,
-        "disagreement_brier": None,
     }
     if total == 0:
         return _none_stats
@@ -736,16 +658,6 @@ def _empty_group() -> dict[str, Any]:
         "edge_sum": 0.0,
         "edge_n": 0,
         "edge_positive_count": 0,
-        "disagree_count": 0,
-        "disagree_tool_wins": 0,
-        "bias_sum": 0.0,
-        "bias_n": 0,
-        "disagree_brier_no_trade_sum": 0.0,
-        "disagree_n_no_trade": 0,
-        "disagree_brier_small_trade_sum": 0.0,
-        "disagree_n_small_trade": 0,
-        "disagree_brier_large_trade_sum": 0.0,
-        "disagree_n_large_trade": 0,
     }
 
 
@@ -797,7 +709,6 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         group["valid_n"] += 1
         p_yes = row["p_yes"]
         outcome = row["final_outcome"]
-        outcome_val = 1.0 if outcome else 0.0
         group["brier_sum"] += brier_score(p_yes, outcome)
         group["log_loss_sum"] += log_loss_score(p_yes, outcome)
         # Directional accuracy — exclude p_yes == 0.5
@@ -813,33 +724,11 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         # Edge over market
         market_prob = row.get("market_prob_at_prediction")
         if market_prob is not None:
-            row_brier = brier_score(p_yes, outcome)
             edge = edge_score(p_yes, market_prob, outcome)
             group["edge_sum"] += edge
             group["edge_n"] += 1
             if edge > 0:
                 group["edge_positive_count"] += 1
-            # Disagreement-stratified Brier
-            disagreement = abs(p_yes - market_prob)
-            if disagreement <= DISAGREEMENT_THRESHOLD:
-                group["disagree_brier_no_trade_sum"] += row_brier
-                group["disagree_n_no_trade"] += 1
-            elif disagreement <= DISAGREEMENT_T2:
-                group["disagree_brier_small_trade_sum"] += row_brier
-                group["disagree_n_small_trade"] += 1
-            else:
-                group["disagree_brier_large_trade_sum"] += row_brier
-                group["disagree_n_large_trade"] += 1
-            # Conditional accuracy & directional bias
-            if disagreement > DISAGREEMENT_THRESHOLD:
-                tool_dist = abs(p_yes - outcome_val)
-                market_dist = abs(market_prob - outcome_val)
-                group["disagree_count"] += 1
-                if tool_dist < market_dist:
-                    group["disagree_tool_wins"] += 1
-                elif tool_dist > market_dist:
-                    group["bias_sum"] += p_yes - outcome_val
-                    group["bias_n"] += 1
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -911,28 +800,6 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     else:
         result["edge"] = None
         result["edge_positive_rate"] = None
-
-    # Diagnostic edge metrics
-    dc = group.get("disagree_count", 0)
-    result["conditional_n"] = dc
-    result["conditional_accuracy"] = (
-        round(group["disagree_tool_wins"] / dc, 4) if dc > 0 else None
-    )
-    bn = group.get("bias_n", 0)
-    result["directional_bias"] = round(group["bias_sum"] / bn, 4) if bn > 0 else None
-
-    # Disagreement-stratified Brier
-    db_out: dict[str, dict[str, Any]] = {}
-    for bucket in ("no_trade", "small_trade", "large_trade"):
-        bk_n = group.get(f"disagree_n_{bucket}", 0)
-        if bk_n > 0:
-            db_out[bucket] = {
-                "brier": round(group[f"disagree_brier_{bucket}_sum"] / bk_n, 4),
-                "n": bk_n,
-            }
-        else:
-            db_out[bucket] = {"brier": None, "n": 0}
-    result["disagreement_brier"] = db_out if edge_n > 0 else None
 
     return result
 
@@ -1237,20 +1104,6 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
             "edge_sum": g.get("edge_sum", 0.0),
             "edge_n": g.get("edge_n", 0),
             "edge_positive_count": g.get("edge_positive_count", 0),
-            "disagree_count": g.get("disagree_count", 0),
-            "disagree_tool_wins": g.get("disagree_tool_wins", 0),
-            "bias_sum": g.get("bias_sum", 0.0),
-            "bias_n": g.get("bias_n", 0),
-            "disagree_brier_no_trade_sum": g.get("disagree_brier_no_trade_sum", 0.0),
-            "disagree_n_no_trade": g.get("disagree_n_no_trade", 0),
-            "disagree_brier_small_trade_sum": g.get(
-                "disagree_brier_small_trade_sum", 0.0
-            ),
-            "disagree_n_small_trade": g.get("disagree_n_small_trade", 0),
-            "disagree_brier_large_trade_sum": g.get(
-                "disagree_brier_large_trade_sum", 0.0
-            ),
-            "disagree_n_large_trade": g.get("disagree_n_large_trade", 0),
         }
 
     scores: dict[str, Any] = {

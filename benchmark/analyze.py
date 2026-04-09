@@ -760,49 +760,6 @@ def section_period(
     return "\n".join(lines)
 
 
-def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
-    """Generate the diagnostic edge metrics section."""
-    o = scores.get("overall", {})
-    cond_acc = o.get("conditional_accuracy")
-    cond_n = o.get("conditional_n", 0)
-    dir_bias = o.get("directional_bias")
-    db = o.get("disagreement_brier")
-
-    if cond_n == 0 and db is None:
-        return "## Diagnostic Edge Metrics\n\nNo edge-eligible rows with disagreement."
-
-    lines = ["## Diagnostic Edge Metrics", ""]
-
-    if cond_acc is not None:
-        lines.append(
-            f"**Conditional accuracy when disagreeing:** {cond_acc:.0%}"
-            f" (n={cond_n})"
-        )
-        lines.append(
-            "  - When tool and market disagree enough to trade,"
-            " how often is the tool closer to the truth?"
-        )
-    if dir_bias is not None:
-        sign = "overestimates" if dir_bias > 0 else "underestimates"
-        lines.append(
-            f"**Directional bias:** {dir_bias:+.4f} (tool {sign} when it loses)"
-        )
-
-    if db:
-        lines.append("")
-        lines.append("**Disagreement-stratified Brier:**")
-        lines.append("")
-        lines.append("| Bucket | Brier | n |")
-        lines.append("|--------|-------|---|")
-        for bucket in ("no_trade", "small_trade", "large_trade"):
-            bv = db.get(bucket, {})
-            b_val = bv.get("brier")
-            b_str = f"{b_val:.4f}" if b_val is not None else "N/A"
-            lines.append(f"| {bucket} | {b_str} | {bv.get('n', 0)} |")
-
-    return "\n".join(lines)
-
-
 # ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
@@ -839,7 +796,6 @@ def generate_report(
         section_platform(scores),
         section_tool_platform(scores),
         section_edge_analysis(scores),
-        section_diagnostic_metrics(scores),
         section_calibration(scores),
         section_weak_spots(scores),
         section_reliability_issues(scores),

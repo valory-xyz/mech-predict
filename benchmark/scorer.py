@@ -236,7 +236,7 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "edge_positive_rate": None,
     }
     if total == 0:
-        return _none_stats
+        return dict(_none_stats)
 
     valid = [
         r
@@ -275,12 +275,21 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ll_sum = sum(log_loss_score(r["p_yes"], r["final_outcome"]) for r in valid)
     avg_log_loss = round(ll_sum / len(valid), 4)
 
-    # Edge over market and diagnostic metrics
+    # BSS — matches _derive_group() computation
+    yes_rate = sum(1 for r in valid if r["final_outcome"]) / len(valid)
+    baseline_brier = round(yes_rate * (1 - yes_rate), 4)
+    brier_rounded = round(avg_brier, 4)
+    if baseline_brier > 0:
+        bss = round(1 - (brier_rounded / baseline_brier), 4)
+    else:
+        bss = None
+
+    # Edge over market
     edge_rows = [r for r in valid if r.get("market_prob_at_prediction") is not None]
     edge_diag = _compute_edge_diagnostics(edge_rows)
 
     return {
-        "brier": round(avg_brier, 4),
+        "brier": brier_rounded,
         "directional_accuracy": dir_accuracy,
         "n_directional": len(directional),
         "no_signal_count": no_signal_count,
@@ -291,6 +300,9 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "n": total,
         "valid_n": len(valid),
         "decision_worthy": worthy,
+        "outcome_yes_rate": round(yes_rate, 4),
+        "baseline_brier": baseline_brier,
+        "brier_skill_score": bss,
         **edge_diag,
     }
 
@@ -747,8 +759,6 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         result.update(
             brier=None,
             directional_accuracy=None,
-            n_directional=0,
-            no_signal_count=0,
             no_signal_rate=None,
             log_loss=None,
             sharpness=None,
@@ -759,8 +769,6 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         result.update(
             brier=None,
             directional_accuracy=None,
-            n_directional=0,
-            no_signal_count=0,
             no_signal_rate=None,
             log_loss=None,
             sharpness=None,
@@ -1074,8 +1082,8 @@ def load_history(history_path: Path) -> list[dict[str, Any]]:
 def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     """Load scores.json and reconstruct the raw accumulator state.
 
-    The saved format includes both derived fields (brier, accuracy) and
-    raw accumulators (brier_sum, correct_count). This function extracts
+    The saved format includes both derived fields (brier, directional_accuracy)
+    and raw accumulators (brier_sum, correct_count). This function extracts
     the raw accumulators into the internal format used by ``_accumulate_row``.
 
     :param scores_path: path to ``scores.json``.
@@ -1389,15 +1397,11 @@ def score_period(
     :param days: how many of the most recent files to include.
     :return: scores dict from ``score()``, or empty scores if no files.
     """
-    # Daily files: YYYY-MM-DD.jsonl
+    # Daily files: YYYY-MM-DD.jsonl and production_log_*.jsonl (flywheel naming)
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
-    files = sorted(glob_mod.glob(daily_pattern))
-    # Also check production_log_ files (flywheel naming)
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
-    prod_files = sorted(glob_mod.glob(prod_pattern))
-
-    # Use daily files if available, else fall back to production_log files
-    all_files = files if files else prod_files
+    # Merge and deduplicate both naming conventions, sort by filename
+    all_files = sorted(set(glob_mod.glob(daily_pattern) + glob_mod.glob(prod_pattern)))
     recent = all_files[-days:] if all_files else []
 
     rows: list[dict[str, Any]] = []

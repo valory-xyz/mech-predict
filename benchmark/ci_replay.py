@@ -77,6 +77,8 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ),
             "n_directional": n_directional,
             "overconf_wrong": overconf_wrong,
+            # Rate uses n (all valid), not n_directional — includes 0.5 rows
+            # since overconfidence is about magnitude, not direction.
             "overconf_wrong_rate": round(overconf_wrong / n, 4) if n > 0 else None,
             "n": n,
         }

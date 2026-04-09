@@ -161,7 +161,7 @@ def _table_row(name: str, stats: dict[str, Any]) -> str:
     """Format one row of a comparison table."""
     b = stats["brier"]
     a = stats["directional_accuracy"]
-    ll = stats.get("log_loss", {})
+    ll = stats.get("log_loss") or {}
     # Show Brier direction + accuracy direction when they disagree
     if b["direction"] == a["direction"] or a["direction"] == "unchanged":
         direction = b["direction"]

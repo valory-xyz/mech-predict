@@ -1225,8 +1225,8 @@ class TestUpdateDedup:
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        row_no_id = _row(p_yes=0.7, outcome=True, row_id="")
-        row_no_id.pop("row_id")  # remove the key entirely
+        row_no_id = _row(p_yes=0.7, outcome=True)
+        row_no_id.pop("row_id")
 
         update([row_no_id], scores_path, history_path)
         result = update([row_no_id], scores_path, history_path)

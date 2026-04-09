@@ -391,6 +391,9 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_EDGE_SECTION_HEADER = "## Edge Over Market (System Diagnostic)"
+
+
 def section_edge_analysis(scores: dict[str, Any]) -> str:
     """Edge-over-market analysis — per platform, difficulty, and liquidity."""
     elig = scores.get("edge_eligibility", {})
@@ -398,13 +401,13 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
     n_total = elig.get("n_total", 0)
     if n_eligible == 0:
         return (
-            "## Edge Over Market\n\n"
+            f"{_EDGE_SECTION_HEADER}\n\n"
             "No edge-eligible rows (need market_prob_at_prediction)."
         )
 
     pct = f" ({n_eligible / n_total:.1%} of total)" if n_total > 0 else ""
     lines = [
-        "## Edge Over Market (System Diagnostic)",
+        _EDGE_SECTION_HEADER,
         "",
         "Edge measures whether prediction accuracy translates to trading"
         " value — it is not a tool ranking metric.",

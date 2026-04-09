@@ -1162,6 +1162,11 @@ def rebuild(
         row_id = row.get("row_id")
         if row_id:
             all_row_ids.add(row_id)
+    # scored_row_ids includes all months so subsequent update() calls
+    # can dedup against rows already scored during rebuild. This grows
+    # with total row count (~2MB for 74K rows). For normal update() runs,
+    # month rollover resets the set via _empty_scores(). If this becomes
+    # a concern, consider moving scored_row_ids to a separate file.
     scores["scored_row_ids"] = all_row_ids
 
     finalized = _finalize_scores(scores)

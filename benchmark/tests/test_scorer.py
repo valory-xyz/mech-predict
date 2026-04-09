@@ -1232,3 +1232,47 @@ class TestUpdateDedup:
         result = update([row_no_id], scores_path, history_path)
         # Without row_id, can't dedup — both passes count
         assert result["overall"]["n"] == 2
+
+    def test_rebuild_then_update_deduplicates(self, tmp_path: Path) -> None:
+        """Rows scored during rebuild() are not double-counted by update()."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        # Write rows spanning two months to a log file
+        rows = [
+            _row(
+                p_yes=0.7,
+                outcome=True,
+                row_id="march_r1",
+                predicted_at="2026-03-15T10:00:00Z",
+            ),
+            _row(
+                p_yes=0.4,
+                outcome=False,
+                row_id="april_r1",
+                predicted_at="2026-04-05T10:00:00Z",
+            ),
+        ]
+        log_file = logs_dir / "production_log_test.jsonl"
+        with open(log_file, "w") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+
+        # Rebuild from log files
+        rebuild(logs_dir=logs_dir, scores_path=scores_path, history_path=history_path)
+
+        # Verify rebuild tracked both row_ids
+        saved = json.loads(scores_path.read_text())
+        assert "march_r1" in saved["scored_row_ids"]
+        assert "april_r1" in saved["scored_row_ids"]
+
+        # Now call update() with the same rows — should all be skipped
+        result = update(rows, scores_path, history_path)
+        # n should still be 1 (only april_r1 in current month accumulators)
+        # because rebuild() only accumulates the last month into scores.json
+        # but scored_row_ids contains both months' IDs
+        assert result["overall"]["n"] == 1, (
+            f"Expected 1 (only last month in accumulators), got {result['overall']['n']}"
+        )

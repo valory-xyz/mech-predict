@@ -404,7 +404,10 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
 
     pct = f" ({n_eligible / n_total:.1%} of total)" if n_total > 0 else ""
     lines = [
-        "## Edge Over Market",
+        "## Edge Over Market (System Diagnostic)",
+        "",
+        "Edge measures whether prediction accuracy translates to trading"
+        " value — it is not a tool ranking metric.",
         "",
         f"Edge-eligible rows: {n_eligible} / {n_total}{pct}",
         "",

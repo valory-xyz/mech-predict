@@ -29,7 +29,7 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Top tools:*
 • `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
-(list top 3, rank by edge if available, otherwise by Brier)
+(list top 3, rank by Brier. Edge is a diagnostic shown alongside, not a ranking criterion)
 
 *Worst tools:*
 • `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
@@ -52,7 +52,7 @@ Rules:
 - Wrap tool names, Brier scores, and Edge scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
 - No greetings or preamble.
-- Edge over market: positive = tool beats market, negative = market beats tool. This is the most important metric for trading value.
+- Edge over market: positive = tool beats market, negative = market beats tool. This is a system-level diagnostic — it shows whether prediction accuracy translates to trading value, but tools are ranked by Brier (prediction quality).
 - Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 MODEL = "gpt-4.1-mini"

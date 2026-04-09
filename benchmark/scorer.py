@@ -27,6 +27,7 @@ from benchmark.io import load_jsonl as load_rows
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
+DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
 LATENCY_RESERVOIR_SIZE = 200
@@ -51,6 +52,33 @@ _ACCUM_KEYS = (
 # ---------------------------------------------------------------------------
 # Brier score computation
 # ---------------------------------------------------------------------------
+
+
+def _load_dedup_ids(dedup_path: Path) -> set[str]:
+    """Load scored row IDs from the dedup file.
+
+    Persists across month rollovers so replayed historical rows
+    are still skipped.
+
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :return: set of row IDs.
+    """
+    if not dedup_path.exists():
+        return set()
+    try:
+        return set(json.loads(dedup_path.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _save_dedup_ids(dedup_path: Path, ids: set[str]) -> None:
+    """Save scored row IDs to the dedup file.
+
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :param ids: set of row IDs to persist.
+    """
+    dedup_path.parent.mkdir(parents=True, exist_ok=True)
+    dedup_path.write_text(json.dumps(sorted(ids)))
 
 
 def brier_score(p_yes: float, outcome: bool) -> float:
@@ -545,7 +573,6 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "latency_reservoir": {},
         "worst_10": [],
         "best_10": [],
-        "scored_row_ids": set(),
     }
 
 
@@ -969,7 +996,6 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores["latency_reservoir"] = data.get("latency_reservoir", {})
     scores["worst_10"] = data.get("worst_10", [])
     scores["best_10"] = data.get("best_10", [])
-    scores["scored_row_ids"] = set(data.get("scored_row_ids", []))
 
     return scores
 
@@ -978,6 +1004,7 @@ def update(
     new_rows: list[dict[str, Any]],
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
 ) -> dict[str, Any]:
     """Incrementally merge new rows into the scores accumulators.
 
@@ -986,13 +1013,18 @@ def update(
 
     Handles month boundaries: if the stored ``current_month`` differs from
     today's month, snapshots the completed month to ``scores_history.jsonl``
-    and resets accumulators.
+    and resets accumulators. Dedup state is stored in a separate file
+    (``scored_row_ids.json``) so it persists across month rollovers.
 
     :param new_rows: list of production log row dicts.
     :param scores_path: path to ``scores.json``.
     :param history_path: path to ``scores_history.jsonl``.
+    :param dedup_path: path to ``scored_row_ids.json``.
     :return: finalized scores dict (also written to disk).
     """
+    if dedup_path is None:
+        dedup_path = scores_path.parent / "scored_row_ids.json"
+
     today_month = datetime.now(timezone.utc).strftime("%Y-%m")
 
     existing = _load_scores_for_resume(scores_path)
@@ -1005,7 +1037,11 @@ def update(
     else:
         scores = _empty_scores(today_month)
 
-    scored_ids: set[str] = scores.get("scored_row_ids", set())
+    # Dedup state lives in its own file — survives month rollover
+    scored_ids = _load_dedup_ids(dedup_path)
+    # Migrate: if old scores.json had scored_row_ids, merge them
+    scored_ids.update(scores.pop("scored_row_ids", set()))
+
     skipped = 0
     no_id = 0
     for row in new_rows:
@@ -1019,7 +1055,8 @@ def update(
             continue
         _accumulate_row(scores, row)
         scored_ids.add(row_id)
-    scores["scored_row_ids"] = scored_ids
+
+    _save_dedup_ids(dedup_path, scored_ids)
 
     if skipped:
         logging.getLogger(__name__).warning(
@@ -1058,7 +1095,6 @@ def update(
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
-    output["scored_row_ids"] = sorted(scores.get("scored_row_ids", set()))
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1070,6 +1106,7 @@ def rebuild(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
 ) -> dict[str, Any]:
     """Rebuild scores.json from all log files in the logs directory.
 
@@ -1079,8 +1116,12 @@ def rebuild(
     :param logs_dir: directory containing daily log files.
     :param scores_path: output path for ``scores.json``.
     :param history_path: output path for ``scores_history.jsonl``.
+    :param dedup_path: path to ``scored_row_ids.json``.
     :return: finalized scores dict.
     """
+
+    if dedup_path is None:
+        dedup_path = scores_path.parent / "scored_row_ids.json"
 
     # Collect all log files
     pattern = str(logs_dir / "production_log_*.jsonl")
@@ -1137,12 +1178,8 @@ def rebuild(
         row_id = row.get("row_id")
         if row_id:
             all_row_ids.add(row_id)
-    # scored_row_ids includes all months so subsequent update() calls
-    # can dedup against rows already scored during rebuild. This grows
-    # with total row count (~2MB for 74K rows). For normal update() runs,
-    # month rollover resets the set via _empty_scores(). If this becomes
-    # a concern, consider moving scored_row_ids to a separate file.
-    scores["scored_row_ids"] = all_row_ids
+    # Save dedup state to its own file — persists across month rollovers
+    _save_dedup_ids(dedup_path, all_row_ids)
 
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use
@@ -1170,7 +1207,6 @@ def rebuild(
                 **{k: group[k] for k in _ACCUM_KEYS},
             }
     output["_calibration_accum"] = scores["calibration"]
-    output["scored_row_ids"] = sorted(scores.get("scored_row_ids", set()))
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))

@@ -1171,6 +1171,7 @@ class TestUpdateDedup:
         """Same rows passed twice produce same result as single pass."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
 
         rows = [
             _row(p_yes=0.7, outcome=True, row_id="r1"),
@@ -1178,11 +1179,11 @@ class TestUpdateDedup:
         ]
 
         # First pass
-        result1 = update(rows, scores_path, history_path)
+        result1 = update(rows, scores_path, history_path, dedup_path)
         assert result1["overall"]["n"] == 2
 
         # Second pass with same rows — should be skipped
-        result2 = update(rows, scores_path, history_path)
+        result2 = update(rows, scores_path, history_path, dedup_path)
         assert (
             result2["overall"]["n"] == 2
         ), f"Expected 2 after dedup, got {result2['overall']['n']}"
@@ -1192,6 +1193,7 @@ class TestUpdateDedup:
         """New rows are added, duplicates are skipped."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
 
         batch1 = [_row(p_yes=0.7, outcome=True, row_id="r1")]
         batch2 = [
@@ -1199,36 +1201,42 @@ class TestUpdateDedup:
             _row(p_yes=0.4, outcome=False, row_id="r3"),  # new
         ]
 
-        update(batch1, scores_path, history_path)
-        result = update(batch2, scores_path, history_path)
+        update(batch1, scores_path, history_path, dedup_path)
+        result = update(batch2, scores_path, history_path, dedup_path)
 
         assert (
             result["overall"]["n"] == 2
         ), f"Expected 2 (r1 + r3), got {result['overall']['n']}"
 
     def test_scored_row_ids_persisted(self, tmp_path: Path) -> None:
-        """scored_row_ids are saved to scores.json and loaded on resume."""
+        """scored_row_ids are saved to separate dedup file."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
 
         rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
-        update(rows, scores_path, history_path)
+        update(rows, scores_path, history_path, dedup_path)
 
-        # Check the saved file
-        saved = json.loads(scores_path.read_text())
-        assert "scored_row_ids" in saved
-        assert "r1" in saved["scored_row_ids"]
+        # Check the dedup file (not scores.json)
+        assert dedup_path.exists()
+        saved_ids = json.loads(dedup_path.read_text())
+        assert "r1" in saved_ids
+
+        # scores.json should NOT contain scored_row_ids
+        saved_scores = json.loads(scores_path.read_text())
+        assert "scored_row_ids" not in saved_scores
 
     def test_rows_without_row_id_always_counted(self, tmp_path: Path) -> None:
         """Rows without row_id are always accumulated (no dedup possible)."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
 
         row_no_id = _row(p_yes=0.7, outcome=True)
         row_no_id.pop("row_id")
 
-        update([row_no_id], scores_path, history_path)
-        result = update([row_no_id], scores_path, history_path)
+        update([row_no_id], scores_path, history_path, dedup_path)
+        result = update([row_no_id], scores_path, history_path, dedup_path)
         # Without row_id, can't dedup — both passes count
         assert result["overall"]["n"] == 2
 
@@ -1236,6 +1244,7 @@ class TestUpdateDedup:
         """Rows scored during rebuild() are not double-counted by update()."""
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
 
@@ -1260,18 +1269,48 @@ class TestUpdateDedup:
                 f.write(json.dumps(r) + "\n")
 
         # Rebuild from log files
-        rebuild(logs_dir=logs_dir, scores_path=scores_path, history_path=history_path)
+        rebuild(
+            logs_dir=logs_dir,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
 
-        # Verify rebuild tracked both row_ids
-        saved = json.loads(scores_path.read_text())
-        assert "march_r1" in saved["scored_row_ids"]
-        assert "april_r1" in saved["scored_row_ids"]
+        # Verify rebuild tracked both row_ids in the dedup file
+        saved_ids = json.loads(dedup_path.read_text())
+        assert "march_r1" in saved_ids
+        assert "april_r1" in saved_ids
 
         # Now call update() with the same rows — should all be skipped
-        result = update(rows, scores_path, history_path)
+        result = update(rows, scores_path, history_path, dedup_path)
         # n should still be 1 (only april_r1 in current month accumulators)
         # because rebuild() only accumulates the last month into scores.json
-        # but scored_row_ids contains both months' IDs
+        # but dedup file contains both months' IDs
         assert (
             result["overall"]["n"] == 1
         ), f"Expected 1 (only last month in accumulators), got {result['overall']['n']}"
+
+    def test_dedup_survives_month_rollover(self, tmp_path: Path) -> None:
+        """Dedup state persists across month rollover."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+
+        # Score in "March"
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            update(rows, scores_path, history_path, dedup_path)
+
+        # Rollover to "April" — accumulators reset, but dedup file stays
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 1, tzinfo=timezone.utc)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            result = update(rows, scores_path, history_path, dedup_path)
+
+        # Row should be skipped even after rollover
+        assert (
+            result["overall"]["n"] == 0
+        ), f"Expected 0 (r1 deduped across month rollover), got {result['overall']['n']}"

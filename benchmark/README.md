@@ -248,12 +248,144 @@ python benchmark/sweep.py \
 - **Delta**: Candidate minus baseline (negative Brier delta = improvement)
 - **Direction**: `improved` / `regressed` / `unchanged`
 
-## Scoring metrics
+## Scoring metrics — formulas
 
-- **Brier score**: `(p_yes - outcome)²` averaged over all predictions. 0 = perfect, 0.25 = coin flip, 1 = always wrong.
-- **Accuracy**: Fraction of predictions where the higher-probability outcome was correct.
-- **Sharpness**: How far predictions deviate from 0.5 (decisive predictions). Higher = more decisive.
-- **Calibration**: When you say 70%, does the event happen 70% of the time?
+All formulas below match the implementations in `scorer.py` and `ci_replay.py`.
+
+### Primary metrics (used for tool ranking)
+
+**Brier score** — measures probabilistic forecast accuracy. Lower is better.
+
+```
+Per prediction:  brier_i = (p_yes - outcome)²
+Aggregate:       Brier   = mean(brier_i)  over all valid predictions
+
+outcome = 1.0 if Yes, 0.0 if No
+```
+
+| Value | Meaning |
+|-------|---------|
+| 0.0 | Perfect — predicted exactly the outcome |
+| 0.25 | No skill — equivalent to always predicting 0.5 |
+| 1.0 | Worst — maximally wrong on every prediction |
+
+**Reliability** — fraction of attempted runs that produced a valid, parseable prediction.
+
+```
+Reliability = valid_outputs / attempted_runs
+```
+
+A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Gate threshold: < 80% marks the tool as unreliable and excludes it from comparative ranking.
+
+**Accuracy** — directional correctness. Predictions at exactly 0.5 count as incorrect (no directional signal).
+
+```
+correct_i = 1  if (p_yes > 0.5) == outcome
+            0  otherwise
+Accuracy  = sum(correct_i) / n_valid
+```
+
+**Sharpness** — how decisive the predictions are. A tool that always predicts 0.5 has zero sharpness.
+
+```
+Sharpness = mean(|p_yes - 0.5|)
+```
+
+| Value | Meaning |
+|-------|---------|
+| 0.0 | All predictions at 50/50 — no conviction |
+| 0.5 | Maximally decisive — every prediction near 0 or 1 |
+
+High sharpness is only good if calibration is also good. A tool that confidently predicts 0.95 on everything is sharp but badly calibrated.
+
+**Baseline Brier** — the Brier score of a naive predictor that always outputs the observed base rate.
+
+```
+yes_rate       = count(outcome == Yes) / n_valid
+Baseline Brier = yes_rate × (1 - yes_rate)
+```
+
+If 70% of outcomes are Yes, the naive predictor always says 0.7 and gets Brier = 0.7 × 0.3 = 0.21. Any tool worth using should beat this.
+
+**Brier Skill Score (BSS)** — improvement over the baseline predictor. Positive = better than base rate.
+
+```
+BSS = 1 - (Brier / Baseline Brier)
+```
+
+| Value | Meaning |
+|-------|---------|
+| > 0 | Better than predicting the base rate |
+| 0 | Same as predicting the base rate |
+| < 0 | Worse than predicting the base rate — actively harmful |
+
+### Calibration
+
+Predictions are binned into 10 decile ranges (0.0–0.1, 0.1–0.2, ... 0.9–1.0). For each bin:
+
+```
+avg_predicted = mean(p_yes)  for predictions in this bin
+realized_rate = count(outcome == Yes) / n  for predictions in this bin
+gap           = avg_predicted - realized_rate
+```
+
+| Gap sign | Meaning |
+|----------|---------|
+| Positive | Overconfident — predicts higher than reality |
+| Negative | Underconfident — predicts lower than reality |
+
+A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (reliability diagram) shows avg_predicted vs realized_rate; the diagonal line is perfect calibration.
+
+### Edge over market (diagnostic — not for ranking)
+
+Edge measures whether the tool's prediction was closer to the truth than the market's price. Positive = tool beat market. This is a system diagnostic, not a ranking metric (see PROPOSAL.md for rationale).
+
+```
+Per prediction:  edge_i = (market_prob - outcome)² - (p_yes - outcome)²
+Aggregate:       Edge   = mean(edge_i)  over edge-eligible predictions
+```
+
+Expanding: `edge_i = market_brier_i - tool_brier_i`. When the tool has lower Brier than the market on a question, edge is positive for that question.
+
+**Eligibility:** A row is edge-eligible when it has a valid prediction, a resolved outcome, and `market_prob_at_prediction` is not null.
+
+**Edge positive rate** — fraction of edge-eligible predictions where the tool beat the market:
+
+```
+Edge positive rate = count(edge_i > 0) / n_edge_eligible
+```
+
+A tool can have negative aggregate edge but > 50% positive rate. This means it beats the market on most questions but loses bigger when it loses — the magnitude of losses exceeds the magnitude of wins.
+
+### Overconfident-wrong (ci_replay.py only)
+
+Used in PR-comment replay comparisons. Counts predictions where the tool was confident and wrong:
+
+```
+overconf_wrong_i = 1  if max(p_yes, 1 - p_yes) > 0.80 AND predicted direction ≠ outcome
+                   0  otherwise
+Overconfident wrong count = sum(overconf_wrong_i)
+```
+
+These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction.
+
+### Stratification dimensions
+
+All primary and diagnostic metrics are computed per group across these dimensions:
+
+| Dimension | Buckets | How it's computed |
+|-----------|---------|-------------------|
+| **Tool** | One bucket per `tool_name` | Direct field grouping |
+| **Platform** | `polymarket`, `omen` | Direct field grouping |
+| **Category** | `crypto`, `politics`, `sports`, etc. | Direct field grouping |
+| **Horizon** | `short_lt_7d`, `medium_7_30d`, `long_gt_30d` | `prediction_lead_time_days`: < 7, 7–30, > 30 |
+| **Difficulty** | `hard`, `medium`, `easy` | `\|market_prob - 0.5\|`: < 0.15 = hard, 0.15–0.30 = medium, > 0.30 = easy |
+| **Liquidity** | `low`, `medium`, `high` | `market_liquidity_at_prediction` in USD: < 500 = low, 500–5000 = medium, > 5000 = high |
+| **Monthly trend** | `YYYY-MM` | Extracted from `predicted_at` |
+
+Cross-dimensions are also computed: platform × difficulty, platform × liquidity, tool × platform, tool × platform × horizon.
+
+Rows where the grouping field is null go into an `unknown` bucket.
 
 ## File locations
 

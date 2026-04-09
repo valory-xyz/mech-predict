@@ -75,9 +75,27 @@ jobs:
             python -m benchmark.scorer --rebuild --logs-dir benchmark/datasets/logs/
           fi
 
-      # Analyze reads only scores.json + scores_history.jsonl
+      # Score recent periods for diff reporting
+      - name: Score today
+        run: |
+          python -m benchmark.scorer --period-days 1 \
+            --logs-dir benchmark/datasets/logs/ \
+            --output benchmark/results/period_scores.json
+        continue-on-error: true
+
+      - name: Score last 7 days
+        run: |
+          python -m benchmark.scorer --period-days 7 \
+            --logs-dir benchmark/datasets/logs/ \
+            --output benchmark/results/rolling_scores.json
+        continue-on-error: true
+
+      # Analyze reads scores.json + history + period scores
       - name: Analyze
-        run: python -m benchmark.analyze
+        run: |
+          python -m benchmark.analyze \
+            --period benchmark/results/period_scores.json \
+            --rolling benchmark/results/rolling_scores.json
 
       # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data

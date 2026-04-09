@@ -277,13 +277,39 @@ Reliability = valid_outputs / attempted_runs
 
 A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Gate threshold: < 80% marks the tool as unreliable and excludes it from comparative ranking.
 
-**Accuracy** — directional correctness. Predictions at exactly 0.5 count as incorrect (no directional signal).
+**Directional Accuracy** — directional correctness, excluding predictions at exactly 0.5 (no signal).
 
 ```
-correct_i = 1  if (p_yes > 0.5) == outcome
-            0  otherwise
-Accuracy  = sum(correct_i) / n_valid
+For rows where p_yes ≠ 0.5:
+    correct_i = 1  if (p_yes > 0.5) == outcome
+                0  otherwise
+Directional Accuracy = sum(correct_i) / n_directional
 ```
+
+If all predictions are 0.5, directional accuracy is `None` (undefined).
+
+**No-signal rate** — fraction of predictions at exactly 0.5 ("I don't know").
+
+```
+No-signal rate = count(p_yes == 0.5) / n_valid
+```
+
+**Log Loss** — like Brier but with logarithmic penalty. Punishes confidently wrong predictions much harder.
+
+```
+Per prediction:
+    If outcome is Yes:   loss = -log(p_yes)
+    If outcome is No:    loss = -log(1 - p_yes)
+Log Loss = mean(loss_i)
+```
+
+p_yes is clamped to [ε, 1-ε] (ε = 1e-15) to avoid log(0).
+
+| p_yes | outcome | Brier | Log loss |
+|-------|---------|-------|----------|
+| 0.9   | Yes     | 0.01  | 0.11     |
+| 0.1   | Yes     | 0.81  | 2.30     |
+| 0.01  | Yes     | 0.98  | 4.61     |
 
 **Sharpness** — how decisive the predictions are. A tool that always predicts 0.5 has zero sharpness.
 
@@ -338,6 +364,28 @@ A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (re
 
 **Note:** The current implementation uses fixed equispaced decile bins (0.0–0.1, 0.1–0.2, ... 0.9–1.0). This is provisional — binning should be monitored and adjusted over time based on sample size and bin stability. With fewer than 200 total predictions, coarser bins (e.g., 5 instead of 10) may be more appropriate to avoid empty or low-count bins.
 
+**ECE (Expected Calibration Error)** — a single scalar summarizing calibration quality:
+
+```
+ECE = sum(n_bin * |gap_bin|) / sum(n_bin)
+```
+
+ECE = 0 means perfectly calibrated. ECE = 0.10 means predictions are off by 10pp on average.
+
+**Calibration intercept and slope** — fit `realized = intercept + slope * predicted` via weighted linear regression on the calibration bins (weighted by bin count):
+
+```
+slope = 1.0 → perfectly dispersed
+slope < 1.0 → overconfident (predictions too extreme)
+slope > 1.0 → underconfident (predictions too compressed toward 0.5)
+
+intercept > 0 → systematically underestimates (reality higher)
+intercept < 0 → systematically overestimates (reality lower)
+```
+
+Returns None if fewer than 3 bins have data.
+
+
 ### Edge over market (diagnostic — not for ranking)
 
 Edge measures whether the tool's prediction was closer to the truth than the market's price. Positive = tool beat market. This is a system diagnostic, not a ranking metric (see PROPOSAL.md for rationale).
@@ -359,6 +407,40 @@ Edge positive rate = count(edge_i > 0) / n_edge_eligible
 
 A tool can have negative aggregate edge but > 50% positive rate. This means it beats the market on most questions but loses bigger when it loses — the magnitude of losses exceeds the magnitude of wins.
 
+### Diagnostic edge metrics
+
+**Conditional accuracy when disagreeing** — when the tool disagrees with the market enough to trigger a trade, is the tool or market closer to the truth?
+
+```
+For edge-eligible rows where |p_yes - market_prob| > DISAGREEMENT_THRESHOLD (0.03):
+    tool_distance   = |p_yes - outcome|
+    market_distance = |market_prob - outcome|
+    tool_wins if tool_distance < market_distance
+
+Conditional accuracy = tool_wins / n_disagreements
+```
+
+**Disagreement-stratified Brier** — Brier computed separately per trade-size bucket:
+
+```
+disagreement = |p_yes - market_prob|
+
+no_trade:    disagreement ≤ 0.03
+small_trade: 0.03 < disagreement ≤ 0.10
+large_trade: disagreement > 0.10
+```
+
+**Directional bias** — when the tool disagrees and loses, does it over- or underestimate?
+
+```
+For rows where tool_distance > market_distance (tool lost):
+    bias_i = p_yes - outcome_val
+
+Directional bias = mean(bias_i)
+```
+
+Positive = overestimates, negative = underestimates.
+
 ### Overconfident-wrong (ci_replay.py only)
 
 Used in PR-comment replay comparisons. Counts predictions where the tool was confident and wrong:
@@ -367,9 +449,10 @@ Used in PR-comment replay comparisons. Counts predictions where the tool was con
 overconf_wrong_i = 1  if max(p_yes, 1 - p_yes) > 0.80 AND predicted direction ≠ outcome
                    0  otherwise
 Overconfident wrong count = sum(overconf_wrong_i)
+Overconfident wrong rate  = count / n
 ```
 
-These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction.
+These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction. The rate normalizes by sample size for cross-dataset comparison.
 
 ### Stratification dimensions
 

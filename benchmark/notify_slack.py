@@ -25,18 +25,18 @@ log = logging.getLogger(__name__)
 SUMMARY_SYSTEM_PROMPT = """\
 Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
-*Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends. Include the overall edge-over-market if available.
+*Summary:* 2-3 sentence high-level takeaway — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
 
 *Top tools:*
-• `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
-(list top 3, rank by Brier. Edge is a diagnostic shown alongside, not a ranking criterion)
+• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
+(list top 3, rank by Brier. Log Loss and Edge are shown alongside for context)
 
 *Worst tools:*
-• `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
+• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
 *Platform performance:*
-• `platform` — Brier `X.XX`, Edge `±X.XX` (n=X), BSS `±X.XX`, n=X
+• `platform` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), BSS `±X.XX`, n=X
 (list all platforms. Edge = how much tool beats market consensus; positive = profitable signal)
 
 *Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
@@ -53,6 +53,9 @@ Rules:
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
 - No greetings or preamble.
 - Edge over market: positive = tool beats market, negative = market beats tool. This is a system-level diagnostic — it shows whether prediction accuracy translates to trading value, but tools are ranked by Brier (prediction quality).
+- "Accuracy" in the report means "Directional Accuracy" — it excludes predictions at exactly 0.5 (no signal). Include the no-signal rate if it's notable.
+- Log Loss: like Brier but punishes confidently-wrong predictions harder. Include alongside Brier.
+- ECE (Expected Calibration Error): how well calibrated predictions are. Include if present.
 - Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 MODEL = "gpt-4.1-mini"

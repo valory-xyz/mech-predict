@@ -44,10 +44,18 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         valid = [r for r in subset if r.get("p_yes") is not None]
         n = len(valid)
         if n == 0:
-            return {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0}
+            return {
+                "brier": None,
+                "directional_accuracy": None,
+                "n_directional": 0,
+                "overconf_wrong": 0,
+                "overconf_wrong_rate": None,
+                "n": 0,
+            }
 
         brier_sum = 0.0
         correct = 0
+        n_directional = 0
         overconf_wrong = 0
         for r in valid:
             p_yes = r["p_yes"]
@@ -55,15 +63,21 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             outcome_val = 1.0 if outcome else 0.0
             brier_sum += (p_yes - outcome_val) ** 2
             predicted_yes = p_yes > 0.5
-            if predicted_yes == outcome:
-                correct += 1
+            if p_yes != 0.5:
+                n_directional += 1
+                if predicted_yes == outcome:
+                    correct += 1
             if max(p_yes, 1 - p_yes) > 0.80 and predicted_yes != outcome:
                 overconf_wrong += 1
 
         return {
             "brier": brier_sum / n,
-            "accuracy": correct / n,
+            "directional_accuracy": (
+                correct / n_directional if n_directional > 0 else None
+            ),
+            "n_directional": n_directional,
             "overconf_wrong": overconf_wrong,
+            "overconf_wrong_rate": round(overconf_wrong / n, 4) if n > 0 else None,
             "n": n,
         }
 
@@ -125,9 +139,9 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
             lower_is_better=True,
         ),
         _fmt_metric_row(
-            "Accuracy",
-            baseline["accuracy"],
-            candidate["accuracy"],
+            "Directional Accuracy",
+            baseline["directional_accuracy"],
+            candidate["directional_accuracy"],
             "pct",
             lower_is_better=False,
         ),
@@ -136,6 +150,13 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
             baseline["overconf_wrong"],
             candidate["overconf_wrong"],
             "int",
+            lower_is_better=True,
+        ),
+        _fmt_metric_row(
+            "Overconf-wrong rate",
+            baseline["overconf_wrong_rate"],
+            candidate["overconf_wrong_rate"],
+            "float",
             lower_is_better=True,
         ),
     ]

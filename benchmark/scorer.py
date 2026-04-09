@@ -17,6 +17,7 @@ import argparse
 import glob as glob_mod
 import json
 import logging
+import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,11 +42,24 @@ MIN_SAMPLE_SIZE = 30
 _ACCUM_KEYS = (
     "brier_sum",
     "correct_count",
+    "n_directional",
+    "no_signal_count",
     "sharpness_sum",
     "outcome_yes_count",
+    "log_loss_sum",
     "edge_sum",
     "edge_n",
     "edge_positive_count",
+    "disagree_count",
+    "disagree_tool_wins",
+    "bias_sum",
+    "bias_n",
+    "disagree_brier_no_trade_sum",
+    "disagree_n_no_trade",
+    "disagree_brier_small_trade_sum",
+    "disagree_n_small_trade",
+    "disagree_brier_large_trade_sum",
+    "disagree_n_large_trade",
 )
 
 
@@ -101,6 +115,28 @@ def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
     market_brier = (market_prob - outcome_val) ** 2
     tool_brier = (p_yes - outcome_val) ** 2
     return market_brier - tool_brier
+
+
+_LOG_LOSS_EPSILON = 1e-15
+
+
+def log_loss_score(p_yes: float, outcome: bool) -> float:
+    """Compute log loss for a single prediction.
+
+    :param p_yes: predicted probability of yes.
+    :param outcome: actual outcome.
+    :return: log loss value (lower is better).
+    """
+    p = max(_LOG_LOSS_EPSILON, min(1 - _LOG_LOSS_EPSILON, p_yes))
+    if outcome:
+        return -math.log(p)
+    return -math.log(1 - p)
+
+
+# Thresholds for disagreement-stratified Brier.
+# TODO: decide final values — these are provisional.
+DISAGREEMENT_THRESHOLD = 0.03
+DISAGREEMENT_T2 = 0.10
 
 
 def _is_edge_eligible(row: dict[str, Any]) -> bool:
@@ -169,16 +205,28 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         decision_worthy.
     """
     total = len(rows)
+    _none_stats: dict[str, Any] = {
+        "brier": None,
+        "directional_accuracy": None,
+        "n_directional": 0,
+        "no_signal_rate": None,
+        "no_signal_count": 0,
+        "log_loss": None,
+        "sharpness": None,
+        "reliability": None,
+        "n": total,
+        "valid_n": 0,
+        "decision_worthy": False,
+        "edge": None,
+        "edge_n": 0,
+        "edge_positive_rate": None,
+        "conditional_accuracy": None,
+        "conditional_n": 0,
+        "directional_bias": None,
+        "disagreement_brier": None,
+    }
     if total == 0:
-        return {
-            "brier": None,
-            "accuracy": None,
-            "sharpness": None,
-            "reliability": None,
-            "n": 0,
-            "valid_n": 0,
-            "decision_worthy": False,
-        }
+        return _none_stats
 
     valid = [
         r
@@ -191,24 +239,31 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     worthy = len(valid) >= MIN_SAMPLE_SIZE
 
     if not valid:
-        return {
-            "brier": None,
-            "accuracy": None,
-            "sharpness": None,
-            "reliability": round(reliability, 4),
-            "n": total,
-            "valid_n": 0,
-            "decision_worthy": False,
-        }
+        result = dict(_none_stats)
+        result["reliability"] = round(reliability, 4)
+        return result
 
-    scores = [brier_score(r["p_yes"], r["final_outcome"]) for r in valid]
-    avg_brier = sum(scores) / len(scores)
+    brier_scores = [brier_score(r["p_yes"], r["final_outcome"]) for r in valid]
+    avg_brier = sum(brier_scores) / len(brier_scores)
 
-    # p_yes == 0.5 counted as incorrect (no directional signal)
-    correct = sum(1 for r in valid if (r["p_yes"] > 0.5) == r["final_outcome"])
-    accuracy = correct / len(valid)
+    # Directional accuracy — exclude p_yes == 0.5 (no signal)
+    directional = [r for r in valid if r["p_yes"] != 0.5]
+    no_signal_count = len(valid) - len(directional)
+    no_signal_rate = round(no_signal_count / len(valid), 4)
+    if directional:
+        correct = sum(
+            1 for r in directional if (r["p_yes"] > 0.5) == r["final_outcome"]
+        )
+        dir_accuracy = round(correct / len(directional), 4)
+    else:
+        correct = 0
+        dir_accuracy = None
 
     sharpness = sum(abs(r["p_yes"] - 0.5) for r in valid) / len(valid)
+
+    # Log loss
+    ll_sum = sum(log_loss_score(r["p_yes"], r["final_outcome"]) for r in valid)
+    avg_log_loss = round(ll_sum / len(valid), 4)
 
     # Edge over market — only for rows with market_prob_at_prediction
     edge_rows = [r for r in valid if r.get("market_prob_at_prediction") is not None]
@@ -224,9 +279,68 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         edge_avg = None
         edge_pos_rate = None
 
+    # Diagnostic metrics for edge-eligible rows
+    disagree_count = 0
+    disagree_tool_wins = 0
+    bias_sum = 0.0
+    bias_n = 0
+    disagree_brier: dict[str, dict[str, float | int]] = {
+        "no_trade": {"brier_sum": 0.0, "n": 0},
+        "small_trade": {"brier_sum": 0.0, "n": 0},
+        "large_trade": {"brier_sum": 0.0, "n": 0},
+    }
+    for r in edge_rows:
+        p_yes = r["p_yes"]
+        market_prob = r["market_prob_at_prediction"]
+        outcome = r["final_outcome"]
+        outcome_val = 1.0 if outcome else 0.0
+        disagreement = abs(p_yes - market_prob)
+        tool_dist = abs(p_yes - outcome_val)
+        market_dist = abs(market_prob - outcome_val)
+        row_brier = brier_score(p_yes, outcome)
+
+        # Disagreement-stratified Brier
+        if disagreement <= DISAGREEMENT_THRESHOLD:
+            bucket = "no_trade"
+        elif disagreement <= DISAGREEMENT_T2:
+            bucket = "small_trade"
+        else:
+            bucket = "large_trade"
+        disagree_brier[bucket]["brier_sum"] += row_brier
+        disagree_brier[bucket]["n"] += 1
+
+        # Conditional accuracy & directional bias (need sufficient disagreement)
+        if disagreement > DISAGREEMENT_THRESHOLD:
+            disagree_count += 1
+            if tool_dist < market_dist:
+                disagree_tool_wins += 1
+            elif tool_dist > market_dist:
+                # Tool lost — accumulate bias
+                bias_sum += p_yes - outcome_val
+                bias_n += 1
+
+    cond_acc = round(disagree_tool_wins / disagree_count, 4) if disagree_count else None
+    dir_bias = round(bias_sum / bias_n, 4) if bias_n else None
+
+    # Format disagreement Brier
+    disagree_brier_out: dict[str, dict[str, Any]] = {}
+    for bk, bv in disagree_brier.items():
+        bn = int(bv["n"])
+        if bn > 0:
+            disagree_brier_out[bk] = {
+                "brier": round(bv["brier_sum"] / bn, 4),
+                "n": bn,
+            }
+        else:
+            disagree_brier_out[bk] = {"brier": None, "n": 0}
+
     return {
         "brier": round(avg_brier, 4),
-        "accuracy": round(accuracy, 4),
+        "directional_accuracy": dir_accuracy,
+        "n_directional": len(directional),
+        "no_signal_count": no_signal_count,
+        "no_signal_rate": no_signal_rate,
+        "log_loss": avg_log_loss,
         "sharpness": round(sharpness, 4),
         "reliability": round(reliability, 4),
         "n": total,
@@ -235,6 +349,10 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "edge": edge_avg,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
+        "conditional_accuracy": cond_acc,
+        "conditional_n": disagree_count,
+        "directional_bias": dir_bias,
+        "disagreement_brier": disagree_brier_out if edge_rows else None,
     }
 
 
@@ -408,6 +526,59 @@ def compute_calibration(
     return result
 
 
+def compute_ece(bins: list[dict[str, Any]]) -> float | None:
+    """Compute Expected Calibration Error from calibration bins.
+
+    :param bins: list of calibration bin dicts with n, gap.
+    :return: ECE value, or None if no bins have data.
+    """
+    populated = [b for b in bins if b.get("n", 0) > 0]
+    if not populated:
+        return None
+    total_n = sum(b["n"] for b in populated)
+    if total_n == 0:
+        return None
+    weighted_gap = sum(b["n"] * abs(b["gap"]) for b in populated)
+    return round(weighted_gap / total_n, 4)
+
+
+def compute_calibration_regression(
+    bins: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    """Compute calibration intercept and slope via weighted linear regression.
+
+    :param bins: list of calibration bin dicts with avg_predicted,
+        realized_rate, n.
+    :return: dict with intercept and slope (None if < 3 populated bins).
+    """
+    populated = [
+        b for b in bins if b.get("n", 0) > 0 and b.get("avg_predicted") is not None
+    ]
+    if len(populated) < 3:
+        return {"calibration_intercept": None, "calibration_slope": None}
+
+    weights = [b["n"] for b in populated]
+    xs = [b["avg_predicted"] for b in populated]
+    ys = [b["realized_rate"] for b in populated]
+    total_w = sum(weights)
+
+    mean_x = sum(w * x for w, x in zip(weights, xs)) / total_w
+    mean_y = sum(w * y for w, y in zip(weights, ys)) / total_w
+
+    num = sum(w * (x - mean_x) * (y - mean_y) for w, x, y in zip(weights, xs, ys))
+    den = sum(w * (x - mean_x) ** 2 for w, x in zip(weights, xs))
+
+    if abs(den) < 1e-12:
+        return {"calibration_intercept": None, "calibration_slope": None}
+
+    slope = num / den
+    intercept = mean_y - slope * mean_x
+    return {
+        "calibration_intercept": round(intercept, 4),
+        "calibration_slope": round(slope, 4),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main scoring
 # ---------------------------------------------------------------------------
@@ -484,6 +655,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Calibration — overall and per-tool
     calibration = compute_calibration(rows)
+    ece = compute_ece(calibration)
+    cal_reg = compute_calibration_regression(calibration)
     calibration_by_tool = {
         tool: compute_calibration(group)
         for tool, group in group_by(rows, "tool_name").items()
@@ -519,6 +692,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "trend": trend,
         "calibration": calibration,
+        "ece": ece,
+        **cal_reg,
         "calibration_by_tool": calibration_by_tool,
         "edge_eligibility": edge_eligibility,
     }
@@ -536,11 +711,24 @@ def _empty_group() -> dict[str, Any]:
         "valid_n": 0,
         "brier_sum": 0.0,
         "correct_count": 0,
+        "n_directional": 0,
+        "no_signal_count": 0,
         "sharpness_sum": 0.0,
         "outcome_yes_count": 0,
+        "log_loss_sum": 0.0,
         "edge_sum": 0.0,
         "edge_n": 0,
         "edge_positive_count": 0,
+        "disagree_count": 0,
+        "disagree_tool_wins": 0,
+        "bias_sum": 0.0,
+        "bias_n": 0,
+        "disagree_brier_no_trade_sum": 0.0,
+        "disagree_n_no_trade": 0,
+        "disagree_brier_small_trade_sum": 0.0,
+        "disagree_n_small_trade": 0,
+        "disagree_brier_large_trade_sum": 0.0,
+        "disagree_n_large_trade": 0,
     }
 
 
@@ -592,20 +780,49 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         group["valid_n"] += 1
         p_yes = row["p_yes"]
         outcome = row["final_outcome"]
+        outcome_val = 1.0 if outcome else 0.0
         group["brier_sum"] += brier_score(p_yes, outcome)
-        if (p_yes > 0.5) == outcome:
-            group["correct_count"] += 1
+        group["log_loss_sum"] += log_loss_score(p_yes, outcome)
+        # Directional accuracy — exclude p_yes == 0.5
+        if p_yes != 0.5:
+            group["n_directional"] += 1
+            if (p_yes > 0.5) == outcome:
+                group["correct_count"] += 1
+        else:
+            group["no_signal_count"] += 1
         group["sharpness_sum"] += abs(p_yes - 0.5)
         if outcome:
             group["outcome_yes_count"] += 1
         # Edge over market
         market_prob = row.get("market_prob_at_prediction")
         if market_prob is not None:
+            row_brier = brier_score(p_yes, outcome)
             edge = edge_score(p_yes, market_prob, outcome)
             group["edge_sum"] += edge
             group["edge_n"] += 1
             if edge > 0:
                 group["edge_positive_count"] += 1
+            # Disagreement-stratified Brier
+            disagreement = abs(p_yes - market_prob)
+            if disagreement <= DISAGREEMENT_THRESHOLD:
+                group["disagree_brier_no_trade_sum"] += row_brier
+                group["disagree_n_no_trade"] += 1
+            elif disagreement <= DISAGREEMENT_T2:
+                group["disagree_brier_small_trade_sum"] += row_brier
+                group["disagree_n_small_trade"] += 1
+            else:
+                group["disagree_brier_large_trade_sum"] += row_brier
+                group["disagree_n_large_trade"] += 1
+            # Conditional accuracy & directional bias
+            if disagreement > DISAGREEMENT_THRESHOLD:
+                tool_dist = abs(p_yes - outcome_val)
+                market_dist = abs(market_prob - outcome_val)
+                group["disagree_count"] += 1
+                if tool_dist < market_dist:
+                    group["disagree_tool_wins"] += 1
+                elif tool_dist > market_dist:
+                    group["bias_sum"] += p_yes - outcome_val
+                    group["bias_n"] += 1
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -623,7 +840,11 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     if n == 0:
         result.update(
             brier=None,
-            accuracy=None,
+            directional_accuracy=None,
+            n_directional=0,
+            no_signal_count=0,
+            no_signal_rate=None,
+            log_loss=None,
             sharpness=None,
             reliability=None,
             decision_worthy=False,
@@ -631,7 +852,11 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     elif valid_n == 0:
         result.update(
             brier=None,
-            accuracy=None,
+            directional_accuracy=None,
+            n_directional=0,
+            no_signal_count=0,
+            no_signal_rate=None,
+            log_loss=None,
             sharpness=None,
             reliability=round(0.0, 4),
             decision_worthy=False,
@@ -640,8 +865,16 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         brier = round(group["brier_sum"] / valid_n, 4)
         yes_rate = group["outcome_yes_count"] / valid_n
         baseline_brier = round(yes_rate * (1 - yes_rate), 4)
+        n_dir = group.get("n_directional", 0)
+        no_sig = group.get("no_signal_count", 0)
         result["brier"] = brier
-        result["accuracy"] = round(group["correct_count"] / valid_n, 4)
+        result["directional_accuracy"] = (
+            round(group["correct_count"] / n_dir, 4) if n_dir > 0 else None
+        )
+        result["n_directional"] = n_dir
+        result["no_signal_count"] = no_sig
+        result["no_signal_rate"] = round(no_sig / valid_n, 4)
+        result["log_loss"] = round(group["log_loss_sum"] / valid_n, 4)
         result["sharpness"] = round(group["sharpness_sum"] / valid_n, 4)
         result["reliability"] = round(valid_n / n, 4)
         result["decision_worthy"] = valid_n >= MIN_SAMPLE_SIZE
@@ -661,6 +894,29 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     else:
         result["edge"] = None
         result["edge_positive_rate"] = None
+
+    # Diagnostic edge metrics
+    dc = group.get("disagree_count", 0)
+    result["conditional_n"] = dc
+    result["conditional_accuracy"] = (
+        round(group["disagree_tool_wins"] / dc, 4) if dc > 0 else None
+    )
+    bn = group.get("bias_n", 0)
+    result["directional_bias"] = round(group["bias_sum"] / bn, 4) if bn > 0 else None
+
+    # Disagreement-stratified Brier
+    db_out: dict[str, dict[str, Any]] = {}
+    for bucket in ("no_trade", "small_trade", "large_trade"):
+        bk_n = group.get(f"disagree_n_{bucket}", 0)
+        if bk_n > 0:
+            db_out[bucket] = {
+                "brier": round(group[f"disagree_brier_{bucket}_sum"] / bk_n, 4),
+                "n": bk_n,
+            }
+        else:
+            db_out[bucket] = {"brier": None, "n": 0}
+    result["disagreement_brier"] = db_out if edge_n > 0 else None
+
     return result
 
 
@@ -876,6 +1132,8 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
             }
         )
     result["calibration"] = cal_result
+    result["ece"] = compute_ece(cal_result)
+    result.update(compute_calibration_regression(cal_result))
 
     result["parse_breakdown"] = scores["parse_breakdown"]
     result["latency_reservoir"] = scores["latency_reservoir"]
@@ -954,11 +1212,28 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
             "valid_n": g["valid_n"],
             "brier_sum": g["brier_sum"],
             "correct_count": g["correct_count"],
+            "n_directional": g.get("n_directional", 0),
+            "no_signal_count": g.get("no_signal_count", 0),
             "sharpness_sum": g["sharpness_sum"],
             "outcome_yes_count": g.get("outcome_yes_count", 0),
+            "log_loss_sum": g.get("log_loss_sum", 0.0),
             "edge_sum": g.get("edge_sum", 0.0),
             "edge_n": g.get("edge_n", 0),
             "edge_positive_count": g.get("edge_positive_count", 0),
+            "disagree_count": g.get("disagree_count", 0),
+            "disagree_tool_wins": g.get("disagree_tool_wins", 0),
+            "bias_sum": g.get("bias_sum", 0.0),
+            "bias_n": g.get("bias_n", 0),
+            "disagree_brier_no_trade_sum": g.get("disagree_brier_no_trade_sum", 0.0),
+            "disagree_n_no_trade": g.get("disagree_n_no_trade", 0),
+            "disagree_brier_small_trade_sum": g.get(
+                "disagree_brier_small_trade_sum", 0.0
+            ),
+            "disagree_n_small_trade": g.get("disagree_n_small_trade", 0),
+            "disagree_brier_large_trade_sum": g.get(
+                "disagree_brier_large_trade_sum", 0.0
+            ),
+            "disagree_n_large_trade": g.get("disagree_n_large_trade", 0),
         }
 
     scores: dict[str, Any] = {
@@ -1226,6 +1501,46 @@ def rebuild(
 
 
 # ---------------------------------------------------------------------------
+# Period scoring — score a time window of log files
+# ---------------------------------------------------------------------------
+
+
+def score_period(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+) -> dict[str, Any]:
+    """Score a recent subset of daily log files.
+
+    Finds the most recent *days* log files in *logs_dir* and runs the
+    batch ``score()`` on their combined rows. Used for "since last report"
+    (days=1) and "rolling 7-day" (days=7) sections.
+
+    :param logs_dir: directory containing ``YYYY-MM-DD.jsonl`` daily files.
+    :param days: how many of the most recent files to include.
+    :return: scores dict from ``score()``, or empty scores if no files.
+    """
+    # Daily files: YYYY-MM-DD.jsonl
+    daily_pattern = str(logs_dir / "????-??-??.jsonl")
+    files = sorted(glob_mod.glob(daily_pattern))
+    # Also check production_log_ files (flywheel naming)
+    prod_pattern = str(logs_dir / "production_log_*.jsonl")
+    prod_files = sorted(glob_mod.glob(prod_pattern))
+
+    # Use daily files if available, else fall back to production_log files
+    all_files = files if files else prod_files
+    recent = all_files[-days:] if all_files else []
+
+    rows: list[dict[str, Any]] = []
+    for filepath in recent:
+        rows.extend(load_rows(Path(filepath)))
+
+    if not rows:
+        return score([])
+
+    return score(rows)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1264,7 +1579,24 @@ def main() -> None:
         default=DEFAULT_HISTORY,
         help="Path to scores_history.jsonl",
     )
+    parser.add_argument(
+        "--period-days",
+        type=int,
+        default=None,
+        help="Score only the last N daily log files (for period reports)",
+    )
     args = parser.parse_args()
+
+    if args.period_days is not None:
+        result = score_period(logs_dir=args.logs_dir, days=args.period_days)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2))
+        overall = result["overall"]
+        print(
+            f"Period ({args.period_days}d): Brier={overall['brier']},"
+            f" n={overall['n']}"
+        )
+        return
 
     if args.rebuild:
         print(f"Rebuilding scores from {args.logs_dir}")
@@ -1276,7 +1608,7 @@ def main() -> None:
         print(f"Scores written to {args.output}")
         overall = result["overall"]
         print(
-            f"Overall: Brier={overall['brier']}, Accuracy={overall['accuracy']},"
+            f"Overall: Brier={overall['brier']}, DirAcc={overall.get('directional_accuracy')},"
             f" n={overall['n']}"
         )
         return
@@ -1294,7 +1626,7 @@ def main() -> None:
     # Print summary
     overall = result["overall"]
     print(
-        f"\nOverall: Brier={overall['brier']}, Accuracy={overall['accuracy']},"
+        f"\nOverall: Brier={overall['brier']}, DirAcc={overall.get('directional_accuracy')},"
         f" Sharpness={overall['sharpness']}, Reliability={overall['reliability']},"
         f" n={overall['n']}"
     )

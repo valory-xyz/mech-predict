@@ -67,7 +67,15 @@ def section_overall(scores: dict[str, Any]) -> str:
 
     rel_str = f"{o['reliability']:.0%}" if o["reliability"] is not None else "N/A"
     brier_str = str(o["brier"]) if o["brier"] is not None else "N/A"
-    acc_str = f"{o['accuracy']:.0%}" if o.get("accuracy") is not None else "N/A"
+    acc_str = (
+        f"{o['directional_accuracy']:.0%}"
+        if o.get("directional_accuracy") is not None
+        else "N/A"
+    )
+    no_sig = o.get("no_signal_rate")
+    no_sig_str = f"{no_sig:.0%}" if no_sig is not None else "N/A"
+    ll = o.get("log_loss")
+    ll_str = f"{ll:.4f}" if ll is not None else "N/A"
     sharp_str = f"{o['sharpness']:.4f}" if o.get("sharpness") is not None else "N/A"
     bss = o.get("brier_skill_score")
     bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
@@ -94,7 +102,11 @@ def section_overall(scores: dict[str, Any]) -> str:
         "  - Positive = tool beats market consensus, negative = market wins",
         f"  - Edge positive rate: {epr_str}"
         " (fraction of questions where tool beat market)",
-        f"- Accuracy: {acc_str}",
+        f"- Directional Accuracy: {acc_str}"
+        f" (n_directional={o.get('n_directional', 0)})",
+        f"- No-signal rate: {no_sig_str}"
+        f" ({o.get('no_signal_count', 0)} predictions at exactly 0.5)",
+        f"- Log Loss: {ll_str}",
         f"- Sharpness: {sharp_str}",
         "  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
     ]
@@ -126,18 +138,24 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
             flags = f" — {stats['reliability']:.0%} reliability"
         flags += _sample_label(stats)
         brier = stats["brier"] if stats["brier"] is not None else "N/A"
-        acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
         sharp = (
             f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
         )
         bss = stats.get("brier_skill_score")
         bss_str = f", BSS: {bss:+.4f}" if bss is not None else ""
+        ll = stats.get("log_loss")
+        ll_str = f", LogLoss: {ll:.4f}" if ll is not None else ""
         edge = stats.get("edge")
         edge_n = stats.get("edge_n", 0)
         edge_str = f", Edge: {edge:+.4f} (n={edge_n})" if edge is not None else ""
         lines.append(
-            f"{i}. **{tool}** — Brier: {brier}{bss_str}{edge_str}, Acc: {acc},"
-            f" Sharp: {sharp} (n={stats['n']}){flags}"
+            f"{i}. **{tool}** — Brier: {brier}{bss_str}{ll_str}{edge_str},"
+            f" DirAcc: {acc}, Sharp: {sharp} (n={stats['n']}){flags}"
         )
 
     return "\n".join(lines)
@@ -362,8 +380,8 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     lines = [
         "## Tool × Platform",
         "",
-        "| Tool | Platform | Brier | BSS | Edge | Edge n | Accuracy | Sharpness | n |",
-        "|------|----------|-------|-----|------|--------|----------|-----------|---|",
+        "| Tool | Platform | Brier | BSS | LogLoss | Edge | Edge n | DirAcc | Sharpness | n |",
+        "|------|----------|-------|-----|---------|------|--------|--------|-----------|---|",
     ]
     for key, stats in sorted(
         data.items(),
@@ -375,16 +393,22 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
         brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
         bss = stats.get("brier_skill_score")
         bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        ll = stats.get("log_loss")
+        ll_str2 = f"{ll:.4f}" if ll is not None else "N/A"
         edge = stats.get("edge")
         edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
         edge_n = stats.get("edge_n", 0)
-        acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
         sharp = (
             f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
         )
         label = _sample_label(stats)
         lines.append(
-            f"| {tool} | {platform} | {brier} | {bss_str} | {edge_str}"
+            f"| {tool} | {platform} | {brier} | {bss_str} | {ll_str2} | {edge_str}"
             f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
         )
 
@@ -510,6 +534,36 @@ def section_calibration(scores: dict[str, Any]) -> str:
         lines.append(
             f"| {bucket['bin']} | {avg_p} | {realized} | {gap_str} | {bucket['n']} |"
         )
+
+    # ECE and calibration regression
+    ece = scores.get("ece")
+    if ece is not None:
+        lines.append("")
+        lines.append(f"**ECE (Expected Calibration Error):** {ece:.4f}")
+        lines.append("  - 0 = perfectly calibrated, higher = worse")
+    cal_int = scores.get("calibration_intercept")
+    cal_slope = scores.get("calibration_slope")
+    if cal_int is not None and cal_slope is not None:
+        lines.append(
+            f"**Calibration regression:** intercept={cal_int:+.4f},"
+            f" slope={cal_slope:.4f}"
+        )
+        if cal_slope < 0.9:
+            lines.append("  - Slope < 1.0 → overconfident (predictions too extreme)")
+        elif cal_slope > 1.1:
+            lines.append(
+                "  - Slope > 1.0 → underconfident (predictions too compressed)"
+            )
+        if cal_int > 0.05:
+            lines.append(
+                "  - Positive intercept → systematically underestimates"
+                " (reality higher than predicted)"
+            )
+        elif cal_int < -0.05:
+            lines.append(
+                "  - Negative intercept → systematically overestimates"
+                " (reality lower than predicted)"
+            )
 
     # Summary interpretation
     lines.append("")
@@ -641,6 +695,114 @@ def section_base_rates(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _delta_str(period_val: float | None, alltime_val: float | None) -> str:
+    """Format a delta vs all-time with arrow."""
+    if period_val is None or alltime_val is None:
+        return ""
+    delta = period_val - alltime_val
+    arrow = "better" if delta < 0 else "worse" if delta > 0 else "same"
+    return f" (delta vs all-time: {delta:+.4f} {arrow})"
+
+
+def section_period(
+    period_scores: dict[str, Any] | None,
+    alltime_scores: dict[str, Any],
+    label: str = "Since last report",
+) -> str:
+    """Generate a period comparison section (since-last-report or rolling 7d).
+
+    :param period_scores: scores from the recent period.
+    :param alltime_scores: all-time scores for delta comparison.
+    :param label: section title.
+    :return: markdown section string.
+    """
+    if period_scores is None:
+        return f"## {label}\n\nNo period data available."
+
+    po = period_scores.get("overall", {})
+    ao = alltime_scores.get("overall", {})
+    n = po.get("n", 0)
+    valid_n = po.get("valid_n", 0)
+
+    if n == 0:
+        return f"## {label}\n\nNo new predictions since last report."
+
+    brier = po.get("brier")
+    brier_str = f"{brier:.4f}" if brier is not None else "N/A"
+    ll = po.get("log_loss")
+    ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+
+    lines = [
+        f"## {label} (n={valid_n})",
+        "",
+        f"- Brier: {brier_str}{_delta_str(brier, ao.get('brier'))}",
+        f"- Log Loss: {ll_str}{_delta_str(ll, ao.get('log_loss'))}",
+    ]
+
+    # Per-tool breakdown
+    by_tool = period_scores.get("by_tool", {})
+    if by_tool:
+        at_tools = alltime_scores.get("by_tool", {})
+        for tool, stats in sorted(
+            by_tool.items(),
+            key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        ):
+            tb = stats.get("brier")
+            if tb is None:
+                continue
+            at_b = at_tools.get(tool, {}).get("brier")
+            lines.append(
+                f"  - **{tool}**: {tb:.4f}"
+                f"{_delta_str(tb, at_b)}"
+                f" (n={stats['n']})"
+            )
+
+    return "\n".join(lines)
+
+
+def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
+    """Generate the diagnostic edge metrics section."""
+    o = scores.get("overall", {})
+    cond_acc = o.get("conditional_accuracy")
+    cond_n = o.get("conditional_n", 0)
+    dir_bias = o.get("directional_bias")
+    db = o.get("disagreement_brier")
+
+    if cond_n == 0 and db is None:
+        return "## Diagnostic Edge Metrics\n\nNo edge-eligible rows with disagreement."
+
+    lines = ["## Diagnostic Edge Metrics", ""]
+
+    if cond_acc is not None:
+        lines.append(
+            f"**Conditional accuracy when disagreeing:** {cond_acc:.0%}"
+            f" (n={cond_n})"
+        )
+        lines.append(
+            "  - When tool and market disagree enough to trade,"
+            " how often is the tool closer to the truth?"
+        )
+    if dir_bias is not None:
+        sign = "overestimates" if dir_bias > 0 else "underestimates"
+        lines.append(
+            f"**Directional bias:** {dir_bias:+.4f} (tool {sign} when it loses)"
+        )
+
+    if db:
+        lines.append("")
+        lines.append("**Disagreement-stratified Brier:**")
+        lines.append("")
+        lines.append("| Bucket | Brier | n |")
+        lines.append("|--------|-------|---|")
+        for bucket in ("no_trade", "small_trade", "large_trade"):
+            bv = db.get(bucket, {})
+            b_val = bv.get("brier")
+            b_str = f"{b_val:.4f}" if b_val is not None else "N/A"
+            lines.append(f"| {bucket} | {b_str} | {bv.get('n', 0)} |")
+
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
@@ -649,11 +811,15 @@ def section_base_rates(scores: dict[str, Any]) -> str:
 def generate_report(
     scores: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
+    period_scores: dict[str, Any] | None = None,
+    rolling_scores: dict[str, Any] | None = None,
 ) -> str:
     """Generate a full benchmark report from scores and history.
 
-    :param scores: parsed ``scores.json`` dict.
+    :param scores: parsed ``scores.json`` dict (all-time).
     :param history: list of monthly snapshots from ``scores_history.jsonl``.
+    :param period_scores: scores from today's run (since last report).
+    :param rolling_scores: scores from the last 7 days.
     :return: full markdown report string.
     """
     if history is None:
@@ -665,12 +831,15 @@ def generate_report(
 
     sections = [
         f"# Benchmark Report — {date}",
+        section_period(period_scores, scores, "Since Last Report"),
+        section_period(rolling_scores, scores, "Last 7 Days Rolling"),
         section_overall(scores),
         section_base_rates(scores),
         section_tool_ranking(scores),
         section_platform(scores),
         section_tool_platform(scores),
         section_edge_analysis(scores),
+        section_diagnostic_metrics(scores),
         section_calibration(scores),
         section_weak_spots(scores),
         section_reliability_issues(scores),
@@ -698,15 +867,33 @@ def main() -> None:
     parser.add_argument("--scores", type=Path, default=DEFAULT_SCORES)
     parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--period",
+        type=Path,
+        default=None,
+        help="Period scores JSON (since last report)",
+    )
+    parser.add_argument(
+        "--rolling",
+        type=Path,
+        default=None,
+        help="Rolling 7-day scores JSON",
+    )
     args = parser.parse_args()
 
     scores = load_scores(args.scores)
     history = load_history(args.history)
+    period = load_scores(args.period) if args.period and args.period.exists() else None
+    rolling = (
+        load_scores(args.rolling) if args.rolling and args.rolling.exists() else None
+    )
     print(
         f"Loaded scores ({scores.get('total_rows', 0)} rows), {len(history)} months of history"
     )
 
-    report = generate_report(scores, history)
+    report = generate_report(
+        scores, history, period_scores=period, rolling_scores=rolling
+    )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report)

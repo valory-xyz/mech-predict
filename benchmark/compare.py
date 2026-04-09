@@ -66,7 +66,8 @@ def compare_stats(
     """Compare two compute_group_stats dicts."""
     metrics = {
         "brier": {"lower_is_better": True},
-        "accuracy": {"lower_is_better": False},
+        "log_loss": {"lower_is_better": True},
+        "directional_accuracy": {"lower_is_better": False},
         "sharpness": {"lower_is_better": False},
         "reliability": {"lower_is_better": False},
     }
@@ -105,7 +106,8 @@ def compare_dimension(
 
     empty_stats: dict[str, Any] = {
         "brier": None,
-        "accuracy": None,
+        "log_loss": None,
+        "directional_accuracy": None,
         "sharpness": None,
         "reliability": None,
         "n": 0,
@@ -158,7 +160,8 @@ def compare(
 def _table_row(name: str, stats: dict[str, Any]) -> str:
     """Format one row of a comparison table."""
     b = stats["brier"]
-    a = stats["accuracy"]
+    a = stats["directional_accuracy"]
+    ll = stats.get("log_loss", {})
     # Show Brier direction + accuracy direction when they disagree
     if b["direction"] == a["direction"] or a["direction"] == "unchanged":
         direction = b["direction"]
@@ -166,11 +169,17 @@ def _table_row(name: str, stats: dict[str, Any]) -> str:
         direction = a["direction"]
     else:
         direction = f"{b['direction'][:3]}B/{a['direction'][:3]}A"
+    ll_b = _fmt(ll.get("baseline")) if ll else "—"
+    ll_c = _fmt(ll.get("candidate")) if ll else "—"
+    ll_d = _fmt_delta(ll.get("delta")) if ll else "—"
     return (
         f"| {name:<35} "
         f"| {_fmt(b['baseline']):>8} "
         f"| {_fmt(b['candidate']):>8} "
         f"| {_fmt_delta(b['delta']):>8} "
+        f"| {ll_b:>8} "
+        f"| {ll_c:>8} "
+        f"| {ll_d:>8} "
         f"| {_fmt(a['baseline']):>8} "
         f"| {_fmt(a['candidate']):>8} "
         f"| {_fmt_delta(a['delta']):>8} "
@@ -189,15 +198,18 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         f"| {'B.Brier':>8} "
         f"| {'C.Brier':>8} "
         f"| {'Delta':>8} "
-        f"| {'B.Acc':>8} "
-        f"| {'C.Acc':>8} "
+        f"| {'B.LL':>8} "
+        f"| {'C.LL':>8} "
+        f"| {'Delta':>8} "
+        f"| {'B.DAcc':>8} "
+        f"| {'C.DAcc':>8} "
         f"| {'Delta':>8} "
         f"| {'B.N':>5} "
         f"| {'C.N':>5} "
         f"| {'Direction':<10} |"
     )
     separator = (
-        "|" + "|".join(["-" * 36] + ["-" * 9] * 6 + ["-" * 6] * 2 + ["-" * 11]) + "|"
+        "|" + "|".join(["-" * 36] + ["-" * 9] * 9 + ["-" * 6] * 2 + ["-" * 11]) + "|"
     )
 
     # Overall

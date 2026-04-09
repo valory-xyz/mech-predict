@@ -33,12 +33,16 @@ from benchmark.scorer import (
     classify_difficulty,
     classify_horizon,
     classify_liquidity,
+    compute_calibration,
+    compute_calibration_regression,
+    compute_ece,
     compute_group_stats,
     edge_score,
     group_by,
     group_by_horizon,
     group_by_month,
     load_history,
+    log_loss_score,
     rebuild,
     score,
     update,
@@ -435,7 +439,10 @@ class TestIncrementalUpdate:
         full_result = score(all_rows)
 
         assert inc_result["overall"]["brier"] == full_result["overall"]["brier"]
-        assert inc_result["overall"]["accuracy"] == full_result["overall"]["accuracy"]
+        assert (
+            inc_result["overall"]["directional_accuracy"]
+            == full_result["overall"]["directional_accuracy"]
+        )
         assert inc_result["overall"]["n"] == full_result["overall"]["n"]
 
     def test_by_tool_accumulated(self, tmp_path: Path) -> None:
@@ -1024,7 +1031,9 @@ class TestEdgeInGroupStats:
         stats_without = compute_group_stats(rows_without)
         stats_with = compute_group_stats(rows_with)
         assert stats_without["brier"] == stats_with["brier"]
-        assert stats_without["accuracy"] == stats_with["accuracy"]
+        assert (
+            stats_without["directional_accuracy"] == stats_with["directional_accuracy"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1075,7 +1084,7 @@ class TestEdgeIncremental:
                 "sharpness_sum": 1.5,
                 "outcome_yes_count": 5,
                 "brier": 0.22,
-                "accuracy": 0.67,
+                "directional_accuracy": 0.67,
                 "sharpness": 0.17,
                 "reliability": 0.9,
                 "decision_worthy": False,
@@ -1391,3 +1400,293 @@ class TestUpdateDedup:
         # The dedup file should now contain the migrated ID
         dedup_ids = json.loads(dedup_path.read_text())
         assert "legacy1" in dedup_ids
+
+# ---------------------------------------------------------------------------
+# Directional accuracy and no-signal rate
+# ---------------------------------------------------------------------------
+
+
+class TestDirectionalAccuracy:
+    """Tests for directional_accuracy and no_signal_rate."""
+
+    def test_excludes_half_predictions(self) -> None:
+        """p_yes=0.5 rows excluded from directional accuracy, counted as no-signal."""
+        rows = [
+            _row(p_yes=0.5, outcome=True),
+            _row(p_yes=0.5, outcome=False),
+            _row(p_yes=0.8, outcome=True),
+        ]
+        stats = compute_group_stats(rows)
+        assert stats["directional_accuracy"] == 1.0
+        assert stats["n_directional"] == 1
+        assert stats["no_signal_count"] == 2
+        assert stats["no_signal_rate"] == round(2 / 3, 4)
+
+    def test_all_half_returns_none(self) -> None:
+        """All predictions at 0.5 gives directional_accuracy=None."""
+        rows = [_row(p_yes=0.5, outcome=True), _row(p_yes=0.5, outcome=False)]
+        stats = compute_group_stats(rows)
+        assert stats["directional_accuracy"] is None
+        assert stats["n_directional"] == 0
+        assert stats["no_signal_rate"] == 1.0
+
+    def test_no_half_predictions(self) -> None:
+        """No 0.5 predictions gives no_signal_rate=0."""
+        rows = [
+            _row(p_yes=0.7, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+        ]
+        stats = compute_group_stats(rows)
+        assert stats["no_signal_rate"] == 0.0
+        assert stats["no_signal_count"] == 0
+        assert stats["n_directional"] == 2
+
+    def test_batch_incremental_parity(self, tmp_path: Path) -> None:
+        """Batch and incremental paths produce the same directional_accuracy."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.5, outcome=True),
+            _row(p_yes=0.5, outcome=False),
+            _row(p_yes=0.8, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+            _row(p_yes=0.6, outcome=True),
+        ]
+        batch = compute_group_stats(rows)
+        inc = update(rows, scores_path, history_path)
+        assert inc["overall"]["directional_accuracy"] == batch["directional_accuracy"]
+        assert inc["overall"]["no_signal_rate"] == batch["no_signal_rate"]
+        assert inc["overall"]["n_directional"] == batch["n_directional"]
+
+
+# ---------------------------------------------------------------------------
+# Log loss
+# ---------------------------------------------------------------------------
+
+
+class TestLogLoss:
+    """Tests for log_loss_score."""
+
+    def test_confident_correct(self) -> None:
+        """p_yes=0.9, outcome=True → -log(0.9) ≈ 0.1054."""
+        result = log_loss_score(0.9, True)
+        assert abs(result - 0.10536) < 0.001
+
+    def test_confident_wrong(self) -> None:
+        """p_yes=0.9, outcome=False → -log(0.1) ≈ 2.3026."""
+        result = log_loss_score(0.9, False)
+        assert abs(result - 2.3026) < 0.001
+
+    def test_coin_flip(self) -> None:
+        """p_yes=0.5 → -log(0.5) ≈ 0.6931."""
+        result = log_loss_score(0.5, True)
+        assert abs(result - 0.6931) < 0.001
+
+    def test_extreme_clamped(self) -> None:
+        """p_yes=0.0 does not crash (clamped)."""
+        result = log_loss_score(0.0, True)
+        assert result > 30  # -log(1e-15) ≈ 34.5
+
+    def test_in_batch_output(self) -> None:
+        """log_loss appears in compute_group_stats output."""
+        rows = [_row(p_yes=0.9, outcome=True), _row(p_yes=0.3, outcome=False)]
+        stats = compute_group_stats(rows)
+        assert stats["log_loss"] is not None
+        assert stats["log_loss"] > 0
+
+    def test_batch_incremental_parity(self, tmp_path: Path) -> None:
+        """Log loss matches between batch and incremental."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.9, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+            _row(p_yes=0.6, outcome=True),
+        ]
+        batch = compute_group_stats(rows)
+        inc = update(rows, scores_path, history_path)
+        assert inc["overall"]["log_loss"] == batch["log_loss"]
+
+
+# ---------------------------------------------------------------------------
+# ECE
+# ---------------------------------------------------------------------------
+
+
+class TestECE:
+    """Tests for compute_ece."""
+
+    def test_hand_calculated(self) -> None:
+        """Hand-calculated ECE: 3 bins."""
+        bins = [
+            {"n": 50, "gap": 0.05},
+            {"n": 30, "gap": 0.10},
+            {"n": 20, "gap": 0.02},
+        ]
+        # ECE = (50*0.05 + 30*0.10 + 20*0.02) / 100 = 5.9/100 = 0.059
+        ece = compute_ece(bins)
+        assert ece == 0.059
+
+    def test_perfect_calibration(self) -> None:
+        """All gaps = 0 gives ECE = 0."""
+        bins = [{"n": 10, "gap": 0.0}, {"n": 20, "gap": 0.0}]
+        assert compute_ece(bins) == 0.0
+
+    def test_empty_bins(self) -> None:
+        """No populated bins gives None."""
+        assert compute_ece([]) is None
+        assert compute_ece([{"n": 0, "gap": 0.1}]) is None
+
+    def test_negative_gap_absolute(self) -> None:
+        """ECE uses absolute gap."""
+        bins = [{"n": 10, "gap": -0.1}]
+        assert compute_ece(bins) == 0.1
+
+    def test_in_score_output(self) -> None:
+        """ECE appears in score() output."""
+        rows = [_row(p_yes=0.75, outcome=True) for _ in range(10)]
+        result = score(rows)
+        assert "ece" in result
+
+
+# ---------------------------------------------------------------------------
+# Calibration regression
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrationRegression:
+    """Tests for compute_calibration_regression."""
+
+    def test_perfect_calibration(self) -> None:
+        """Perfect calibration: slope=1.0, intercept=0.0."""
+        bins = [
+            {"avg_predicted": 0.1, "realized_rate": 0.1, "n": 10},
+            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 10},
+            {"avg_predicted": 0.9, "realized_rate": 0.9, "n": 10},
+        ]
+        result = compute_calibration_regression(bins)
+        assert abs(result["calibration_slope"] - 1.0) < 0.01
+        assert abs(result["calibration_intercept"]) < 0.01
+
+    def test_overconfident(self) -> None:
+        """Overconfident tool: slope < 1.0."""
+        bins = [
+            {"avg_predicted": 0.1, "realized_rate": 0.25, "n": 10},
+            {"avg_predicted": 0.5, "realized_rate": 0.50, "n": 10},
+            {"avg_predicted": 0.9, "realized_rate": 0.75, "n": 10},
+        ]
+        result = compute_calibration_regression(bins)
+        assert result["calibration_slope"] < 1.0
+
+    def test_fewer_than_3_bins(self) -> None:
+        """< 3 bins returns None for both."""
+        bins = [
+            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 10},
+        ]
+        result = compute_calibration_regression(bins)
+        assert result["calibration_intercept"] is None
+        assert result["calibration_slope"] is None
+
+    def test_in_score_output(self) -> None:
+        """Calibration regression appears in score() output."""
+        rows = [
+            _row(p_yes=0.15, outcome=False),
+            _row(p_yes=0.55, outcome=True),
+            _row(p_yes=0.85, outcome=True),
+        ]
+        result = score(rows)
+        assert "calibration_intercept" in result
+        assert "calibration_slope" in result
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic edge metrics
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosticEdgeMetrics:
+    """Tests for conditional accuracy, directional bias, disagreement Brier."""
+
+    def test_conditional_accuracy_tool_wins(self) -> None:
+        """Tool closer to truth → conditional_accuracy = 1.0."""
+        # Tool 0.8, market 0.6, outcome Yes(1.0). Tool dist=0.2, market dist=0.4
+        rows = [_row(p_yes=0.8, outcome=True, market_prob=0.6)]
+        stats = compute_group_stats(rows)
+        assert stats["conditional_accuracy"] == 1.0
+        assert stats["conditional_n"] == 1
+
+    def test_conditional_accuracy_market_wins(self) -> None:
+        """Market closer to truth → tool loses."""
+        # Tool 0.3, market 0.5, outcome Yes(1.0). Tool dist=0.7, market dist=0.5
+        rows = [_row(p_yes=0.3, outcome=True, market_prob=0.5)]
+        stats = compute_group_stats(rows)
+        assert stats["conditional_accuracy"] == 0.0
+        assert stats["conditional_n"] == 1
+
+    def test_no_disagreement(self) -> None:
+        """Small disagreement excluded from conditional accuracy."""
+        # |0.51 - 0.50| = 0.01 < 0.03 threshold
+        rows = [_row(p_yes=0.51, outcome=True, market_prob=0.50)]
+        stats = compute_group_stats(rows)
+        assert stats["conditional_n"] == 0
+        assert stats["conditional_accuracy"] is None
+
+    def test_directional_bias_overestimate(self) -> None:
+        """Tool overestimates → positive bias."""
+        # Tool 0.9, market 0.6, outcome No(0.0).
+        # Tool dist=0.9, market dist=0.6. Tool lost.
+        # Bias = 0.9 - 0.0 = +0.9
+        rows = [_row(p_yes=0.9, outcome=False, market_prob=0.6)]
+        stats = compute_group_stats(rows)
+        assert stats["directional_bias"] == 0.9
+
+    def test_directional_bias_underestimate(self) -> None:
+        """Tool underestimates → negative bias."""
+        # Tool 0.2, market 0.4, outcome Yes(1.0).
+        # Tool dist=0.8, market dist=0.6. Tool lost.
+        # Bias = 0.2 - 1.0 = -0.8
+        rows = [_row(p_yes=0.2, outcome=True, market_prob=0.4)]
+        stats = compute_group_stats(rows)
+        assert stats["directional_bias"] == -0.8
+
+    def test_disagreement_brier_buckets(self) -> None:
+        """Rows are classified into correct disagreement buckets."""
+        rows = [
+            # |0.50-0.51|=0.01 → no_trade
+            _row(p_yes=0.50, outcome=True, market_prob=0.51),
+            # |0.60-0.53|=0.07 → small_trade
+            _row(p_yes=0.60, outcome=True, market_prob=0.53),
+            # |0.85-0.50|=0.35 → large_trade
+            _row(p_yes=0.85, outcome=True, market_prob=0.50),
+        ]
+        stats = compute_group_stats(rows)
+        db = stats["disagreement_brier"]
+        assert db["no_trade"]["n"] == 1
+        assert db["small_trade"]["n"] == 1
+        assert db["large_trade"]["n"] == 1
+
+    def test_batch_incremental_parity(self, tmp_path: Path) -> None:
+        """Diagnostic edge metrics match between batch and incremental."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.8, outcome=True, market_prob=0.6),
+            _row(p_yes=0.3, outcome=True, market_prob=0.5),
+            _row(p_yes=0.9, outcome=False, market_prob=0.6),
+            _row(p_yes=0.51, outcome=True, market_prob=0.50),
+        ]
+        batch = compute_group_stats(rows)
+        inc = update(rows, scores_path, history_path)
+
+        assert inc["overall"]["conditional_accuracy"] == batch["conditional_accuracy"]
+        assert inc["overall"]["conditional_n"] == batch["conditional_n"]
+        assert inc["overall"]["directional_bias"] == batch["directional_bias"]
+        inc_db = inc["overall"]["disagreement_brier"]
+        batch_db = batch["disagreement_brier"]
+        for bucket in ("no_trade", "small_trade", "large_trade"):
+            assert inc_db[bucket]["n"] == batch_db[bucket]["n"]
+            assert inc_db[bucket]["brier"] == batch_db[bucket]["brier"]
+

@@ -829,11 +829,16 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
 
     # Edge eligibility from accumulators
     overall_n = scores["overall"]["n"]
+    overall_valid_n = scores["overall"]["valid_n"]
     overall_edge_n = scores["overall"].get("edge_n", 0)
     result["edge_eligibility"] = {
         "n_total": overall_n,
         "n_eligible": overall_edge_n,
         "n_excluded": overall_n - overall_edge_n,
+        "exclusion_reasons": {
+            "invalid_or_incomplete": overall_n - overall_valid_n,
+            "missing_market_prob": overall_valid_n - overall_edge_n,
+        },
     }
 
     # Calibration — derive avg_predicted, realized_rate, gap

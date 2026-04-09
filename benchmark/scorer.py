@@ -461,41 +461,16 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for tool, group in group_by(rows, "tool_name").items()
     }
 
-    # Edge eligibility reporting — mutually exclusive exclusion reasons
+    # Edge eligibility reporting — same schema as _finalize_scores()
     n_edge_eligible = sum(1 for r in rows if _is_edge_eligible(r))
-    n_invalid_parse = sum(
-        1 for r in rows if r.get("prediction_parse_status") != "valid"
-    )
-    n_missing_outcome = sum(
-        1
-        for r in rows
-        if r.get("prediction_parse_status") == "valid"
-        and r.get("final_outcome") is None
-    )
-    n_missing_p_yes = sum(
-        1
-        for r in rows
-        if r.get("prediction_parse_status") == "valid"
-        and r.get("final_outcome") is not None
-        and r.get("p_yes") is None
-    )
-    n_missing_market_prob = sum(
-        1
-        for r in rows
-        if r.get("prediction_parse_status") == "valid"
-        and r.get("final_outcome") is not None
-        and r.get("p_yes") is not None
-        and r.get("market_prob_at_prediction") is None
-    )
+    valid_n = overall["valid_n"]
     edge_eligibility = {
         "n_total": total,
         "n_eligible": n_edge_eligible,
         "n_excluded": total - n_edge_eligible,
         "exclusion_reasons": {
-            "invalid_parse": n_invalid_parse,
-            "missing_outcome": n_missing_outcome,
-            "missing_p_yes": n_missing_p_yes,
-            "missing_market_prob": n_missing_market_prob,
+            "invalid_or_incomplete": total - valid_n,
+            "missing_market_prob": valid_n - n_edge_eligible,
         },
     }
 

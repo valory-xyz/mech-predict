@@ -1145,8 +1145,7 @@ class TestEdgeBatchScore:
         assert elig["n_excluded"] == 1
         reasons = elig["exclusion_reasons"]
         assert reasons["missing_market_prob"] == 1
-        assert reasons["invalid_parse"] == 0
-        assert reasons["missing_outcome"] == 0
+        assert reasons["invalid_or_incomplete"] == 0
 
     def test_score_includes_difficulty_and_liquidity(self) -> None:
         """score() output includes by_difficulty and by_liquidity."""

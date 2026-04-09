@@ -1256,7 +1256,7 @@ class TestUpdateDedup:
             ),
         ]
         log_file = logs_dir / "production_log_test.jsonl"
-        with open(log_file, "w") as f:
+        with open(log_file, "w", encoding="utf-8") as f:
             for r in rows:
                 f.write(json.dumps(r) + "\n")
 

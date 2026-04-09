@@ -1136,6 +1136,8 @@ def rebuild(
         finalized = _finalize_scores(scores)
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
+        # Clear dedup file — empty rebuild means fresh start
+        _save_dedup_ids(dedup_path, set())
         return finalized
 
     # Sort rows by predicted_at to process chronologically
@@ -1165,8 +1167,10 @@ def rebuild(
     for month in sorted_months[:-1]:
         scores = _empty_scores(month)
         for row in months[month]:
-            _accumulate_row(scores, row)
             row_id = row.get("row_id")
+            if row_id and row_id in all_row_ids:
+                continue  # skip duplicate across log files
+            _accumulate_row(scores, row)
             if row_id:
                 all_row_ids.add(row_id)
         _snapshot_month(scores, history_path)
@@ -1174,8 +1178,10 @@ def rebuild(
     # The last month becomes the current scores.json
     scores = _empty_scores(last_month)
     for row in months[last_month]:
-        _accumulate_row(scores, row)
         row_id = row.get("row_id")
+        if row_id and row_id in all_row_ids:
+            continue  # skip duplicate across log files
+        _accumulate_row(scores, row)
         if row_id:
             all_row_ids.add(row_id)
     # Save dedup state to its own file — persists across month rollovers

@@ -1310,3 +1310,56 @@ class TestUpdateDedup:
         assert (
             result["overall"]["n"] == 0
         ), f"Expected 0 (r1 deduped across month rollover), got {result['overall']['n']}"
+
+    def test_rebuild_deduplicates_across_log_files(self, tmp_path: Path) -> None:
+        """Same row_id in two log files is only counted once during rebuild."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        row = _row(p_yes=0.7, outcome=True, row_id="dup1")
+
+        # Write same row to two different log files
+        for name in ["production_log_a.jsonl", "production_log_b.jsonl"]:
+            with open(logs_dir / name, "w", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+        result = rebuild(
+            logs_dir=logs_dir,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (deduped), got {result['overall']['n']}"
+
+    def test_empty_rebuild_clears_dedup(self, tmp_path: Path) -> None:
+        """Empty rebuild clears stale dedup state so rows aren't falsely skipped."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        empty_logs = tmp_path / "empty_logs"
+        empty_logs.mkdir()
+
+        # Seed dedup via update
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        update(rows, scores_path, history_path, dedup_path)
+        assert json.loads(dedup_path.read_text()) == ["r1"]
+
+        # Rebuild on empty logs — should clear dedup
+        rebuild(
+            logs_dir=empty_logs,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        assert json.loads(dedup_path.read_text()) == []
+
+        # Now update with the same row — should be accepted (not stale-skipped)
+        result = update(rows, scores_path, history_path, dedup_path)
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (not stale-skipped), got {result['overall']['n']}"

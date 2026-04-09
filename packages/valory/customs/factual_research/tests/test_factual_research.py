@@ -131,6 +131,8 @@ def _make_mock_parse_completion() -> List[Tuple[Any, None]]:
     counter-based dispatcher makes the test fail loudly if the pipeline
     ever reorders or adds a call, instead of silently returning the wrong
     model.
+
+    :return: side_effect list of (parsed_model, None) tuples for the 3 calls.
     """
     sub_q = SubQuestions(sub_questions=["What is the status of X?"])
     briefing = FactualBriefing(
@@ -586,14 +588,10 @@ class TestParseCompletionRetry:
         assert mock_sleep.call_count == 3
 
     @patch(f"{FR_MODULE}.time.sleep")
-    def test_non_retryable_exception_propagates(
-        self, mock_sleep: MagicMock
-    ) -> None:
+    def test_non_retryable_exception_propagates(self, mock_sleep: MagicMock) -> None:
         """Non-retryable exceptions (e.g. AttributeError) surface immediately."""
         mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.side_effect = AttributeError(
-            "bug"
-        )
+        mock_client.beta.chat.completions.parse.side_effect = AttributeError("bug")
 
         with pytest.raises(AttributeError, match="bug"):
             _parse_completion(

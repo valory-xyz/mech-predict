@@ -885,10 +885,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         MAX_EVIDENCE_TOKENS = 3000
         original_count = len(all_evidence)
         evidence_text = _format_evidence(all_evidence)
-        while (
-            all_evidence
-            and count_tokens(evidence_text, model) > MAX_EVIDENCE_TOKENS
-        ):
+        while all_evidence and count_tokens(evidence_text, model) > MAX_EVIDENCE_TOKENS:
             all_evidence.pop()
             evidence_text = _format_evidence(all_evidence)
         if len(all_evidence) < original_count:

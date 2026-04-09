@@ -39,6 +39,7 @@ from packages.valory.customs.factual_research.factual_research import (
     _extract_question,
     _fetch_page_content,
     _format_evidence,
+    _parse_completion,
     _search_serper,
     run,
 )
@@ -524,6 +525,67 @@ class TestRunSourceContent:
         assert "source_content" not in used_params
 
 
+class TestParseCompletionRetry:
+    """Tests for _parse_completion retry logic."""
+
+    @patch(f"{FR_MODULE}.time.sleep")
+    def test_retries_then_succeeds(self, mock_sleep: MagicMock) -> None:
+        """Fail twice, succeed on the third attempt; verify 3 calls made."""
+        mock_client = MagicMock()
+
+        # Build a successful response for the third attempt
+        mock_parsed = SubQuestions(sub_questions=["Q1", "Q2"])
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 20
+        mock_message = MagicMock()
+        mock_message.parsed = mock_parsed
+        mock_message.refusal = None
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_response.usage = mock_usage
+
+        mock_client.beta.chat.completions.parse.side_effect = [
+            RuntimeError("fail 1"),
+            RuntimeError("fail 2"),
+            mock_response,
+        ]
+
+        result, cb = _parse_completion(
+            client=mock_client,
+            model="gpt-4.1-2025-04-14",
+            messages=[{"role": "user", "content": "test"}],
+            response_format=SubQuestions,
+            retries=3,
+            delay=1,
+        )
+
+        assert mock_client.beta.chat.completions.parse.call_count == 3
+        assert result == mock_parsed
+        assert mock_sleep.call_count == 2
+
+    @patch(f"{FR_MODULE}.time.sleep")
+    def test_retries_exhausted_raises(self, mock_sleep: MagicMock) -> None:
+        """All retries fail; final attempt raises RuntimeError."""
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse.side_effect = RuntimeError("nope")
+
+        with pytest.raises(RuntimeError, match="Failed to get structured LLM"):
+            _parse_completion(
+                client=mock_client,
+                model="gpt-4.1-2025-04-14",
+                messages=[{"role": "user", "content": "test"}],
+                response_format=SubQuestions,
+                retries=3,
+                delay=1,
+            )
+
+        assert mock_client.beta.chat.completions.parse.call_count == 3
+        assert mock_sleep.call_count == 3
+
+
 class TestNoGlobalClient:
     """Verify the module does not use a global client variable."""
 
@@ -596,3 +658,22 @@ class TestRunEdgeCases:
             delivery_rate=100,
         )
         assert "Invalid source_content_mode" in result[0]
+
+    def test_delivery_rate_zero_returns_max_cost(self) -> None:
+        """delivery_rate=0 calls counter_callback with max_cost=True."""
+        mock_cb = MagicMock(return_value=42.0)
+
+        result = run(
+            tool="factual_research",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            delivery_rate=0,
+            counter_callback=mock_cb,
+        )
+
+        mock_cb.assert_called_once_with(
+            max_cost=True,
+            models_calls=("gpt-4.1-2025-04-14",) * 3,
+        )
+        assert result == 42.0

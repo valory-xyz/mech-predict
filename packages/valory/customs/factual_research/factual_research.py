@@ -61,7 +61,7 @@ import openai
 import requests
 from markdownify import markdownify as md
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
@@ -173,6 +173,16 @@ class PredictionResult(BaseModel):
         description="Utility of the information gathered to inform the prediction.",
     )
 
+    @model_validator(mode="after")
+    def _check_p_yes_p_no_sum(self) -> "PredictionResult":
+        """Validate that p_yes + p_no ≈ 1."""
+        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
+            raise ValueError(
+                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
+                f"{self.p_yes + self.p_no})"
+            )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Mech-protocol types
@@ -200,14 +210,20 @@ def with_key_rotation(func: Callable) -> Callable:
     """Decorator that retries a function with API key rotation on failure."""
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
@@ -290,7 +306,6 @@ BLOCKED_DOMAINS = [
     "oddschecker.com",
     "bovada.lv",
 ]
-BLOCKED_DOMAINS_FILTER = " ".join(f"-site:{d}" for d in BLOCKED_DOMAINS)
 
 
 # ---------------------------------------------------------------------------

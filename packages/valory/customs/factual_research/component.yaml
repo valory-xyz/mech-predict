@@ -9,9 +9,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
-  factual_research.py: bafybeihjjxjqyh26x43nb4zq3ojz332dn74w5ufvw7b5nuofhbx5gmdati
+  factual_research.py: bafybeiejwyy7h7pjmn2wxdxjnkpfyor26n3ggf3wki3xpr5j2cspmueyki
   tests/__init__.py: bafybeibu5izhcixkot5uv2k6uwj736qcpvdbepyk2ardyrhhc6vmhvgwnu
-  tests/test_factual_research.py: bafybeic7uxkqliu6uogr7ptn6opebnt4bxt7g3qcbiqeqintpyusrx7f6i
+  tests/test_factual_research.py: bafybeibpdig23vi7a224kyoatd3l4mzacr3s3ny7xqrxt7hxo5w7vvkt7m
 fingerprint_ignore_patterns: []
 entry_point: factual_research.py
 callable: run
@@ -25,7 +25,7 @@ dependencies:
   pydantic:
     version: '>=2.0.0,<3.0.0'
   requests:
-    version: ==2.28.1
+    version: ==2.32.5
   readability-lxml:
     version: ==0.8.1
   lxml_html_clean:

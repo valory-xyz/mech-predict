@@ -33,7 +33,6 @@ from benchmark.scorer import (
     classify_difficulty,
     classify_horizon,
     classify_liquidity,
-    compute_calibration,
     compute_calibration_regression,
     compute_ece,
     compute_group_stats,
@@ -1567,8 +1566,10 @@ class TestCalibrationRegression:
             {"avg_predicted": 0.9, "realized_rate": 0.9, "n": 10},
         ]
         result = compute_calibration_regression(bins)
-        assert abs(result["calibration_slope"] - 1.0) < 0.01
-        assert abs(result["calibration_intercept"]) < 0.01
+        slope = result["calibration_slope"]
+        intercept = result["calibration_intercept"]
+        assert slope is not None and abs(slope - 1.0) < 0.01
+        assert intercept is not None and abs(intercept) < 0.01
 
     def test_overconfident(self) -> None:
         """Overconfident tool: slope < 1.0."""
@@ -1578,7 +1579,8 @@ class TestCalibrationRegression:
             {"avg_predicted": 0.9, "realized_rate": 0.75, "n": 10},
         ]
         result = compute_calibration_regression(bins)
-        assert result["calibration_slope"] < 1.0
+        slope = result["calibration_slope"]
+        assert slope is not None and slope < 1.0
 
     def test_fewer_than_3_bins(self) -> None:
         """< 3 bins returns None for both."""

@@ -19,6 +19,7 @@
 """Tests for benchmark/scorer.py."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,9 +49,6 @@ from benchmark.scorer import (
 # ---------------------------------------------------------------------------
 
 
-_ROW_COUNTER = 0
-
-
 def _row(
     p_yes: float = 0.5,
     outcome: bool = True,
@@ -68,10 +66,8 @@ def _row(
     row_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
-    global _ROW_COUNTER
     if row_id is None:
-        _ROW_COUNTER += 1
-        row_id = f"test_row_{_ROW_COUNTER}"
+        row_id = f"test_{uuid.uuid4().hex[:12]}"
     return {
         "row_id": row_id,
         "prediction_parse_status": status,
@@ -1301,13 +1297,13 @@ class TestUpdateDedup:
         # Score in "March"
         with patch("benchmark.scorer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = datetime
             update(rows, scores_path, history_path, dedup_path)
 
         # Rollover to "April" — accumulators reset, but dedup file stays
         with patch("benchmark.scorer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 1, tzinfo=timezone.utc)
-            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_dt.side_effect = datetime
             result = update(rows, scores_path, history_path, dedup_path)
 
         # Row should be skipped even after rollover

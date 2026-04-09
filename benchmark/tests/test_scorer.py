@@ -1273,6 +1273,6 @@ class TestUpdateDedup:
         # n should still be 1 (only april_r1 in current month accumulators)
         # because rebuild() only accumulates the last month into scores.json
         # but scored_row_ids contains both months' IDs
-        assert result["overall"]["n"] == 1, (
-            f"Expected 1 (only last month in accumulators), got {result['overall']['n']}"
-        )
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (only last month in accumulators), got {result['overall']['n']}"

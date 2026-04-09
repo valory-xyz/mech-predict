@@ -395,17 +395,18 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
     """Edge-over-market analysis — per platform, difficulty, and liquidity."""
     elig = scores.get("edge_eligibility", {})
     n_eligible = elig.get("n_eligible", 0)
+    n_total = elig.get("n_total", 0)
     if n_eligible == 0:
         return (
             "## Edge Over Market\n\n"
             "No edge-eligible rows (need market_prob_at_prediction)."
         )
 
+    pct = f" ({n_eligible / n_total:.1%} of total)" if n_total > 0 else ""
     lines = [
         "## Edge Over Market",
         "",
-        f"Edge-eligible rows: {n_eligible} / {elig.get('n_total', 0)}"
-        f" ({n_eligible / elig['n_total']:.1%} of total)",
+        f"Edge-eligible rows: {n_eligible} / {n_total}{pct}",
         "",
     ]
 

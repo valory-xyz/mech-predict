@@ -105,7 +105,7 @@ def classify_difficulty(market_prob: float | None) -> str:
     """
     if market_prob is None:
         return "unknown"
-    distance = abs(market_prob - 0.5)
+    distance = round(abs(market_prob - 0.5), 10)
     lo, hi = DIFFICULTY_THRESHOLDS
     if distance < lo:
         return "hard"

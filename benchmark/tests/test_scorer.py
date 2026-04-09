@@ -946,11 +946,9 @@ class TestClassifyDifficulty:
         assert classify_difficulty(0.35) == "medium"
 
     def test_boundary_medium_easy(self) -> None:
-        """Near boundary: |0.8-0.5|≈0.3 falls to easy due to float precision."""
-        # abs(0.8 - 0.5) = 0.30000000000000004 > 0.3 → easy
-        assert classify_difficulty(0.8) == "easy"
-        # 0.79 is clearly medium
-        assert classify_difficulty(0.79) == "medium"
+        """Exact boundary: |0.8-0.5|=0.3 is medium (<= hi)."""
+        assert classify_difficulty(0.8) == "medium"
+        assert classify_difficulty(0.2) == "medium"
 
 
 # ---------------------------------------------------------------------------

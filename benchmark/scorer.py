@@ -35,6 +35,18 @@ WORST_BEST_SIZE = 10
 RELIABILITY_GATE = 0.80
 MIN_SAMPLE_SIZE = 30
 
+# Keys that must be persisted in scores.json for incremental resume.
+# Used in update() and rebuild() when merging accumulators into output.
+_ACCUM_KEYS = (
+    "brier_sum",
+    "correct_count",
+    "sharpness_sum",
+    "outcome_yes_count",
+    "edge_sum",
+    "edge_n",
+    "edge_positive_count",
+)
+
 
 # ---------------------------------------------------------------------------
 # Brier score computation
@@ -1039,18 +1051,9 @@ def update(
     finalized = _finalize_scores(scores)
     # Merge accumulators into the output so next load can resume
     output = dict(finalized)
-    _accum_keys = (
-        "brier_sum",
-        "correct_count",
-        "sharpness_sum",
-        "outcome_yes_count",
-        "edge_sum",
-        "edge_n",
-        "edge_positive_count",
-    )
     output["overall"] = {
         **finalized["overall"],
-        **{k: scores["overall"][k] for k in _accum_keys},
+        **{k: scores["overall"][k] for k in _ACCUM_KEYS},
     }
     for dim in (
         "by_tool",
@@ -1068,7 +1071,7 @@ def update(
         for key, group in scores[dim].items():
             output[dim][key] = {
                 **finalized[dim][key],
-                **{k: group[k] for k in _accum_keys},
+                **{k: group[k] for k in _ACCUM_KEYS},
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
@@ -1156,18 +1159,9 @@ def rebuild(
     finalized = _finalize_scores(scores)
     # Write with accumulators for future incremental use
     output = dict(finalized)
-    _accum_keys = (
-        "brier_sum",
-        "correct_count",
-        "sharpness_sum",
-        "outcome_yes_count",
-        "edge_sum",
-        "edge_n",
-        "edge_positive_count",
-    )
     output["overall"] = {
         **finalized["overall"],
-        **{k: scores["overall"][k] for k in _accum_keys},
+        **{k: scores["overall"][k] for k in _ACCUM_KEYS},
     }
     for dim in (
         "by_tool",
@@ -1185,7 +1179,7 @@ def rebuild(
         for key, group in scores[dim].items():
             output[dim][key] = {
                 **finalized[dim][key],
-                **{k: group[k] for k in _accum_keys},
+                **{k: group[k] for k in _ACCUM_KEYS},
             }
     output["_calibration_accum"] = scores["calibration"]
     output["scored_row_ids"] = sorted(scores.get("scored_row_ids", set()))

@@ -519,6 +519,116 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_DIAG_SECTION_HEADER = "## Diagnostic Edge Metrics"
+
+
+def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
+    """Conditional accuracy, disagreement-stratified Brier, and directional bias."""
+    overall = scores.get("overall", {})
+    disagree_n = overall.get("disagree_n", 0)
+    if disagree_n == 0 and overall.get("edge_n", 0) == 0:
+        return (
+            f"{_DIAG_SECTION_HEADER}\n\n"
+            "No edge-eligible rows — diagnostic metrics require "
+            "market_prob_at_prediction."
+        )
+
+    lines = [
+        _DIAG_SECTION_HEADER,
+        "",
+        "These metrics diagnose whether accuracy translates to profit and"
+        " where the system loses. They are not used for tool ranking.",
+        "",
+    ]
+
+    # --- Conditional accuracy ---
+    lines.append("### Conditional Accuracy When Disagreeing")
+    lines.append("")
+    lines.append(
+        "When the tool disagrees with the market enough to trigger a trade"
+        " (|p_yes - market_prob| > 0.03), is the tool or market closer to truth?"
+    )
+    lines.append("")
+
+    ca = overall.get("conditional_accuracy_rate")
+    if ca is not None:
+        lines.append(
+            f"- **Overall**: {ca:.0%} tool-wins (n={disagree_n} disagreements)"
+        )
+    else:
+        lines.append(
+            f"- **Overall**: insufficient data (n={disagree_n} disagreements,"
+            f" need {30})"
+        )
+
+    by_plat = scores.get("by_platform", {})
+    for plat, stats in sorted(by_plat.items()):
+        p_ca = stats.get("conditional_accuracy_rate")
+        p_dn = stats.get("disagree_n", 0)
+        if p_ca is not None:
+            lines.append(f"- **{plat}**: {p_ca:.0%} tool-wins (n={p_dn})")
+    lines.append("")
+
+    # --- Disagreement-stratified Brier ---
+    lines.append("### Disagreement-Stratified Brier")
+    lines.append("")
+    lines.append(
+        "Brier score bucketed by how much the tool disagrees with the market."
+        " Worse accuracy on large_trade = losing money where it matters."
+    )
+    lines.append("")
+
+    bucket_labels = [
+        ("no_trade", "No trade (|d| \u2264 0.03)"),
+        ("small_trade", "Small trade (0.03 < |d| \u2264 0.10)"),
+        ("large_trade", "Large trade (|d| > 0.10)"),
+    ]
+    for bucket_key, label in bucket_labels:
+        b = overall.get(f"brier_{bucket_key}")
+        n = overall.get(f"n_{bucket_key}", 0)
+        if b is not None:
+            lines.append(f"- **{label}**: Brier {b:.4f} (n={n})")
+        else:
+            lines.append(f"- **{label}**: insufficient data (n={n})")
+    lines.append("")
+
+    # --- Directional bias ---
+    lines.append("### Directional Bias (When Tool Loses)")
+    lines.append("")
+    lines.append(
+        "When the tool disagrees and the market was closer to truth,"
+        " does the tool tend to overestimate (positive) or underestimate"
+        " (negative)?"
+    )
+    lines.append("")
+
+    bias = overall.get("directional_bias")
+    n_losses = overall.get("n_bias_losses", 0)
+    if bias is not None:
+        direction = "overestimates" if bias > 0 else "underestimates"
+        lines.append(
+            f"- **Overall**: {bias:+.4f} (tends to {direction},"
+            f" n={n_losses} losses)"
+        )
+    else:
+        lines.append(
+            f"- **Overall**: insufficient data (n={n_losses} losses,"
+            f" need {30})"
+        )
+
+    by_cat = scores.get("by_category", {})
+    for cat, stats in sorted(by_cat.items()):
+        c_bias = stats.get("directional_bias")
+        c_n = stats.get("n_bias_losses", 0)
+        if c_bias is not None:
+            c_dir = "overestimates" if c_bias > 0 else "underestimates"
+            lines.append(
+                f"- **{cat}**: {c_bias:+.4f} ({c_dir}, n={c_n})"
+            )
+
+    return "\n".join(lines)
+
+
 def section_calibration(scores: dict[str, Any]) -> str:
     """Calibration analysis — are predictions overconfident or underconfident?"""
     cal = scores.get("calibration", [])
@@ -808,6 +918,7 @@ def generate_report(
         section_platform(scores),
         section_tool_platform(scores),
         section_edge_analysis(scores),
+        section_diagnostic_metrics(scores),
         section_calibration(scores),
         section_weak_spots(scores),
         section_reliability_issues(scores),

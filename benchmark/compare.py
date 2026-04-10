@@ -311,10 +311,18 @@ def format_markdown(comparison: dict[str, Any]) -> str:
             m = overall.get(key, {})
             if not m:
                 continue
+            b_val = m.get("baseline")
+            c_val = m.get("candidate")
+            if key == "directional_bias":
+                b_display = _fmt(abs(b_val) if b_val is not None else None)
+                c_display = _fmt(abs(c_val) if c_val is not None else None)
+            else:
+                b_display = _fmt(b_val)
+                c_display = _fmt(c_val)
             lines.append(
                 f"| {label} "
-                f"| {_fmt(m.get('baseline'))} "
-                f"| {_fmt(m.get('candidate'))} "
+                f"| {b_display} "
+                f"| {c_display} "
                 f"| {_fmt_delta(m.get('delta'))} "
                 f"| {m.get('direction', '—')} |"
             )

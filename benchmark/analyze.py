@@ -650,6 +650,8 @@ def _render_directional_bias(
             lines.append(
                 f"- **{cat}**: insufficient data" f" (n={c_n}, need {MIN_SAMPLE_SIZE})"
             )
+        else:
+            lines.append(f"- **{cat}**: no losses to measure")
 
 
 def section_diagnostic_metrics(scores: dict[str, Any]) -> str:

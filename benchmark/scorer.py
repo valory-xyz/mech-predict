@@ -38,6 +38,7 @@ DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
 LATENCY_RESERVOIR_SIZE = 200
 CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
+_RESERVOIR_RNG = random.Random(42)
 WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80
@@ -992,7 +993,7 @@ def _accumulate_calibration(scores: dict[str, Any], row: dict[str, Any]) -> None
     if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
         pairs.append(pair)
     else:
-        idx = random.randint(0, scores["overall"]["valid_n"] - 1)
+        idx = _RESERVOIR_RNG.randint(0, scores["overall"]["valid_n"] - 1)
         if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
             pairs[idx] = pair
 

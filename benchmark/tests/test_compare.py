@@ -101,6 +101,16 @@ class TestCompareDiagnosticMetrics:
         assert db["delta"] == 0.06
         assert db["direction"] == "regressed"
 
+    def test_directional_bias_sign_flip_same_magnitude(self) -> None:
+        """Bias +0.05 → -0.05: abs-delta=0 but sign flipped."""
+        baseline = _stats(directional_bias=0.05)
+        candidate = _stats(directional_bias=-0.05)
+        result = compare_stats(baseline, candidate)
+
+        db = result["directional_bias"]
+        assert abs(db["delta"]) < 0.001
+        assert db["direction"] == "sign-flip"
+
     def test_none_values_produce_dashes(self) -> None:
         """None baseline or candidate → delta is None, direction is '—'."""
         baseline = _stats(conditional_accuracy_rate=None)

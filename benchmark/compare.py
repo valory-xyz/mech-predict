@@ -93,18 +93,28 @@ def compare_stats(
             "direction": _direction(d, opts["lower_is_better"]),
         }
 
-    # Directional bias — closer to 0 is better (use abs comparison)
+    # Directional bias — closer to 0 is better (use abs comparison).
+    # A sign-flip with same magnitude (e.g. +0.05 → -0.05) yields
+    # abs-delta=0 but is qualitatively significant — flag it explicitly.
     b_bias = baseline.get("directional_bias")
     c_bias = candidate.get("directional_bias")
     bias_delta = _delta(
         abs(b_bias) if b_bias is not None else None,
         abs(c_bias) if c_bias is not None else None,
     )
+    bias_direction = _direction(bias_delta, lower_is_better=True)
+    if (
+        b_bias is not None
+        and c_bias is not None
+        and (b_bias > 0) != (c_bias > 0)
+        and bias_direction == "unchanged"
+    ):
+        bias_direction = "sign-flip"
     result["directional_bias"] = {
         "baseline": b_bias,
         "candidate": c_bias,
         "delta": bias_delta,
-        "direction": _direction(bias_delta, lower_is_better=True),
+        "direction": bias_direction,
     }
 
     return result

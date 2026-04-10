@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.io import load_jsonl
+from benchmark.scorer import MIN_SAMPLE_SIZE
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -561,7 +562,7 @@ def _render_conditional_accuracy(
     else:
         lines.append(
             f"- **Overall**: insufficient data (n={disagree_n} disagreements,"
-            f" need {30})"
+            f" need {MIN_SAMPLE_SIZE})"
         )
 
     for plat, stats in sorted(scores.get("by_platform", {}).items()):
@@ -569,6 +570,11 @@ def _render_conditional_accuracy(
         p_dn = stats.get("disagree_n", 0)
         if p_ca is not None:
             lines.append(f"- **{plat}**: {p_ca:.0%} tool-wins (n={p_dn})")
+        elif p_dn > 0:
+            lines.append(
+                f"- **{plat}**: insufficient data (n={p_dn},"
+                f" need {MIN_SAMPLE_SIZE})"
+            )
     lines.append("")
 
 
@@ -627,7 +633,8 @@ def _render_directional_bias(
         )
     else:
         lines.append(
-            f"- **Overall**: insufficient data (n={n_losses} losses," f" need {30})"
+            f"- **Overall**: insufficient data (n={n_losses} losses,"
+            f" need {MIN_SAMPLE_SIZE})"
         )
 
     for cat, stats in sorted(scores.get("by_category", {}).items()):
@@ -635,6 +642,10 @@ def _render_directional_bias(
         c_n = stats.get("n_bias_losses", 0)
         if c_bias is not None:
             lines.append(f"- **{cat}**: {c_bias:+.4f} ({_bias_label(c_bias)}, n={c_n})")
+        elif c_n > 0:
+            lines.append(
+                f"- **{cat}**: insufficient data" f" (n={c_n}, need {MIN_SAMPLE_SIZE})"
+            )
 
 
 def section_diagnostic_metrics(scores: dict[str, Any]) -> str:

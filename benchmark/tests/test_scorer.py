@@ -20,7 +20,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1653,40 +1653,48 @@ class TestDeriveGroupSchema:
 
 
 class TestScorePeriod:
-    """Tests for score_period."""
+    """Tests for score_period (time-based filtering)."""
 
-    def test_picks_most_recent_by_date(self, tmp_path: Path) -> None:
-        """days=1 picks the most recent file regardless of naming convention."""
+    def test_filters_by_predicted_at(self, tmp_path: Path) -> None:
+        """days=1 includes only rows from the last 24 hours."""
         logs = tmp_path / "logs"
         logs.mkdir()
 
-        old_row = _row(p_yes=0.7, outcome=True, predicted_at="2026-04-05T10:00:00Z")
-        new_row = _row(p_yes=0.3, outcome=False, predicted_at="2026-04-07T10:00:00Z")
+        now = datetime.now(timezone.utc)
+        recent_ts = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        (logs / "production_log_2026_04_05.jsonl").write_text(
-            json.dumps(old_row) + "\n"
-        )
-        (logs / "2026-04-07.jsonl").write_text(json.dumps(new_row) + "\n")
+        # Both rows in the same file — time filtering must work within a file
+        rows = [
+            _row(p_yes=0.7, outcome=True, predicted_at=recent_ts),
+            _row(p_yes=0.3, outcome=False, predicted_at=old_ts),
+        ]
+        log_file = logs / "production_log_2026_04_11.jsonl"
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
         result = score_period(logs, days=1)
-        assert result["total_rows"] == 1
-        # The newest file (2026-04-07) should be selected
-        assert result["overall"]["brier"] is not None
+        assert (
+            result["total_rows"] == 1
+        ), f"Expected 1 recent row, got {result['total_rows']}"
 
-    def test_mixed_naming_days2(self, tmp_path: Path) -> None:
-        """days=2 picks two most recent across both naming conventions."""
+    def test_days7_includes_week(self, tmp_path: Path) -> None:
+        """days=7 includes rows from the last week across multiple files."""
         logs = tmp_path / "logs"
         logs.mkdir()
 
-        for name, p, dt in [
-            ("production_log_2026_04_05.jsonl", 0.7, "2026-04-05T10:00:00Z"),
-            ("2026-04-06.jsonl", 0.4, "2026-04-06T10:00:00Z"),
-            ("production_log_2026_04_07.jsonl", 0.9, "2026-04-07T10:00:00Z"),
-        ]:
-            row = _row(p_yes=p, outcome=True, predicted_at=dt)
-            (logs / name).write_text(json.dumps(row) + "\n")
+        now = datetime.now(timezone.utc)
+        timestamps = [
+            (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ]
+        for i, ts in enumerate(timestamps):
+            row = _row(p_yes=0.5 + i * 0.1, outcome=True, predicted_at=ts)
+            f = logs / f"production_log_2026_04_{10 + i:02d}.jsonl"
+            f.write_text(json.dumps(row) + "\n")
 
-        result = score_period(logs, days=2)
+        result = score_period(logs, days=7)
+        # Only the first 2 rows (2 days ago and 5 days ago) are within 7 days
         assert result["total_rows"] == 2
 
     def test_empty_dir(self, tmp_path: Path) -> None:

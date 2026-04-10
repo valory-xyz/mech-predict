@@ -425,7 +425,7 @@ These metrics are not used to rank or select tools. They diagnose whether accura
 
 | Metric | Formula | Why it matters |
 |--------|---------|----------------|
-| **Brier score** | `mean((p_yes - outcome)²)` | Gold standard for probabilistic forecasting. Lower is better. Random = 0.25, perfect = 0.0. **Primary ranking metric.** |
+| **Brier score** | `mean((p_yes - outcome)²)` | Gold standard for probabilistic forecasting. Lower is better. No-skill baseline = `yes_rate × (1 - yes_rate)` (only 0.25 when outcomes are balanced), perfect = 0.0. **Primary ranking metric.** |
 | **Log loss** | `-mean(outcome * log(p_yes) + (1 - outcome) * log(1 - p_yes))` | Like Brier but punishes confidently wrong predictions exponentially harder. Matters for Kelly criterion betting. |
 | **Brier Skill Score (BSS)** | `1 - (Brier / baseline_brier)` | Improvement over the naive base-rate predictor. BSS > 0 = better than base rate. |
 
@@ -1231,7 +1231,7 @@ python benchmark/publish.py --results results/monthly_report.json
 |---|---|
 | Autocast academic dataset (2022) | Real Polymarket/Omen markets + production data |
 | No temporal controls | Three modes: production replay, tournament, cached replay |
-| Binary accuracy only | Staged pipeline: reliability → Brier → calibration → diagnostics (edge, conditional accuracy, disagreement Brier, directional bias) → PnL (future) |
+| Binary accuracy only | Staged pipeline: reliability → Brier + Log Loss → calibration (ECE, intercept/slope) → diagnostics (edge, sharpness, directional accuracy) → PnL (future) |
 | No market price comparison | Edge over market + 3 diagnostic metrics for system health (accuracy is primary, edge is diagnostic) |
 | Single prompt template | Automated prompt evolution via LLM |
 | No parameter variation | Grid search over models, temps, num_urls, queries |
@@ -1287,7 +1287,7 @@ The first sprint delivers a minimal but complete pipeline: real production data 
    - Row schema definition with validation
    - `fetch_resolved.py` for Polymarket API + Omen subgraph (binary markets only)
    - `runner.py` with cached replay mode, production timeout enforcement (`TASK_DEADLINE`)
-   - `scorer.py` with staged pipeline: reliability gate (80%) → edge → Brier → calibration (min 20/bin) → stratified analysis (per-platform)
+   - `scorer.py` with staged pipeline: reliability gate (80%) → Brier + Log Loss → calibration (ECE, min 20/bin) → edge diagnostics → stratified analysis (per-platform)
    - `compare.py` with paired bootstrap significance testing, eligibility reporting, cost-adjusted metrics
 
 2. **Phase 2 — Production Flywheel** (~3 days)

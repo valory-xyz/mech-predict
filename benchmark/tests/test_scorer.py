@@ -1530,7 +1530,7 @@ class TestECE:
 
     def test_perfect_calibration(self) -> None:
         """All gaps = 0 gives ECE = 0."""
-        bins = [{"n": 10, "gap": 0.0}, {"n": 20, "gap": 0.0}]
+        bins = [{"n": 25, "gap": 0.0}, {"n": 30, "gap": 0.0}]
         assert compute_ece(bins) == 0.0
 
     def test_empty_bins(self) -> None:
@@ -1538,9 +1538,20 @@ class TestECE:
         assert compute_ece([]) is None
         assert compute_ece([{"n": 0, "gap": 0.1}]) is None
 
+    def test_small_bins_excluded(self) -> None:
+        """Bins with < MIN_CALIBRATION_BIN_SIZE are excluded."""
+        bins = [{"n": 5, "gap": 0.5}, {"n": 50, "gap": 0.1}]
+        # Only the n=50 bin qualifies → ECE = 0.1
+        assert compute_ece(bins) == 0.1
+
+    def test_all_bins_below_min(self) -> None:
+        """All bins below min size returns None."""
+        bins = [{"n": 10, "gap": 0.1}, {"n": 15, "gap": 0.2}]
+        assert compute_ece(bins) is None
+
     def test_negative_gap_absolute(self) -> None:
         """ECE uses absolute gap."""
-        bins = [{"n": 10, "gap": -0.1}]
+        bins = [{"n": 25, "gap": -0.1}]
         assert compute_ece(bins) == 0.1
 
     def test_in_score_output(self) -> None:
@@ -1561,9 +1572,9 @@ class TestCalibrationRegression:
     def test_perfect_calibration(self) -> None:
         """Perfect calibration: slope=1.0, intercept=0.0."""
         bins = [
-            {"avg_predicted": 0.1, "realized_rate": 0.1, "n": 10},
-            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 10},
-            {"avg_predicted": 0.9, "realized_rate": 0.9, "n": 10},
+            {"avg_predicted": 0.1, "realized_rate": 0.1, "n": 25},
+            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 25},
+            {"avg_predicted": 0.9, "realized_rate": 0.9, "n": 25},
         ]
         result = compute_calibration_regression(bins)
         slope = result["calibration_slope"]
@@ -1574,18 +1585,18 @@ class TestCalibrationRegression:
     def test_overconfident(self) -> None:
         """Overconfident tool: slope < 1.0."""
         bins = [
-            {"avg_predicted": 0.1, "realized_rate": 0.25, "n": 10},
-            {"avg_predicted": 0.5, "realized_rate": 0.50, "n": 10},
-            {"avg_predicted": 0.9, "realized_rate": 0.75, "n": 10},
+            {"avg_predicted": 0.1, "realized_rate": 0.25, "n": 25},
+            {"avg_predicted": 0.5, "realized_rate": 0.50, "n": 25},
+            {"avg_predicted": 0.9, "realized_rate": 0.75, "n": 25},
         ]
         result = compute_calibration_regression(bins)
         slope = result["calibration_slope"]
         assert slope is not None and slope < 1.0
 
     def test_fewer_than_3_bins(self) -> None:
-        """< 3 bins returns None for both."""
+        """< 3 qualifying bins returns None for both."""
         bins = [
-            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 10},
+            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 25},
         ]
         result = compute_calibration_regression(bins)
         assert result["calibration_intercept"] is None

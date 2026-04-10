@@ -36,6 +36,7 @@ WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80
 MIN_SAMPLE_SIZE = 30
+MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
 # Used in update() and rebuild() when merging accumulators into output.
@@ -477,13 +478,20 @@ def compute_calibration(
     return result
 
 
-def compute_ece(bins: list[dict[str, Any]]) -> float | None:
+def compute_ece(
+    bins: list[dict[str, Any]],
+    min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
+) -> float | None:
     """Compute Expected Calibration Error from calibration bins.
 
+    Bins with fewer than *min_bin_n* samples are excluded to avoid
+    noisy estimates (per PROPOSAL.md: min 20 samples per bin).
+
     :param bins: list of calibration bin dicts with n, gap.
-    :return: ECE value, or None if no bins have data.
+    :param min_bin_n: minimum samples for a bin to be included.
+    :return: ECE value, or None if no qualifying bins.
     """
-    populated = [b for b in bins if b.get("n", 0) > 0]
+    populated = [b for b in bins if b.get("n", 0) >= min_bin_n]
     if not populated:
         return None
     total_n = sum(b["n"] for b in populated)
@@ -495,15 +503,21 @@ def compute_ece(bins: list[dict[str, Any]]) -> float | None:
 
 def compute_calibration_regression(
     bins: list[dict[str, Any]],
+    min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
 ) -> dict[str, float | None]:
     """Compute calibration intercept and slope via weighted linear regression.
 
+    Bins with fewer than *min_bin_n* samples are excluded.
+
     :param bins: list of calibration bin dicts with avg_predicted,
         realized_rate, n.
-    :return: dict with intercept and slope (None if < 3 populated bins).
+    :param min_bin_n: minimum samples for a bin to be included.
+    :return: dict with intercept and slope (None if < 3 qualifying bins).
     """
     populated = [
-        b for b in bins if b.get("n", 0) > 0 and b.get("avg_predicted") is not None
+        b
+        for b in bins
+        if b.get("n", 0) >= min_bin_n and b.get("avg_predicted") is not None
     ]
     if len(populated) < 3:
         return {"calibration_intercept": None, "calibration_slope": None}

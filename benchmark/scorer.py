@@ -792,6 +792,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "latency_reservoir": {},
         "worst_10": [],
         "best_10": [],
+        "calibration_pairs": [],
     }
 
 
@@ -1006,6 +1007,8 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
                 bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
                 bucket["predicted_sum"] += p
                 break
+        # Store (p_yes, outcome) for row-level calibration regression
+        scores["calibration_pairs"].append([p, 1 if row["final_outcome"] else 0])
 
     # Parse breakdown
     status = row.get("prediction_parse_status") or "unknown"
@@ -1115,7 +1118,18 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         )
     result["calibration"] = cal_result
     result["ece"] = compute_ece(cal_result)
-    result.update(_compute_calibration_regression_from_bins(cal_result))
+
+    # Row-level logistic regression from stored pairs; bin-level fallback
+    pairs = scores.get("calibration_pairs", [])
+    if pairs:
+        # Build minimal row dicts for compute_calibration_regression
+        pair_rows = [
+            {"prediction_parse_status": "valid", "p_yes": p, "final_outcome": bool(o)}
+            for p, o in pairs
+        ]
+        result.update(compute_calibration_regression(pair_rows))
+    else:
+        result.update(_compute_calibration_regression_from_bins(cal_result))
 
     result["parse_breakdown"] = scores["parse_breakdown"]
     result["latency_reservoir"] = scores["latency_reservoir"]
@@ -1239,6 +1253,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores["latency_reservoir"] = data.get("latency_reservoir", {})
     scores["worst_10"] = data.get("worst_10", [])
     scores["best_10"] = data.get("best_10", [])
+    scores["calibration_pairs"] = data.get("_calibration_pairs", [])
 
     # Preserve legacy scored_row_ids so update() can migrate them
     # to the separate dedup file on first run after upgrade.
@@ -1343,6 +1358,7 @@ def update(
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
+    output["_calibration_pairs"] = scores["calibration_pairs"]
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1461,6 +1477,7 @@ def rebuild(
                 **{k: group[k] for k in _ACCUM_KEYS},
             }
     output["_calibration_accum"] = scores["calibration"]
+    output["_calibration_pairs"] = scores["calibration_pairs"]
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))

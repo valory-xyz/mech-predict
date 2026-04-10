@@ -32,6 +32,11 @@ RELIABILITY_ISSUE_THRESHOLD = 0.90
 SAMPLE_SIZE_WARNING = 20
 TREND_WORSENING_THRESHOLD = 0.02
 
+# Calibration interpretation thresholds
+CAL_SLOPE_OVERCONFIDENT = 0.9
+CAL_SLOPE_UNDERCONFIDENT = 1.1
+CAL_INTERCEPT_NOTABLE = 0.05
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -548,22 +553,29 @@ def section_calibration(scores: dict[str, Any]) -> str:
             f"**Calibration regression:** intercept={cal_int:+.4f},"
             f" slope={cal_slope:.4f}"
         )
-        if cal_slope < 0.9:
-            lines.append("  - Slope < 1.0 → overconfident (predictions too extreme)")
-        elif cal_slope > 1.1:
+        if cal_slope < CAL_SLOPE_OVERCONFIDENT:
             lines.append(
-                "  - Slope > 1.0 → underconfident (predictions too compressed)"
+                "  - Slope < 1.0 → predictions too extreme"
+                " (overpredicts high-confidence, underpredicts low-confidence)"
             )
-        if cal_int > 0.05:
+        elif cal_slope > CAL_SLOPE_UNDERCONFIDENT:
             lines.append(
-                "  - Positive intercept → systematically underestimates"
-                " (reality higher than predicted)"
+                "  - Slope > 1.0 → predictions too compressed toward 0.5"
             )
-        elif cal_int < -0.05:
-            lines.append(
-                "  - Negative intercept → systematically overestimates"
-                " (reality lower than predicted)"
-            )
+        # Intercept interpretation depends on slope — only meaningful
+        # in isolation when slope ≈ 1.0. With slope < 1 the regression
+        # line crosses the diagonal, so intercept alone is ambiguous.
+        if abs(cal_slope - 1.0) < 0.15 and abs(cal_int) > CAL_INTERCEPT_NOTABLE:
+            if cal_int > 0:
+                lines.append(
+                    "  - Intercept shifted upward at p=0"
+                    " (regression line above diagonal at low predictions)"
+                )
+            else:
+                lines.append(
+                    "  - Intercept shifted downward at p=0"
+                    " (regression line below diagonal at low predictions)"
+                )
 
     # Summary interpretation
     lines.append("")
@@ -575,18 +587,18 @@ def section_calibration(scores: dict[str, Any]) -> str:
         avg_gap = sum(b["gap"] for b in high_conf) / len(high_conf)
         if avg_gap > 0.1:
             lines.append(
-                "**High-confidence predictions are overconfident** — predicted high yes-probability"
+                "**High-confidence bins overpredict** — predicted high yes-probability"
                 " but realized rate is much lower."
             )
         elif avg_gap < -0.1:
             lines.append(
-                "**High-confidence predictions are underconfident** — realized rate exceeds predictions."
+                "**High-confidence bins underpredict** — realized rate exceeds predictions."
             )
     if low_conf:
         avg_gap = sum(b["gap"] for b in low_conf) / len(low_conf)
         if avg_gap < -0.1:
             lines.append(
-                "**Low-confidence predictions are underconfident** — predicted low yes-probability"
+                "**Low-confidence bins underpredict** — predicted low yes-probability"
                 " but events happen more often than predicted."
             )
 

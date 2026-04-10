@@ -19,6 +19,7 @@
 """Tests for benchmark/scorer.py."""
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,13 @@ from unittest.mock import patch
 from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
     WORST_BEST_SIZE,
+    _is_edge_eligible,
     brier_score,
+    classify_difficulty,
     classify_horizon,
+    classify_liquidity,
     compute_group_stats,
+    edge_score,
     group_by,
     group_by_horizon,
     group_by_month,
@@ -55,9 +60,16 @@ def _row(
     predicted_at: str = "2026-03-15T10:00:00Z",
     tool_version: str | None = None,
     config_hash: str | None = None,
+    market_prob: float | None = None,
+    market_liquidity: float | None = None,
+    market_spread: float | None = None,
+    row_id: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
+    if row_id is None:
+        row_id = f"test_{uuid.uuid4().hex[:12]}"
     return {
+        "row_id": row_id,
         "prediction_parse_status": status,
         "p_yes": p_yes if status == "valid" else None,
         "p_no": (1 - p_yes) if status == "valid" else None,
@@ -69,6 +81,9 @@ def _row(
         "predicted_at": predicted_at,
         "tool_version": tool_version,
         "config_hash": config_hash,
+        "market_prob_at_prediction": market_prob,
+        "market_liquidity_at_prediction": market_liquidity,
+        "market_spread_at_prediction": market_spread,
     }
 
 
@@ -820,3 +835,559 @@ class TestConfigBreakdown:
         result = update(rows, scores_path, history_path)
 
         assert "t1 | unknown" in result["by_config"]
+
+
+# ---------------------------------------------------------------------------
+# edge_score
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeScore:
+    """Tests for edge_score."""
+
+    def test_tool_beats_market(self) -> None:
+        """Positive edge when tool is closer to outcome than market."""
+        # Outcome=True, tool says 0.9, market says 0.6
+        # market_brier = (0.6-1)^2 = 0.16, tool_brier = (0.9-1)^2 = 0.01
+        edge = edge_score(0.9, 0.6, True)
+        assert round(edge, 4) == 0.15
+
+    def test_market_beats_tool(self) -> None:
+        """Negative edge when market is closer to outcome than tool."""
+        # Outcome=False, tool says 0.7, market says 0.4
+        # market_brier = (0.4-0)^2 = 0.16, tool_brier = (0.7-0)^2 = 0.49
+        edge = edge_score(0.7, 0.4, False)
+        assert round(edge, 4) == -0.33
+
+    def test_tool_equals_market(self) -> None:
+        """Zero edge when tool and market agree."""
+        edge = edge_score(0.6, 0.6, True)
+        assert edge == 0.0
+
+    def test_both_wrong_outcome_true(self) -> None:
+        """Both predict low but outcome is True — less wrong tool wins."""
+        # market=0.3, tool=0.4, outcome=True
+        # market_brier = (0.3-1)^2 = 0.49, tool_brier = (0.4-1)^2 = 0.36
+        edge = edge_score(0.4, 0.3, True)
+        assert round(edge, 4) == 0.13
+
+    def test_both_wrong_outcome_false(self) -> None:
+        """Both predict high but outcome is False — less wrong tool wins."""
+        # market=0.8, tool=0.6, outcome=False
+        # market_brier = 0.64, tool_brier = 0.36
+        edge = edge_score(0.6, 0.8, False)
+        assert round(edge, 4) == 0.28
+
+
+# ---------------------------------------------------------------------------
+# _is_edge_eligible
+# ---------------------------------------------------------------------------
+
+
+class TestIsEdgeEligible:
+    """Tests for _is_edge_eligible."""
+
+    def test_eligible_row(self) -> None:
+        """Row with all required fields is eligible."""
+        row = _row(p_yes=0.7, outcome=True, market_prob=0.6)
+        assert _is_edge_eligible(row)
+
+    def test_missing_market_prob(self) -> None:
+        """Row without market_prob is not eligible."""
+        row = _row(p_yes=0.7, outcome=True)
+        assert not _is_edge_eligible(row)
+
+    def test_invalid_parse(self) -> None:
+        """Malformed prediction is not eligible."""
+        row = _row(status="malformed", market_prob=0.6)
+        assert not _is_edge_eligible(row)
+
+    def test_no_outcome(self) -> None:
+        """Row without outcome is not eligible."""
+        row = _row(p_yes=0.7, market_prob=0.6)
+        row["final_outcome"] = None
+        assert not _is_edge_eligible(row)
+
+
+# ---------------------------------------------------------------------------
+# classify_difficulty
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyDifficulty:
+    """Tests for classify_difficulty."""
+
+    def test_hard(self) -> None:
+        """Market near 50/50 is hard."""
+        assert classify_difficulty(0.55) == "hard"
+        assert classify_difficulty(0.45) == "hard"
+
+    def test_medium(self) -> None:
+        """Market between thresholds is medium."""
+        assert classify_difficulty(0.75) == "medium"
+        assert classify_difficulty(0.25) == "medium"
+
+    def test_easy(self) -> None:
+        """Market far from 50/50 is easy."""
+        assert classify_difficulty(0.9) == "easy"
+        assert classify_difficulty(0.1) == "easy"
+
+    def test_none(self) -> None:
+        """None returns unknown."""
+        assert classify_difficulty(None) == "unknown"
+
+    def test_boundary_hard_medium(self) -> None:
+        """Exact boundary: |0.65-0.5|=0.15 is medium (>= lo)."""
+        assert classify_difficulty(0.65) == "medium"
+        assert classify_difficulty(0.35) == "medium"
+
+    def test_boundary_medium_easy(self) -> None:
+        """Exact boundary: |0.8-0.5|=0.3 is medium (<= hi)."""
+        assert classify_difficulty(0.8) == "medium"
+        assert classify_difficulty(0.2) == "medium"
+
+
+# ---------------------------------------------------------------------------
+# classify_liquidity
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyLiquidity:
+    """Tests for classify_liquidity."""
+
+    def test_low(self) -> None:
+        """Below threshold is low."""
+        assert classify_liquidity(6.0) == "low"
+        assert classify_liquidity(499.99) == "low"
+
+    def test_medium(self) -> None:
+        """Between thresholds is medium."""
+        assert classify_liquidity(500.0) == "medium"
+        assert classify_liquidity(3000.0) == "medium"
+
+    def test_high(self) -> None:
+        """Above threshold is high."""
+        assert classify_liquidity(5001.0) == "high"
+
+    def test_none(self) -> None:
+        """None returns unknown."""
+        assert classify_liquidity(None) == "unknown"
+
+    def test_boundary(self) -> None:
+        """Exact boundary: 5000 is medium (<= hi)."""
+        assert classify_liquidity(5000.0) == "medium"
+
+
+# ---------------------------------------------------------------------------
+# Edge in compute_group_stats (batch path)
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeInGroupStats:
+    """Tests for edge metrics in compute_group_stats."""
+
+    def test_edge_with_market_prob(self) -> None:
+        """Edge is computed when market_prob is available."""
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),  # edge > 0
+            _row(p_yes=0.3, outcome=False, market_prob=0.4),  # edge > 0
+        ]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 2
+        assert result["edge"] is not None
+        assert result["edge"] > 0
+        assert result["edge_positive_rate"] == 1.0
+
+    def test_edge_without_market_prob(self) -> None:
+        """Edge is null when no rows have market_prob."""
+        rows = [_row(p_yes=0.7, outcome=True)]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 0
+        assert result["edge"] is None
+        assert result["edge_positive_rate"] is None
+
+    def test_edge_mixed(self) -> None:
+        """Edge computed only from rows that have market_prob."""
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),  # eligible
+            _row(p_yes=0.7, outcome=True),  # not eligible
+        ]
+        result = compute_group_stats(rows)
+        assert result["edge_n"] == 1
+        assert result["valid_n"] == 2  # both valid for Brier
+        assert result["edge"] is not None
+
+    def test_brier_unchanged_by_edge(self) -> None:
+        """Adding market_prob doesn't change Brier computation."""
+        rows_without = [_row(p_yes=0.7, outcome=True)]
+        rows_with = [_row(p_yes=0.7, outcome=True, market_prob=0.5)]
+        stats_without = compute_group_stats(rows_without)
+        stats_with = compute_group_stats(rows_with)
+        assert stats_without["brier"] == stats_with["brier"]
+        assert stats_without["accuracy"] == stats_with["accuracy"]
+
+
+# ---------------------------------------------------------------------------
+# Edge in incremental path
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeIncremental:
+    """Tests for edge metrics in incremental update path."""
+
+    def test_incremental_edge(self, tmp_path: Path) -> None:
+        """Edge accumulators work through update()."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.9, outcome=True, market_prob=0.6),
+            _row(p_yes=0.3, outcome=True, market_prob=0.7),
+        ]
+        result = update(rows, scores_path, history_path)
+        assert result["overall"]["edge_n"] == 2
+        assert result["overall"]["edge"] is not None
+
+    def test_incremental_no_edge(self, tmp_path: Path) -> None:
+        """No edge when no market_prob."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(p_yes=0.7, outcome=True)]
+        result = update(rows, scores_path, history_path)
+        assert result["overall"]["edge_n"] == 0
+        assert result["overall"]["edge"] is None
+
+    def test_resume_with_old_scores(self, tmp_path: Path) -> None:
+        """Old scores.json without edge fields loads gracefully."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        # Write old-format scores.json (no edge fields)
+        old_scores = {
+            "current_month": "2026-04",
+            "generated_at": "2026-04-08T00:00:00Z",
+            "overall": {
+                "n": 10,
+                "valid_n": 9,
+                "brier_sum": 2.0,
+                "correct_count": 6,
+                "sharpness_sum": 1.5,
+                "outcome_yes_count": 5,
+                "brier": 0.22,
+                "accuracy": 0.67,
+                "sharpness": 0.17,
+                "reliability": 0.9,
+                "decision_worthy": False,
+            },
+            "by_tool": {},
+            "by_platform": {},
+            "by_category": {},
+            "by_horizon": {},
+            "by_tool_platform": {},
+            "by_tool_version": {},
+            "by_config": {},
+            "calibration": {},
+            "parse_breakdown": {},
+            "latency_reservoir": {},
+            "worst_10": [],
+            "best_10": [],
+        }
+        scores_path.write_text(json.dumps(old_scores))
+
+        # Add a new row with market_prob
+        rows = [_row(p_yes=0.8, outcome=True, market_prob=0.5)]
+        result = update(rows, scores_path, history_path)
+
+        # Old rows didn't have edge, new one does
+        assert result["overall"]["edge_n"] == 1
+        assert result["overall"]["n"] == 11
+
+    def test_difficulty_and_liquidity_dimensions(self, tmp_path: Path) -> None:
+        """by_difficulty and by_liquidity dimensions are populated."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.55, market_liquidity=6.0),
+            _row(p_yes=0.8, outcome=True, market_prob=0.85, market_liquidity=1000.0),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "hard" in result["by_difficulty"]
+        assert "easy" in result["by_difficulty"]
+        assert "low" in result["by_liquidity"]
+        assert "medium" in result["by_liquidity"]
+
+
+# ---------------------------------------------------------------------------
+# Edge in batch score()
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeBatchScore:
+    """Tests for edge metrics in batch score()."""
+
+    def test_score_includes_edge_eligibility(self) -> None:
+        """score() output includes edge_eligibility section."""
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.5),
+            _row(p_yes=0.6, outcome=False),
+        ]
+        result = score(rows)
+        elig = result["edge_eligibility"]
+        assert elig["n_total"] == 2
+        assert elig["n_eligible"] == 1
+        assert elig["n_excluded"] == 1
+        reasons = elig["exclusion_reasons"]
+        assert reasons["missing_market_prob"] == 1
+        assert reasons["invalid_or_incomplete"] == 0
+
+    def test_score_includes_difficulty_and_liquidity(self) -> None:
+        """score() output includes by_difficulty and by_liquidity."""
+        rows = [
+            _row(p_yes=0.7, outcome=True, market_prob=0.55, market_liquidity=6.0),
+        ]
+        result = score(rows)
+        assert "by_difficulty" in result
+        assert "by_liquidity" in result
+        assert "hard" in result["by_difficulty"]
+        assert "low" in result["by_liquidity"]
+
+
+# ---------------------------------------------------------------------------
+# Row-ID deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateDedup:
+    """Tests for row_id deduplication in update()."""
+
+    def test_duplicate_rows_not_double_counted(self, tmp_path: Path) -> None:
+        """Same rows passed twice produce same result as single pass."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        rows = [
+            _row(p_yes=0.7, outcome=True, row_id="r1"),
+            _row(p_yes=0.3, outcome=False, row_id="r2"),
+        ]
+
+        # First pass
+        result1 = update(rows, scores_path, history_path, dedup_path)
+        assert result1["overall"]["n"] == 2
+
+        # Second pass with same rows — should be skipped
+        result2 = update(rows, scores_path, history_path, dedup_path)
+        assert (
+            result2["overall"]["n"] == 2
+        ), f"Expected 2 after dedup, got {result2['overall']['n']}"
+        assert result2["overall"]["brier"] == result1["overall"]["brier"]
+
+    def test_new_rows_added_after_dedup(self, tmp_path: Path) -> None:
+        """New rows are added, duplicates are skipped."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        batch1 = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        batch2 = [
+            _row(p_yes=0.7, outcome=True, row_id="r1"),  # duplicate
+            _row(p_yes=0.4, outcome=False, row_id="r3"),  # new
+        ]
+
+        update(batch1, scores_path, history_path, dedup_path)
+        result = update(batch2, scores_path, history_path, dedup_path)
+
+        assert (
+            result["overall"]["n"] == 2
+        ), f"Expected 2 (r1 + r3), got {result['overall']['n']}"
+
+    def test_scored_row_ids_persisted(self, tmp_path: Path) -> None:
+        """scored_row_ids are saved to separate dedup file."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        update(rows, scores_path, history_path, dedup_path)
+
+        # Check the dedup file (not scores.json)
+        assert dedup_path.exists()
+        saved_ids = json.loads(dedup_path.read_text())
+        assert "r1" in saved_ids
+
+        # scores.json should NOT contain scored_row_ids
+        saved_scores = json.loads(scores_path.read_text())
+        assert "scored_row_ids" not in saved_scores
+
+    def test_rows_without_row_id_always_counted(self, tmp_path: Path) -> None:
+        """Rows without row_id are always accumulated (no dedup possible)."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        row_no_id = _row(p_yes=0.7, outcome=True)
+        row_no_id.pop("row_id")
+
+        update([row_no_id], scores_path, history_path, dedup_path)
+        result = update([row_no_id], scores_path, history_path, dedup_path)
+        # Without row_id, can't dedup — both passes count
+        assert result["overall"]["n"] == 2
+
+    def test_rebuild_then_update_deduplicates(self, tmp_path: Path) -> None:
+        """Rows scored during rebuild() are not double-counted by update()."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        # Write rows spanning two months to a log file
+        rows = [
+            _row(
+                p_yes=0.7,
+                outcome=True,
+                row_id="march_r1",
+                predicted_at="2026-03-15T10:00:00Z",
+            ),
+            _row(
+                p_yes=0.4,
+                outcome=False,
+                row_id="april_r1",
+                predicted_at="2026-04-05T10:00:00Z",
+            ),
+        ]
+        log_file = logs_dir / "production_log_test.jsonl"
+        with open(log_file, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r) + "\n")
+
+        # Rebuild from log files
+        rebuild(
+            logs_dir=logs_dir,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+
+        # Verify rebuild tracked both row_ids in the dedup file
+        saved_ids = json.loads(dedup_path.read_text())
+        assert "march_r1" in saved_ids
+        assert "april_r1" in saved_ids
+
+        # Now call update() with the same rows — should all be skipped
+        result = update(rows, scores_path, history_path, dedup_path)
+        # n should still be 1 (only april_r1 in current month accumulators)
+        # because rebuild() only accumulates the last month into scores.json
+        # but dedup file contains both months' IDs
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (only last month in accumulators), got {result['overall']['n']}"
+
+    def test_dedup_survives_month_rollover(self, tmp_path: Path) -> None:
+        """Dedup state persists across month rollover."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+
+        # Score in "March"
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            update(rows, scores_path, history_path, dedup_path)
+
+        # Rollover to "April" — accumulators reset, but dedup file stays
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 1, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            result = update(rows, scores_path, history_path, dedup_path)
+
+        # Row should be skipped even after rollover
+        assert (
+            result["overall"]["n"] == 0
+        ), f"Expected 0 (r1 deduped across month rollover), got {result['overall']['n']}"
+
+    def test_rebuild_deduplicates_across_log_files(self, tmp_path: Path) -> None:
+        """Same row_id in two log files is only counted once during rebuild."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        row = _row(p_yes=0.7, outcome=True, row_id="dup1")
+
+        # Write same row to two different log files
+        for name in ["production_log_a.jsonl", "production_log_b.jsonl"]:
+            with open(logs_dir / name, "w", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+        result = rebuild(
+            logs_dir=logs_dir,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (deduped), got {result['overall']['n']}"
+
+    def test_empty_rebuild_clears_dedup(self, tmp_path: Path) -> None:
+        """Empty rebuild clears stale dedup state so rows aren't falsely skipped."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        empty_logs = tmp_path / "empty_logs"
+        empty_logs.mkdir()
+
+        # Seed dedup via update
+        rows = [_row(p_yes=0.7, outcome=True, row_id="r1")]
+        update(rows, scores_path, history_path, dedup_path)
+        assert json.loads(dedup_path.read_text()) == ["r1"]
+
+        # Rebuild on empty logs — should clear dedup
+        rebuild(
+            logs_dir=empty_logs,
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        assert json.loads(dedup_path.read_text()) == []
+
+        # Now update with the same row — should be accepted (not stale-skipped)
+        result = update(rows, scores_path, history_path, dedup_path)
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (not stale-skipped), got {result['overall']['n']}"
+
+    def test_legacy_scored_row_ids_migrated_from_scores_json(
+        self, tmp_path: Path
+    ) -> None:
+        """Legacy scored_row_ids in scores.json are migrated to dedup file."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        # Simulate a legacy scores.json that contains scored_row_ids
+        rows = [_row(p_yes=0.7, outcome=True, row_id="legacy1")]
+        update(rows, scores_path, history_path, dedup_path)
+
+        # Inject legacy scored_row_ids into scores.json and remove dedup file
+        data = json.loads(scores_path.read_text())
+        data["scored_row_ids"] = ["legacy1"]
+        scores_path.write_text(json.dumps(data))
+        dedup_path.unlink()
+
+        # Update with the same row — should be skipped via migration
+        result = update(rows, scores_path, history_path, dedup_path)
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (resumed accumulators), got {result['overall']['n']}"
+
+        # The dedup file should now contain the migrated ID
+        dedup_ids = json.loads(dedup_path.read_text())
+        assert "legacy1" in dedup_ids

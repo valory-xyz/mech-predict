@@ -25,31 +25,34 @@ log = logging.getLogger(__name__)
 SUMMARY_SYSTEM_PROMPT = """\
 Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
-*Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends.
+*Summary:* 2-3 sentence high-level takeaway — what's working, what's not, any trends. Include the overall edge-over-market if available.
 
 *Top tools:*
-• `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "strong calibration")
-(list top 3)
+• `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
+(list top 3, rank by Brier. Edge is a diagnostic shown alongside, not a ranking criterion)
 
 *Worst tools:*
-• `tool-name` — Brier `X.XX`, accuracy X%, one word on why (e.g. "overconfident", "anti-predictive")
+• `tool-name` — Brier `X.XX`, Edge `±X.XX` (n=X), accuracy X%, one word on why
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
 *Platform performance:*
-• `platform` — Brier `X.XX`, BSS `±X.XX` (interpret: >0 = skillful, <0 = worse than base rate), n=X
-(list all platforms)
+• `platform` — Brier `X.XX`, Edge `±X.XX` (n=X), BSS `±X.XX`, n=X
+(list all platforms. Edge = how much tool beats market consensus; positive = profitable signal)
+
+*Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
 
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
 
-*Recommended actions:* 2-3 concrete next steps based on the data
+*Recommended actions:* 2-3 concrete next steps based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
 
 Rules:
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
-- Wrap tool names and Brier scores in backticks.
+- Wrap tool names, Brier scores, and Edge scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
 - No greetings or preamble.
+- Edge over market: positive = tool beats market, negative = market beats tool. This is a system-level diagnostic — it shows whether prediction accuracy translates to trading value, but tools are ranked by Brier (prediction quality).
 - Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 MODEL = "gpt-4.1-mini"

@@ -162,13 +162,19 @@ def _table_row(name: str, stats: dict[str, Any]) -> str:
     b = stats["brier"]
     a = stats["directional_accuracy"]
     ll = stats.get("log_loss") or {}
-    # Show Brier direction + accuracy direction when they disagree
-    if b["direction"] == a["direction"] or a["direction"] == "unchanged":
-        direction = b["direction"]
-    elif b["direction"] == "unchanged":
-        direction = a["direction"]
+    # Combine Brier, log loss, and accuracy directions
+    dirs = {
+        "B": b["direction"],
+        "LL": ll.get("direction", "unchanged") if ll else "unchanged",
+        "A": a["direction"],
+    }
+    non_unchanged = {k: v for k, v in dirs.items() if v not in ("unchanged", "—")}
+    if not non_unchanged:
+        direction = "unchanged"
+    elif len(set(non_unchanged.values())) == 1:
+        direction = next(iter(non_unchanged.values()))
     else:
-        direction = f"{b['direction'][:3]}B/{a['direction'][:3]}A"
+        direction = "/".join(f"{v[:3]}{k}" for k, v in non_unchanged.items())
     ll_b = _fmt(ll.get("baseline")) if ll else "—"
     ll_c = _fmt(ll.get("candidate")) if ll else "—"
     ll_d = _fmt_delta(ll.get("delta")) if ll else "—"

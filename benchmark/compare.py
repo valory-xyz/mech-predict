@@ -287,7 +287,11 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         ("Brier (large trade)", "brier_large_trade", True),
         ("Directional Bias (|abs|)", "directional_bias", True),
     ]
-    has_diag = any(overall.get(m) for _, m, _ in diag_metrics)
+    has_diag = any(
+        (overall.get(m) or {}).get("baseline") is not None
+        or (overall.get(m) or {}).get("candidate") is not None
+        for _, m, _ in diag_metrics
+    )
     if has_diag:
         lines.append("## Diagnostic Edge Metrics")
         lines.append("")

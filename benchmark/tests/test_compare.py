@@ -136,3 +136,16 @@ class TestCompareDiagnosticMetrics:
         assert "Conditional Accuracy" in md
         assert "Brier (large trade)" in md
         assert "Directional Bias" in md
+
+    def test_format_markdown_hides_diagnostics_when_all_none(self) -> None:
+        """No diagnostic table when all values are None."""
+        baseline = _stats()  # all diagnostic keys are None
+        candidate = _stats()
+        comparison = {
+            "overall": compare_stats(baseline, candidate),
+            "by_tool": {},
+            "by_platform": {},
+            "by_category": {},
+        }
+        md = format_markdown(comparison)
+        assert "## Diagnostic Edge Metrics" not in md

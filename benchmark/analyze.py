@@ -605,9 +605,14 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
     bias = overall.get("directional_bias")
     n_losses = overall.get("n_bias_losses", 0)
     if bias is not None:
-        direction = "overestimates" if bias > 0 else "underestimates"
+        if bias > 0:
+            direction = "overestimates"
+        elif bias < 0:
+            direction = "underestimates"
+        else:
+            direction = "no bias"
         lines.append(
-            f"- **Overall**: {bias:+.4f} (tends to {direction},"
+            f"- **Overall**: {bias:+.4f} ({direction},"
             f" n={n_losses} losses)"
         )
     else:
@@ -621,7 +626,12 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
         c_bias = stats.get("directional_bias")
         c_n = stats.get("n_bias_losses", 0)
         if c_bias is not None:
-            c_dir = "overestimates" if c_bias > 0 else "underestimates"
+            if c_bias > 0:
+                c_dir = "overestimates"
+            elif c_bias < 0:
+                c_dir = "underestimates"
+            else:
+                c_dir = "no bias"
             lines.append(
                 f"- **{cat}**: {c_bias:+.4f} ({c_dir}, n={c_n})"
             )

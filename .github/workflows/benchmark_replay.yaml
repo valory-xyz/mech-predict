@@ -116,8 +116,10 @@ jobs:
         with:
           python-version: '3.10'
 
+      - uses: astral-sh/setup-uv@v4
+
       - name: Install dependencies
-        run: pip install requests openai anthropic
+        run: uv sync
 
       # Download latest production log from flywheel
       - name: Download production log
@@ -133,7 +135,7 @@ jobs:
       - name: Locate production log
         id: log
         run: |
-          LOG_FILE=$(ls -t benchmark/datasets/logs/*.jsonl | head -1)
+          LOG_FILE=$(find benchmark/datasets/logs/ -name '*.jsonl' -type f -print0 | xargs -0 ls -t | head -1)
           echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
           echo "Found production log: $LOG_FILE ($(wc -l < "$LOG_FILE") rows)"
 
@@ -148,7 +150,7 @@ jobs:
       - name: Enrich dataset
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          python -m benchmark.prompt_replay enrich \
+          uv run python -m benchmark.prompt_replay enrich \
             --production-log "${{ steps.log.outputs.path }}" \
             --tool "${{ steps.parse.outputs.tool }}" \
             --sample-per-platform "${{ steps.parse.outputs.sample }}" \
@@ -161,7 +163,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
         run: |
-          python -m benchmark.prompt_replay replay \
+          uv run python -m benchmark.prompt_replay replay \
             --dataset benchmark/results/ci_enriched/dataset.jsonl \
             --output-dir benchmark/results/ci_replay/ \
             --phase "${{ steps.parse.outputs.phase }}"
@@ -173,14 +175,14 @@ jobs:
         run: |
           PR="${{ steps.parse.outputs.pr }}"
           if [ -n "$PR" ]; then
-            python -m benchmark.ci_replay \
+            uv run python -m benchmark.ci_replay \
               --baseline benchmark/results/ci_replay/baseline.jsonl \
               --candidate benchmark/results/ci_replay/candidate.jsonl \
               --pr "$PR" \
               --repo "${{ github.repository }}" \
               --triggered-by "${{ steps.parse.outputs.triggered_by }}"
           else
-            python -m benchmark.ci_replay \
+            uv run python -m benchmark.ci_replay \
               --baseline benchmark/results/ci_replay/baseline.jsonl \
               --candidate benchmark/results/ci_replay/candidate.jsonl
           fi

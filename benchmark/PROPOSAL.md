@@ -471,7 +471,7 @@ These metrics are not used for ranking. They diagnose whether accuracy is transl
 | **Discrimination (AUC-ROC)** | Can the tool rank questions by likelihood? |
 | **Cost per question** | USD per prediction (from token counts). |
 | **Latency p50/p95** | Response time distribution. |
-| **Simulated PnL** | Simulate Kelly criterion or fixed-fraction betting against market odds. **(Deferred — pending Kelly vs fixed-fraction decision.)** |
+| **Simulated PnL** | Simulate Kelly criterion or fixed-fraction betting against market odds. Closest proxy to actual trading value. **(Deferred — pending Kelly vs fixed-fraction decision. Data is captured via `market_spread`.)** |
 
 ### Stratified Analysis
 

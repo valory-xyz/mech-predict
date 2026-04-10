@@ -372,19 +372,17 @@ ECE = sum(n_bin * |gap_bin|) / sum(n_bin)
 
 ECE = 0 means perfectly calibrated. ECE = 0.10 means predictions are off by 10pp on average.
 
-**Calibration intercept and slope** — fit `realized = intercept + slope * predicted` via weighted linear regression on the calibration bins (weighted by bin count):
+**Calibration intercept and slope** — Platt scaling on the logit scale: `logit(P(y=1|p)) = intercept + slope * logit(p_yes)`.
 
 ```
-slope = 1.0 → perfectly dispersed
+slope = 1.0 → perfectly calibrated
 slope < 1.0 → overconfident (predictions too extreme)
 slope > 1.0 → underconfident (predictions too compressed toward 0.5)
 
-intercept > 0 → systematically underestimates (reality higher)
-intercept < 0 → systematically overestimates (reality lower)
+intercept evaluated at p_yes = 0.5 (logit midpoint)
 ```
 
-Returns None if fewer than 3 bins have data.
-
+Returns None if fewer than 30 valid predictions or uniform p_yes values.
 
 ### Edge over market (diagnostic — not for ranking)
 

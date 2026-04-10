@@ -183,9 +183,10 @@ def format_report(
     :param meta: dict with tool, phase, sample, seed, triggered_by.
     :return: markdown string.
     """
+    tool = meta.get("tool", "unknown")
     parts = [
-        "<!-- benchmark-result -->",
-        f"## Benchmark: {meta.get('tool', 'unknown')}",
+        f"<!-- benchmark-result:{tool} -->",
+        f"## Benchmark: {tool}",
         "",
         _metrics_table(baseline, candidate),
         "",
@@ -242,62 +243,28 @@ def format_report(
     return "\n".join(parts)
 
 
-def post_or_update_comment(report: str, pr_number: int, repo: str) -> None:
-    """Post or update a benchmark comment on a GitHub PR.
+def post_comment(report: str, pr_number: int, repo: str) -> None:
+    """Post a benchmark comment on a GitHub PR.
 
-    Finds existing comment by <!-- benchmark-result --> marker and updates it,
-    or creates a new one.
+    Always creates a new comment so results flow chronologically with
+    the conversation and history is preserved.
 
     :param report: markdown report string.
     :param pr_number: PR number.
     :param repo: owner/repo string.
     """
-    # Find existing benchmark comment
-    result = subprocess.run(
+    subprocess.run(
         [
             "gh",
             "api",
             f"repos/{repo}/issues/{pr_number}/comments",
-            "--paginate",
-            "--jq",
-            '[.[] | select(.body | contains("<!-- benchmark-result -->")) | .id] | first',
+            "-f",
+            f"body={report}",
+            "--silent",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        check=True,
     )
-    existing_id = result.stdout.strip()
-
-    if existing_id and existing_id != "null":
-        # Update existing comment
-        subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/issues/comments/{existing_id}",
-                "-X",
-                "PATCH",
-                "-f",
-                f"body={report}",
-                "--silent",
-            ],
-            check=True,
-        )
-        print(f"Updated existing comment {existing_id}")
-    else:
-        # Create new comment
-        subprocess.run(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/issues/{pr_number}/comments",
-                "-f",
-                f"body={report}",
-                "--silent",
-            ],
-            check=True,
-        )
-        print(f"Posted new comment on PR #{pr_number}")
+    print(f"Posted benchmark comment on PR #{pr_number}")
 
 
 def main() -> None:
@@ -363,7 +330,7 @@ def main() -> None:
 
     # Post to PR if requested
     if args.pr and args.repo:
-        post_or_update_comment(report, args.pr, args.repo)
+        post_comment(report, args.pr, args.repo)
 
 
 if __name__ == "__main__":

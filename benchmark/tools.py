@@ -68,6 +68,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "prediction-url-cot-claude": ToolSpec(
         module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
     ),
+    # valory/factual_research
+    "factual_research": ToolSpec(
+        module="packages.valory.customs.factual_research.factual_research",
+    ),
     # nickcom007/prediction_request_sme
     "prediction-offline-sme": ToolSpec(
         module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",

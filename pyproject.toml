@@ -11,7 +11,7 @@ readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
     "open-autonomy==0.21.16",
-    "openai==1.30.2",
+    "openai==1.93.0",
     "requests==2.32.5",
     "py-multibase==1.0.3",
     "py-multicodec==0.2.1",

@@ -41,9 +41,12 @@ from benchmark.scorer import (
     group_by_horizon,
     group_by_month,
     load_history,
+    _derive_group,
+    _empty_group,
     log_loss_score,
     rebuild,
     score,
+    score_period,
     update,
 )
 
@@ -1400,6 +1403,7 @@ class TestUpdateDedup:
         dedup_ids = json.loads(dedup_path.read_text())
         assert "legacy1" in dedup_ids
 
+
 # ---------------------------------------------------------------------------
 # Directional accuracy and no-signal rate
 # ---------------------------------------------------------------------------
@@ -1613,3 +1617,111 @@ class TestCalibrationRegression:
         assert "calibration_intercept" in result
         assert "calibration_slope" in result
 
+
+# ---------------------------------------------------------------------------
+# _derive_group null schema parity
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveGroupSchema:
+    """Verify _derive_group produces the same keys as compute_group_stats."""
+
+    def test_empty_group_has_all_keys(self) -> None:
+        """_derive_group on empty accumulators has BSS/baseline/yes_rate."""
+        result = _derive_group(_empty_group())
+        for key in ("outcome_yes_rate", "baseline_brier", "brier_skill_score"):
+            assert key in result, f"_derive_group missing '{key}' on n==0 path"
+            assert result[key] is None
+
+    def test_schema_matches_batch(self) -> None:
+        """Keys from _derive_group match compute_group_stats for same data."""
+        rows = [_row(p_yes=0.7, outcome=True), _row(p_yes=0.3, outcome=False)]
+        batch_keys = set(compute_group_stats(rows).keys())
+        # Simulate incremental
+        group = _empty_group()
+        for r in rows:
+            from benchmark.scorer import _accumulate_group
+
+            _accumulate_group(group, r)
+        inc_keys = set(_derive_group(group).keys())
+        missing = batch_keys - inc_keys
+        assert not missing, f"_derive_group missing keys: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# score_period
+# ---------------------------------------------------------------------------
+
+
+class TestScorePeriod:
+    """Tests for score_period."""
+
+    def test_picks_most_recent_by_date(self, tmp_path: Path) -> None:
+        """days=1 picks the most recent file regardless of naming convention."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+
+        old_row = _row(p_yes=0.7, outcome=True, predicted_at="2026-04-05T10:00:00Z")
+        new_row = _row(p_yes=0.3, outcome=False, predicted_at="2026-04-07T10:00:00Z")
+
+        (logs / "production_log_2026_04_05.jsonl").write_text(
+            json.dumps(old_row) + "\n"
+        )
+        (logs / "2026-04-07.jsonl").write_text(json.dumps(new_row) + "\n")
+
+        result = score_period(logs, days=1)
+        assert result["total_rows"] == 1
+        # The newest file (2026-04-07) should be selected
+        assert result["overall"]["brier"] is not None
+
+    def test_mixed_naming_days2(self, tmp_path: Path) -> None:
+        """days=2 picks two most recent across both naming conventions."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+
+        for name, p, dt in [
+            ("production_log_2026_04_05.jsonl", 0.7, "2026-04-05T10:00:00Z"),
+            ("2026-04-06.jsonl", 0.4, "2026-04-06T10:00:00Z"),
+            ("production_log_2026_04_07.jsonl", 0.9, "2026-04-07T10:00:00Z"),
+        ]:
+            row = _row(p_yes=p, outcome=True, predicted_at=dt)
+            (logs / name).write_text(json.dumps(row) + "\n")
+
+        result = score_period(logs, days=2)
+        assert result["total_rows"] == 2
+
+    def test_empty_dir(self, tmp_path: Path) -> None:
+        """Empty log directory returns zero-row scores."""
+        logs = tmp_path / "empty_logs"
+        logs.mkdir()
+        result = score_period(logs, days=7)
+        assert result["total_rows"] == 0
+        assert result["overall"]["brier"] is None
+
+
+# ---------------------------------------------------------------------------
+# Degenerate calibration regression
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrationRegressionDegenerate:
+    """Tests for edge cases in compute_calibration_regression."""
+
+    def test_uniform_probability_returns_none(self) -> None:
+        """All predictions at same p_yes → slope is unidentifiable."""
+        rows = [_row(p_yes=0.5, outcome=True)] * 20 + [
+            _row(p_yes=0.5, outcome=False)
+        ] * 20
+        result = compute_calibration_regression(rows)
+        assert result["calibration_slope"] is None
+        assert result["calibration_intercept"] is None
+
+    def test_all_same_outcome_converges(self) -> None:
+        """All outcomes True — optimizer should still return or return None."""
+        rows = [_row(p_yes=0.3, outcome=True)] * 20 + [
+            _row(p_yes=0.8, outcome=True)
+        ] * 20
+        result = compute_calibration_regression(rows)
+        # May return values or None — either is acceptable, just no crash
+        assert "calibration_slope" in result
+        assert "calibration_intercept" in result

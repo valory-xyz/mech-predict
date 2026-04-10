@@ -1400,6 +1400,25 @@ def rebuild(
 # ---------------------------------------------------------------------------
 
 
+def _extract_date_from_log_path(path: str) -> str:
+    """Extract a sortable date string from a log file path.
+
+    Handles both ``YYYY-MM-DD.jsonl`` and ``production_log_YYYY_MM_DD.jsonl``
+    naming conventions.
+
+    :param path: file path string.
+    :return: date string in ``YYYY-MM-DD`` format, or ``""`` if unparseable.
+    """
+    import re  # noqa: C0415  # local import, used only here
+
+    name = Path(path).stem
+    # production_log_YYYY_MM_DD → YYYY-MM-DD
+    m = re.search(r"(\d{4})[_-](\d{2})[_-](\d{2})", name)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return ""
+
+
 def score_period(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
@@ -1410,15 +1429,21 @@ def score_period(
     batch ``score()`` on their combined rows. Used for "since last report"
     (days=1) and "rolling 7-day" (days=7) sections.
 
-    :param logs_dir: directory containing ``YYYY-MM-DD.jsonl`` daily files.
+    Handles both ``YYYY-MM-DD.jsonl`` and ``production_log_YYYY_MM_DD.jsonl``
+    naming conventions (the flywheel uses the latter).
+
+    :param logs_dir: directory containing daily log files.
     :param days: how many of the most recent files to include.
     :return: scores dict from ``score()``, or empty scores if no files.
     """
-    # Daily files: YYYY-MM-DD.jsonl and production_log_*.jsonl (flywheel naming)
+    # Both naming conventions: YYYY-MM-DD.jsonl and production_log_YYYY_MM_DD.jsonl
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
-    # Merge and deduplicate both naming conventions, sort by filename
-    all_files = sorted(set(glob_mod.glob(daily_pattern) + glob_mod.glob(prod_pattern)))
+    # Merge, deduplicate, sort by extracted date (not lexicographic filename)
+    all_files = sorted(
+        set(glob_mod.glob(daily_pattern) + glob_mod.glob(prod_pattern)),
+        key=_extract_date_from_log_path,
+    )
     recent = all_files[-days:] if all_files else []
 
     rows: list[dict[str, Any]] = []

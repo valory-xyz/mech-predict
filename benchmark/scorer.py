@@ -18,10 +18,13 @@ import glob as glob_mod
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from benchmark.io import load_jsonl as load_rows
 
@@ -526,7 +529,6 @@ def compute_calibration_regression(
         (None if fewer than ``MIN_CAL_REG_ROWS`` valid rows or if
         optimization fails).
     """
-    from scipy.optimize import minimize
 
     valid = [
         r
@@ -1509,7 +1511,6 @@ def _extract_date_from_log_path(path: str) -> str:
     :param path: file path string.
     :return: date string in ``YYYY-MM-DD`` format, or ``""`` if unparseable.
     """
-    import re  # noqa: C0415  # local import, used only here
 
     name = Path(path).stem
     # production_log_YYYY_MM_DD → YYYY-MM-DD

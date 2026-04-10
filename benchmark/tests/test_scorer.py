@@ -28,6 +28,9 @@ from unittest.mock import patch
 from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
     WORST_BEST_SIZE,
+    _accumulate_group,
+    _derive_group,
+    _empty_group,
     _is_edge_eligible,
     brier_score,
     classify_difficulty,
@@ -41,8 +44,6 @@ from benchmark.scorer import (
     group_by_horizon,
     group_by_month,
     load_history,
-    _derive_group,
-    _empty_group,
     log_loss_score,
     rebuild,
     score,
@@ -1640,8 +1641,6 @@ class TestDeriveGroupSchema:
         # Simulate incremental
         group = _empty_group()
         for r in rows:
-            from benchmark.scorer import _accumulate_group
-
             _accumulate_group(group, r)
         inc_keys = set(_derive_group(group).keys())
         missing = batch_keys - inc_keys

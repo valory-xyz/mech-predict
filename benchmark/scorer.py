@@ -969,6 +969,34 @@ def _update_extreme_list(
     return entries[:WORST_BEST_SIZE]
 
 
+def _accumulate_calibration(scores: dict[str, Any], row: dict[str, Any]) -> None:
+    """Accumulate calibration bins and pairs for a valid row.
+
+    :param scores: the full scores dict with calibration accumulators.
+    :param row: a valid production log row dict.
+    """
+    p = row["p_yes"]
+    for lo, hi in CALIBRATION_BINS:
+        if lo <= p < hi:
+            label = _bin_label(lo, hi)
+            bucket = scores["calibration"][label]
+            bucket["count"] += 1
+            bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
+            bucket["predicted_sum"] += p
+            break
+    # Store (p_yes, outcome) for row-level calibration regression.
+    # Reservoir sampling: once at capacity, randomly replace entries
+    # so the sample remains representative without unbounded growth.
+    pair = [p, 1 if row["final_outcome"] else 0]
+    pairs = scores["calibration_pairs"]
+    if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+        pairs.append(pair)
+    else:
+        idx = random.randint(0, scores["overall"]["valid_n"] - 1)
+        if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+            pairs[idx] = pair
+
+
 def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """Merge one row into all accumulator dimensions (mutates *scores*).
 
@@ -1005,33 +1033,14 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
         scores["by_platform_liquidity"], f"{platform} | {liquidity}", row
     )
 
-    # Calibration buckets
+    # Calibration buckets + pairs
     is_valid = (
         row.get("prediction_parse_status") == "valid"
         and row.get("final_outcome") is not None
         and row.get("p_yes") is not None
     )
     if is_valid:
-        p = row["p_yes"]
-        for lo, hi in CALIBRATION_BINS:
-            if lo <= p < hi:
-                label = _bin_label(lo, hi)
-                bucket = scores["calibration"][label]
-                bucket["count"] += 1
-                bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
-                bucket["predicted_sum"] += p
-                break
-        # Store (p_yes, outcome) for row-level calibration regression.
-        # Reservoir sampling: once at capacity, randomly replace entries
-        # so the sample remains representative without unbounded growth.
-        pair = [p, 1 if row["final_outcome"] else 0]
-        pairs = scores["calibration_pairs"]
-        if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-            pairs.append(pair)
-        else:
-            idx = random.randint(0, scores["overall"]["valid_n"] - 1)
-            if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-                pairs[idx] = pair
+        _accumulate_calibration(scores, row)
 
     # Parse breakdown
     status = row.get("prediction_parse_status") or "unknown"

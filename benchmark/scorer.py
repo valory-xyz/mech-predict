@@ -1674,7 +1674,7 @@ def main() -> None:
             flags.append(f"LOW-SAMPLE<{MIN_SAMPLE_SIZE}")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
         print(
-            f"  {tool}: Brier={stats['brier']}, Acc={stats['accuracy']}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}"
+            f"  {tool}: Brier={stats['brier']}, DirAcc={stats.get('directional_accuracy')}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}"
         )
 
     print("\nBy platform:")

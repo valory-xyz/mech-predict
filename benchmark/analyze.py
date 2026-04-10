@@ -562,19 +562,19 @@ def section_calibration(scores: dict[str, Any]) -> str:
             )
         elif cal_slope > CAL_SLOPE_UNDERCONFIDENT:
             lines.append("  - Slope > 1.0 → predictions too compressed toward 0.5")
-        # Intercept interpretation depends on slope — only meaningful
-        # in isolation when slope ≈ 1.0. With slope < 1 the regression
-        # line crosses the diagonal, so intercept alone is ambiguous.
-        if abs(cal_slope - 1.0) < 0.15 and abs(cal_int) > CAL_INTERCEPT_NOTABLE:
+        # Intercept is evaluated at logit(p_yes)=0, i.e. p_yes=0.5.
+        # Only interpret when slope is not too far from 1.0; with extreme
+        # slopes the intercept alone is ambiguous.
+        if abs(cal_slope - 1.0) < 0.4 and abs(cal_int) > CAL_INTERCEPT_NOTABLE:
             if cal_int > 0:
                 lines.append(
-                    "  - Intercept shifted upward at p=0"
-                    " (regression line above diagonal at low predictions)"
+                    "  - Positive intercept at p=0.5 midpoint"
+                    " (tool underpredicts at the 50% probability point)"
                 )
             else:
                 lines.append(
-                    "  - Intercept shifted downward at p=0"
-                    " (regression line below diagonal at low predictions)"
+                    "  - Negative intercept at p=0.5 midpoint"
+                    " (tool overpredicts at the 50% probability point)"
                 )
 
     # Summary interpretation

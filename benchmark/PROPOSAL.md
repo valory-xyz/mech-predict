@@ -389,7 +389,7 @@ Metrics are not a flat list — they form a staged pipeline where earlier stages
 
 **Stage 1 — Reliability Gate:**
 - Metric: `valid_structured_outputs / attempted_runs`
-- Rule: if < 80%, tool is marked unreliable and excluded from comparative ranking
+- Rule: if < 80%, tool is flagged as unreliable in the report (exclusion from ranking is planned but not yet enforced)
 - Includes all `prediction_parse_status` values: `valid`, `invalid`, `malformed`, `timeout`, `error`
 - **Timeouts count as failures.** The benchmark runner must enforce the same `TASK_DEADLINE` (default 240s) as production. A tool that takes 10 minutes per question would time out in production, so it must time out in the benchmark too. Without matching timeouts, reliability numbers are meaningless.
 - This is computed on all attempted runs — no exclusions
@@ -419,14 +419,32 @@ These metrics are not used to rank or select tools. They diagnose whether accura
 - Tier 1: Execution-aware simulated PnL with spread/slippage assumptions
 - Tier 2: Realized execution PnL (when execution data is available)
 
-### Metric Definitions
+### Metric Taxonomy
+
+**Core ranking** — these determine which tool is "better":
 
 | Metric | Formula | Why it matters |
 |--------|---------|----------------|
-| **Reliability** | `valid_outputs / attempted_runs` | Hard gate. A tool that crashes 20% of the time is unusable. |
-| **Brier score** | `mean((p_yes - outcome)²)` | Gold standard for probabilistic forecasting. Lower is better. Random = 0.25, perfect = 0.0. **Primary ranking metric.** |
-| **Calibration error (ECE)** | Bin predictions by decile, compare mean prediction to actual frequency | Detects systematic overconfidence/underconfidence. |
-| **Resolution rate** | `valid_json_results / total_questions` | Tool reliability — subset of the reliability gate metric. |
+| **Brier score** | `mean((p_yes - outcome)²)` | Gold standard for probabilistic forecasting. Lower is better. No-skill baseline = `yes_rate × (1 - yes_rate)` (only 0.25 when outcomes are balanced), perfect = 0.0. **Primary ranking metric.** |
+| **Log loss** | `-mean(outcome * log(p_yes) + (1 - outcome) * log(1 - p_yes))` | Like Brier but punishes confidently wrong predictions exponentially harder. Matters for Kelly criterion betting. |
+| **Brier Skill Score (BSS)** | `1 - (Brier / baseline_brier)` | Improvement over the naive base-rate predictor. BSS > 0 = better than base rate. |
+
+**Eligibility/gating:**
+
+| Metric | Formula | Threshold |
+|--------|---------|-----------|
+| **Reliability** | `valid_outputs / attempted_runs` | < 80% = flagged as unreliable (exclusion planned, not yet enforced) |
+
+**Core diagnostic** — understand tool behavior, not for ranking:
+
+| Metric | Formula | What it diagnoses |
+|--------|---------|-------------------|
+| **ECE** | `sum(n_bin * \|gap_bin\|) / total_n` | Overall calibration quality. 0 = perfect. |
+| **Calibration intercept** | Weighted linear regression intercept (realized vs predicted) | Systematic bias direction. Positive = underestimates. |
+| **Calibration slope** | Weighted linear regression slope | Prediction dispersion. < 1 = overconfident, > 1 = underconfident. |
+| **Sharpness** | `mean(\|p_yes - 0.5\|)` | How decisive predictions are. Only good if calibration is also good. |
+| **Directional accuracy** | `correct / n_directional` (excludes p_yes == 0.5) | Fraction correct when the tool has an opinion. |
+| **No-signal rate** | `count(p_yes == 0.5) / n_valid` | How often the tool says "I don't know." |
 
 **Brier score is the primary metric for tool selection.** Tools are ranked and compared on forecasting accuracy. Edge over market is a *consequence* of accuracy, not a goal to optimise for directly — if you optimise a tool for edge, you incentivise it to be contrarian (disagree with the market for the sake of disagreement), and a tool that deliberately disagrees with an accurate market loses money. The fix for negative edge is making tools more accurate. If the tool predicts the world more accurately than the market, edge emerges naturally.
 
@@ -437,17 +455,20 @@ These metrics are not used for ranking. They diagnose whether accuracy is transl
 | Metric | Formula | What it diagnoses |
 |--------|---------|-------------------|
 | **Edge over market** | `mean((market_prob - outcome)² - (p_yes - outcome)²)` | Is accuracy translating into profit opportunity? Positive = tool beats market. If Brier is good but edge is negative, the market is already as accurate as the tool — the tool is right, but so is everyone else. |
-| **Conditional accuracy when disagreeing** | For rows where `\|p_yes - market_prob\| > disagreement_threshold`: `tool_wins / n_disagreements` where tool_wins = `\|p_yes - outcome\| < \|market_prob - outcome\|` | When the trader bets, does the bet tend to win? A tool with positive aggregate edge but low conditional accuracy wins on small bets and loses on big ones — the trader should cap bet size or raise min_edge. A tool with high conditional accuracy but negative aggregate edge doesn't disagree often/boldly enough — needs more sharpness. `disagreement_threshold` is configurable (<!-- TODO: decide threshold, default 0.03 -->). |
-| **Disagreement-stratified Brier** | Brier computed per disagreement bucket: no-trade (`\|disagreement\| ≤ T1`), small-trade (`T1 < \|disagreement\| ≤ T2`), large-trade (`\|disagreement\| > T2`) | Is the tool accurate where it matters for profit? A tool with great Brier on low-disagreement questions (no trade, no PnL impact) but terrible Brier on high-disagreement questions (big Kelly bet, big losses) looks good on aggregate but loses money. Bucket thresholds are configurable (<!-- TODO: decide T1 and T2, tentatively 0.03 and 0.10 -->). |
-| **Directional bias** | For rows where tool disagrees and market was closer to truth: `mean(p_yes - outcome)` | When the tool loses, does it tend to overestimate (positive bias) or underestimate (negative bias)? Informs targeted calibration fixes — e.g., if the tool systematically overestimates on crypto, shrink predictions toward 0.5 for that category. |
+| **Conditional accuracy when disagreeing** | For edge-eligible rows where `\|p_yes - market_prob\| > 0.03`: `tool_wins / n_disagreements` where tool_wins = `\|p_yes - outcome\| < \|market_prob - outcome\|`. **Ties** (`tool_distance == market_distance`) are excluded — neither side wins. | When the trader bets, does the bet tend to win? A tool with positive aggregate edge but low conditional accuracy wins on small bets and loses on big ones — the trader should cap bet size or raise min_edge. Threshold fixed at 0.03 for now; will tune with observations. |
+| **Disagreement-stratified Brier** | Brier computed per disagreement bucket on edge-eligible rows: no-trade (`\|disagreement\| ≤ 0.03`), small-trade (`0.03 < \|disagreement\| ≤ 0.10`), large-trade (`\|disagreement\| > 0.10`). These are disagreement magnitude buckets, not directly tied to trade-sizing policy. | Is the tool accurate where it matters for profit? A tool with great Brier on low-disagreement questions (no trade, no PnL impact) but terrible Brier on high-disagreement questions (big Kelly bet, big losses) looks good on aggregate but loses money. Thresholds: T1=0.03, T2=0.10 (fixed for now, will version if changed). |
+| **Directional bias** | For edge-eligible rows where tool disagrees (`\|p_yes - market_prob\| > 0.03`) and market was closer to truth (`tool_distance > market_distance`; **ties excluded**): `mean(p_yes - outcome)` | When the tool loses, does it tend to overestimate (positive bias) or underestimate (negative bias)? Uses same winner/loser rule and tie handling as conditional accuracy. |
 
-### Secondary Metrics
+### Secondary Diagnostic Metrics
 
 | Metric | What it measures |
 |--------|-----------------|
+| **Edge over market** | System diagnostic, not a ranking objective. See Diagnostic Metrics above. |
+| **Conditional accuracy when disagreeing** | When trading, is the tool or the market closer to truth? |
+| **Disagreement-stratified Brier** | Brier per trade-size bucket: no_trade, small_trade, large_trade. |
+| **Directional bias** | When tool loses, does it over- or underestimate? |
+| **Overconfident-wrong count/rate** | Confident (>80%) and wrong predictions. Rate denominator is `n_valid` (not `n_directional`) — p_yes=0.5 rows can never be overconfident-wrong so numerator is unaffected; denominator normalizes against total sample size. |
 | **Discrimination (AUC-ROC)** | Can the tool rank questions by likelihood? |
-| **Log loss** | `-mean(outcome * log(p_yes) + (1-outcome) * log(p_no))`. Heavily penalizes confident wrong predictions. |
-| **Sharpness** | `mean(abs(p_yes - 0.5))`. How far from 50/50 are predictions? Higher sharpness with good calibration is ideal. |
 | **Cost per question** | USD per prediction (from token counts). |
 | **Latency p50/p95** | Response time distribution. |
 | **Simulated PnL** | Simulate Kelly criterion or fixed-fraction betting against market odds. Closest proxy to actual trading value. **(Deferred — pending Kelly vs fixed-fraction decision. Data is captured via `market_spread`.)** |
@@ -1210,7 +1231,7 @@ python benchmark/publish.py --results results/monthly_report.json
 |---|---|
 | Autocast academic dataset (2022) | Real Polymarket/Omen markets + production data |
 | No temporal controls | Three modes: production replay, tournament, cached replay |
-| Binary accuracy only | Staged pipeline: reliability → Brier → calibration → diagnostics (edge, conditional accuracy, disagreement Brier, directional bias) → PnL (future) |
+| Binary accuracy only | Staged pipeline: reliability → Brier + Log Loss → calibration (ECE, intercept/slope) → diagnostics (edge, sharpness, directional accuracy) → PnL (future) |
 | No market price comparison | Edge over market + 3 diagnostic metrics for system health (accuracy is primary, edge is diagnostic) |
 | Single prompt template | Automated prompt evolution via LLM |
 | No parameter variation | Grid search over models, temps, num_urls, queries |
@@ -1266,7 +1287,7 @@ The first sprint delivers a minimal but complete pipeline: real production data 
    - Row schema definition with validation
    - `fetch_resolved.py` for Polymarket API + Omen subgraph (binary markets only)
    - `runner.py` with cached replay mode, production timeout enforcement (`TASK_DEADLINE`)
-   - `scorer.py` with staged pipeline: reliability gate (80%) → edge → Brier → calibration (min 20/bin) → stratified analysis (per-platform)
+   - `scorer.py` with staged pipeline: reliability gate (80%) → Brier + Log Loss → calibration (ECE, min 20/bin) → edge diagnostics → stratified analysis (per-platform)
    - `compare.py` with paired bootstrap significance testing, eligibility reporting, cost-adjusted metrics
 
 2. **Phase 2 — Production Flywheel** (~3 days)

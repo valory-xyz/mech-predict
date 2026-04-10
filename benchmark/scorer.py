@@ -17,10 +17,16 @@ import argparse
 import glob as glob_mod
 import json
 import logging
+import math
+import random
+import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import numpy as np
+from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from benchmark.io import load_jsonl as load_rows
 
@@ -31,18 +37,24 @@ DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
 LATENCY_RESERVOIR_SIZE = 200
+CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
+_RESERVOIR_RNG = random.Random(42)
 WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80
 MIN_SAMPLE_SIZE = 30
+MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
 # Used in update() and rebuild() when merging accumulators into output.
 _ACCUM_KEYS = (
     "brier_sum",
     "correct_count",
+    "n_directional",
+    "no_signal_count",
     "sharpness_sum",
     "outcome_yes_count",
+    "log_loss_sum",
     "edge_sum",
     "edge_n",
     "edge_positive_count",
@@ -103,6 +115,22 @@ def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
     return market_brier - tool_brier
 
 
+_LOG_LOSS_EPSILON = 1e-15
+
+
+def log_loss_score(p_yes: float, outcome: bool) -> float:
+    """Compute log loss for a single prediction.
+
+    :param p_yes: predicted probability of yes.
+    :param outcome: actual outcome.
+    :return: log loss value (lower is better).
+    """
+    p = max(_LOG_LOSS_EPSILON, min(1 - _LOG_LOSS_EPSILON, p_yes))
+    if outcome:
+        return -math.log(p)
+    return -math.log(1 - p)
+
+
 def _is_edge_eligible(row: dict[str, Any]) -> bool:
     """Check if a row has all fields needed for edge-over-market calculation."""
     return (
@@ -158,6 +186,36 @@ def classify_liquidity(liquidity_usd: float | None) -> str:
     return "high"
 
 
+def _compute_edge_diagnostics(
+    edge_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compute edge-over-market metrics for edge-eligible rows.
+
+    :param edge_rows: valid rows that have market_prob_at_prediction.
+    :return: dict with edge, edge_n, edge_positive_rate.
+    """
+    if not edge_rows:
+        return {
+            "edge": None,
+            "edge_n": 0,
+            "edge_positive_rate": None,
+        }
+
+    edges = [
+        edge_score(r["p_yes"], r["market_prob_at_prediction"], r["final_outcome"])
+        for r in edge_rows
+    ]
+    edge_avg = round(sum(edges) / len(edges), 4)
+    edge_positive = sum(1 for e in edges if e > 0)
+    edge_pos_rate = round(edge_positive / len(edges), 4)
+
+    return {
+        "edge": edge_avg,
+        "edge_n": len(edge_rows),
+        "edge_positive_rate": edge_pos_rate,
+    }
+
+
 def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute Brier score and reliability for a group of rows.
 
@@ -169,16 +227,27 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         decision_worthy.
     """
     total = len(rows)
+    _none_stats: dict[str, Any] = {
+        "brier": None,
+        "directional_accuracy": None,
+        "n_directional": 0,
+        "no_signal_rate": None,
+        "no_signal_count": 0,
+        "log_loss": None,
+        "sharpness": None,
+        "reliability": None,
+        "n": total,
+        "valid_n": 0,
+        "decision_worthy": False,
+        "outcome_yes_rate": None,
+        "baseline_brier": None,
+        "brier_skill_score": None,
+        "edge": None,
+        "edge_n": 0,
+        "edge_positive_rate": None,
+    }
     if total == 0:
-        return {
-            "brier": None,
-            "accuracy": None,
-            "sharpness": None,
-            "reliability": None,
-            "n": 0,
-            "valid_n": 0,
-            "decision_worthy": False,
-        }
+        return dict(_none_stats)
 
     valid = [
         r
@@ -191,50 +260,61 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     worthy = len(valid) >= MIN_SAMPLE_SIZE
 
     if not valid:
-        return {
-            "brier": None,
-            "accuracy": None,
-            "sharpness": None,
-            "reliability": round(reliability, 4),
-            "n": total,
-            "valid_n": 0,
-            "decision_worthy": False,
-        }
+        result = dict(_none_stats)
+        result["reliability"] = round(reliability, 4)
+        return result
 
-    scores = [brier_score(r["p_yes"], r["final_outcome"]) for r in valid]
-    avg_brier = sum(scores) / len(scores)
+    brier_scores = [brier_score(r["p_yes"], r["final_outcome"]) for r in valid]
+    avg_brier = sum(brier_scores) / len(brier_scores)
 
-    # p_yes == 0.5 counted as incorrect (no directional signal)
-    correct = sum(1 for r in valid if (r["p_yes"] > 0.5) == r["final_outcome"])
-    accuracy = correct / len(valid)
+    # Directional accuracy — exclude p_yes == 0.5 (no signal)
+    directional = [r for r in valid if r["p_yes"] != 0.5]
+    no_signal_count = len(valid) - len(directional)
+    no_signal_rate = round(no_signal_count / len(valid), 4)
+    if directional:
+        correct = sum(
+            1 for r in directional if (r["p_yes"] > 0.5) == r["final_outcome"]
+        )
+        dir_accuracy = round(correct / len(directional), 4)
+    else:
+        correct = 0
+        dir_accuracy = None
 
     sharpness = sum(abs(r["p_yes"] - 0.5) for r in valid) / len(valid)
 
-    # Edge over market — only for rows with market_prob_at_prediction
-    edge_rows = [r for r in valid if r.get("market_prob_at_prediction") is not None]
-    if edge_rows:
-        edges = [
-            edge_score(r["p_yes"], r["market_prob_at_prediction"], r["final_outcome"])
-            for r in edge_rows
-        ]
-        edge_avg = round(sum(edges) / len(edges), 4)
-        edge_positive = sum(1 for e in edges if e > 0)
-        edge_pos_rate = round(edge_positive / len(edges), 4)
+    # Log loss
+    ll_sum = sum(log_loss_score(r["p_yes"], r["final_outcome"]) for r in valid)
+    avg_log_loss = round(ll_sum / len(valid), 4)
+
+    # BSS — matches _derive_group() computation
+    yes_rate = sum(1 for r in valid if r["final_outcome"]) / len(valid)
+    baseline_brier = round(yes_rate * (1 - yes_rate), 4)
+    brier_rounded = round(avg_brier, 4)
+    if baseline_brier > 0:
+        bss = round(1 - (brier_rounded / baseline_brier), 4)
     else:
-        edge_avg = None
-        edge_pos_rate = None
+        bss = None
+
+    # Edge over market
+    edge_rows = [r for r in valid if r.get("market_prob_at_prediction") is not None]
+    edge_diag = _compute_edge_diagnostics(edge_rows)
 
     return {
-        "brier": round(avg_brier, 4),
-        "accuracy": round(accuracy, 4),
+        "brier": brier_rounded,
+        "directional_accuracy": dir_accuracy,
+        "n_directional": len(directional),
+        "no_signal_count": no_signal_count,
+        "no_signal_rate": no_signal_rate,
+        "log_loss": avg_log_loss,
         "sharpness": round(sharpness, 4),
         "reliability": round(reliability, 4),
         "n": total,
         "valid_n": len(valid),
         "decision_worthy": worthy,
-        "edge": edge_avg,
-        "edge_n": len(edge_rows),
-        "edge_positive_rate": edge_pos_rate,
+        "outcome_yes_rate": round(yes_rate, 4),
+        "baseline_brier": baseline_brier,
+        "brier_skill_score": bss,
+        **edge_diag,
     }
 
 
@@ -263,7 +343,7 @@ def group_by(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, A
     """Group rows by a field value."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[row.get(key, "unknown")].append(row)
+        groups[row.get(key) or "unknown"].append(row)
     return dict(groups)
 
 
@@ -296,7 +376,7 @@ def group_by_horizon(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _composite_key(row: dict[str, Any], fields: list[str]) -> str:
     """Build a composite grouping key from multiple fields."""
-    return " | ".join(str(row.get(f, "unknown")) for f in fields)
+    return " | ".join(str(row.get(f) or "unknown") for f in fields)
 
 
 def group_by_composite(
@@ -408,6 +488,147 @@ def compute_calibration(
     return result
 
 
+def compute_ece(
+    bins: list[dict[str, Any]],
+    min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
+) -> float | None:
+    """Compute Expected Calibration Error from calibration bins.
+
+    Bins with fewer than *min_bin_n* samples are excluded to avoid
+    noisy estimates (per PROPOSAL.md: min 20 samples per bin).
+
+    :param bins: list of calibration bin dicts with n, gap.
+    :param min_bin_n: minimum samples for a bin to be included.
+    :return: ECE value, or None if no qualifying bins.
+    """
+    populated = [b for b in bins if b.get("n", 0) >= min_bin_n]
+    if not populated:
+        return None
+    total_n = sum(b["n"] for b in populated)
+    if total_n == 0:
+        return None
+    weighted_gap = sum(b["n"] * abs(b["gap"]) for b in populated)
+    return round(weighted_gap / total_n, 4)
+
+
+_CAL_REG_NONE = {"calibration_intercept": None, "calibration_slope": None}
+
+# Minimum valid predictions required for calibration regression.
+MIN_CAL_REG_ROWS = 30
+
+
+def compute_calibration_regression(
+    rows: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    """Compute calibration intercept and slope via Platt scaling on the logit scale.
+
+    Fits ``logit(P(y=1|p)) = intercept + slope * logit(p_yes)`` on
+    individual predictions using ``scipy.optimize.minimize`` (Nelder-Mead).
+
+    Both parameters live on the logit scale:
+
+    - **slope = 1.0, intercept = 0.0**: perfectly calibrated
+    - **slope < 1.0**: overconfident (predictions too extreme)
+    - **slope > 1.0**: underconfident (predictions too compressed)
+    - **intercept != 0**: systematic bias on the logit scale
+
+    :param rows: list of prediction row dicts (must have p_yes, final_outcome).
+    :return: dict with ``calibration_intercept`` and ``calibration_slope``
+        (None if fewer than ``MIN_CAL_REG_ROWS`` valid rows, uniform
+        predictions, or optimization failure).
+    """
+
+    valid = [
+        r
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is not None
+        and r.get("p_yes") is not None
+    ]
+    if len(valid) < MIN_CAL_REG_ROWS:
+        return dict(_CAL_REG_NONE)
+
+    ps_list = [r["p_yes"] for r in valid]
+    ys_list = [1.0 if r["final_outcome"] else 0.0 for r in valid]
+
+    # Uniform predictions → slope is unidentifiable
+    if len(set(ps_list)) < 2:
+        return dict(_CAL_REG_NONE)
+
+    # Vectorized computation with numpy
+    eps = 1e-15
+    ps_arr = np.asarray(ps_list)
+    ys_arr = np.asarray(ys_list)
+    logit_p = np.log(np.clip(ps_arr, eps, 1 - eps) / np.clip(1 - ps_arr, eps, 1 - eps))
+
+    def _neg_log_likelihood(params: list[float]) -> float:
+        intercept, slope = params
+        z = intercept + slope * logit_p
+        # Numerically stable: -sum(y*z - log(1+exp(z)))
+        return float(np.sum(np.logaddexp(0.0, z) - ys_arr * z))
+
+    try:
+        result = minimize(  # type: ignore[call-overload]
+            _neg_log_likelihood,
+            x0=[0.0, 1.0],  # start at perfect calibration
+            method="Nelder-Mead",
+            options={"maxiter": 1000, "xatol": 1e-6, "fatol": 1e-8},
+        )
+        if not result.success:
+            return dict(_CAL_REG_NONE)
+        intercept, slope = result.x
+        return {
+            "calibration_intercept": round(float(intercept), 4),
+            "calibration_slope": round(float(slope), 4),
+        }
+    except (ValueError, RuntimeError):
+        return dict(_CAL_REG_NONE)
+
+
+def _compute_calibration_regression_from_bins(
+    bins: list[dict[str, Any]],
+    min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
+) -> dict[str, float | None]:
+    """Legacy migration fallback: calibration regression from bin averages.
+
+    Only runs for scores.json files written before ``_calibration_pairs``
+    was introduced. Once ``rebuild()`` is run, pairs are populated and
+    the row-level logistic path in ``_finalize_scores`` takes over.
+
+    :param bins: list of calibration bin dicts.
+    :param min_bin_n: minimum samples for a bin to be included.
+    :return: dict with intercept and slope (None if < 3 qualifying bins).
+    """
+    populated = [
+        b
+        for b in bins
+        if b.get("n", 0) >= min_bin_n and b.get("avg_predicted") is not None
+    ]
+    if len(populated) < 3:
+        return dict(_CAL_REG_NONE)
+
+    weights = [b["n"] for b in populated]
+    xs = [b["avg_predicted"] for b in populated]
+    ys = [b["realized_rate"] for b in populated]
+    total_w = sum(weights)
+
+    mean_x = sum(w * x for w, x in zip(weights, xs)) / total_w
+    mean_y = sum(w * y for w, y in zip(weights, ys)) / total_w
+
+    num = sum(w * (x - mean_x) * (y - mean_y) for w, x, y in zip(weights, xs, ys))
+    den = sum(w * (x - mean_x) ** 2 for w, x in zip(weights, xs))
+
+    if abs(den) < 1e-12:
+        return dict(_CAL_REG_NONE)
+
+    slope = num / den
+    intercept = mean_y - slope * mean_x
+    return {
+        "calibration_intercept": round(intercept, 4),
+        "calibration_slope": round(slope, 4),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main scoring
 # ---------------------------------------------------------------------------
@@ -456,7 +677,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Platform × difficulty cross breakdown
     pd_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        plat = row.get("platform", "unknown")
+        plat = row.get("platform") or "unknown"
         diff = classify_difficulty(row.get("market_prob_at_prediction"))
         pd_groups[f"{plat} | {diff}"].append(row)
     by_platform_difficulty = {k: compute_group_stats(g) for k, g in pd_groups.items()}
@@ -464,7 +685,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Platform × liquidity cross breakdown
     pl_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        plat = row.get("platform", "unknown")
+        plat = row.get("platform") or "unknown"
         liq = classify_liquidity(row.get("market_liquidity_at_prediction"))
         pl_groups[f"{plat} | {liq}"].append(row)
     by_platform_liquidity = {k: compute_group_stats(g) for k, g in pl_groups.items()}
@@ -484,6 +705,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Calibration — overall and per-tool
     calibration = compute_calibration(rows)
+    ece = compute_ece(calibration)
+    cal_reg = compute_calibration_regression(rows)
     calibration_by_tool = {
         tool: compute_calibration(group)
         for tool, group in group_by(rows, "tool_name").items()
@@ -519,6 +742,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "trend": trend,
         "calibration": calibration,
+        "ece": ece,
+        **cal_reg,
         "calibration_by_tool": calibration_by_tool,
         "edge_eligibility": edge_eligibility,
     }
@@ -536,8 +761,11 @@ def _empty_group() -> dict[str, Any]:
         "valid_n": 0,
         "brier_sum": 0.0,
         "correct_count": 0,
+        "n_directional": 0,
+        "no_signal_count": 0,
         "sharpness_sum": 0.0,
         "outcome_yes_count": 0,
+        "log_loss_sum": 0.0,
         "edge_sum": 0.0,
         "edge_n": 0,
         "edge_positive_count": 0,
@@ -573,6 +801,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "latency_reservoir": {},
         "worst_10": [],
         "best_10": [],
+        "calibration_pairs": [],
     }
 
 
@@ -593,8 +822,14 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
         p_yes = row["p_yes"]
         outcome = row["final_outcome"]
         group["brier_sum"] += brier_score(p_yes, outcome)
-        if (p_yes > 0.5) == outcome:
-            group["correct_count"] += 1
+        group["log_loss_sum"] += log_loss_score(p_yes, outcome)
+        # Directional accuracy — exclude p_yes == 0.5
+        if p_yes != 0.5:
+            group["n_directional"] += 1
+            if (p_yes > 0.5) == outcome:
+                group["correct_count"] += 1
+        else:
+            group["no_signal_count"] += 1
         group["sharpness_sum"] += abs(p_yes - 0.5)
         if outcome:
             group["outcome_yes_count"] += 1
@@ -623,25 +858,43 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     if n == 0:
         result.update(
             brier=None,
-            accuracy=None,
+            directional_accuracy=None,
+            no_signal_rate=None,
+            log_loss=None,
             sharpness=None,
             reliability=None,
             decision_worthy=False,
+            outcome_yes_rate=None,
+            baseline_brier=None,
+            brier_skill_score=None,
         )
     elif valid_n == 0:
         result.update(
             brier=None,
-            accuracy=None,
+            directional_accuracy=None,
+            no_signal_rate=None,
+            log_loss=None,
             sharpness=None,
             reliability=round(0.0, 4),
             decision_worthy=False,
+            outcome_yes_rate=None,
+            baseline_brier=None,
+            brier_skill_score=None,
         )
     else:
         brier = round(group["brier_sum"] / valid_n, 4)
         yes_rate = group["outcome_yes_count"] / valid_n
         baseline_brier = round(yes_rate * (1 - yes_rate), 4)
+        n_dir = group.get("n_directional", 0)
+        no_sig = group.get("no_signal_count", 0)
         result["brier"] = brier
-        result["accuracy"] = round(group["correct_count"] / valid_n, 4)
+        result["directional_accuracy"] = (
+            round(group["correct_count"] / n_dir, 4) if n_dir > 0 else None
+        )
+        result["n_directional"] = n_dir
+        result["no_signal_count"] = no_sig
+        result["no_signal_rate"] = round(no_sig / valid_n, 4)
+        result["log_loss"] = round(group["log_loss_sum"] / valid_n, 4)
         result["sharpness"] = round(group["sharpness_sum"] / valid_n, 4)
         result["reliability"] = round(valid_n / n, 4)
         result["decision_worthy"] = valid_n >= MIN_SAMPLE_SIZE
@@ -661,6 +914,7 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     else:
         result["edge"] = None
         result["edge_positive_rate"] = None
+
     return result
 
 
@@ -716,6 +970,34 @@ def _update_extreme_list(
     return entries[:WORST_BEST_SIZE]
 
 
+def _accumulate_calibration(scores: dict[str, Any], row: dict[str, Any]) -> None:
+    """Accumulate calibration bins and pairs for a valid row.
+
+    :param scores: the full scores dict with calibration accumulators.
+    :param row: a valid production log row dict.
+    """
+    p = row["p_yes"]
+    for lo, hi in CALIBRATION_BINS:
+        if lo <= p < hi:
+            label = _bin_label(lo, hi)
+            bucket = scores["calibration"][label]
+            bucket["count"] += 1
+            bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
+            bucket["predicted_sum"] += p
+            break
+    # Store (p_yes, outcome) for row-level calibration regression.
+    # Reservoir sampling: once at capacity, randomly replace entries
+    # so the sample remains representative without unbounded growth.
+    pair = [p, 1 if row["final_outcome"] else 0]
+    pairs = scores["calibration_pairs"]
+    if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+        pairs.append(pair)
+    else:
+        idx = _RESERVOIR_RNG.randint(0, scores["overall"]["valid_n"] - 1)
+        if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+            pairs[idx] = pair
+
+
 def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """Merge one row into all accumulator dimensions (mutates *scores*).
 
@@ -724,9 +1006,9 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """
     _accumulate_group(scores["overall"], row)
 
-    tool = row.get("tool_name", "unknown")
-    platform = row.get("platform", "unknown")
-    category = row.get("category", "unknown")
+    tool = row.get("tool_name") or "unknown"
+    platform = row.get("platform") or "unknown"
+    category = row.get("category") or "unknown"
     horizon = classify_horizon(row.get("prediction_lead_time_days"))
     tool_version = row.get("tool_version") or "unknown"
     config_hash = row.get("config_hash") or "unknown"
@@ -752,25 +1034,17 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
         scores["by_platform_liquidity"], f"{platform} | {liquidity}", row
     )
 
-    # Calibration buckets
+    # Calibration buckets + pairs
     is_valid = (
         row.get("prediction_parse_status") == "valid"
         and row.get("final_outcome") is not None
         and row.get("p_yes") is not None
     )
     if is_valid:
-        p = row["p_yes"]
-        for lo, hi in CALIBRATION_BINS:
-            if lo <= p < hi:
-                label = _bin_label(lo, hi)
-                bucket = scores["calibration"][label]
-                bucket["count"] += 1
-                bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
-                bucket["predicted_sum"] += p
-                break
+        _accumulate_calibration(scores, row)
 
     # Parse breakdown
-    status = row.get("prediction_parse_status", "unknown")
+    status = row.get("prediction_parse_status") or "unknown"
     if tool not in scores["parse_breakdown"]:
         scores["parse_breakdown"][tool] = {}
     tool_pb = scores["parse_breakdown"][tool]
@@ -876,6 +1150,19 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
             }
         )
     result["calibration"] = cal_result
+    result["ece"] = compute_ece(cal_result)
+
+    # Row-level logistic regression from stored pairs; bin-level fallback
+    pairs = scores.get("calibration_pairs", [])
+    if pairs:
+        # Build minimal row dicts for compute_calibration_regression
+        pair_rows = [
+            {"prediction_parse_status": "valid", "p_yes": p, "final_outcome": bool(o)}
+            for p, o in pairs
+        ]
+        result.update(compute_calibration_regression(pair_rows))
+    else:
+        result.update(_compute_calibration_regression_from_bins(cal_result))
 
     result["parse_breakdown"] = scores["parse_breakdown"]
     result["latency_reservoir"] = scores["latency_reservoir"]
@@ -932,8 +1219,8 @@ def load_history(history_path: Path) -> list[dict[str, Any]]:
 def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     """Load scores.json and reconstruct the raw accumulator state.
 
-    The saved format includes both derived fields (brier, accuracy) and
-    raw accumulators (brier_sum, correct_count). This function extracts
+    The saved format includes both derived fields (brier, directional_accuracy)
+    and raw accumulators (brier_sum, correct_count). This function extracts
     the raw accumulators into the internal format used by ``_accumulate_row``.
 
     :param scores_path: path to ``scores.json``.
@@ -954,8 +1241,11 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
             "valid_n": g["valid_n"],
             "brier_sum": g["brier_sum"],
             "correct_count": g["correct_count"],
+            "n_directional": g.get("n_directional", 0),
+            "no_signal_count": g.get("no_signal_count", 0),
             "sharpness_sum": g["sharpness_sum"],
             "outcome_yes_count": g.get("outcome_yes_count", 0),
+            "log_loss_sum": g.get("log_loss_sum", 0.0),
             "edge_sum": g.get("edge_sum", 0.0),
             "edge_n": g.get("edge_n", 0),
             "edge_positive_count": g.get("edge_positive_count", 0),
@@ -996,6 +1286,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores["latency_reservoir"] = data.get("latency_reservoir", {})
     scores["worst_10"] = data.get("worst_10", [])
     scores["best_10"] = data.get("best_10", [])
+    scores["calibration_pairs"] = data.get("_calibration_pairs", [])
 
     # Preserve legacy scored_row_ids so update() can migrate them
     # to the separate dedup file on first run after upgrade.
@@ -1100,6 +1391,7 @@ def update(
             }
     # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
+    output["_calibration_pairs"] = scores["calibration_pairs"]
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1218,11 +1510,74 @@ def rebuild(
                 **{k: group[k] for k in _ACCUM_KEYS},
             }
     output["_calibration_accum"] = scores["calibration"]
+    output["_calibration_pairs"] = scores["calibration_pairs"]
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
 
     return finalized
+
+
+# ---------------------------------------------------------------------------
+# Period scoring — score a time window of log files
+# ---------------------------------------------------------------------------
+
+
+def _extract_date_from_log_path(path: str) -> str:
+    """Extract a sortable date string from a log file path.
+
+    Handles both ``YYYY-MM-DD.jsonl`` and ``production_log_YYYY_MM_DD.jsonl``
+    naming conventions.
+
+    :param path: file path string.
+    :return: date string in ``YYYY-MM-DD`` format, or ``""`` if unparseable.
+    """
+
+    name = Path(path).stem
+    # production_log_YYYY_MM_DD → YYYY-MM-DD
+    m = re.search(r"(\d{4})[_-](\d{2})[_-](\d{2})", name)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return ""
+
+
+def score_period(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+) -> dict[str, Any]:
+    """Score rows whose ``predicted_at`` falls within the last *days* days.
+
+    Reads all log files in *logs_dir*, filters rows by timestamp, and
+    runs ``score()`` on the matching subset. This works correctly even
+    when all data lands in a single file (e.g. after a force rebuild).
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N days.
+    :return: scores dict from ``score()``, or empty scores if no matching rows.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    # Read all log files
+    daily_pattern = str(logs_dir / "????-??-??.jsonl")
+    prod_pattern = str(logs_dir / "production_log_*.jsonl")
+    all_files = sorted(
+        set(glob_mod.glob(daily_pattern) + glob_mod.glob(prod_pattern)),
+        key=_extract_date_from_log_path,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for filepath in all_files:
+        for row in load_rows(Path(filepath)):
+            predicted_at = row.get("predicted_at") or ""
+            if predicted_at >= cutoff:
+                rows.append(row)
+
+    if not rows:
+        return score([])
+
+    return score(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1264,7 +1619,24 @@ def main() -> None:
         default=DEFAULT_HISTORY,
         help="Path to scores_history.jsonl",
     )
+    parser.add_argument(
+        "--period-days",
+        type=int,
+        default=None,
+        help="Score only the last N daily log files (for period reports)",
+    )
     args = parser.parse_args()
+
+    if args.period_days is not None:
+        result = score_period(logs_dir=args.logs_dir, days=args.period_days)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2))
+        overall = result["overall"]
+        print(
+            f"Period ({args.period_days}d): Brier={overall['brier']},"
+            f" n={overall['n']}"
+        )
+        return
 
     if args.rebuild:
         print(f"Rebuilding scores from {args.logs_dir}")
@@ -1276,7 +1648,7 @@ def main() -> None:
         print(f"Scores written to {args.output}")
         overall = result["overall"]
         print(
-            f"Overall: Brier={overall['brier']}, Accuracy={overall['accuracy']},"
+            f"Overall: Brier={overall['brier']}, DirAcc={overall.get('directional_accuracy')},"
             f" n={overall['n']}"
         )
         return
@@ -1294,7 +1666,7 @@ def main() -> None:
     # Print summary
     overall = result["overall"]
     print(
-        f"\nOverall: Brier={overall['brier']}, Accuracy={overall['accuracy']},"
+        f"\nOverall: Brier={overall['brier']}, DirAcc={overall.get('directional_accuracy')},"
         f" Sharpness={overall['sharpness']}, Reliability={overall['reliability']},"
         f" n={overall['n']}"
     )
@@ -1314,7 +1686,7 @@ def main() -> None:
             flags.append(f"LOW-SAMPLE<{MIN_SAMPLE_SIZE}")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
         print(
-            f"  {tool}: Brier={stats['brier']}, Acc={stats['accuracy']}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}"
+            f"  {tool}: Brier={stats['brier']}, DirAcc={stats.get('directional_accuracy')}, Sharp={stats['sharpness']}, n={stats['n']}{suffix}"
         )
 
     print("\nBy platform:")

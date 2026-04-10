@@ -66,7 +66,8 @@ def compare_stats(
     """Compare two compute_group_stats dicts."""
     metrics = {
         "brier": {"lower_is_better": True},
-        "accuracy": {"lower_is_better": False},
+        "log_loss": {"lower_is_better": True},
+        "directional_accuracy": {"lower_is_better": False},
         "sharpness": {"lower_is_better": False},
         "reliability": {"lower_is_better": False},
     }
@@ -105,7 +106,8 @@ def compare_dimension(
 
     empty_stats: dict[str, Any] = {
         "brier": None,
-        "accuracy": None,
+        "log_loss": None,
+        "directional_accuracy": None,
         "sharpness": None,
         "reliability": None,
         "n": 0,
@@ -158,19 +160,32 @@ def compare(
 def _table_row(name: str, stats: dict[str, Any]) -> str:
     """Format one row of a comparison table."""
     b = stats["brier"]
-    a = stats["accuracy"]
-    # Show Brier direction + accuracy direction when they disagree
-    if b["direction"] == a["direction"] or a["direction"] == "unchanged":
-        direction = b["direction"]
-    elif b["direction"] == "unchanged":
-        direction = a["direction"]
+    a = stats["directional_accuracy"]
+    ll = stats.get("log_loss") or {}
+    # Combine Brier, log loss, and accuracy directions
+    dirs = {
+        "B": b["direction"],
+        "LL": ll.get("direction", "unchanged") if ll else "unchanged",
+        "A": a["direction"],
+    }
+    non_unchanged = {k: v for k, v in dirs.items() if v not in ("unchanged", "—")}
+    if not non_unchanged:
+        direction = "unchanged"
+    elif len(set(non_unchanged.values())) == 1:
+        direction = next(iter(non_unchanged.values()))
     else:
-        direction = f"{b['direction'][:3]}B/{a['direction'][:3]}A"
+        direction = "/".join(f"{v[:3]}{k}" for k, v in non_unchanged.items())
+    ll_b = _fmt(ll.get("baseline")) if ll else "—"
+    ll_c = _fmt(ll.get("candidate")) if ll else "—"
+    ll_d = _fmt_delta(ll.get("delta")) if ll else "—"
     return (
         f"| {name:<35} "
         f"| {_fmt(b['baseline']):>8} "
         f"| {_fmt(b['candidate']):>8} "
         f"| {_fmt_delta(b['delta']):>8} "
+        f"| {ll_b:>8} "
+        f"| {ll_c:>8} "
+        f"| {ll_d:>8} "
         f"| {_fmt(a['baseline']):>8} "
         f"| {_fmt(a['candidate']):>8} "
         f"| {_fmt_delta(a['delta']):>8} "
@@ -189,15 +204,18 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         f"| {'B.Brier':>8} "
         f"| {'C.Brier':>8} "
         f"| {'Delta':>8} "
-        f"| {'B.Acc':>8} "
-        f"| {'C.Acc':>8} "
+        f"| {'B.LL':>8} "
+        f"| {'C.LL':>8} "
+        f"| {'Delta':>8} "
+        f"| {'B.DAcc':>8} "
+        f"| {'C.DAcc':>8} "
         f"| {'Delta':>8} "
         f"| {'B.N':>5} "
         f"| {'C.N':>5} "
         f"| {'Direction':<10} |"
     )
     separator = (
-        "|" + "|".join(["-" * 36] + ["-" * 9] * 6 + ["-" * 6] * 2 + ["-" * 11]) + "|"
+        "|" + "|".join(["-" * 36] + ["-" * 9] * 9 + ["-" * 6] * 2 + ["-" * 11]) + "|"
     )
 
     # Overall

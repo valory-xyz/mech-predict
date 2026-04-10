@@ -20,7 +20,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -28,19 +28,26 @@ from unittest.mock import patch
 from benchmark.scorer import (
     LATENCY_RESERVOIR_SIZE,
     WORST_BEST_SIZE,
+    _accumulate_group,
+    _derive_group,
+    _empty_group,
     _is_edge_eligible,
     brier_score,
     classify_difficulty,
     classify_horizon,
     classify_liquidity,
+    compute_calibration_regression,
+    compute_ece,
     compute_group_stats,
     edge_score,
     group_by,
     group_by_horizon,
     group_by_month,
     load_history,
+    log_loss_score,
     rebuild,
     score,
+    score_period,
     update,
 )
 
@@ -435,7 +442,10 @@ class TestIncrementalUpdate:
         full_result = score(all_rows)
 
         assert inc_result["overall"]["brier"] == full_result["overall"]["brier"]
-        assert inc_result["overall"]["accuracy"] == full_result["overall"]["accuracy"]
+        assert (
+            inc_result["overall"]["directional_accuracy"]
+            == full_result["overall"]["directional_accuracy"]
+        )
         assert inc_result["overall"]["n"] == full_result["overall"]["n"]
 
     def test_by_tool_accumulated(self, tmp_path: Path) -> None:
@@ -1024,7 +1034,9 @@ class TestEdgeInGroupStats:
         stats_without = compute_group_stats(rows_without)
         stats_with = compute_group_stats(rows_with)
         assert stats_without["brier"] == stats_with["brier"]
-        assert stats_without["accuracy"] == stats_with["accuracy"]
+        assert (
+            stats_without["directional_accuracy"] == stats_with["directional_accuracy"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1075,7 +1087,7 @@ class TestEdgeIncremental:
                 "sharpness_sum": 1.5,
                 "outcome_yes_count": 5,
                 "brier": 0.22,
-                "accuracy": 0.67,
+                "directional_accuracy": 0.67,
                 "sharpness": 0.17,
                 "reliability": 0.9,
                 "decision_worthy": False,
@@ -1391,3 +1403,332 @@ class TestUpdateDedup:
         # The dedup file should now contain the migrated ID
         dedup_ids = json.loads(dedup_path.read_text())
         assert "legacy1" in dedup_ids
+
+
+# ---------------------------------------------------------------------------
+# Directional accuracy and no-signal rate
+# ---------------------------------------------------------------------------
+
+
+class TestDirectionalAccuracy:
+    """Tests for directional_accuracy and no_signal_rate."""
+
+    def test_excludes_half_predictions(self) -> None:
+        """p_yes=0.5 rows excluded from directional accuracy, counted as no-signal."""
+        rows = [
+            _row(p_yes=0.5, outcome=True),
+            _row(p_yes=0.5, outcome=False),
+            _row(p_yes=0.8, outcome=True),
+        ]
+        stats = compute_group_stats(rows)
+        assert stats["directional_accuracy"] == 1.0
+        assert stats["n_directional"] == 1
+        assert stats["no_signal_count"] == 2
+        assert stats["no_signal_rate"] == round(2 / 3, 4)
+
+    def test_all_half_returns_none(self) -> None:
+        """All predictions at 0.5 gives directional_accuracy=None."""
+        rows = [_row(p_yes=0.5, outcome=True), _row(p_yes=0.5, outcome=False)]
+        stats = compute_group_stats(rows)
+        assert stats["directional_accuracy"] is None
+        assert stats["n_directional"] == 0
+        assert stats["no_signal_rate"] == 1.0
+
+    def test_no_half_predictions(self) -> None:
+        """No 0.5 predictions gives no_signal_rate=0."""
+        rows = [
+            _row(p_yes=0.7, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+        ]
+        stats = compute_group_stats(rows)
+        assert stats["no_signal_rate"] == 0.0
+        assert stats["no_signal_count"] == 0
+        assert stats["n_directional"] == 2
+
+    def test_batch_incremental_parity(self, tmp_path: Path) -> None:
+        """Batch and incremental paths produce the same directional_accuracy."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.5, outcome=True),
+            _row(p_yes=0.5, outcome=False),
+            _row(p_yes=0.8, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+            _row(p_yes=0.6, outcome=True),
+        ]
+        batch = compute_group_stats(rows)
+        inc = update(rows, scores_path, history_path)
+        assert inc["overall"]["directional_accuracy"] == batch["directional_accuracy"]
+        assert inc["overall"]["no_signal_rate"] == batch["no_signal_rate"]
+        assert inc["overall"]["n_directional"] == batch["n_directional"]
+
+
+# ---------------------------------------------------------------------------
+# Log loss
+# ---------------------------------------------------------------------------
+
+
+class TestLogLoss:
+    """Tests for log_loss_score."""
+
+    def test_confident_correct(self) -> None:
+        """p_yes=0.9, outcome=True → -log(0.9) ≈ 0.1054."""
+        result = log_loss_score(0.9, True)
+        assert abs(result - 0.10536) < 0.001
+
+    def test_confident_wrong(self) -> None:
+        """p_yes=0.9, outcome=False → -log(0.1) ≈ 2.3026."""
+        result = log_loss_score(0.9, False)
+        assert abs(result - 2.3026) < 0.001
+
+    def test_coin_flip(self) -> None:
+        """p_yes=0.5 → -log(0.5) ≈ 0.6931."""
+        result = log_loss_score(0.5, True)
+        assert abs(result - 0.6931) < 0.001
+
+    def test_extreme_clamped(self) -> None:
+        """p_yes=0.0 does not crash (clamped)."""
+        result = log_loss_score(0.0, True)
+        assert result > 30  # -log(1e-15) ≈ 34.5
+
+    def test_in_batch_output(self) -> None:
+        """log_loss appears in compute_group_stats output."""
+        rows = [_row(p_yes=0.9, outcome=True), _row(p_yes=0.3, outcome=False)]
+        stats = compute_group_stats(rows)
+        assert stats["log_loss"] is not None
+        assert stats["log_loss"] > 0
+
+    def test_batch_incremental_parity(self, tmp_path: Path) -> None:
+        """Log loss matches between batch and incremental."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(p_yes=0.9, outcome=True),
+            _row(p_yes=0.3, outcome=False),
+            _row(p_yes=0.6, outcome=True),
+        ]
+        batch = compute_group_stats(rows)
+        inc = update(rows, scores_path, history_path)
+        assert inc["overall"]["log_loss"] == batch["log_loss"]
+
+
+# ---------------------------------------------------------------------------
+# ECE
+# ---------------------------------------------------------------------------
+
+
+class TestECE:
+    """Tests for compute_ece."""
+
+    def test_hand_calculated(self) -> None:
+        """Hand-calculated ECE: 3 bins."""
+        bins = [
+            {"n": 50, "gap": 0.05},
+            {"n": 30, "gap": 0.10},
+            {"n": 20, "gap": 0.02},
+        ]
+        # ECE = (50*0.05 + 30*0.10 + 20*0.02) / 100 = 5.9/100 = 0.059
+        ece = compute_ece(bins)
+        assert ece == 0.059
+
+    def test_perfect_calibration(self) -> None:
+        """All gaps = 0 gives ECE = 0."""
+        bins = [{"n": 25, "gap": 0.0}, {"n": 30, "gap": 0.0}]
+        assert compute_ece(bins) == 0.0
+
+    def test_empty_bins(self) -> None:
+        """No populated bins gives None."""
+        assert compute_ece([]) is None
+        assert compute_ece([{"n": 0, "gap": 0.1}]) is None
+
+    def test_small_bins_excluded(self) -> None:
+        """Bins with < MIN_CALIBRATION_BIN_SIZE are excluded."""
+        bins = [{"n": 5, "gap": 0.5}, {"n": 50, "gap": 0.1}]
+        # Only the n=50 bin qualifies → ECE = 0.1
+        assert compute_ece(bins) == 0.1
+
+    def test_all_bins_below_min(self) -> None:
+        """All bins below min size returns None."""
+        bins = [{"n": 10, "gap": 0.1}, {"n": 15, "gap": 0.2}]
+        assert compute_ece(bins) is None
+
+    def test_negative_gap_absolute(self) -> None:
+        """ECE uses absolute gap."""
+        bins = [{"n": 25, "gap": -0.1}]
+        assert compute_ece(bins) == 0.1
+
+    def test_in_score_output(self) -> None:
+        """ECE appears in score() output."""
+        rows = [_row(p_yes=0.75, outcome=True) for _ in range(10)]
+        result = score(rows)
+        assert "ece" in result
+
+
+# ---------------------------------------------------------------------------
+# Calibration regression
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrationRegression:
+    """Tests for compute_calibration_regression (row-level logistic)."""
+
+    def test_well_calibrated(self) -> None:
+        """Well-calibrated predictions: slope ≈ 1.0, intercept ≈ 0.0."""
+        # 40 rows: 20 at p_yes=0.2 (4 Yes), 20 at p_yes=0.8 (16 Yes)
+        rows = (
+            [_row(p_yes=0.2, outcome=True)] * 4
+            + [_row(p_yes=0.2, outcome=False)] * 16
+            + [_row(p_yes=0.8, outcome=True)] * 16
+            + [_row(p_yes=0.8, outcome=False)] * 4
+        )
+        result = compute_calibration_regression(rows)
+        slope = result["calibration_slope"]
+        intercept = result["calibration_intercept"]
+        assert slope is not None and abs(slope - 1.0) < 0.25
+        assert intercept is not None and abs(intercept) < 0.25
+
+    def test_overconfident(self) -> None:
+        """Overconfident tool: slope < 1.0."""
+        # Tool predicts 0.9 but only 60% are Yes → overconfident
+        rows = (
+            [_row(p_yes=0.1, outcome=False)] * 12
+            + [_row(p_yes=0.1, outcome=True)] * 8
+            + [_row(p_yes=0.9, outcome=True)] * 12
+            + [_row(p_yes=0.9, outcome=False)] * 8
+        )
+        result = compute_calibration_regression(rows)
+        slope = result["calibration_slope"]
+        assert slope is not None and slope < 1.0
+
+    def test_too_few_rows(self) -> None:
+        """< MIN_CAL_REG_ROWS returns None for both."""
+        rows = [_row(p_yes=0.5, outcome=True)] * 5
+        result = compute_calibration_regression(rows)
+        assert result["calibration_intercept"] is None
+        assert result["calibration_slope"] is None
+
+    def test_in_score_output(self) -> None:
+        """Calibration regression appears in score() output."""
+        rows = [_row(p_yes=0.15, outcome=False)] * 15 + [
+            _row(p_yes=0.85, outcome=True)
+        ] * 15
+        result = score(rows)
+        assert "calibration_intercept" in result
+        assert "calibration_slope" in result
+
+
+# ---------------------------------------------------------------------------
+# _derive_group null schema parity
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveGroupSchema:
+    """Verify _derive_group produces the same keys as compute_group_stats."""
+
+    def test_empty_group_has_all_keys(self) -> None:
+        """_derive_group on empty accumulators has BSS/baseline/yes_rate."""
+        result = _derive_group(_empty_group())
+        for key in ("outcome_yes_rate", "baseline_brier", "brier_skill_score"):
+            assert key in result, f"_derive_group missing '{key}' on n==0 path"
+            assert result[key] is None
+
+    def test_schema_matches_batch(self) -> None:
+        """Keys from _derive_group match compute_group_stats for same data."""
+        rows = [_row(p_yes=0.7, outcome=True), _row(p_yes=0.3, outcome=False)]
+        batch_keys = set(compute_group_stats(rows).keys())
+        # Simulate incremental
+        group = _empty_group()
+        for r in rows:
+            _accumulate_group(group, r)
+        inc_keys = set(_derive_group(group).keys())
+        missing = batch_keys - inc_keys
+        assert not missing, f"_derive_group missing keys: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# score_period
+# ---------------------------------------------------------------------------
+
+
+class TestScorePeriod:
+    """Tests for score_period (time-based filtering)."""
+
+    def test_filters_by_predicted_at(self, tmp_path: Path) -> None:
+        """days=1 includes only rows from the last 24 hours."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+
+        now = datetime.now(timezone.utc)
+        recent_ts = (now - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_ts = (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Both rows in the same file — time filtering must work within a file
+        rows = [
+            _row(p_yes=0.7, outcome=True, predicted_at=recent_ts),
+            _row(p_yes=0.3, outcome=False, predicted_at=old_ts),
+        ]
+        log_file = logs / "production_log_2026_04_11.jsonl"
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        result = score_period(logs, days=1)
+        assert (
+            result["total_rows"] == 1
+        ), f"Expected 1 recent row, got {result['total_rows']}"
+
+    def test_days7_includes_week(self, tmp_path: Path) -> None:
+        """days=7 includes rows from the last week across multiple files."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+
+        now = datetime.now(timezone.utc)
+        timestamps = [
+            (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (now - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ]
+        for i, ts in enumerate(timestamps):
+            row = _row(p_yes=0.5 + i * 0.1, outcome=True, predicted_at=ts)
+            f = logs / f"production_log_2026_04_{10 + i:02d}.jsonl"
+            f.write_text(json.dumps(row) + "\n")
+
+        result = score_period(logs, days=7)
+        # Only the first 2 rows (2 days ago and 5 days ago) are within 7 days
+        assert result["total_rows"] == 2
+
+    def test_empty_dir(self, tmp_path: Path) -> None:
+        """Empty log directory returns zero-row scores."""
+        logs = tmp_path / "empty_logs"
+        logs.mkdir()
+        result = score_period(logs, days=7)
+        assert result["total_rows"] == 0
+        assert result["overall"]["brier"] is None
+
+
+# ---------------------------------------------------------------------------
+# Degenerate calibration regression
+# ---------------------------------------------------------------------------
+
+
+class TestCalibrationRegressionDegenerate:
+    """Tests for edge cases in compute_calibration_regression."""
+
+    def test_uniform_probability_returns_none(self) -> None:
+        """All predictions at same p_yes → slope is unidentifiable."""
+        rows = [_row(p_yes=0.5, outcome=True)] * 20 + [
+            _row(p_yes=0.5, outcome=False)
+        ] * 20
+        result = compute_calibration_regression(rows)
+        assert result["calibration_slope"] is None
+        assert result["calibration_intercept"] is None
+
+    def test_all_same_outcome_converges(self) -> None:
+        """All outcomes True — optimizer should still return or return None."""
+        rows = [_row(p_yes=0.3, outcome=True)] * 20 + [
+            _row(p_yes=0.8, outcome=True)
+        ] * 20
+        result = compute_calibration_regression(rows)
+        # May return values or None — either is acceptable, just no crash
+        assert "calibration_slope" in result
+        assert "calibration_intercept" in result

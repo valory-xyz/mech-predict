@@ -43,6 +43,19 @@ the mech is performing in production right now.
 ```bash
 python benchmark/datasets/fetch_production.py    # fetch + match + score
 python benchmark/analyze.py                       # generate report
+
+# Period scoring — analyse trends from the last N days.
+# Filters rows by predicted_at timestamp, so it works even if all data
+# is in a single log file. Useful for spotting recent regressions or
+# checking if a prompt change improved scores over the last week.
+python -m benchmark.scorer --period-days 1 --logs-dir benchmark/datasets/logs/ --output results/last_day.json
+python -m benchmark.scorer --period-days 7 --logs-dir benchmark/datasets/logs/ --output results/last_week.json
+python -m benchmark.scorer --period-days 30 --logs-dir benchmark/datasets/logs/ --output results/last_month.json
+
+# Pass period scores to analyze for delta-vs-alltime reporting.
+# The report will lead with "Since Last Report" and "Last 7 Days Rolling"
+# sections showing how recent performance compares to all-time.
+python -m benchmark.analyze --period results/last_day.json --rolling results/last_week.json
 ```
 
 ### 2. Cached replay (local dev — sweep.py)
@@ -275,15 +288,41 @@ outcome = 1.0 if Yes, 0.0 if No
 Reliability = valid_outputs / attempted_runs
 ```
 
-A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Tools below 80% reliability are flagged with a warning in the report. Exclusion from ranking is not currently enforced — it is planned as part of the staged pipeline gates.
+A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Gate threshold: < 80% flags the tool as unreliable in the report. Exclusion from comparative ranking is planned but not yet enforced — unreliable tools currently appear in rankings with a warning flag.
 
-**Accuracy** — directional correctness. Predictions at exactly 0.5 count as incorrect (no directional signal).
+**Directional Accuracy** — directional correctness, excluding predictions at exactly 0.5 (no signal).
 
 ```
-correct_i = 1  if (p_yes > 0.5) == outcome
-            0  otherwise
-Accuracy  = sum(correct_i) / n_valid
+For rows where p_yes ≠ 0.5:
+    correct_i = 1  if (p_yes > 0.5) == outcome
+                0  otherwise
+Directional Accuracy = sum(correct_i) / n_directional
 ```
+
+If all predictions are 0.5, directional accuracy is `None` (undefined).
+
+**No-signal rate** — fraction of predictions at exactly 0.5 ("I don't know").
+
+```
+No-signal rate = count(p_yes == 0.5) / n_valid
+```
+
+**Log Loss** — like Brier but with logarithmic penalty. Punishes confidently wrong predictions much harder.
+
+```
+Per prediction:
+    If outcome is Yes:   loss = -log(p_yes)
+    If outcome is No:    loss = -log(1 - p_yes)
+Log Loss = mean(loss_i)
+```
+
+p_yes is clamped to [ε, 1-ε] (ε = 1e-15) to avoid log(0).
+
+| p_yes | outcome | Brier | Log loss |
+|-------|---------|-------|----------|
+| 0.9   | Yes     | 0.01  | 0.11     |
+| 0.1   | Yes     | 0.81  | 2.30     |
+| 0.01  | Yes     | 0.98  | 4.61     |
 
 **Sharpness** — how decisive the predictions are. A tool that always predicts 0.5 has zero sharpness.
 
@@ -338,6 +377,25 @@ A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (re
 
 **Note:** The current implementation uses fixed equispaced decile bins (0.0–0.1, 0.1–0.2, ... 0.9–1.0). This is provisional — binning should be monitored and adjusted over time based on sample size and bin stability. With fewer than 200 total predictions, coarser bins (e.g., 5 instead of 10) may be more appropriate to avoid empty or low-count bins.
 
+**ECE (Expected Calibration Error)** — a single scalar summarizing calibration quality:
+
+```
+ECE = sum(n_bin * |gap_bin|) / sum(n_bin)
+```
+
+ECE = 0 means perfectly calibrated. ECE = 0.10 means predictions are off by 10pp on average.
+
+**Calibration intercept and slope** — Platt scaling on the logit scale: `logit(P(y=1|p)) = intercept + slope * logit(p_yes)`.
+
+```
+slope = 1.0 → perfectly calibrated
+slope < 1.0 → overconfident (predictions too extreme)
+slope > 1.0 → underconfident (predictions too compressed toward 0.5)
+
+intercept evaluated at p_yes = 0.5 (logit midpoint)
+```
+
+Returns None if fewer than 30 valid predictions or uniform p_yes values.
 
 ### Edge over market (diagnostic — not for ranking)
 
@@ -368,9 +426,10 @@ Used in PR-comment replay comparisons. Counts predictions where the tool was con
 overconf_wrong_i = 1  if max(p_yes, 1 - p_yes) > 0.80 AND predicted direction ≠ outcome
                    0  otherwise
 Overconfident wrong count = sum(overconf_wrong_i)
+Overconfident wrong rate  = count / n
 ```
 
-These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction.
+These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction. The rate normalizes by sample size for cross-dataset comparison.
 
 ### Stratification dimensions
 

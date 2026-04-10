@@ -98,8 +98,12 @@ def _fmt_delta(
     lower_is_better: bool = True,
 ) -> str:
     """Format a delta cell with arrow indicator."""
-    if baseline_val is None or candidate_val is None or baseline_val == 0:
+    if baseline_val is None or candidate_val is None:
         return "N/A"
+    if baseline_val == 0:
+        if candidate_val == 0:
+            return "0.0%"
+        return "+∞%" if candidate_val > 0 else "-∞%"
     delta_pct = (candidate_val - baseline_val) / abs(baseline_val) * 100
     return f"{delta_pct:+.1f}%"
 

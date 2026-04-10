@@ -70,6 +70,11 @@ def compare_stats(
         "directional_accuracy": {"lower_is_better": False},
         "sharpness": {"lower_is_better": False},
         "reliability": {"lower_is_better": False},
+        # Diagnostic edge metrics
+        "conditional_accuracy_rate": {"lower_is_better": False},
+        "brier_no_trade": {"lower_is_better": True},
+        "brier_small_trade": {"lower_is_better": True},
+        "brier_large_trade": {"lower_is_better": True},
     }
 
     result: dict[str, Any] = {
@@ -87,6 +92,20 @@ def compare_stats(
             "delta": d,
             "direction": _direction(d, opts["lower_is_better"]),
         }
+
+    # Directional bias — closer to 0 is better (use abs comparison)
+    b_bias = baseline.get("directional_bias")
+    c_bias = candidate.get("directional_bias")
+    bias_delta = _delta(
+        abs(b_bias) if b_bias is not None else None,
+        abs(c_bias) if c_bias is not None else None,
+    )
+    result["directional_bias"] = {
+        "baseline": b_bias,
+        "candidate": c_bias,
+        "delta": bias_delta,
+        "direction": _direction(bias_delta, lower_is_better=True),
+    }
 
     return result
 
@@ -257,6 +276,38 @@ def format_markdown(comparison: dict[str, Any]) -> str:
         lines.append(separator)
         for cat in sorted(by_category):
             lines.append(_table_row(cat, by_category[cat]))
+        lines.append("")
+
+    # Diagnostic edge metrics summary (overall only)
+    overall = comparison.get("overall", {})
+    diag_metrics = [
+        ("Conditional Accuracy", "conditional_accuracy_rate", False),
+        ("Brier (no trade)", "brier_no_trade", True),
+        ("Brier (small trade)", "brier_small_trade", True),
+        ("Brier (large trade)", "brier_large_trade", True),
+        ("Directional Bias (|abs|)", "directional_bias", True),
+    ]
+    has_diag = any(overall.get(m) for _, m, _ in diag_metrics)
+    if has_diag:
+        lines.append("## Diagnostic Edge Metrics")
+        lines.append("")
+        lines.append(
+            "| Metric | Baseline | Candidate | Delta | Direction |"
+        )
+        lines.append(
+            "|--------|----------|-----------|-------|-----------|"
+        )
+        for label, key, lower_better in diag_metrics:
+            m = overall.get(key, {})
+            if not m:
+                continue
+            lines.append(
+                f"| {label} "
+                f"| {_fmt(m.get('baseline'))} "
+                f"| {_fmt(m.get('candidate'))} "
+                f"| {_fmt_delta(m.get('delta'))} "
+                f"| {m.get('direction', '—')} |"
+            )
         lines.append("")
 
     return "\n".join(lines)

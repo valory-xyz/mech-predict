@@ -997,6 +997,11 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores["worst_10"] = data.get("worst_10", [])
     scores["best_10"] = data.get("best_10", [])
 
+    # Preserve legacy scored_row_ids so update() can migrate them
+    # to the separate dedup file on first run after upgrade.
+    if "scored_row_ids" in data:
+        scores["scored_row_ids"] = set(data["scored_row_ids"])
+
     return scores
 
 

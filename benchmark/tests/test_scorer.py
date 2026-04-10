@@ -1363,3 +1363,31 @@ class TestUpdateDedup:
         assert (
             result["overall"]["n"] == 1
         ), f"Expected 1 (not stale-skipped), got {result['overall']['n']}"
+
+    def test_legacy_scored_row_ids_migrated_from_scores_json(
+        self, tmp_path: Path
+    ) -> None:
+        """Legacy scored_row_ids in scores.json are migrated to dedup file."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+
+        # Simulate a legacy scores.json that contains scored_row_ids
+        rows = [_row(p_yes=0.7, outcome=True, row_id="legacy1")]
+        update(rows, scores_path, history_path, dedup_path)
+
+        # Inject legacy scored_row_ids into scores.json and remove dedup file
+        data = json.loads(scores_path.read_text())
+        data["scored_row_ids"] = ["legacy1"]
+        scores_path.write_text(json.dumps(data))
+        dedup_path.unlink()
+
+        # Update with the same row — should be skipped via migration
+        result = update(rows, scores_path, history_path, dedup_path)
+        assert (
+            result["overall"]["n"] == 1
+        ), f"Expected 1 (resumed accumulators), got {result['overall']['n']}"
+
+        # The dedup file should now contain the migrated ID
+        dedup_ids = json.loads(dedup_path.read_text())
+        assert "legacy1" in dedup_ids

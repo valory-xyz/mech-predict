@@ -1,0 +1,34 @@
+name: factual_research
+author: valory
+version: 0.1.0
+type: custom
+description: "A tool that answers narrow factual questions by gathering and citing\
+  \ verifiable evidence. Produces state-of-the-world facts only \u2014 never predictions,\
+  \ probabilities, or market opinions."
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
+  factual_research.py: bafybeigllbddfemsapdc3qbk4oi2l5ic3cstegjmbbcmiz3v4uduskk24q
+  tests/__init__.py: bafybeibu5izhcixkot5uv2k6uwj736qcpvdbepyk2ardyrhhc6vmhvgwnu
+  tests/test_factual_research.py: bafybeigs2edileo2tga4ty3jhxbhaijoiiovah77d6rjpslgxkwicddcg4
+fingerprint_ignore_patterns: []
+entry_point: factual_research.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  tiktoken:
+    version: ==0.9.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==0.11.6

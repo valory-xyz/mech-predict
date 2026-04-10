@@ -336,7 +336,7 @@ def group_by(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, A
     """Group rows by a field value."""
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        groups[row.get(key, "unknown")].append(row)
+        groups[row.get(key) or "unknown"].append(row)
     return dict(groups)
 
 
@@ -369,7 +369,7 @@ def group_by_horizon(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _composite_key(row: dict[str, Any], fields: list[str]) -> str:
     """Build a composite grouping key from multiple fields."""
-    return " | ".join(str(row.get(f, "unknown")) for f in fields)
+    return " | ".join(str(row.get(f) or "unknown") for f in fields)
 
 
 def group_by_composite(
@@ -595,7 +595,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Platform × difficulty cross breakdown
     pd_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        plat = row.get("platform", "unknown")
+        plat = row.get("platform") or "unknown"
         diff = classify_difficulty(row.get("market_prob_at_prediction"))
         pd_groups[f"{plat} | {diff}"].append(row)
     by_platform_difficulty = {k: compute_group_stats(g) for k, g in pd_groups.items()}
@@ -603,7 +603,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Platform × liquidity cross breakdown
     pl_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        plat = row.get("platform", "unknown")
+        plat = row.get("platform") or "unknown"
         liq = classify_liquidity(row.get("market_liquidity_at_prediction"))
         pl_groups[f"{plat} | {liq}"].append(row)
     by_platform_liquidity = {k: compute_group_stats(g) for k, g in pl_groups.items()}
@@ -889,9 +889,9 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     """
     _accumulate_group(scores["overall"], row)
 
-    tool = row.get("tool_name", "unknown")
-    platform = row.get("platform", "unknown")
-    category = row.get("category", "unknown")
+    tool = row.get("tool_name") or "unknown"
+    platform = row.get("platform") or "unknown"
+    category = row.get("category") or "unknown"
     horizon = classify_horizon(row.get("prediction_lead_time_days"))
     tool_version = row.get("tool_version") or "unknown"
     config_hash = row.get("config_hash") or "unknown"
@@ -935,7 +935,7 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
                 break
 
     # Parse breakdown
-    status = row.get("prediction_parse_status", "unknown")
+    status = row.get("prediction_parse_status") or "unknown"
     if tool not in scores["parse_breakdown"]:
         scores["parse_breakdown"][tool] = {}
     tool_pb = scores["parse_breakdown"][tool]

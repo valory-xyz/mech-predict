@@ -275,7 +275,7 @@ outcome = 1.0 if Yes, 0.0 if No
 Reliability = valid_outputs / attempted_runs
 ```
 
-A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Gate threshold: < 80% marks the tool as unreliable and excludes it from comparative ranking.
+A row is "valid" when `prediction_parse_status == "valid"`, `final_outcome` is not null, and `p_yes` is not null. Gate threshold: < 80% flags the tool as unreliable in the report. Exclusion from comparative ranking is planned but not yet enforced — unreliable tools currently appear in rankings with a warning flag.
 
 **Directional Accuracy** — directional correctness, excluding predictions at exactly 0.5 (no signal).
 

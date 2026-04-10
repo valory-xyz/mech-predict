@@ -389,7 +389,7 @@ Metrics are not a flat list — they form a staged pipeline where earlier stages
 
 **Stage 1 — Reliability Gate:**
 - Metric: `valid_structured_outputs / attempted_runs`
-- Rule: if < 80%, tool is marked unreliable and excluded from comparative ranking
+- Rule: if < 80%, tool is flagged as unreliable in the report (exclusion from ranking is planned but not yet enforced)
 - Includes all `prediction_parse_status` values: `valid`, `invalid`, `malformed`, `timeout`, `error`
 - **Timeouts count as failures.** The benchmark runner must enforce the same `TASK_DEADLINE` (default 240s) as production. A tool that takes 10 minutes per question would time out in production, so it must time out in the benchmark too. Without matching timeouts, reliability numbers are meaningless.
 - This is computed on all attempted runs — no exclusions
@@ -433,7 +433,7 @@ These metrics are not used to rank or select tools. They diagnose whether accura
 
 | Metric | Formula | Threshold |
 |--------|---------|-----------|
-| **Reliability** | `valid_outputs / attempted_runs` | < 80% = excluded from ranking |
+| **Reliability** | `valid_outputs / attempted_runs` | < 80% = flagged as unreliable (exclusion planned, not yet enforced) |
 
 **Core diagnostic** — understand tool behavior, not for ranking:
 

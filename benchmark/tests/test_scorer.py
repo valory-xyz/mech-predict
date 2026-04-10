@@ -1567,48 +1567,48 @@ class TestECE:
 
 
 class TestCalibrationRegression:
-    """Tests for compute_calibration_regression."""
+    """Tests for compute_calibration_regression (row-level logistic)."""
 
-    def test_perfect_calibration(self) -> None:
-        """Perfect calibration: slope=1.0, intercept=0.0."""
-        bins = [
-            {"avg_predicted": 0.1, "realized_rate": 0.1, "n": 25},
-            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 25},
-            {"avg_predicted": 0.9, "realized_rate": 0.9, "n": 25},
-        ]
-        result = compute_calibration_regression(bins)
+    def test_well_calibrated(self) -> None:
+        """Well-calibrated predictions: slope ≈ 1.0, intercept ≈ 0.0."""
+        # 40 rows: 20 at p_yes=0.2 (4 Yes), 20 at p_yes=0.8 (16 Yes)
+        rows = (
+            [_row(p_yes=0.2, outcome=True)] * 4
+            + [_row(p_yes=0.2, outcome=False)] * 16
+            + [_row(p_yes=0.8, outcome=True)] * 16
+            + [_row(p_yes=0.8, outcome=False)] * 4
+        )
+        result = compute_calibration_regression(rows)
         slope = result["calibration_slope"]
         intercept = result["calibration_intercept"]
-        assert slope is not None and abs(slope - 1.0) < 0.01
-        assert intercept is not None and abs(intercept) < 0.01
+        assert slope is not None and abs(slope - 1.0) < 0.25
+        assert intercept is not None and abs(intercept) < 0.25
 
     def test_overconfident(self) -> None:
         """Overconfident tool: slope < 1.0."""
-        bins = [
-            {"avg_predicted": 0.1, "realized_rate": 0.25, "n": 25},
-            {"avg_predicted": 0.5, "realized_rate": 0.50, "n": 25},
-            {"avg_predicted": 0.9, "realized_rate": 0.75, "n": 25},
-        ]
-        result = compute_calibration_regression(bins)
+        # Tool predicts 0.9 but only 60% are Yes → overconfident
+        rows = (
+            [_row(p_yes=0.1, outcome=False)] * 12
+            + [_row(p_yes=0.1, outcome=True)] * 8
+            + [_row(p_yes=0.9, outcome=True)] * 12
+            + [_row(p_yes=0.9, outcome=False)] * 8
+        )
+        result = compute_calibration_regression(rows)
         slope = result["calibration_slope"]
         assert slope is not None and slope < 1.0
 
-    def test_fewer_than_3_bins(self) -> None:
-        """< 3 qualifying bins returns None for both."""
-        bins = [
-            {"avg_predicted": 0.5, "realized_rate": 0.5, "n": 25},
-        ]
-        result = compute_calibration_regression(bins)
+    def test_too_few_rows(self) -> None:
+        """< MIN_CAL_REG_ROWS returns None for both."""
+        rows = [_row(p_yes=0.5, outcome=True)] * 5
+        result = compute_calibration_regression(rows)
         assert result["calibration_intercept"] is None
         assert result["calibration_slope"] is None
 
     def test_in_score_output(self) -> None:
         """Calibration regression appears in score() output."""
-        rows = [
-            _row(p_yes=0.15, outcome=False),
-            _row(p_yes=0.55, outcome=True),
-            _row(p_yes=0.85, outcome=True),
-        ]
+        rows = [_row(p_yes=0.15, outcome=False)] * 15 + [
+            _row(p_yes=0.85, outcome=True)
+        ] * 15
         result = score(rows)
         assert "calibration_intercept" in result
         assert "calibration_slope" in result

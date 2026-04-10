@@ -504,16 +504,89 @@ def compute_ece(
     return round(weighted_gap / total_n, 4)
 
 
+_CAL_REG_NONE = {"calibration_intercept": None, "calibration_slope": None}
+
+# Minimum valid predictions required for calibration regression.
+MIN_CAL_REG_ROWS = 30
+
+
 def compute_calibration_regression(
+    rows: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    """Compute calibration intercept and slope via row-level logistic regression.
+
+    Fits ``logit(outcome) = intercept + slope * p_yes`` on individual
+    predictions using ``scipy.optimize.minimize``.  This is more accurate
+    than the bin-level weighted linear regression previously used, because
+    it considers every prediction individually instead of collapsing them
+    into 10 bin averages.
+
+    :param rows: list of prediction row dicts (must have p_yes, final_outcome).
+    :return: dict with ``calibration_intercept`` and ``calibration_slope``
+        (None if fewer than ``MIN_CAL_REG_ROWS`` valid rows or if
+        optimization fails).
+    """
+    from scipy.optimize import minimize
+
+    valid = [
+        r
+        for r in rows
+        if r.get("prediction_parse_status") == "valid"
+        and r.get("final_outcome") is not None
+        and r.get("p_yes") is not None
+    ]
+    if len(valid) < MIN_CAL_REG_ROWS:
+        return dict(_CAL_REG_NONE)
+
+    ps = [r["p_yes"] for r in valid]
+    ys = [1.0 if r["final_outcome"] else 0.0 for r in valid]
+
+    # Clamp predictions to avoid log(0)
+    eps = 1e-15
+
+    def _neg_log_likelihood(params: list[float]) -> float:
+        intercept, slope = params
+        total = 0.0
+        for p, y in zip(ps, ys):
+            # Transform predicted probability through logistic recalibration
+            logit_p = math.log(max(p, eps) / max(1 - p, eps))
+            z = intercept + slope * logit_p
+            # Numerically stable log-sigmoid
+            if z >= 0:
+                total -= y * z - math.log(1 + math.exp(z))
+            else:
+                total -= y * z - z - math.log(1 + math.exp(-z))
+        return total
+
+    try:
+        result = minimize(  # type: ignore[call-overload]
+            _neg_log_likelihood,
+            x0=[0.0, 1.0],  # start at perfect calibration
+            method="Nelder-Mead",
+            options={"maxiter": 1000, "xatol": 1e-6, "fatol": 1e-8},
+        )
+        if not result.success:
+            return dict(_CAL_REG_NONE)
+        intercept, slope = result.x
+        return {
+            "calibration_intercept": round(float(intercept), 4),
+            "calibration_slope": round(float(slope), 4),
+        }
+    except (ValueError, RuntimeError):
+        return dict(_CAL_REG_NONE)
+
+
+def _compute_calibration_regression_from_bins(
     bins: list[dict[str, Any]],
     min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
 ) -> dict[str, float | None]:
-    """Compute calibration intercept and slope via weighted linear regression.
+    """Fallback: calibration regression from bin averages (incremental path).
 
-    Bins with fewer than *min_bin_n* samples are excluded.
+    Used when individual rows are not available (incremental scoring
+    only has bin accumulators). Less accurate than row-level logistic
+    but still useful.
 
-    :param bins: list of calibration bin dicts with avg_predicted,
-        realized_rate, n.
+    :param bins: list of calibration bin dicts.
     :param min_bin_n: minimum samples for a bin to be included.
     :return: dict with intercept and slope (None if < 3 qualifying bins).
     """
@@ -523,7 +596,7 @@ def compute_calibration_regression(
         if b.get("n", 0) >= min_bin_n and b.get("avg_predicted") is not None
     ]
     if len(populated) < 3:
-        return {"calibration_intercept": None, "calibration_slope": None}
+        return dict(_CAL_REG_NONE)
 
     weights = [b["n"] for b in populated]
     xs = [b["avg_predicted"] for b in populated]
@@ -537,7 +610,7 @@ def compute_calibration_regression(
     den = sum(w * (x - mean_x) ** 2 for w, x in zip(weights, xs))
 
     if abs(den) < 1e-12:
-        return {"calibration_intercept": None, "calibration_slope": None}
+        return dict(_CAL_REG_NONE)
 
     slope = num / den
     intercept = mean_y - slope * mean_x
@@ -624,7 +697,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Calibration — overall and per-tool
     calibration = compute_calibration(rows)
     ece = compute_ece(calibration)
-    cal_reg = compute_calibration_regression(calibration)
+    cal_reg = compute_calibration_regression(rows)
     calibration_by_tool = {
         tool: compute_calibration(group)
         for tool, group in group_by(rows, "tool_name").items()
@@ -1042,7 +1115,7 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         )
     result["calibration"] = cal_result
     result["ece"] = compute_ece(cal_result)
-    result.update(compute_calibration_regression(cal_result))
+    result.update(_compute_calibration_regression_from_bins(cal_result))
 
     result["parse_breakdown"] = scores["parse_breakdown"]
     result["latency_reservoir"] = scores["latency_reservoir"]

@@ -72,6 +72,13 @@ def section_overall(scores: dict[str, Any]) -> str:
     bss = o.get("brier_skill_score")
     bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
     baseline_str = str(o.get("baseline_brier", "N/A"))
+    # Edge over market
+    edge = o.get("edge")
+    edge_n = o.get("edge_n", 0)
+    edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+    epr = o.get("edge_positive_rate")
+    epr_str = f"{epr:.0%}" if epr is not None else "N/A"
+
     lines = [
         "## Overall",
         "",
@@ -83,6 +90,10 @@ def section_overall(scores: dict[str, Any]) -> str:
         f"- Brier Skill Score: {bss_str}",
         "  - BSS > 0 = better than base rate, BSS = 0 = no skill,"
         " BSS < 0 = worse than base rate",
+        f"- Edge over market: {edge_str} (n={edge_n})",
+        "  - Positive = tool beats market consensus, negative = market wins",
+        f"  - Edge positive rate: {epr_str}"
+        " (fraction of questions where tool beat market)",
         f"- Accuracy: {acc_str}",
         f"- Sharpness: {sharp_str}",
         "  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
@@ -121,8 +132,11 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
         )
         bss = stats.get("brier_skill_score")
         bss_str = f", BSS: {bss:+.4f}" if bss is not None else ""
+        edge = stats.get("edge")
+        edge_n = stats.get("edge_n", 0)
+        edge_str = f", Edge: {edge:+.4f} (n={edge_n})" if edge is not None else ""
         lines.append(
-            f"{i}. **{tool}** — Brier: {brier}{bss_str}, Acc: {acc},"
+            f"{i}. **{tool}** — Brier: {brier}{bss_str}{edge_str}, Acc: {acc},"
             f" Sharp: {sharp} (n={stats['n']}){flags}"
         )
 
@@ -140,11 +154,15 @@ def section_platform(scores: dict[str, Any]) -> str:
         baseline = stats.get("baseline_brier")
         bss = stats.get("brier_skill_score")
         yes_rate = stats.get("outcome_yes_rate")
+        edge = stats.get("edge")
+        edge_n = stats.get("edge_n", 0)
         parts = [f"Brier: {stats['brier']}"]
         if baseline is not None:
             parts.append(f"baseline: {baseline}")
         if bss is not None:
             parts.append(f"BSS: {bss:+.4f}")
+        if edge is not None:
+            parts.append(f"edge: {edge:+.4f} (n={edge_n})")
         if yes_rate is not None:
             parts.append(f"yes rate: {yes_rate:.0%}")
         parts.append(f"n={stats['n']}")
@@ -344,8 +362,8 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     lines = [
         "## Tool × Platform",
         "",
-        "| Tool | Platform | Brier | BSS | Accuracy | Sharpness | n |",
-        "|------|----------|-------|-----|----------|-----------|---|",
+        "| Tool | Platform | Brier | BSS | Edge | Edge n | Accuracy | Sharpness | n |",
+        "|------|----------|-------|-----|------|--------|----------|-----------|---|",
     ]
     for key, stats in sorted(
         data.items(),
@@ -357,15 +375,115 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
         brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
         bss = stats.get("brier_skill_score")
         bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        edge = stats.get("edge")
+        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+        edge_n = stats.get("edge_n", 0)
         acc = f"{stats['accuracy']:.0%}" if stats.get("accuracy") is not None else "N/A"
         sharp = (
             f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
         )
         label = _sample_label(stats)
         lines.append(
-            f"| {tool} | {platform} | {brier} | {bss_str} | {acc}"
-            f" | {sharp} | {stats['n']}{label} |"
+            f"| {tool} | {platform} | {brier} | {bss_str} | {edge_str}"
+            f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
         )
+
+    return "\n".join(lines)
+
+
+_EDGE_SECTION_HEADER = "## Edge Over Market (System Diagnostic)"
+
+
+def section_edge_analysis(scores: dict[str, Any]) -> str:
+    """Edge-over-market analysis — per platform, difficulty, and liquidity."""
+    elig = scores.get("edge_eligibility", {})
+    n_eligible = elig.get("n_eligible", 0)
+    n_total = elig.get("n_total", 0)
+    if n_eligible == 0:
+        return (
+            f"{_EDGE_SECTION_HEADER}\n\n"
+            "No edge-eligible rows (need market_prob_at_prediction)."
+        )
+
+    pct = f" ({n_eligible / n_total:.1%} of total)" if n_total > 0 else ""
+    lines = [
+        _EDGE_SECTION_HEADER,
+        "",
+        "Edge measures whether prediction accuracy translates to trading"
+        " value — it is not a tool ranking metric.",
+        "",
+        f"Edge-eligible rows: {n_eligible} / {n_total}{pct}",
+        "",
+    ]
+
+    # Per-platform edge
+    by_plat = scores.get("by_platform", {})
+    if by_plat:
+        lines.append("### By Platform")
+        lines.append("")
+        for plat, stats in sorted(by_plat.items()):
+            edge = stats.get("edge")
+            edge_n = stats.get("edge_n", 0)
+            epr = stats.get("edge_positive_rate")
+            if edge is not None:
+                lines.append(
+                    f"- **{plat}**: edge {edge:+.4f},"
+                    f" positive rate {epr:.0%}, edge_n={edge_n}"
+                )
+        lines.append("")
+
+    # Platform × difficulty
+    pd = scores.get("by_platform_difficulty", {})
+    pd_filtered = {
+        k: v for k, v in pd.items() if v.get("edge") is not None and "unknown" not in k
+    }
+    if pd_filtered:
+        lines.append("### By Platform × Difficulty")
+        lines.append("")
+        lines.append(
+            "| Platform | Difficulty | Edge | Edge +rate | Edge n | Brier | n |"
+        )
+        lines.append(
+            "|----------|-----------|------|------------|--------|-------|---|"
+        )
+        for key, stats in sorted(pd_filtered.items()):
+            parts = key.split(" | ")
+            plat, diff = parts[0], parts[1] if len(parts) > 1 else "?"
+            edge = stats["edge"]
+            epr = stats.get("edge_positive_rate", 0)
+            brier = stats.get("brier")
+            brier_str = f"{brier:.4f}" if brier is not None else "N/A"
+            lines.append(
+                f"| {plat} | {diff} | {edge:+.4f} | {epr:.0%}"
+                f" | {stats.get('edge_n', 0)} | {brier_str} | {stats['n']} |"
+            )
+        lines.append("")
+
+    # Platform × liquidity
+    pl = scores.get("by_platform_liquidity", {})
+    pl_filtered = {
+        k: v for k, v in pl.items() if v.get("edge") is not None and "unknown" not in k
+    }
+    if pl_filtered:
+        lines.append("### By Platform × Liquidity")
+        lines.append("")
+        lines.append(
+            "| Platform | Liquidity | Edge | Edge +rate | Edge n | Brier | n |"
+        )
+        lines.append(
+            "|----------|-----------|------|------------|--------|-------|---|"
+        )
+        for key, stats in sorted(pl_filtered.items()):
+            parts = key.split(" | ")
+            plat, liq = parts[0], parts[1] if len(parts) > 1 else "?"
+            edge = stats["edge"]
+            epr = stats.get("edge_positive_rate", 0)
+            brier = stats.get("brier")
+            brier_str = f"{brier:.4f}" if brier is not None else "N/A"
+            lines.append(
+                f"| {plat} | {liq} | {edge:+.4f} | {epr:.0%}"
+                f" | {stats.get('edge_n', 0)} | {brier_str} | {stats['n']} |"
+            )
 
     return "\n".join(lines)
 
@@ -552,6 +670,7 @@ def generate_report(
         section_tool_ranking(scores),
         section_platform(scores),
         section_tool_platform(scores),
+        section_edge_analysis(scores),
         section_calibration(scores),
         section_weak_spots(scores),
         section_reliability_issues(scores),

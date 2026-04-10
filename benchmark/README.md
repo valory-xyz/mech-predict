@@ -338,6 +338,7 @@ A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (re
 
 **Note:** The current implementation uses fixed equispaced decile bins (0.0–0.1, 0.1–0.2, ... 0.9–1.0). This is provisional — binning should be monitored and adjusted over time based on sample size and bin stability. With fewer than 200 total predictions, coarser bins (e.g., 5 instead of 10) may be more appropriate to avoid empty or low-count bins.
 
+
 ### Edge over market (diagnostic — not for ranking)
 
 Edge measures whether the tool's prediction was closer to the truth than the market's price. Positive = tool beat market. This is a system diagnostic, not a ranking metric (see PROPOSAL.md for rationale).

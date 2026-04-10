@@ -559,9 +559,7 @@ def section_calibration(scores: dict[str, Any]) -> str:
                 " (overpredicts high-confidence, underpredicts low-confidence)"
             )
         elif cal_slope > CAL_SLOPE_UNDERCONFIDENT:
-            lines.append(
-                "  - Slope > 1.0 → predictions too compressed toward 0.5"
-            )
+            lines.append("  - Slope > 1.0 → predictions too compressed toward 0.5")
         # Intercept interpretation depends on slope — only meaningful
         # in isolation when slope ≈ 1.0. With slope < 1 the regression
         # line crosses the diagonal, so intercept alone is ambiguous.

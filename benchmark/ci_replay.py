@@ -77,8 +77,10 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ),
             "n_directional": n_directional,
             "overconf_wrong": overconf_wrong,
-            # Rate uses n (all valid), not n_directional — includes 0.5 rows
-            # since overconfidence is about magnitude, not direction.
+            # Denominator is n (not n_directional) to normalize against
+            # total valid sample size; p_yes==0.5 rows can never be
+            # overconfident-wrong (max(0.5,0.5)=0.5 < 0.80 threshold)
+            # so the numerator is unaffected.
             "overconf_wrong_rate": round(overconf_wrong / n, 4) if n > 0 else None,
             "n": n,
         }

@@ -32,10 +32,12 @@ RELIABILITY_ISSUE_THRESHOLD = 0.90
 SAMPLE_SIZE_WARNING = 20
 TREND_WORSENING_THRESHOLD = 0.02
 
-# Calibration interpretation thresholds
-CAL_SLOPE_OVERCONFIDENT = 0.9
-CAL_SLOPE_UNDERCONFIDENT = 1.1
-CAL_INTERCEPT_NOTABLE = 0.05
+# Calibration interpretation thresholds (logit-scale Platt scaling).
+# On the logit scale, deviations from 1.0/0.0 are larger than on the
+# probability scale. These are initial values; validate against real data.
+CAL_SLOPE_OVERCONFIDENT = 0.7
+CAL_SLOPE_UNDERCONFIDENT = 1.3
+CAL_INTERCEPT_NOTABLE = 0.3
 
 
 # ---------------------------------------------------------------------------

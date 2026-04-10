@@ -18,12 +18,14 @@ import glob as glob_mod
 import json
 import logging
 import math
+import random
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 from benchmark.io import load_jsonl as load_rows
@@ -35,6 +37,7 @@ DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
 LATENCY_RESERVOIR_SIZE = 200
+CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
 WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80
@@ -516,18 +519,22 @@ MIN_CAL_REG_ROWS = 30
 def compute_calibration_regression(
     rows: list[dict[str, Any]],
 ) -> dict[str, float | None]:
-    """Compute calibration intercept and slope via row-level logistic regression.
+    """Compute calibration intercept and slope via Platt scaling on the logit scale.
 
-    Fits ``logit(outcome) = intercept + slope * p_yes`` on individual
-    predictions using ``scipy.optimize.minimize``.  This is more accurate
-    than the bin-level weighted linear regression previously used, because
-    it considers every prediction individually instead of collapsing them
-    into 10 bin averages.
+    Fits ``logit(P(y=1|p)) = intercept + slope * logit(p_yes)`` on
+    individual predictions using ``scipy.optimize.minimize`` (Nelder-Mead).
+
+    Both parameters live on the logit scale:
+
+    - **slope = 1.0, intercept = 0.0**: perfectly calibrated
+    - **slope < 1.0**: overconfident (predictions too extreme)
+    - **slope > 1.0**: underconfident (predictions too compressed)
+    - **intercept != 0**: systematic bias on the logit scale
 
     :param rows: list of prediction row dicts (must have p_yes, final_outcome).
     :return: dict with ``calibration_intercept`` and ``calibration_slope``
-        (None if fewer than ``MIN_CAL_REG_ROWS`` valid rows or if
-        optimization fails).
+        (None if fewer than ``MIN_CAL_REG_ROWS`` valid rows, uniform
+        predictions, or optimization failure).
     """
 
     valid = [
@@ -540,29 +547,24 @@ def compute_calibration_regression(
     if len(valid) < MIN_CAL_REG_ROWS:
         return dict(_CAL_REG_NONE)
 
-    ps = [r["p_yes"] for r in valid]
-    ys = [1.0 if r["final_outcome"] else 0.0 for r in valid]
+    ps_list = [r["p_yes"] for r in valid]
+    ys_list = [1.0 if r["final_outcome"] else 0.0 for r in valid]
 
     # Uniform predictions → slope is unidentifiable
-    if len(set(ps)) < 2:
+    if len(set(ps_list)) < 2:
         return dict(_CAL_REG_NONE)
 
-    # Clamp predictions to avoid log(0)
+    # Vectorized computation with numpy
     eps = 1e-15
+    ps_arr = np.asarray(ps_list)
+    ys_arr = np.asarray(ys_list)
+    logit_p = np.log(np.clip(ps_arr, eps, 1 - eps) / np.clip(1 - ps_arr, eps, 1 - eps))
 
     def _neg_log_likelihood(params: list[float]) -> float:
         intercept, slope = params
-        total = 0.0
-        for p, y in zip(ps, ys):
-            # Transform predicted probability through logistic recalibration
-            logit_p = math.log(max(p, eps) / max(1 - p, eps))
-            z = intercept + slope * logit_p
-            # Numerically stable log-sigmoid
-            if z >= 0:
-                total -= y * z - math.log(1 + math.exp(z))
-            else:
-                total -= y * z - z - math.log(1 + math.exp(-z))
-        return total
+        z = intercept + slope * logit_p
+        # Numerically stable: -sum(y*z - log(1+exp(z)))
+        return float(np.sum(np.logaddexp(0.0, z) - ys_arr * z))
 
     try:
         result = minimize(  # type: ignore[call-overload]
@@ -586,11 +588,11 @@ def _compute_calibration_regression_from_bins(
     bins: list[dict[str, Any]],
     min_bin_n: int = MIN_CALIBRATION_BIN_SIZE,
 ) -> dict[str, float | None]:
-    """Fallback: calibration regression from bin averages (incremental path).
+    """Legacy migration fallback: calibration regression from bin averages.
 
-    Used when individual rows are not available (incremental scoring
-    only has bin accumulators). Less accurate than row-level logistic
-    but still useful.
+    Only runs for scores.json files written before ``_calibration_pairs``
+    was introduced. Once ``rebuild()`` is run, pairs are populated and
+    the row-level logistic path in ``_finalize_scores`` takes over.
 
     :param bins: list of calibration bin dicts.
     :param min_bin_n: minimum samples for a bin to be included.
@@ -1019,8 +1021,17 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
                 bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
                 bucket["predicted_sum"] += p
                 break
-        # Store (p_yes, outcome) for row-level calibration regression
-        scores["calibration_pairs"].append([p, 1 if row["final_outcome"] else 0])
+        # Store (p_yes, outcome) for row-level calibration regression.
+        # Reservoir sampling: once at capacity, randomly replace entries
+        # so the sample remains representative without unbounded growth.
+        pair = [p, 1 if row["final_outcome"] else 0]
+        pairs = scores["calibration_pairs"]
+        if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+            pairs.append(pair)
+        else:
+            idx = random.randint(0, scores["overall"]["valid_n"] - 1)
+            if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
+                pairs[idx] = pair
 
     # Parse breakdown
     status = row.get("prediction_parse_status") or "unknown"

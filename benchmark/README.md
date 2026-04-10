@@ -266,7 +266,7 @@ outcome = 1.0 if Yes, 0.0 if No
 | Value | Meaning |
 |-------|---------|
 | 0.0 | Perfect — predicted exactly the outcome |
-| 0.25 | No skill — equivalent to always predicting 0.5 |
+| yes_rate × (1 - yes_rate) | No skill — equivalent to always predicting the base rate. Only equals 0.25 when outcomes are balanced (50/50). See Baseline Brier below. |
 | 1.0 | Worst — maximally wrong on every prediction |
 
 **Reliability** — fraction of attempted runs that produced a valid, parseable prediction.
@@ -335,6 +335,9 @@ gap           = avg_predicted - realized_rate
 | Negative | Underconfident — predicts lower than reality |
 
 A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (reliability diagram) shows avg_predicted vs realized_rate; the diagonal line is perfect calibration.
+
+**Note:** The current implementation uses fixed equispaced decile bins (0.0–0.1, 0.1–0.2, ... 0.9–1.0). This is provisional — binning should be monitored and adjusted over time based on sample size and bin stability. With fewer than 200 total predictions, coarser bins (e.g., 5 instead of 10) may be more appropriate to avoid empty or low-count bins.
+
 
 ### Edge over market (diagnostic — not for ranking)
 

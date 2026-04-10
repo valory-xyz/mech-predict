@@ -541,6 +541,10 @@ def compute_calibration_regression(
     ps = [r["p_yes"] for r in valid]
     ys = [1.0 if r["final_outcome"] else 0.0 for r in valid]
 
+    # Uniform predictions → slope is unidentifiable
+    if len(set(ps)) < 2:
+        return dict(_CAL_REG_NONE)
+
     # Clamp predictions to avoid log(0)
     eps = 1e-15
 

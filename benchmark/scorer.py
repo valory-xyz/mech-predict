@@ -855,6 +855,9 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
             sharpness=None,
             reliability=None,
             decision_worthy=False,
+            outcome_yes_rate=None,
+            baseline_brier=None,
+            brier_skill_score=None,
         )
     elif valid_n == 0:
         result.update(
@@ -865,6 +868,9 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
             sharpness=None,
             reliability=round(0.0, 4),
             decision_worthy=False,
+            outcome_yes_rate=None,
+            baseline_brier=None,
+            brier_skill_score=None,
         )
     else:
         brier = round(group["brier_sum"] / valid_n, 4)

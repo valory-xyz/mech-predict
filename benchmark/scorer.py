@@ -162,9 +162,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def classify_disagreement(
-    p_yes: float, market_prob: float, outcome: bool
-) -> str:
+def classify_disagreement(p_yes: float, market_prob: float, outcome: bool) -> str:
     """Classify whether tool or market was closer to the outcome.
 
     :param p_yes: tool's predicted probability.
@@ -282,7 +280,11 @@ def _compute_edge_diagnostics(
     # Diagnostic edge metrics
     tool_wins = 0
     disagree_n = 0
-    bucket_brier: dict[str, float] = {"no_trade": 0.0, "small_trade": 0.0, "large_trade": 0.0}
+    bucket_brier: dict[str, float] = {
+        "no_trade": 0.0,
+        "small_trade": 0.0,
+        "large_trade": 0.0,
+    }
     bucket_n: dict[str, int] = {"no_trade": 0, "small_trade": 0, "large_trade": 0}
     bias_sum = 0.0
     n_bias_losses = 0
@@ -1057,6 +1059,17 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         result["edge_positive_rate"] = None
 
     # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias
+    _derive_diagnostic_metrics(group, result)
+
+    return result
+
+
+def _derive_diagnostic_metrics(group: dict[str, Any], result: dict[str, Any]) -> None:
+    """Derive diagnostic edge metrics from accumulators into *result*.
+
+    :param group: accumulator dict with diagnostic keys.
+    :param result: output dict to populate (mutated in place).
+    """
     disagree_n = group.get("disagree_n", 0)
     result["disagree_n"] = disagree_n
     if disagree_n >= MIN_SAMPLE_SIZE:
@@ -1082,8 +1095,6 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         result["directional_bias"] = round(group["bias_sum"] / n_losses, 4)
     else:
         result["directional_bias"] = None
-
-    return result
 
 
 def _ensure_and_accumulate(
@@ -1419,11 +1430,16 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores
         for key in (
-            "disagree_tool_win_count", "disagree_n",
-            "brier_sum_no_trade", "n_no_trade",
-            "brier_sum_small_trade", "n_small_trade",
-            "brier_sum_large_trade", "n_large_trade",
-            "bias_sum", "n_bias_losses",
+            "disagree_tool_win_count",
+            "disagree_n",
+            "brier_sum_no_trade",
+            "n_no_trade",
+            "brier_sum_small_trade",
+            "n_small_trade",
+            "brier_sum_large_trade",
+            "n_large_trade",
+            "bias_sum",
+            "n_bias_losses",
         ):
             restored[key] = g.get(key, restored[key])
         return restored

@@ -522,26 +522,29 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
 _DIAG_SECTION_HEADER = "## Diagnostic Edge Metrics"
 
 
-def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
-    """Conditional accuracy, disagreement-stratified Brier, and directional bias."""
-    overall = scores.get("overall", {})
+def _bias_label(bias: float) -> str:
+    """Return a human-readable label for a directional bias value.
+
+    :param bias: directional bias value.
+    :return: label string.
+    """
+    if bias > 0:
+        return "overestimates"
+    if bias < 0:
+        return "underestimates"
+    return "no bias"
+
+
+def _render_conditional_accuracy(
+    overall: dict[str, Any], scores: dict[str, Any], lines: list[str]
+) -> None:
+    """Render conditional accuracy subsection.
+
+    :param overall: overall stats dict.
+    :param scores: full scores dict (for by_platform).
+    :param lines: output list to append to.
+    """
     disagree_n = overall.get("disagree_n", 0)
-    if disagree_n == 0 and overall.get("edge_n", 0) == 0:
-        return (
-            f"{_DIAG_SECTION_HEADER}\n\n"
-            "No edge-eligible rows — diagnostic metrics require "
-            "market_prob_at_prediction."
-        )
-
-    lines = [
-        _DIAG_SECTION_HEADER,
-        "",
-        "These metrics diagnose whether accuracy translates to profit and"
-        " where the system loses. They are not used for tool ranking.",
-        "",
-    ]
-
-    # --- Conditional accuracy ---
     lines.append("### Conditional Accuracy When Disagreeing")
     lines.append("")
     lines.append(
@@ -561,15 +564,20 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
             f" need {30})"
         )
 
-    by_plat = scores.get("by_platform", {})
-    for plat, stats in sorted(by_plat.items()):
+    for plat, stats in sorted(scores.get("by_platform", {}).items()):
         p_ca = stats.get("conditional_accuracy_rate")
         p_dn = stats.get("disagree_n", 0)
         if p_ca is not None:
             lines.append(f"- **{plat}**: {p_ca:.0%} tool-wins (n={p_dn})")
     lines.append("")
 
-    # --- Disagreement-stratified Brier ---
+
+def _render_disagreement_brier(overall: dict[str, Any], lines: list[str]) -> None:
+    """Render disagreement-stratified Brier subsection.
+
+    :param overall: overall stats dict.
+    :param lines: output list to append to.
+    """
     lines.append("### Disagreement-Stratified Brier")
     lines.append("")
     lines.append(
@@ -592,7 +600,16 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
             lines.append(f"- **{label}**: insufficient data (n={n})")
     lines.append("")
 
-    # --- Directional bias ---
+
+def _render_directional_bias(
+    overall: dict[str, Any], scores: dict[str, Any], lines: list[str]
+) -> None:
+    """Render directional bias subsection.
+
+    :param overall: overall stats dict.
+    :param scores: full scores dict (for by_category).
+    :param lines: output list to append to.
+    """
     lines.append("### Directional Bias (When Tool Loses)")
     lines.append("")
     lines.append(
@@ -605,36 +622,43 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
     bias = overall.get("directional_bias")
     n_losses = overall.get("n_bias_losses", 0)
     if bias is not None:
-        if bias > 0:
-            direction = "overestimates"
-        elif bias < 0:
-            direction = "underestimates"
-        else:
-            direction = "no bias"
         lines.append(
-            f"- **Overall**: {bias:+.4f} ({direction},"
-            f" n={n_losses} losses)"
+            f"- **Overall**: {bias:+.4f} ({_bias_label(bias)}," f" n={n_losses} losses)"
         )
     else:
         lines.append(
-            f"- **Overall**: insufficient data (n={n_losses} losses,"
-            f" need {30})"
+            f"- **Overall**: insufficient data (n={n_losses} losses," f" need {30})"
         )
 
-    by_cat = scores.get("by_category", {})
-    for cat, stats in sorted(by_cat.items()):
+    for cat, stats in sorted(scores.get("by_category", {}).items()):
         c_bias = stats.get("directional_bias")
         c_n = stats.get("n_bias_losses", 0)
         if c_bias is not None:
-            if c_bias > 0:
-                c_dir = "overestimates"
-            elif c_bias < 0:
-                c_dir = "underestimates"
-            else:
-                c_dir = "no bias"
-            lines.append(
-                f"- **{cat}**: {c_bias:+.4f} ({c_dir}, n={c_n})"
-            )
+            lines.append(f"- **{cat}**: {c_bias:+.4f} ({_bias_label(c_bias)}, n={c_n})")
+
+
+def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
+    """Conditional accuracy, disagreement-stratified Brier, and directional bias."""
+    overall = scores.get("overall", {})
+    disagree_n = overall.get("disagree_n", 0)
+    if disagree_n == 0 and overall.get("edge_n", 0) == 0:
+        return (
+            f"{_DIAG_SECTION_HEADER}\n\n"
+            "No edge-eligible rows — diagnostic metrics require "
+            "market_prob_at_prediction."
+        )
+
+    lines = [
+        _DIAG_SECTION_HEADER,
+        "",
+        "These metrics diagnose whether accuracy translates to profit and"
+        " where the system loses. They are not used for tool ranking.",
+        "",
+    ]
+
+    _render_conditional_accuracy(overall, scores, lines)
+    _render_disagreement_brier(overall, lines)
+    _render_directional_bias(overall, scores, lines)
 
     return "\n".join(lines)
 

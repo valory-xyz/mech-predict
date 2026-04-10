@@ -295,13 +295,9 @@ def format_markdown(comparison: dict[str, Any]) -> str:
     if has_diag:
         lines.append("## Diagnostic Edge Metrics")
         lines.append("")
-        lines.append(
-            "| Metric | Baseline | Candidate | Delta | Direction |"
-        )
-        lines.append(
-            "|--------|----------|-----------|-------|-----------|"
-        )
-        for label, key, lower_better in diag_metrics:
+        lines.append("| Metric | Baseline | Candidate | Delta | Direction |")
+        lines.append("|--------|----------|-----------|-------|-----------|")
+        for label, key, _lower_better in diag_metrics:
             m = overall.get(key, {})
             if not m:
                 continue

@@ -88,7 +88,6 @@ class TestCompareDiagnosticMetrics:
         result = compare_stats(baseline, candidate)
 
         db = result["directional_bias"]
-        # abs: 0.02 - 0.08 = -0.06
         assert db["delta"] == -0.06
         assert db["direction"] == "improved"
 
@@ -99,7 +98,6 @@ class TestCompareDiagnosticMetrics:
         result = compare_stats(baseline, candidate)
 
         db = result["directional_bias"]
-        # abs: 0.08 - 0.02 = +0.06
         assert db["delta"] == 0.06
         assert db["direction"] == "regressed"
 

@@ -26,7 +26,10 @@ from typing import Any
 from unittest.mock import patch
 
 from benchmark.scorer import (
+    DISAGREE_THRESHOLD,
+    LARGE_TRADE_THRESHOLD,
     LATENCY_RESERVOIR_SIZE,
+    MIN_SAMPLE_SIZE,
     WORST_BEST_SIZE,
     _accumulate_group,
     _derive_group,
@@ -34,11 +37,13 @@ from benchmark.scorer import (
     _is_edge_eligible,
     brier_score,
     classify_difficulty,
+    classify_disagreement,
     classify_horizon,
     classify_liquidity,
     compute_calibration_regression,
     compute_ece,
     compute_group_stats,
+    disagree_bucket,
     edge_score,
     group_by,
     group_by_horizon,
@@ -1724,3 +1729,260 @@ class TestCalibrationRegressionDegenerate:
         # May return values or None — either is acceptable, just no crash
         assert "calibration_slope" in result
         assert "calibration_intercept" in result
+
+
+# ---------------------------------------------------------------------------
+# classify_disagreement
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyDisagreement:
+    """Tests for classify_disagreement."""
+
+    def test_tool_wins(self) -> None:
+        """Tool closer to truth."""
+        # p_yes=0.8, market=0.3, outcome=True(1.0)
+        # tool_dist=0.2, market_dist=0.7
+        assert classify_disagreement(0.8, 0.3, True) == "tool_win"
+
+    def test_market_wins(self) -> None:
+        """Market closer to truth."""
+        # p_yes=0.3, market=0.8, outcome=True(1.0)
+        # tool_dist=0.7, market_dist=0.2
+        assert classify_disagreement(0.3, 0.8, True) == "market_win"
+
+    def test_tie(self) -> None:
+        """Both equidistant from truth."""
+        # p_yes=0.6, market=0.4, outcome=True(1.0)
+        # tool_dist=0.4, market_dist=0.6 — NOT a tie
+        # p_yes=0.6, market=0.4, outcome=False(0.0)
+        # tool_dist=0.6, market_dist=0.4 — NOT a tie
+        # Actual tie: p_yes=0.3, market=0.7, outcome=True(1.0)
+        # tool_dist=0.7, market_dist=0.3 — NOT a tie
+        # tie: p_yes=0.7, market=0.3, outcome=False(0.0)
+        # tool_dist=0.7, market_dist=0.3 — NOT a tie
+        # Simple tie: same prediction
+        assert classify_disagreement(0.5, 0.5, True) == "tie"
+
+    def test_symmetric_tie(self) -> None:
+        """Symmetric around outcome — both equally wrong."""
+        # outcome=True(1.0), p_yes=0.4, market=0.6
+        # tool_dist=0.6, market_dist=0.4 → market_win
+        # For a real tie: both have same distance
+        # p_yes=0.3, market_prob=0.3, outcome=True → tie (same prediction)
+        assert classify_disagreement(0.3, 0.3, True) == "tie"
+
+    def test_outcome_false(self) -> None:
+        """Outcome is False (0.0)."""
+        # p_yes=0.2, market=0.7, outcome=False(0.0)
+        # tool_dist=0.2, market_dist=0.7
+        assert classify_disagreement(0.2, 0.7, False) == "tool_win"
+
+    def test_extreme_values(self) -> None:
+        """Test with 0.0 and 1.0 predictions."""
+        assert classify_disagreement(1.0, 0.0, True) == "tool_win"
+        assert classify_disagreement(0.0, 1.0, True) == "market_win"
+        assert classify_disagreement(0.0, 1.0, False) == "tool_win"
+
+
+# ---------------------------------------------------------------------------
+# disagree_bucket
+# ---------------------------------------------------------------------------
+
+
+class TestDisagreeBucket:
+    """Tests for disagree_bucket."""
+
+    def test_no_trade_zero_disagreement(self) -> None:
+        """Identical predictions → no_trade."""
+        assert disagree_bucket(0.5, 0.5) == "no_trade"
+
+    def test_no_trade_at_threshold(self) -> None:
+        """Exactly at DISAGREE_THRESHOLD → no_trade (<=)."""
+        assert disagree_bucket(0.5, 0.5 + DISAGREE_THRESHOLD) == "no_trade"
+
+    def test_small_trade_just_above(self) -> None:
+        """Just above DISAGREE_THRESHOLD → small_trade."""
+        assert disagree_bucket(0.5, 0.5 + DISAGREE_THRESHOLD + 0.001) == "small_trade"
+
+    def test_small_trade_at_large_threshold(self) -> None:
+        """Exactly at LARGE_TRADE_THRESHOLD → small_trade (<=)."""
+        assert disagree_bucket(0.5, 0.5 + LARGE_TRADE_THRESHOLD) == "small_trade"
+
+    def test_large_trade_above(self) -> None:
+        """Above LARGE_TRADE_THRESHOLD → large_trade."""
+        assert disagree_bucket(0.5, 0.5 + LARGE_TRADE_THRESHOLD + 0.01) == "large_trade"
+
+    def test_large_trade_extreme(self) -> None:
+        """Maximum disagreement."""
+        assert disagree_bucket(0.0, 1.0) == "large_trade"
+
+    def test_sign_doesnt_matter(self) -> None:
+        """Negative disagreement (tool < market) uses absolute value."""
+        assert disagree_bucket(0.3, 0.5) == "large_trade"  # |0.3-0.5|=0.2 > 0.10
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic metrics in accumulator path
+# ---------------------------------------------------------------------------
+
+
+class TestDiagnosticAccumulators:
+    """Test that diagnostic metrics accumulate correctly and derive properly."""
+
+    def _make_edge_rows(self, n: int = 40) -> list[dict[str, Any]]:
+        """Build rows with known diagnostic metric outcomes.
+
+        Creates rows where we can hand-calculate expected values:
+        - 20 rows: p_yes=0.8, market=0.3, outcome=True → tool_win, large_trade
+          brier = (0.8 - 1.0)² = 0.04
+        - 10 rows: p_yes=0.3, market=0.8, outcome=True → market_win, large_trade
+          brier = (0.3 - 1.0)² = 0.49, bias = 0.3 - 1.0 = -0.7
+        - 10 rows: p_yes=0.52, market=0.50, outcome=True → no_trade (|d|=0.02)
+          brier = (0.52 - 1.0)² = 0.2304
+        """
+        rows = []
+        for i in range(20):
+            rows.append(
+                _row(p_yes=0.8, outcome=True, market_prob=0.3,
+                     row_id=f"diag_tw_{i}")
+            )
+        for i in range(10):
+            rows.append(
+                _row(p_yes=0.3, outcome=True, market_prob=0.8,
+                     row_id=f"diag_mw_{i}")
+            )
+        for i in range(10):
+            rows.append(
+                _row(p_yes=0.52, outcome=True, market_prob=0.50,
+                     row_id=f"diag_nt_{i}")
+            )
+        return rows
+
+    def test_accumulate_group_counts(self) -> None:
+        """Verify raw accumulator values after accumulating known rows."""
+        group = _empty_group()
+        for row in self._make_edge_rows():
+            _accumulate_group(group, row)
+
+        # 30 large_trade rows (20 tool_win + 10 market_win)
+        assert group["n_large_trade"] == 30
+        # 10 no_trade rows
+        assert group["n_no_trade"] == 10
+        assert group["n_small_trade"] == 0
+        # disagree_n = 20 tool_wins + 10 market_wins (no ties)
+        assert group["disagree_n"] == 30
+        assert group["disagree_tool_win_count"] == 20
+        # bias losses = 10 market_wins
+        assert group["n_bias_losses"] == 10
+        # bias_sum = 10 * (0.3 - 1.0) = -7.0
+        assert abs(group["bias_sum"] - (-7.0)) < 1e-9
+
+    def test_derive_conditional_accuracy(self) -> None:
+        """Conditional accuracy = tool_wins / disagree_n."""
+        group = _empty_group()
+        for row in self._make_edge_rows():
+            _accumulate_group(group, row)
+        result = _derive_group(group)
+
+        # 20 tool_wins / 30 disagree = 0.6667
+        assert result["conditional_accuracy_rate"] == round(20 / 30, 4)
+
+    def test_derive_disagreement_brier(self) -> None:
+        """Brier per bucket matches hand-calculated values."""
+        group = _empty_group()
+        for row in self._make_edge_rows():
+            _accumulate_group(group, row)
+        result = _derive_group(group)
+
+        # large_trade: (20 * 0.04 + 10 * 0.49) / 30 = 5.7 / 30 = 0.19
+        assert result["brier_large_trade"] == round(
+            (20 * 0.04 + 10 * 0.49) / 30, 4
+        )
+        # no_trade: 10 * 0.2304 / 10 = 0.2304
+        # n=10 < MIN_SAMPLE_SIZE=30 → None
+        assert result["brier_no_trade"] is None
+        assert result["n_no_trade"] == 10
+
+    def test_derive_directional_bias(self) -> None:
+        """Directional bias = mean(p_yes - outcome) for losses."""
+        group = _empty_group()
+        for row in self._make_edge_rows():
+            _accumulate_group(group, row)
+        result = _derive_group(group)
+
+        # 10 losses, bias_sum = -7.0 → bias = -0.7
+        # n=10 < MIN_SAMPLE_SIZE=30 → None
+        assert result["directional_bias"] is None
+        assert result["n_bias_losses"] == 10
+
+    def test_derive_bias_with_enough_samples(self) -> None:
+        """Directional bias computed when n_bias_losses >= MIN_SAMPLE_SIZE."""
+        group = _empty_group()
+        # Need >= 30 market_win rows
+        for i in range(35):
+            row = _row(
+                p_yes=0.3, outcome=True, market_prob=0.8,
+                row_id=f"bias_{i}"
+            )
+            _accumulate_group(group, row)
+        result = _derive_group(group)
+
+        assert result["n_bias_losses"] == 35
+        expected_bias = round((0.3 - 1.0), 4)  # each row contributes -0.7
+        assert result["directional_bias"] == expected_bias
+
+    def test_no_edge_rows_all_none(self) -> None:
+        """No edge-eligible rows → all diagnostic metrics are None."""
+        group = _empty_group()
+        for i in range(50):
+            _accumulate_group(group, _row(p_yes=0.7, outcome=True))
+        result = _derive_group(group)
+
+        assert result["conditional_accuracy_rate"] is None
+        assert result["brier_no_trade"] is None
+        assert result["brier_small_trade"] is None
+        assert result["brier_large_trade"] is None
+        assert result["directional_bias"] is None
+        assert result["disagree_n"] == 0
+
+    def test_all_ties_conditional_accuracy_none(self) -> None:
+        """All ties → disagree_n=0 → conditional accuracy is None."""
+        group = _empty_group()
+        for i in range(50):
+            # Same p_yes and market_prob → tie
+            _accumulate_group(
+                group,
+                _row(p_yes=0.5, outcome=True, market_prob=0.5,
+                     row_id=f"tie_{i}")
+            )
+        result = _derive_group(group)
+
+        assert result["disagree_n"] == 0
+        assert result["conditional_accuracy_rate"] is None
+
+    def test_batch_matches_incremental(self) -> None:
+        """compute_group_stats matches _accumulate_group + _derive_group."""
+        rows = self._make_edge_rows()
+        batch = compute_group_stats(rows)
+
+        group = _empty_group()
+        for row in rows:
+            _accumulate_group(group, row)
+        incremental = _derive_group(group)
+
+        for key in (
+            "conditional_accuracy_rate",
+            "brier_large_trade",
+            "brier_small_trade",
+            "brier_no_trade",
+            "directional_bias",
+            "disagree_n",
+            "n_no_trade",
+            "n_small_trade",
+            "n_large_trade",
+            "n_bias_losses",
+        ):
+            assert batch[key] == incremental[key], (
+                f"{key}: batch={batch[key]} != incremental={incremental[key]}"
+            )

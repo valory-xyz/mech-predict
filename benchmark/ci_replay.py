@@ -194,10 +194,26 @@ def format_report(
         detail_lines = ["<details><summary>Per-platform breakdown</summary>", ""]
         for plat in all_platforms:
             b_plat = b_platforms.get(
-                plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0}
+                plat,
+                {
+                    "brier": None,
+                    "directional_accuracy": None,
+                    "n_directional": 0,
+                    "overconf_wrong": 0,
+                    "overconf_wrong_rate": None,
+                    "n": 0,
+                },
             )
             c_plat = c_platforms.get(
-                plat, {"brier": None, "accuracy": None, "overconf_wrong": 0, "n": 0}
+                plat,
+                {
+                    "brier": None,
+                    "directional_accuracy": None,
+                    "n_directional": 0,
+                    "overconf_wrong": 0,
+                    "overconf_wrong_rate": None,
+                    "n": 0,
+                },
             )
             detail_lines.append(f"### {plat.title()} (n={b_plat['n']})")
             detail_lines.append("")

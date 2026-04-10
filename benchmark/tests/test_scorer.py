@@ -1869,10 +1869,7 @@ class TestDiagnosticAccumulators:
             _accumulate_group(group, row)
         result = _derive_group(group)
 
-        # large_trade: (20 * 0.04 + 10 * 0.49) / 30 = 5.7 / 30 = 0.19
         assert result["brier_large_trade"] == round((20 * 0.04 + 10 * 0.49) / 30, 4)
-        # no_trade: 10 * 0.2304 / 10 = 0.2304
-        # n=10 < MIN_SAMPLE_SIZE=30 → None
         assert result["brier_no_trade"] is None
         assert result["n_no_trade"] == 10
 

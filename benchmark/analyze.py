@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.io import load_jsonl
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -550,7 +550,8 @@ def _render_conditional_accuracy(
     lines.append("")
     lines.append(
         "When the tool disagrees with the market enough to trigger a trade"
-        " (|p_yes - market_prob| > 0.03), is the tool or market closer to truth?"
+        f" (|p_yes - market_prob| > {DISAGREE_THRESHOLD}),"
+        " is the tool or market closer to truth?"
     )
     lines.append("")
 
@@ -593,9 +594,12 @@ def _render_disagreement_brier(overall: dict[str, Any], lines: list[str]) -> Non
     lines.append("")
 
     bucket_labels = [
-        ("no_trade", "No trade (|d| \u2264 0.03)"),
-        ("small_trade", "Small trade (0.03 < |d| \u2264 0.10)"),
-        ("large_trade", "Large trade (|d| > 0.10)"),
+        ("no_trade", f"No trade (|d| \u2264 {DISAGREE_THRESHOLD})"),
+        (
+            "small_trade",
+            f"Small trade ({DISAGREE_THRESHOLD} < |d| \u2264 {LARGE_TRADE_THRESHOLD})",
+        ),
+        ("large_trade", f"Large trade (|d| > {LARGE_TRADE_THRESHOLD})"),
     ]
     for bucket_key, label in bucket_labels:
         b = overall.get(f"brier_{bucket_key}")

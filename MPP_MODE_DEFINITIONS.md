@@ -289,7 +289,9 @@ prediction-request-reasoning,crypto,super,55.10,402,2026-01-28,2026-03-17
 superforcaster,,deep,72.58,485,2026-01-22,2026-03-17
 ```
 
-**Backward compatibility:** CSVs without a `compute_tier` column are still valid. Consumers that don't need compute_tier (polystrat, omenstrat) ignore it. The MPP server filters by it.
+**Backward compatibility:** CSVs without a `compute_tier` column are still valid. Consumers that don't need compute_tier (polystrat, omenstrat) ignore it.
+
+**MPP fallback when `compute_tier` column is missing:** If the CSV has no `compute_tier` column (legacy format), the MPP server cannot filter by mode. In this case, it falls back to the **starting defaults** for each mode (`prediction-offline` for Quick, `prediction-online` for Deep, `prediction-request-reasoning` for Super) — no weighted selection, just the single default tool per mode. This is equivalent to Scenario A (hardcoded tools) from [MPP_COST_PROPOSAL.md](./MPP_COST_PROPOSAL.md). Weighted pool selection activates only when the CSV includes `compute_tier`.
 
 ### 4.4 How Pool Membership Becomes Dynamic
 
@@ -299,7 +301,7 @@ With `compute_tier` in the CSV:
 2. **Moving a tool between pools:** Update the tool's `compute_tier` in IPFS metadata → propagates through the pipeline.
 3. **Removing a tool:** Remove from IPFS metadata or let its reliability drop below the 80% gate → benchmark excludes it → disappears from the CSV.
 
-No MPP server code change needed for any of these operations.
+**No MPP server code change needed for pool membership changes** — which tool appears in which mode's pool is driven by the CSV, not by server code. However, **runtime availability still requires the tool's Python package to be vendored** in the server's `server/packages/` directory. A tool that appears in the CSV but isn't installed on the server will fail at execution time and trigger the fallback chain (§5.5). Adding a genuinely new tool (not already vendored) requires a server dependency update + deploy.
 
 ---
 
@@ -389,9 +391,15 @@ def compute_weights(csv_rows: list, mode: str, category: str | None) -> dict[str
 ### 5.4 Weight Refresh
 
 The MPP server fetches the performance CSV from IPFS:
-- **On startup:** read `TOOLS_ACCURACY_HASH` env var, fetch CSV, cache in memory
-- **Periodically:** re-fetch every N hours (matching the benchmark pipeline's publish cadence — e.g., every 6 hours)
-- **No Redis needed for weights** — in-memory cache with periodic refresh from IPFS is sufficient
+- **On startup:** read `TOOLS_ACCURACY_HASH` env var (or Redis key), fetch CSV, cache in memory
+- **No Redis needed for weights** — in-memory cache is sufficient
+
+**Hash rotation:** IPFS hashes are content-addressed — re-fetching the same hash always returns the same content. To pick up new benchmark results, the hash must change. Two mechanisms:
+
+1. **Redis pointer (recommended):** The benchmark CI publishes a new CSV to IPFS, gets a new hash, and writes it to a Redis key (e.g., `tools_accuracy_hash:polymarket`). The MPP server polls this Redis key periodically (e.g., every 6 hours). When the hash changes, it fetches the new CSV. This requires no server restart and no env var change.
+2. **Env var + restart (simpler):** Update `TOOLS_ACCURACY_HASH` in the environment and restart the server. Simpler but requires a deploy cycle.
+
+The polystrat/omenstrat services face the same hash-rotation problem — the TOOL_SELECTION_SPEC.md notes that `tools_accuracy_hash` is "updated by operators when the oracle publishes a new snapshot." The Redis pointer approach is an improvement over manual operator updates.
 
 ### 5.5 Fallback on Tool Failure
 
@@ -404,7 +412,19 @@ If the selected tool fails at runtime (API error, timeout, invalid response):
 
 This is analogous to quarantine in the trader spec, but per-request rather than persistent — the MPP server doesn't maintain cross-request quarantine state. A tool that failed once may succeed on the next request (transient API error). Persistent quarantine can be added later if failure patterns warrant it.
 
-### 5.6 Logging Requirements
+### 5.6 Cold-Start Behavior for New Tools
+
+A new tool added to the vendored packages and declared with a `compute_tier` in IPFS metadata won't have any rows in the performance CSV until the next benchmark run scores it. Without a CSV row, it gets no weight and is never selected.
+
+**How new tools enter the pool:**
+
+1. **Benchmark-first (recommended):** Run the new tool through the benchmark pipeline before adding it to the CSV. It needs at least 30 scored predictions (the `N_MIN_CELL` threshold) to get an aggregate row. Once the next CSV is published with its scores, the weighted selection logic picks it up automatically.
+2. **Starting default override:** Temporarily set the new tool as the starting default for its mode (e.g., `SUPER_DEFAULT=new-tool-name` env var). This routes all traffic for that mode to the new tool until CSV-driven selection takes over. Use for tools we're confident in from offline evaluation.
+3. **Exploration budget (future):** Reserve a small fraction of traffic (e.g., 5%) for tools with no CSV data. Similar to the trader's epsilon-exploration but scoped to tools without scores. Not proposed for launch — adds complexity and the benchmark-first approach is sufficient.
+
+Tools without CSV rows and not set as a starting default will not receive production traffic. This is by design — untested tools should not serve real users until they have benchmark evidence.
+
+### 5.7 Logging Requirements
 
 Every prediction request must log:
 

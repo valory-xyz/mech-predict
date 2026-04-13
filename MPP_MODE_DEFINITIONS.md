@@ -1,6 +1,6 @@
 # MPP Mode Definitions — Proposal
 
-**Status:** Draft
+**Status:** Draft — key decisions locked (integration architecture, softmax temperature)
 **Date:** 2026-04-13
 **Scope:** Defines user-facing prediction modes for the Wildcard Chrome extension (MPP server), tool pool membership, and selection logic.
 
@@ -357,7 +357,9 @@ Weights are derived from Brier score (the primary ranking metric, per §2.1). Lo
 ```python
 import math
 
-# Temperature controls sharpness: lower = more aggressive winner-take-all
+# Launch default: T=0.5. Gives mild preference to best tool without
+# becoming winner-take-all. Can be lowered once benchmark estimates
+# are confirmed stable and well-sampled.
 SOFTMAX_TEMPERATURE = 0.5
 
 def compute_weights(csv_rows: list, mode: str, category: str | None) -> dict[str, float]:
@@ -469,75 +471,31 @@ This data feeds back into the benchmark pipeline (Layer 3) and is essential for 
 
 ## 6. Integration Architecture <a id="6-integration-architecture"></a>
 
-The MPP server currently calls tool `run()` functions directly — it imports them from vendored mech-predict packages. It does not use mech-interact's FSM or mech marketplace discovery. The question is: should it?
-
-### Option A: MPP Server Consumes Layer 3 Directly (No mech-interact)
+**Decision: MPP server consumes the IPFS performance CSV directly, no mech-interact dependency.**
 
 ```
 mech-predict (Layer 3)              MPP server (Wildcard)
 ┌────────────────────────┐     ┌─────────────────────────────────┐
-│ Benchmark scorer       │     │ Reads IPFS CSV (TOOLS_ACCURACY_ │
-│ → scores.json          │     │   HASH env var)                 │
-│ → per-platform CSV     │────▶│ Filters by compute_tier = mode  │
-│ → pins to IPFS         │     │ Weighted random selection       │
+│ Benchmark scorer       │     │ Reads IPFS CSV (via Redis       │
+│ → scores.json          │     │   pointer or TOOLS_ACCURACY_    │
+│ → per-platform CSV     │────▶│   HASH env var)                 │
+│ → pins to IPFS         │     │ Filters by compute_tier = mode  │
+│                        │     │ BSS + softmax weighted selection │
 │                        │     │ Calls run() directly on tool    │
 └────────────────────────┘     │ Fallback on failure             │
                                └─────────────────────────────────┘
 ```
 
-**Advantages:**
-- Simplest architecture. MPP server is already calling `run()` directly; adding CSV-based selection is a small change.
+**Why this approach:**
+- Simplest architecture. MPP server is already calling `run()` directly; adding CSV-based selection is ~100 lines of Python.
 - No dependency on mech-interact's FSM, Tendermint consensus, or mech marketplace discovery.
-- Fastest to ship. Selection logic is ~100 lines of Python in the MPP server.
-- The MPP server runs our own tools — it doesn't need to discover mechs from the open marketplace.
+- Fastest to ship. The MPP server runs our own vendored tools — it doesn't need to discover mechs from the open marketplace.
 
-**Disadvantages:**
-- MPP server maintains its own selection logic, separate from the trader's `EGreedyPolicy`. Two selection implementations to maintain.
-- If Layer 1 gates (reputation, category, capability) later become relevant for MPP, they'd need to be reimplemented.
-- No mech-level filtering — the MPP server trusts that all tools in its vendored packages are healthy. This is fine today (it runs its own tools), but doesn't scale if MPP ever routes to third-party mechs.
-
-### Option B: MPP Server Uses mech-interact for Selection
-
-```
-mech-interact (Layer 1)         MPP server (Wildcard)
-┌────────────────────┐     ┌──────────────────────────────┐
-│ Catalog gates      │     │ Calls mech-interact API:     │
-│ (category,         │────▶│   get_tools(task_type=       │
-│  reputation,       │     │     "prediction",            │
-│  capability)       │     │     compute_tier="deep")     │
-└────────────────────┘     │                              │
-                           │ Reads IPFS CSV for weights   │
-mech-predict (Layer 3)     │ Weighted random selection    │
-┌────────────────────┐     │ Calls run() on selected tool │
-│ Performance CSV    │────▶│                              │
-└────────────────────┘     └──────────────────────────────┘
-```
-
-**Advantages:**
-- Single source of truth for tool eligibility. The same gates that protect polystrat/omenstrat protect MPP.
-- If a mech goes down, the reputation gate catches it for all consumers simultaneously.
-- If MPP later routes to third-party mechs (not just our own vendored tools), the infrastructure is already there.
-- Consistency — one pipeline, multiple consumers.
-
-**Disadvantages:**
-- mech-interact is an Open Autonomy skill designed for FSM-based agents. Using it from a FastAPI server requires either: (a) extracting the gate logic into a standalone library, or (b) running mech-interact as a sidecar service. Both are non-trivial.
-- Adds operational complexity — the MPP server now depends on mech-interact's subgraph queries, IPFS fetches, and gate configuration.
-- Over-engineered for the current use case. The MPP server runs 12 known tools from 4 packages. It doesn't need marketplace discovery or mech reputation scoring.
-- Slower to ship. Requires mech-interact changes before MPP can adopt.
-
-### Recommendation
-
-**Start with Option A. Migrate to Option B if/when MPP needs to route to third-party mechs.**
-
-Option A is sufficient for the current architecture (MPP runs its own vendored tools) and can ship immediately. The selection logic is simple enough that maintaining it separately from the trader's `EGreedyPolicy` is acceptable — especially since the MPP server has a different routing dimension (`compute_tier`) that the trader doesn't use.
-
-**Practical limitations of Option A (what you give up):**
+**Known limitations (accepted trade-offs for launch):**
 - **No shared eligibility gates.** If a tool breaks on polystrat and gets quarantined there, the MPP server won't know — it has its own independent failure detection (per-request fallback only, no persistent quarantine). A tool can be disabled on polystrat but still serving MPP users.
 - **Two selection implementations to maintain.** The trader's `EGreedyPolicy` and MPP's softmax selection will diverge over time unless actively kept in sync. Bug fixes in one don't automatically propagate to the other.
-- **No mech reputation signal.** Option A trusts all vendored tools equally — there's no Wilson reliability gate or liveness check. If a tool's upstream API degrades gradually (not a hard failure, just slower/worse), Option A won't detect it until the next benchmark run updates the CSV.
+- **No mech reputation signal.** The MPP server trusts all vendored tools equally — there's no Wilson reliability gate or liveness check. If a tool's upstream API degrades gradually (not a hard failure, just slower/worse), it won't be detected until the next benchmark run updates the CSV.
 - **Adding new tools requires server deploy.** Pool membership is dynamic via CSV, but runtime availability requires vendoring the Python package. This is a deploy cycle, not a config change.
 
-These are acceptable trade-offs for launch given the controlled environment (12 known tools, 4 packages, single operator). They become problems if MPP scales to third-party tools or multi-operator setups.
-
-The migration path to Option B is clean: extract mech-interact's gate logic into a standalone library that both the FSM skill and the MPP server can import. This refactor is worth doing when mech-interact's gates are production-ready (currently proposed, not merged).
+These are acceptable given the controlled environment (12 known tools, 4 packages, single operator). If MPP later needs to route to third-party mechs, the migration path is to extract mech-interact's gate logic into a standalone library that both the FSM skill and the MPP server can import.
 

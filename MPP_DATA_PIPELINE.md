@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Date:** 2026-04-13
-**Urgency:** Chrome store submission is imminent. Extension-side changes (new request fields) must be agreed before submission. Server-side storage can follow, but the extension API contract is harder to change after launch.
+**Urgency: BLOCKER.** The extension must include `market_url`, `condition_id`, and `market_prob_at_prediction` in the request body before Chrome store submission. These fields are required for downstream evaluation and calibration. Changing the request schema after Chrome store launch requires a new review cycle. This is agreed as a near-term blocker.
 **Companion docs:** [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md), [MPP_COST_PROPOSAL.md](./MPP_COST_PROPOSAL.md)
 
 ---

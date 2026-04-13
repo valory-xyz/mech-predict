@@ -5,6 +5,22 @@
 
 ---
 
+## Action Required
+
+**BLOCKER — Wildcard team, before Chrome store submission:**
+- Add 3 fields to the prediction request body: `market_url`, `condition_id`, `market_prob_at_prediction`. The extension already computes all three — it's ~5 lines on each side. **If the extension ships without these, adding them later requires a Chrome store review cycle (days to weeks).** See [details below](#urgent-what-the-wildcard-team-needs-to-do-before-chrome-store-submission).
+
+**IMMEDIATE — Wildcard team:**
+- Reprice Quick from $0.001 → $0.01 and Deep from $0.01 → $0.03. Both modes are currently priced below API cost. See [Phase 1 pricing](#phase-1-keep-current-hardcoded-prices-fix-the-losses-now).
+- Enable Redis AOF persistence (`--appendonly yes` + volume mount). One-line Docker config change. Currently every prediction vanishes after 1 hour with no backup.
+
+**NEXT — mech-predict team:**
+- Publish `compute_tier` column in IPFS performance CSV (Layer 3 work)
+- Implement BSS + softmax selection logic in MPP server (~100 lines Python)
+- Add JSONL append log for persistent prediction storage
+
+---
+
 ## What We're Proposing
 
 Three user-facing prediction modes (quick / deep / super), defined by compute intensity, with dynamic tool selection behind each mode driven by benchmark performance data.
@@ -137,4 +153,3 @@ Both coexist: JSONL for benchmark pipeline ingestion, PostgreSQL for querying an
 | Extension fields | BLOCKER — must ship before Chrome store submission |
 | Storage (immediate) | Redis AOF + longer TTL |
 | Storage (end goal) | JSONL + PostgreSQL |
-| User-level tracking | Not in scope |

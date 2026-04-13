@@ -339,12 +339,16 @@ def _apply_resolution(
     resolved_at = resolution["resolved_at"]
     if predicted_at and resolved_at:
         try:
-            pred_dt = datetime.fromisoformat(predicted_at)
-            res_dt = datetime.fromisoformat(resolved_at)
+            pred_dt = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
+            res_dt = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
             lead_days = (res_dt - pred_dt).total_seconds() / 86400
             scored_row["prediction_lead_time_days"] = round(lead_days, 1)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as exc:
+            log.warning(
+                "Failed to compute lead time for row_id=%s: %s",
+                row.get("row_id"),
+                exc,
+            )
 
     scored_row.pop("source_content", None)
     return scored_row

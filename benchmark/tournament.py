@@ -318,7 +318,13 @@ def run_tournament(
     """Run all tool x market combos and append predictions."""
     markets = load_markets(markets_path)
     if max_markets is not None:
-        markets = markets[:max_markets]
+        by_platform: dict[str, list[dict[str, Any]]] = {}
+        for m in markets:
+            by_platform.setdefault(m.get("platform", "unknown"), []).append(m)
+        markets = []
+        for plat_markets in by_platform.values():
+            plat_markets.sort(key=lambda m: m.get("fetched_at", ""), reverse=True)
+            markets.extend(plat_markets[:max_markets])
 
     log.info(
         "Tournament: %d markets x %d tools = %d combos",

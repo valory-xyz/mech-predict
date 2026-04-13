@@ -166,13 +166,13 @@ jobs:
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform omen \
-            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
+            --max-markets "${{ github.event.inputs.max_markets || '20' }}"
 
       - name: Fetch Polymarket open markets
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform polymarket \
-            --max-markets "${{ github.event.inputs.max_markets || '10' }}" \
+            --max-markets "${{ github.event.inputs.max_markets || '20' }}" \
             --min-liquidity 1000
 
       - name: Upload tournament markets
@@ -248,8 +248,8 @@ jobs:
         run: |
           uv run python -m benchmark.tournament \
             --markets benchmark/datasets/open_markets.jsonl \
-            --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme' }}" \
-            --max-markets "${{ github.event.inputs.max_markets || '10' }}"
+            --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research' }}" \
+            --max-markets "${{ github.event.inputs.max_markets || '20' }}"
 
       - name: Score resolved predictions
         run: uv run python -m benchmark.score_tournament

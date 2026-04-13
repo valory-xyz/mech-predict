@@ -9,7 +9,7 @@ score_tournament.py when they resolve.
 Usage:
     python benchmark/tournament.py --markets benchmark/datasets/open_markets.jsonl
     python benchmark/tournament.py --markets open_markets.jsonl --tools prediction-online,superforcaster
-    python benchmark/tournament.py --markets open_markets.jsonl --max-markets 10
+    python benchmark/tournament.py --markets open_markets.jsonl --max-markets 10  # 10 per platform
 """
 
 from __future__ import annotations
@@ -447,7 +447,7 @@ def main() -> None:
         "--max-markets",
         type=int,
         default=None,
-        help="Max markets to process (default: all)",
+        help="Max markets per platform to process (default: all)",
     )
     parser.add_argument(
         "--timeout",

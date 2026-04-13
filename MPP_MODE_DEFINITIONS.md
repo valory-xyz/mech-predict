@@ -531,5 +531,13 @@ mech-predict (Layer 3)     │ Weighted random selection    │
 
 Option A is sufficient for the current architecture (MPP runs its own vendored tools) and can ship immediately. The selection logic is simple enough that maintaining it separately from the trader's `EGreedyPolicy` is acceptable — especially since the MPP server has a different routing dimension (`compute_tier`) that the trader doesn't use.
 
-The migration path to Option B is clean: extract mech-interact's gate logic into a reusable library that both the FSM skill and the MPP server can import. This refactor is worth doing when mech-interact's gates are production-ready (currently proposed, not merged).
+**Practical limitations of Option A (what you give up):**
+- **No shared eligibility gates.** If a tool breaks on polystrat and gets quarantined there, the MPP server won't know — it has its own independent failure detection (per-request fallback only, no persistent quarantine). A tool can be disabled on polystrat but still serving MPP users.
+- **Two selection implementations to maintain.** The trader's `EGreedyPolicy` and MPP's softmax selection will diverge over time unless actively kept in sync. Bug fixes in one don't automatically propagate to the other.
+- **No mech reputation signal.** Option A trusts all vendored tools equally — there's no Wilson reliability gate or liveness check. If a tool's upstream API degrades gradually (not a hard failure, just slower/worse), Option A won't detect it until the next benchmark run updates the CSV.
+- **Adding new tools requires server deploy.** Pool membership is dynamic via CSV, but runtime availability requires vendoring the Python package. This is a deploy cycle, not a config change.
+
+These are acceptable trade-offs for launch given the controlled environment (12 known tools, 4 packages, single operator). They become problems if MPP scales to third-party tools or multi-operator setups.
+
+The migration path to Option B is clean: extract mech-interact's gate logic into a standalone library that both the FSM skill and the MPP server can import. This refactor is worth doing when mech-interact's gates are production-ready (currently proposed, not merged).
 

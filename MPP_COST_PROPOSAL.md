@@ -353,4 +353,8 @@ Wildcard adopts pool-based weighted selection. Any tool in a mode's pool may be 
 
 **Scenario A** reveals that Quick and Deep are underpriced and must be raised. Super's break-even floor is $0.02, but its current price ($0.05) is profitable — lowering it is a separate policy choice, not a cost requirement.
 
-**Scenario B** costs more across the board because the pool includes Claude Sonnet variants, which are ~1.5-2x more expensive than GPT-4.1 for the same task. The tradeoff: Claude variants have the best benchmark performance (`prediction-request-reasoning-claude` has the best Brier score of any tool at 0.2058).
+**Scenario B is a real pricing tradeoff, not just added flexibility.** The pool includes Claude Sonnet variants, which are ~1.5-2x more expensive than GPT-4.1 for the same task. The best-performing tool (`prediction-request-reasoning-claude`, Brier 0.2058) is also the most expensive ($0.074/call). Dynamic pools mean either:
+- **Higher user prices** (as proposed: $0.015 / $0.04 / $0.08) to cover worst-case tool costs, or
+- **An intentional subsidy** where we absorb the cost difference when expensive tools are selected, pricing at the weighted average instead of the max.
+
+The break-even prices above assume no subsidy — every possible tool selection must be cost-covered. If Valory is willing to subsidize Claude routing to drive better predictions, the prices can be lower but the expected loss per Claude selection should be quantified and budgeted.

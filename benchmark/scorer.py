@@ -21,7 +21,7 @@ import math
 import random
 import re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1738,32 +1738,38 @@ def score_period(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
 ) -> dict[str, Any]:
-    """Score a recent subset of daily log files.
+    """Score rows whose ``predicted_at`` falls within the last *days* days.
 
-    Finds the most recent *days* log files in *logs_dir* and runs the
-    batch ``score()`` on their combined rows. Used for "since last report"
-    (days=1) and "rolling 7-day" (days=7) sections.
+    Reads all log files in *logs_dir*, filters rows by timestamp, and
+    runs ``score()`` on the matching subset.  This works correctly even
+    when all data lands in a single file (e.g. after a force rebuild),
+    when multiple files cover the same date, or when days are missing.
 
     Handles both ``YYYY-MM-DD.jsonl`` and ``production_log_YYYY_MM_DD.jsonl``
     naming conventions (the flywheel uses the latter).
 
     :param logs_dir: directory containing daily log files.
-    :param days: how many of the most recent files to include.
-    :return: scores dict from ``score()``, or empty scores if no files.
+    :param days: score rows from the last N calendar days.
+    :return: scores dict from ``score()``, or empty scores if no matching rows.
     """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
     # Both naming conventions: YYYY-MM-DD.jsonl and production_log_YYYY_MM_DD.jsonl
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
-    # Merge, deduplicate, sort by extracted date (not lexicographic filename)
     all_files = sorted(
         set(glob_mod.glob(daily_pattern) + glob_mod.glob(prod_pattern)),
         key=_extract_date_from_log_path,
     )
-    recent = all_files[-days:] if all_files else []
 
     rows: list[dict[str, Any]] = []
-    for filepath in recent:
-        rows.extend(load_rows(Path(filepath)))
+    for filepath in all_files:
+        for row in load_rows(Path(filepath)):
+            predicted_at = row.get("predicted_at") or ""
+            if predicted_at >= cutoff:
+                rows.append(row)
 
     if not rows:
         return score([])

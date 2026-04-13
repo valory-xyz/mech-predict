@@ -20,7 +20,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1657,40 +1657,61 @@ class TestDeriveGroupSchema:
 
 
 class TestScorePeriod:
-    """Tests for score_period."""
+    """Tests for score_period — timestamp-based filtering."""
 
-    def test_picks_most_recent_by_date(self, tmp_path: Path) -> None:
-        """days=1 picks the most recent file regardless of naming convention."""
+    def _ts(self, days_ago: int) -> str:
+        """Return an ISO timestamp *days_ago* days in the past.
+
+        :param days_ago: how many days before now.
+        :return: ISO 8601 UTC timestamp string.
+        """
+        dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_filters_by_timestamp_not_file(self, tmp_path: Path) -> None:
+        """days=1 includes rows from the last 24h regardless of file name."""
         logs = tmp_path / "logs"
         logs.mkdir()
 
-        old_row = _row(p_yes=0.7, outcome=True, predicted_at="2026-04-05T10:00:00Z")
-        new_row = _row(p_yes=0.3, outcome=False, predicted_at="2026-04-07T10:00:00Z")
+        old_row = _row(p_yes=0.7, outcome=True, predicted_at=self._ts(5))
+        new_row = _row(p_yes=0.3, outcome=False, predicted_at=self._ts(0))
 
-        (logs / "production_log_2026_04_05.jsonl").write_text(
-            json.dumps(old_row) + "\n"
+        (logs / "production_log_2020_01_01.jsonl").write_text(
+            json.dumps(old_row) + "\n" + json.dumps(new_row) + "\n"
         )
-        (logs / "2026-04-07.jsonl").write_text(json.dumps(new_row) + "\n")
 
         result = score_period(logs, days=1)
         assert result["total_rows"] == 1
-        # The newest file (2026-04-07) should be selected
         assert result["overall"]["brier"] is not None
 
-    def test_mixed_naming_days2(self, tmp_path: Path) -> None:
-        """days=2 picks two most recent across both naming conventions."""
+    def test_days7_includes_recent_week(self, tmp_path: Path) -> None:
+        """days=7 includes rows from the last 7 calendar days."""
         logs = tmp_path / "logs"
         logs.mkdir()
 
-        for name, p, dt in [
-            ("production_log_2026_04_05.jsonl", 0.7, "2026-04-05T10:00:00Z"),
-            ("2026-04-06.jsonl", 0.4, "2026-04-06T10:00:00Z"),
-            ("production_log_2026_04_07.jsonl", 0.9, "2026-04-07T10:00:00Z"),
-        ]:
-            row = _row(p_yes=p, outcome=True, predicted_at=dt)
-            (logs / name).write_text(json.dumps(row) + "\n")
+        rows_data = [
+            _row(p_yes=0.7, outcome=True, predicted_at=self._ts(10)),
+            _row(p_yes=0.4, outcome=True, predicted_at=self._ts(3)),
+            _row(p_yes=0.9, outcome=True, predicted_at=self._ts(0)),
+        ]
+        content = "\n".join(json.dumps(r) for r in rows_data) + "\n"
+        (logs / "production_log_2020_01_01.jsonl").write_text(content)
 
-        result = score_period(logs, days=2)
+        result = score_period(logs, days=7)
+        assert result["total_rows"] == 2
+
+    def test_reads_both_naming_conventions(self, tmp_path: Path) -> None:
+        """Rows from both file naming conventions are included."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+
+        row_a = _row(p_yes=0.6, outcome=True, predicted_at=self._ts(0))
+        row_b = _row(p_yes=0.4, outcome=False, predicted_at=self._ts(0))
+
+        (logs / "production_log_2020_01_01.jsonl").write_text(json.dumps(row_a) + "\n")
+        (logs / "2020-01-02.jsonl").write_text(json.dumps(row_b) + "\n")
+
+        result = score_period(logs, days=1)
         assert result["total_rows"] == 2
 
     def test_empty_dir(self, tmp_path: Path) -> None:

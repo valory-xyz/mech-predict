@@ -30,11 +30,14 @@ on:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Job 1: Production benchmark (existing, unchanged)
+  # Job 1: Production benchmark
+  # Depends on tournament-run so tournament_scored.jsonl is available for
+  # the scorer/analyze steps to merge into the unified report.
   # -----------------------------------------------------------------------
   benchmark:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    needs: [tournament-run]
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +59,16 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # Tournament-scored data from the tournament-run job. Used as input
+      # to scorer (--tournament-input) so the per-(tool, version, mode)
+      # breakdown shows up in the unified report.
+      - name: Download tournament scored data
+        uses: actions/download-artifact@v4
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+        continue-on-error: true
+
       # Discard cached scores when force_rebuild is requested
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true'
@@ -67,27 +80,53 @@ jobs:
           python -m benchmark.datasets.fetch_production \
             --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
+      # Incrementally merge tournament-scored rows into the cumulative
+      # scores.json. Dedup by row_id makes this a no-op for already-merged
+      # rows, so it's safe to run every day.
+      - name: Merge tournament into cumulative scores
+        if: hashFiles('benchmark/results/tournament_scored.jsonl') != ''
+        run: |
+          python -m benchmark.scorer \
+            --update benchmark/results/tournament_scored.jsonl
+        continue-on-error: true
+
       # Fallback: if inline scorer failed, run standalone rebuild
       - name: Score (fallback)
         run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
           if [ ! -f benchmark/results/scores.json ]; then
             echo "scores.json missing — running standalone scorer rebuild"
-            python -m benchmark.scorer --rebuild --logs-dir benchmark/datasets/logs/
+            python -m benchmark.scorer --rebuild \
+              --logs-dir benchmark/datasets/logs/ \
+              $TOURNAMENT_FLAG
           fi
 
       # Score recent periods for diff reporting
       - name: Score today
         run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
           python -m benchmark.scorer --period-days 1 \
             --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/period_scores.json
+            --output benchmark/results/period_scores.json \
+            $TOURNAMENT_FLAG
         continue-on-error: true
 
       - name: Score last 7 days
         run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
           python -m benchmark.scorer --period-days 7 \
             --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/rolling_scores.json
+            --output benchmark/results/rolling_scores.json \
+            $TOURNAMENT_FLAG
         continue-on-error: true
 
       # Analyze reads scores.json + history + period scores
@@ -95,7 +134,8 @@ jobs:
         run: |
           python -m benchmark.analyze \
             --period benchmark/results/period_scores.json \
-            --rolling benchmark/results/rolling_scores.json
+            --rolling benchmark/results/rolling_scores.json \
+            --include-tournament
 
       # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data

@@ -45,6 +45,8 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
 
+*Tool versions:* if the report has a "Tool × Version × Mode" (cumulative or 7d), or "Version Deltas" section, summarize per-version observations: which tool versions changed, mode (production_replay vs tournament), Brier delta where shown. Show full hashes (no truncation) wrapped in backticks. CRITICAL: any row whose n cell ends in ⚠ or whose underlying n is below 30 is a small sample — when mentioning such a row you MUST lead with "small sample (n=X)" before stating any metric, and you MUST NOT use the words "best", "highest", "lowest", "worst", or any superlative for that row. Compare across versions only when both have n >= 30. Skip the section entirely if no Tool × Version × Mode or Version Deltas content is present.
+
 *Recommended actions:* 2-3 concrete next steps based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
 
 Rules:
@@ -94,7 +96,7 @@ def summarize_report(report_text: str, api_key: str) -> str:
                 {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 500,
+            "max_tokens": 1200,
             "temperature": 0.2,
         }
     ).encode()

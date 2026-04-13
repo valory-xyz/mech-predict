@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark.compare import compare_stats
 from benchmark.io import load_jsonl
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
@@ -772,6 +773,102 @@ def section_period(
     return "\n".join(lines)
 
 
+VERSION_DELTA_LOW_SAMPLE = 30
+
+
+def _parse_tvm_key(key: str) -> tuple[str, str, str]:
+    """Split a 'tool | version | mode' key. Pads if mode is missing (legacy)."""
+    parts = [p.strip() for p in key.split("|")]
+    while len(parts) < 3:
+        parts.append("unknown")
+    return parts[0], parts[1], parts[2]
+
+
+def section_tool_version_breakdown(
+    scores: dict[str, Any],
+    title: str = "Tool × Version × Mode",
+) -> str:
+    """Per (tool, version, mode) metrics table — combines prod and tournament."""
+    tvm = scores.get("by_tool_version_mode", {})
+    if not tvm:
+        return ""
+
+    rows = sorted(
+        (_parse_tvm_key(k) + (v,) for k, v in tvm.items()),
+        key=lambda r: (r[0], r[1], r[2]),
+    )
+
+    lines = [
+        f"## {title}",
+        "",
+        "| Tool | Version | Mode | n | valid | Brier | DirAcc | BSS |",
+        "|------|---------|------|---:|---:|---:|---:|---:|",
+    ]
+    has_low_sample = False
+    for tool, version, mode, stats in rows:
+        n = stats.get("n", 0)
+        valid_n = stats.get("valid_n", 0)
+        low = n < VERSION_DELTA_LOW_SAMPLE
+        if low:
+            has_low_sample = True
+        n_cell = f"{n} ⚠" if low else str(n)
+        brier = stats.get("brier")
+        brier_s = f"{brier:.4f}" if brier is not None else "—"
+        acc = stats.get("directional_accuracy")
+        acc_s = f"{acc:.0%}" if acc is not None else "—"
+        bss = stats.get("brier_skill_score")
+        bss_s = f"{bss:+.4f}" if bss is not None else "—"
+        lines.append(
+            f"| {tool} | `{version}` | {mode} | {n_cell} | {valid_n} | {brier_s} | {acc_s} | {bss_s} |"
+        )
+
+    if has_low_sample:
+        lines.extend(
+            [
+                "",
+                f"⚠ Rows marked with ⚠ have n < {VERSION_DELTA_LOW_SAMPLE}; metrics from these cells are statistically unreliable and superlatives should not be drawn from them.",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def section_version_deltas(scores: dict[str, Any]) -> str:
+    """Pairwise Brier deltas across versions/modes for each tool with multiple cells."""
+    tvm = scores.get("by_tool_version_mode", {})
+    if not tvm:
+        return ""
+
+    by_tool: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+    for key, stats in tvm.items():
+        tool, version, mode = _parse_tvm_key(key)
+        by_tool.setdefault(tool, []).append((version, mode, stats))
+
+    multi = {t: cells for t, cells in by_tool.items() if len(cells) >= 2}
+    if not multi:
+        return ""
+
+    lines = ["## Version Deltas", ""]
+    for tool in sorted(multi):
+        cells = sorted(multi[tool], key=lambda c: (c[0], c[1]))
+        lines.append(f"### {tool}")
+        lines.append("")
+        lines.append("| Baseline (version, mode) | Candidate (version, mode) | Brier Δ | Direction | n_b | n_c |")
+        lines.append("|---|---|---:|---|---:|---:|")
+        for i, (v_b, m_b, s_b) in enumerate(cells):
+            for v_c, m_c, s_c in cells[i + 1 :]:
+                cmp = compare_stats(s_b, s_c)
+                brier_cmp = cmp.get("brier", {})
+                delta = brier_cmp.get("delta")
+                direction = brier_cmp.get("direction") or "—"
+                delta_s = f"{delta:+.4f}" if isinstance(delta, (int, float)) else "—"
+                low = " ⚠" if min(s_b.get("n", 0), s_c.get("n", 0)) < VERSION_DELTA_LOW_SAMPLE else ""
+                lines.append(
+                    f"| `{v_b}` / {m_b} | `{v_c}` / {m_c} | {delta_s}{low} | {direction} | {s_b.get('n', 0)} | {s_c.get('n', 0)} |"
+                )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 # ---------------------------------------------------------------------------
 # Report assembly
 # ---------------------------------------------------------------------------
@@ -782,7 +879,12 @@ def generate_report(
     history: list[dict[str, Any]] | None = None,
     period_scores: dict[str, Any] | None = None,
     rolling_scores: dict[str, Any] | None = None,
+    include_tournament: bool = False,
 ) -> str:
+    """Generate the markdown report. ``include_tournament`` toggles the
+    Tool × Version × Mode (cumulative + 7d rolling) and Version Deltas
+    sections; the rest of the report is unchanged when off.
+    """
     """Generate a full benchmark report from scores and history.
 
     :param scores: parsed ``scores.json`` dict (all-time).
@@ -798,6 +900,20 @@ def generate_report(
         "%Y-%m-%d"
     )
 
+    tournament_sections: list[str] = []
+    if include_tournament:
+        candidates = [
+            section_tool_version_breakdown(scores, "Tool × Version × Mode (All-Time)"),
+        ]
+        if rolling_scores is not None:
+            candidates.append(
+                section_tool_version_breakdown(
+                    rolling_scores, "Tool × Version × Mode (Last 7 Days)"
+                )
+            )
+        candidates.append(section_version_deltas(scores))
+        tournament_sections = [s for s in candidates if s]
+
     sections = [
         f"# Benchmark Report — {date}",
         section_period(period_scores, scores, "Since Last Report"),
@@ -805,6 +921,7 @@ def generate_report(
         section_overall(scores),
         section_base_rates(scores),
         section_tool_ranking(scores),
+        *tournament_sections,
         section_platform(scores),
         section_tool_platform(scores),
         section_edge_analysis(scores),
@@ -847,6 +964,11 @@ def main() -> None:
         default=None,
         help="Rolling 7-day scores JSON",
     )
+    parser.add_argument(
+        "--include-tournament",
+        action="store_true",
+        help="Render tournament-mode sections (Tool × Version × Mode and Version Deltas)",
+    )
     args = parser.parse_args()
 
     scores = load_scores(args.scores)
@@ -860,7 +982,11 @@ def main() -> None:
     )
 
     report = generate_report(
-        scores, history, period_scores=period, rolling_scores=rolling
+        scores,
+        history,
+        period_scores=period,
+        rolling_scores=rolling,
+        include_tournament=args.include_tournament,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

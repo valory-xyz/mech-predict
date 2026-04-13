@@ -693,6 +693,22 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
 
+    # Tool × version (normalized: tool_version OR tool_ipfs_hash) cross breakdown
+    tv_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    tvm_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        tool = row.get("tool_name") or "unknown"
+        version = (
+            row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
+        )
+        mode = row.get("mode") or "production_replay"
+        tv_groups[f"{tool} | {version}"].append(row)
+        tvm_groups[f"{tool} | {version} | {mode}"].append(row)
+    by_tool_version = {k: compute_group_stats(g) for k, g in tv_groups.items()}
+    by_tool_version_mode = {
+        k: compute_group_stats(g) for k, g in tvm_groups.items()
+    }
+
     # Tool × platform × horizon breakdown
     by_tool_platform_horizon = group_by_composite(
         rows,
@@ -740,6 +756,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
         "by_tool_platform_horizon": by_tool_platform_horizon,
+        "by_tool_version": by_tool_version,
+        "by_tool_version_mode": by_tool_version_mode,
         "trend": trend,
         "calibration": calibration,
         "ece": ece,
@@ -788,6 +806,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_horizon": {},
         "by_tool_platform": {},
         "by_tool_version": {},
+        "by_tool_version_mode": {},
         "by_config": {},
         "by_difficulty": {},
         "by_liquidity": {},
@@ -1010,7 +1029,12 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     platform = row.get("platform") or "unknown"
     category = row.get("category") or "unknown"
     horizon = classify_horizon(row.get("prediction_lead_time_days"))
-    tool_version = row.get("tool_version") or "unknown"
+    # Production rows store the IPFS hash in `tool_version`; tournament rows
+    # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
+    tool_version = (
+        row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
+    )
+    mode = row.get("mode") or "production_replay"
     config_hash = row.get("config_hash") or "unknown"
 
     _ensure_and_accumulate(scores["by_tool"], tool, row)
@@ -1019,6 +1043,11 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_horizon"], horizon, row)
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
+    _ensure_and_accumulate(
+        scores["by_tool_version_mode"],
+        f"{tool} | {tool_version} | {mode}",
+        row,
+    )
     _ensure_and_accumulate(scores["by_config"], f"{tool} | {config_hash}", row)
 
     difficulty = classify_difficulty(row.get("market_prob_at_prediction"))
@@ -1107,6 +1136,7 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_horizon",
         "by_tool_platform",
         "by_tool_version",
+        "by_tool_version_mode",
         "by_config",
         "by_difficulty",
         "by_liquidity",
@@ -1263,6 +1293,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_horizon",
         "by_tool_platform",
         "by_tool_version",
+        "by_tool_version_mode",
         "by_config",
         "by_difficulty",
         "by_liquidity",
@@ -1378,6 +1409,7 @@ def update(
         "by_horizon",
         "by_tool_platform",
         "by_tool_version",
+        "by_tool_version_mode",
         "by_config",
         "by_difficulty",
         "by_liquidity",
@@ -1404,6 +1436,7 @@ def rebuild(
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
     dedup_path: Path | None = None,
+    tournament_input: Path | None = None,
 ) -> dict[str, Any]:
     """Rebuild scores.json from all log files in the logs directory.
 
@@ -1427,6 +1460,10 @@ def rebuild(
     all_rows: list[dict[str, Any]] = []
     for filepath in files:
         all_rows.extend(load_rows(Path(filepath)))
+
+    if tournament_input is not None and tournament_input.exists():
+        tournament_rows = load_rows(tournament_input)
+        all_rows.extend(tournament_rows)
 
     if not all_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
@@ -1498,6 +1535,7 @@ def rebuild(
         "by_horizon",
         "by_tool_platform",
         "by_tool_version",
+        "by_tool_version_mode",
         "by_config",
         "by_difficulty",
         "by_liquidity",
@@ -1544,6 +1582,7 @@ def _extract_date_from_log_path(path: str) -> str:
 def score_period(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
+    tournament_input: Path | None = None,
 ) -> dict[str, Any]:
     """Score rows whose ``predicted_at`` falls within the last *days* days.
 
@@ -1570,6 +1609,12 @@ def score_period(
     rows: list[dict[str, Any]] = []
     for filepath in all_files:
         for row in load_rows(Path(filepath)):
+            predicted_at = row.get("predicted_at") or ""
+            if predicted_at >= cutoff:
+                rows.append(row)
+
+    if tournament_input is not None and tournament_input.exists():
+        for row in load_rows(tournament_input):
             predicted_at = row.get("predicted_at") or ""
             if predicted_at >= cutoff:
                 rows.append(row)
@@ -1625,10 +1670,36 @@ def main() -> None:
         default=None,
         help="Score only the last N daily log files (for period reports)",
     )
+    parser.add_argument(
+        "--tournament-input",
+        type=Path,
+        default=None,
+        help="Optional path to tournament_scored.jsonl to merge into scoring",
+    )
+    parser.add_argument(
+        "--update",
+        type=Path,
+        default=None,
+        help="Incrementally merge rows from PATH into scores.json via update()",
+    )
     args = parser.parse_args()
 
+    if args.update is not None:
+        rows = load_rows(args.update)
+        result = update(rows, args.output, args.history)
+        overall = result["overall"]
+        print(
+            f"Merged {len(rows)} rows from {args.update}: Brier={overall['brier']},"
+            f" n={overall['n']}"
+        )
+        return
+
     if args.period_days is not None:
-        result = score_period(logs_dir=args.logs_dir, days=args.period_days)
+        result = score_period(
+            logs_dir=args.logs_dir,
+            days=args.period_days,
+            tournament_input=args.tournament_input,
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2))
         overall = result["overall"]
@@ -1644,6 +1715,7 @@ def main() -> None:
             logs_dir=args.logs_dir,
             scores_path=args.output,
             history_path=args.history,
+            tournament_input=args.tournament_input,
         )
         print(f"Scores written to {args.output}")
         overall = result["overall"]

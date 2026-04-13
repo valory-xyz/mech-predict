@@ -358,8 +358,8 @@ gap           = avg_predicted - realized_rate
 
 | Gap sign | Meaning |
 |----------|---------|
-| Positive | Overconfident — predicts higher than reality |
-| Negative | Underconfident — predicts lower than reality |
+| Positive | Overpredicts — predicted probability higher than realized rate |
+| Negative | Underpredicts — predicted probability lower than realized rate |
 
 A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (reliability diagram) shows avg_predicted vs realized_rate; the diagonal line is perfect calibration.
 
@@ -377,8 +377,8 @@ Bins with fewer than 20 samples (`MIN_CALIBRATION_BIN_SIZE`) are excluded to avo
 
 ```
 slope = 1.0 → perfectly calibrated
-slope < 1.0 → overconfident (predictions too extreme)
-slope > 1.0 → underconfident (predictions too compressed toward 0.5)
+slope < 1.0 → predictions too extreme (overconfident)
+slope > 1.0 → predictions too compressed toward 0.5 (underconfident)
 
 intercept evaluated at p_yes = 0.5 (logit midpoint)
 ```

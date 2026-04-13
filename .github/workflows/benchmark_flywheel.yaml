@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     needs: [tournament-run]
+    if: always() && !cancelled()
 
     steps:
       - uses: actions/checkout@v4
@@ -80,17 +81,12 @@ jobs:
           python -m benchmark.datasets.fetch_production \
             --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
 
-      # Incrementally merge tournament-scored rows into the cumulative
-      # scores.json. Dedup by row_id makes this a no-op for already-merged
-      # rows, so it's safe to run every day.
-      - name: Merge tournament into cumulative scores
-        if: hashFiles('benchmark/results/tournament_scored.jsonl') != ''
-        run: |
-          python -m benchmark.scorer \
-            --update benchmark/results/tournament_scored.jsonl
-        continue-on-error: true
-
-      # Fallback: if inline scorer failed, run standalone rebuild
+      # Fallback: if inline scorer failed, run standalone rebuild.
+      # Must run BEFORE the tournament merge so --rebuild has a chance to
+      # reprocess all logs from scratch on force_rebuild / first run. If
+      # merge ran first, it would create a scores.json containing only
+      # tournament rows (plus whatever fetch_production accumulated from
+      # the last lookback_days window) and this guard would skip --rebuild.
       - name: Score (fallback)
         run: |
           TOURNAMENT_FLAG=""
@@ -103,6 +99,16 @@ jobs:
               --logs-dir benchmark/datasets/logs/ \
               $TOURNAMENT_FLAG
           fi
+
+      # Incrementally merge tournament-scored rows into the cumulative
+      # scores.json. Dedup by row_id (via scored_row_ids.json) makes this
+      # a no-op for already-merged rows, so it's safe to run every day.
+      - name: Merge tournament into cumulative scores
+        if: hashFiles('benchmark/results/tournament_scored.jsonl') != ''
+        run: |
+          python -m benchmark.scorer \
+            --update benchmark/results/tournament_scored.jsonl
+        continue-on-error: true
 
       # Score recent periods for diff reporting
       - name: Score today
@@ -146,6 +152,7 @@ jobs:
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json
             benchmark/results/scores_history.jsonl
+            benchmark/results/scored_row_ids.json
             benchmark/results/report.md
           retention-days: 90
 

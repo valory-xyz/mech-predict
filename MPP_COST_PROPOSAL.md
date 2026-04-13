@@ -321,11 +321,13 @@ Wildcard keeps using exactly the 3 tools currently hardcoded in `registry.py`. N
 |---|---|---|---|---|---|
 | Quick | `prediction-offline` (GPT-4.1) | $0.008 | $0.001 | **$0.01** | Currently losing ~$0.007/call |
 | Deep | `prediction-online` (GPT-4.1) | $0.026 | $0.01 | **$0.03** | Currently losing ~$0.016/call |
-| Super | `superforcaster` (GPT-4.1) | $0.020 | $0.05 | **$0.02** | Currently profitable at $0.03/call |
+| Super | `superforcaster` (GPT-4.1) | $0.020 | $0.05 | **$0.02** (floor) | Currently profitable at $0.03/call |
 
-**Key finding:** Super mode is currently the *cheapest* tool to run ($0.020 for superforcaster) but the *most expensive* price to the user ($0.05). Meanwhile Quick and Deep lose money. If these 3 tools stay hardcoded, the simplest fix is repricing Quick and Deep upward to cover costs.
+**Key finding:** Quick and Deep are priced below API cost and must be raised. Super is currently profitable — the break-even floor is $0.02, but the current price of $0.05 generates $0.03/call margin. **Lowering Super to $0.02 is the break-even floor, not a recommendation.** There is no reason to reduce a profitable price. The $0.02 figure is shown for completeness to illustrate the true cost floor.
 
-**Note on Super:** Superforcaster costs less than prediction-online because it makes only 1 LLM call + 1 Serper call (search snippets, no page scraping), while prediction-online makes 2 LLM calls + 2 Serper calls + URL scraping. But superforcaster has worse benchmark performance (Brier 0.34 vs 0.26). The user is paying more for a cheaper, weaker tool.
+**Note on Super (superforcaster reassignment):** Under the proposed dynamic pool model (Scenario B / [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md)), superforcaster moves from the Super pool to the **Deep pool** because it performs web search but no embeddings/reasoning. This means Scenario A's Super pricing ($0.02 floor) and Scenario B's Super pricing ($0.08 floor) reflect different tools entirely.
+
+**Note on tool cost vs quality:** Superforcaster costs less than prediction-online because it makes only 1 LLM call + 1 Serper call (search snippets, no page scraping), while prediction-online makes 2 LLM calls + 2 Serper calls + URL scraping. But superforcaster has worse benchmark performance (Brier 0.34 vs 0.26). Under the current hardcoded setup, the user pays the most for Super but gets a cheaper, weaker tool.
 
 ### Scenario B: Dynamic Tool Pools (Per MPP_MODE_DEFINITIONS.md)
 
@@ -349,6 +351,6 @@ Wildcard adopts pool-based weighted selection. Any tool in a mode's pool may be 
 | **Deep** | $0.01 | **$0.03** (+3x) | **$0.04** (+4x) |
 | **Super** | $0.05 | **$0.02** (-60%) | **$0.08** (+60%) |
 
-**Scenario A** reveals that Super is currently overpriced relative to its tool cost — the user pays $0.05 for a $0.02 tool. Quick and Deep are underpriced.
+**Scenario A** reveals that Quick and Deep are underpriced and must be raised. Super's break-even floor is $0.02, but its current price ($0.05) is profitable — lowering it is a separate policy choice, not a cost requirement.
 
 **Scenario B** costs more across the board because the pool includes Claude Sonnet variants, which are ~1.5-2x more expensive than GPT-4.1 for the same task. The tradeoff: Claude variants have the best benchmark performance (`prediction-request-reasoning-claude` has the best Brier score of any tool at 0.2058).

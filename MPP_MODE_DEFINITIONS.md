@@ -214,9 +214,11 @@ Each mode is defined by its **compute budget** (what the tool is allowed to do) 
 | `prediction-request-rag` | `napthaai/prediction_request_rag` | GPT-4.1 | Search + RAG (FAISS embeddings, semantic retrieval of relevant passages) → predict |
 | `prediction-request-rag-claude` | `napthaai/prediction_request_rag` | Claude Sonnet | Same tool, Claude model variant |
 
-**Starting default:** `prediction-request-reasoning`
+**Starting default:** `prediction-request-reasoning` (GPT-4.1)
 
-**Benchmark evidence:** `prediction-request-reasoning` is the **only tool with positive Brier Skill Score on Polymarket** (+0.12 BSS, meaning it beats the naive base-rate predictor). Brier of 0.2568 with 68.9% accuracy (n=349). After prompt improvements: training Brier 0.1985 (15.3% improvement), holdout Brier 0.2473 (8.1% improvement), and 85% reduction in overconfident-wrong predictions.
+**Why GPT-4.1 default, not Claude?** The Claude variant (`prediction-request-reasoning-claude`) has the best Brier of any tool in any pool (0.2058, n=181). However, it costs $0.074/call vs $0.045 for the GPT variant — 64% more expensive. Since we're targeting break-even pricing (see [MPP_COST_PROPOSAL.md](./MPP_COST_PROPOSAL.md)), the GPT variant is the safer default to launch with. Once the weighted selection logic is live, the Claude variant will naturally receive traffic proportional to its benchmark performance — and if Brier-based softmax weights are used, it will receive significant traffic given its superior score. The default only matters until the CSV-driven selection takes over.
+
+**Benchmark evidence:** `prediction-request-reasoning` (GPT-4.1) is the **only tool with positive Brier Skill Score on Polymarket** (+0.12 BSS, meaning it beats the naive base-rate predictor). Brier of 0.2568 with 68.9% accuracy (n=349). After prompt improvements: training Brier 0.1985 (15.3% improvement), holdout Brier 0.2473 (8.1% improvement), and 85% reduction in overconfident-wrong predictions. The Claude variant has better raw Brier (0.2058, 71% accuracy, n=181) but a smaller sample and higher cost.
 
 ### 3.4 Mode Assignment Rationale
 
@@ -322,7 +324,9 @@ At request time, the MPP server receives a mode (`quick`, `deep`, or `super`) an
 
 ### 5.2 Category-Aware Routing
 
-Different tools perform differently on different question categories. For example, `prediction-request-reasoning` has +0.12 BSS on Polymarket overall but only +0.08 on crypto and +0.15 on politics. Category-aware routing lets the MPP server pick the best tool *for the specific type of question being asked*.
+Different tools perform differently on different question categories. Category-aware routing lets the MPP server pick the best tool *for the specific type of question being asked*. For example, a tool that excels at politics questions may underperform on crypto — routing by category ensures the best-evidenced tool is selected per segment.
+
+**Note:** Per-category BSS breakdowns per tool are not yet available in the benchmark pipeline (no `by_tool_category` cross-breakdown in `scores.json`). The `by_tool_category` scorer addition is listed as net-new work in the TOOL_SELECTION_SPEC.md rollout sequence (item #8). Until that ships, category routing will fall back to the aggregate row for all tools.
 
 The MPP server uses the same `classify_category()` function from mech-predict's benchmark pipeline to classify the incoming question. This ensures consistency — the category a question is classified into at prediction time matches the category used during benchmarking.
 
@@ -338,28 +342,49 @@ Starting default for the mode
 
 ### 5.3 Weight Calculation
 
-Weights are derived from the CSV's accuracy metric (or Brier score once the CSV schema evolves):
+Weights are derived from Brier score (the primary ranking metric, per §2.1). Lower Brier = better tool = higher weight.
+
+**Why not raw accuracy?** Tool accuracies cluster in a narrow range (55-75%), so raw-accuracy weighting produces nearly uniform selection — a 70%-accurate tool only gets ~1.27x the weight of a 55% tool. Brier Skill Score (BSS) with softmax provides sharper differentiation, rewarding tools that demonstrably beat the baseline.
 
 ```python
+import math
+
+# Temperature controls sharpness: lower = more aggressive winner-take-all
+SOFTMAX_TEMPERATURE = 0.5
+
 def compute_weights(csv_rows: list, mode: str, category: str | None) -> dict[str, float]:
-    """Compute selection weights for tools in a given mode."""
+    """Compute selection weights for tools in a given mode.
+
+    Uses Brier Skill Score (BSS = 1 - brier/baseline_brier) with softmax.
+    Positive BSS = beats naive predictor. Higher BSS = more weight.
+    """
     pool = [row for row in csv_rows if row.compute_tier == mode]
 
-    scores = {}
+    bss_scores = {}
     for tool_name in {row.tool for row in pool}:
-        # Prefer category-specific cell if available
         specific = find_cell(pool, tool_name, category, min_n=30)
         aggregate = find_cell(pool, tool_name, category="", min_n=0)
         cell = specific or aggregate
-        if cell:
-            scores[tool_name] = cell.tool_accuracy
+        if cell and cell.brier is not None and cell.baseline_brier:
+            bss = 1.0 - (cell.brier / cell.baseline_brier)
+            bss_scores[tool_name] = bss
 
-    if not scores:
+    if not bss_scores:
         return {}  # fallback to starting default
 
-    total = sum(scores.values())
-    return {tool: score / total for tool, score in scores.items()}
+    # Softmax with temperature for sharper differentiation
+    max_bss = max(bss_scores.values())
+    exp_scores = {
+        tool: math.exp((bss - max_bss) / SOFTMAX_TEMPERATURE)
+        for tool, bss in bss_scores.items()
+    }
+    total = sum(exp_scores.values())
+    return {tool: exp_s / total for tool, exp_s in exp_scores.items()}
 ```
+
+**Effect of temperature:** At `T=0.5`, a tool with BSS +0.12 gets ~3.3x the weight of a tool with BSS -0.04. At `T=1.0` (softer), the ratio drops to ~1.7x. At `T=0.25` (sharper), it rises to ~11x. Temperature is tunable without code changes.
+
+**Note:** The current IPFS CSV uses `tool_accuracy`, not Brier. Until the CSV schema evolves to include Brier (Layer 3 work, per TOOL_SELECTION_SPEC.md item #9), accuracy can be used as an interim proxy with the same softmax approach. The code above assumes the target CSV schema.
 
 ### 5.4 Weight Refresh
 

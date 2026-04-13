@@ -289,7 +289,7 @@ result = await asyncio.wait_for(coro, timeout=TOOL_TIMEOUT)
 deliver_msg = result[0]
 prompt_used = result[1] if len(result) > 1 else None
 counter_callback = result[3] if len(result) > 3 else None
-cost_dict = counter_callback.cost_dict if counter_callback and hasattr(counter_callback, 'cost_dict') else None
+cost_dict = counter_callback.cost_dict if counter_callback else None
 
 parsed = json.loads(deliver_msg)
 # Pass metadata to persistent storage (not to Redis TTL store)

@@ -698,16 +698,12 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     tvm_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         tool = row.get("tool_name") or "unknown"
-        version = (
-            row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-        )
+        version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
         mode = row.get("mode") or "production_replay"
         tv_groups[f"{tool} | {version}"].append(row)
         tvm_groups[f"{tool} | {version} | {mode}"].append(row)
     by_tool_version = {k: compute_group_stats(g) for k, g in tv_groups.items()}
-    by_tool_version_mode = {
-        k: compute_group_stats(g) for k, g in tvm_groups.items()
-    }
+    by_tool_version_mode = {k: compute_group_stats(g) for k, g in tvm_groups.items()}
 
     # Tool × platform × horizon breakdown
     by_tool_platform_horizon = group_by_composite(
@@ -1031,9 +1027,7 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     horizon = classify_horizon(row.get("prediction_lead_time_days"))
     # Production rows store the IPFS hash in `tool_version`; tournament rows
     # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
-    tool_version = (
-        row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-    )
+    tool_version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
     mode = row.get("mode") or "production_replay"
     config_hash = row.get("config_hash") or "unknown"
 
@@ -1431,6 +1425,24 @@ def update(
     return finalized
 
 
+def _collect_rebuild_rows(
+    logs_dir: Path,
+    tournament_input: Path | None,
+) -> list[dict[str, Any]]:
+    """Load production log rows + optional tournament rows for rebuild."""
+    pattern = str(logs_dir / "production_log_*.jsonl")
+    files = sorted(glob_mod.glob(pattern))
+
+    rows: list[dict[str, Any]] = []
+    for filepath in files:
+        rows.extend(load_rows(Path(filepath)))
+
+    if tournament_input is not None and tournament_input.exists():
+        rows.extend(load_rows(tournament_input))
+
+    return rows
+
+
 def rebuild(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     scores_path: Path = DEFAULT_OUTPUT,
@@ -1447,23 +1459,15 @@ def rebuild(
     :param scores_path: output path for ``scores.json``.
     :param history_path: output path for ``scores_history.jsonl``.
     :param dedup_path: path to ``scored_row_ids.json``.
+    :param tournament_input: optional path to ``tournament_scored.jsonl`` to
+        merge into the rebuild input.
     :return: finalized scores dict.
     """
 
     if dedup_path is None:
         dedup_path = scores_path.parent / "scored_row_ids.json"
 
-    # Collect all log files
-    pattern = str(logs_dir / "production_log_*.jsonl")
-    files = sorted(glob_mod.glob(pattern))
-
-    all_rows: list[dict[str, Any]] = []
-    for filepath in files:
-        all_rows.extend(load_rows(Path(filepath)))
-
-    if tournament_input is not None and tournament_input.exists():
-        tournament_rows = load_rows(tournament_input)
-        all_rows.extend(tournament_rows)
+    all_rows = _collect_rebuild_rows(logs_dir, tournament_input)
 
     if not all_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
@@ -1592,6 +1596,8 @@ def score_period(
 
     :param logs_dir: directory containing daily log files.
     :param days: score rows from the last N days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl`` whose
+        rows are filtered to the same window and merged into the input.
     :return: scores dict from ``score()``, or empty scores if no matching rows.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
@@ -1630,8 +1636,8 @@ def score_period(
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """CLI entry point for scoring."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the scorer CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Score production prediction data.",
     )
@@ -1682,7 +1688,12 @@ def main() -> None:
         default=None,
         help="Incrementally merge rows from PATH into scores.json via update()",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """CLI entry point for scoring."""
+    args = _build_arg_parser().parse_args()
 
     if args.update is not None:
         rows = load_rows(args.update)

@@ -852,7 +852,9 @@ def section_version_deltas(scores: dict[str, Any]) -> str:
         cells = sorted(multi[tool], key=lambda c: (c[0], c[1]))
         lines.append(f"### {tool}")
         lines.append("")
-        lines.append("| Baseline (version, mode) | Candidate (version, mode) | Brier Δ | Direction | n_b | n_c |")
+        lines.append(
+            "| Baseline (version, mode) | Candidate (version, mode) | Brier Δ | Direction | n_b | n_c |"
+        )
         lines.append("|---|---|---:|---|---:|---:|")
         for i, (v_b, m_b, s_b) in enumerate(cells):
             for v_c, m_c, s_c in cells[i + 1 :]:
@@ -861,7 +863,11 @@ def section_version_deltas(scores: dict[str, Any]) -> str:
                 delta = brier_cmp.get("delta")
                 direction = brier_cmp.get("direction") or "—"
                 delta_s = f"{delta:+.4f}" if isinstance(delta, (int, float)) else "—"
-                low = " ⚠" if min(s_b.get("n", 0), s_c.get("n", 0)) < VERSION_DELTA_LOW_SAMPLE else ""
+                low = (
+                    " ⚠"
+                    if min(s_b.get("n", 0), s_c.get("n", 0)) < VERSION_DELTA_LOW_SAMPLE
+                    else ""
+                )
                 lines.append(
                     f"| `{v_b}` / {m_b} | `{v_c}` / {m_c} | {delta_s}{low} | {direction} | {s_b.get('n', 0)} | {s_c.get('n', 0)} |"
                 )
@@ -881,16 +887,14 @@ def generate_report(
     rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
 ) -> str:
-    """Generate the markdown report. ``include_tournament`` toggles the
-    Tool × Version × Mode (cumulative + 7d rolling) and Version Deltas
-    sections; the rest of the report is unchanged when off.
-    """
     """Generate a full benchmark report from scores and history.
 
     :param scores: parsed ``scores.json`` dict (all-time).
     :param history: list of monthly snapshots from ``scores_history.jsonl``.
     :param period_scores: scores from today's run (since last report).
     :param rolling_scores: scores from the last 7 days.
+    :param include_tournament: when True, render the Tool × Version × Mode
+        (cumulative + 7d rolling) and Version Deltas sections.
     :return: full markdown report string.
     """
     if history is None:

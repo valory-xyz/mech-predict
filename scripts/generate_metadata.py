@@ -22,7 +22,6 @@ import argparse
 import copy
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List, Optional, Tuple
@@ -82,9 +81,7 @@ def _extract_allowed_tools(module: ModuleType) -> List[str]:
     return []
 
 
-def parse_tool_folder(
-    sub: Path, allow_import_errors: bool
-) -> Optional[Dict[str, Any]]:
+def parse_tool_folder(sub: Path, allow_import_errors: bool) -> Optional[Dict[str, Any]]:
     """Parse a single tool directory into an entry dict, or None if unusable."""
     yaml_path = sub / COMPONENT_YAML
     if not yaml_path.is_file():
@@ -231,9 +228,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="WIRE_NAME",
         help="Exclude this tool from the output (repeatable).",
     )
-    parser.add_argument(
-        "--schema-registry", type=Path, default=SCHEMA_REGISTRY_PATH
-    )
+    parser.add_argument("--schema-registry", type=Path, default=SCHEMA_REGISTRY_PATH)
     return parser.parse_args(argv)
 
 

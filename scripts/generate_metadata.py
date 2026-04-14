@@ -31,7 +31,6 @@ import yaml
 ROOT_DIR = "./packages"
 CUSTOMS = "customs"
 METADATA_FILE_PATH = "metadata.json"
-INIT_PY = "__init__.py"
 COMPONENT_YAML = "component.yaml"
 ENTRY_POINT = "entry_point"
 SCHEMA_REGISTRY_PATH = Path(__file__).parent / "tool_schemas.yaml"
@@ -157,6 +156,12 @@ def load_schema_registry(path: Path) -> Dict[str, Any]:
         if "input" not in schemas or "output" not in schemas:
             raise ValueError(
                 f"Schema registry kind '{kind}' missing 'input' or 'output'"
+            )
+    for wire_name, kind in tool_kinds.items():
+        if kind not in defaults:
+            raise ValueError(
+                f"Schema registry maps '{wire_name}' to unknown kind '{kind}'; "
+                f"known kinds: {sorted(defaults)}"
             )
     return {"defaults": defaults, "tool_kinds": tool_kinds}
 

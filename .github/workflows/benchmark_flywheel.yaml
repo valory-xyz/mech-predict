@@ -30,11 +30,15 @@ on:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Job 1: Production benchmark (existing, unchanged)
+  # Job 1: Production benchmark
+  # Depends on tournament-run so tournament_scored.jsonl is available for
+  # the scorer/analyze steps to merge into the unified report.
   # -----------------------------------------------------------------------
   benchmark:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    needs: [tournament-run]
+    if: always() && !cancelled()
 
     steps:
       - uses: actions/checkout@v4
@@ -56,43 +60,103 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
-      # Discard cached scores when force_rebuild is requested
+      # Tournament-scored data from the tournament-run job. Used as input
+      # to scorer (--tournament-input) so the per-(tool, version, mode)
+      # breakdown shows up in the unified report.
+      - name: Download tournament scored data
+        uses: actions/download-artifact@v4
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+        continue-on-error: true
+
+      # force_rebuild semantics: wipe ALL derived scoring state as a set
+      # (scores.json, scores_history.jsonl, scored_row_ids.json) so the
+      # subsequent Score step rebuilds from raw logs without stale dedup
+      # state poisoning the result.
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true'
-        run: rm -f benchmark/results/scores.json benchmark/results/scores_history.jsonl
+        run: |
+          rm -f benchmark/results/scores.json \
+                benchmark/results/scores_history.jsonl \
+                benchmark/results/scored_row_ids.json
 
-      # Fetch writes daily log file + calls scorer.update() inline
+      # Fetch writes daily log file + calls scorer.update() inline (fast path).
+      # On force_rebuild, --no-score disables the inline scoring so the
+      # dedicated Score step below owns scores.json creation (slow path).
       # Inputs routed through env (not ${{ }} interpolation in the shell script)
       # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
       # before the shell runs, so malicious input would become part of the script.
       - name: Fetch production data
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
-          python -m benchmark.datasets.fetch_production \
-            --lookback-days "$INPUT_LOOKBACK_DAYS"
-
-      # Fallback: if inline scorer failed, run standalone rebuild
-      - name: Score (fallback)
-        run: |
-          if [ ! -f benchmark/results/scores.json ]; then
-            echo "scores.json missing — running standalone scorer rebuild"
-            python -m benchmark.scorer --rebuild --logs-dir benchmark/datasets/logs/
+          NO_SCORE_FLAG=""
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            NO_SCORE_FLAG="--no-score"
           fi
+          python -m benchmark.datasets.fetch_production \
+            --lookback-days "$INPUT_LOOKBACK_DAYS" \
+            $NO_SCORE_FLAG
+
+      # Slow-path scoring: run --rebuild when either (a) scores.json is
+      # missing (first run, or prior run crashed before fetch's inline
+      # update), or (b) force_rebuild=true (explicit full rebuild). On
+      # normal runs the fast path in fetch_production already produced
+      # scores.json, and this step is a no-op.
+      - name: Score
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+        run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          if [ ! -f benchmark/results/scores.json ] || [ "$FORCE_REBUILD" = "true" ]; then
+            echo "Running full rebuild (missing scores.json or force_rebuild=true)"
+            python -m benchmark.scorer --rebuild \
+              --logs-dir benchmark/datasets/logs/ \
+              $TOURNAMENT_FLAG
+          else
+            echo "scores.json present and not force_rebuild — fast path already ran in fetch"
+          fi
+
+      # Incrementally merge tournament-scored rows into the cumulative
+      # scores.json. Dedup by row_id (via scored_row_ids.json) makes this
+      # a no-op on force_rebuild (rebuild already included --tournament-input
+      # and wrote the full row_id set), and adds only genuinely new rows
+      # on normal runs.
+      - name: Merge tournament into cumulative scores
+        if: hashFiles('benchmark/results/tournament_scored.jsonl') != ''
+        run: |
+          python -m benchmark.scorer \
+            --update benchmark/results/tournament_scored.jsonl
+        continue-on-error: true
 
       # Score recent periods for diff reporting
       - name: Score today
         run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
           python -m benchmark.scorer --period-days 1 \
             --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/period_scores.json
+            --output benchmark/results/period_scores.json \
+            $TOURNAMENT_FLAG
         continue-on-error: true
 
       - name: Score last 7 days
         run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
           python -m benchmark.scorer --period-days 7 \
             --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/rolling_scores.json
+            --output benchmark/results/rolling_scores.json \
+            $TOURNAMENT_FLAG
         continue-on-error: true
 
       # Analyze reads scores.json + history + period scores
@@ -100,7 +164,8 @@ jobs:
         run: |
           python -m benchmark.analyze \
             --period benchmark/results/period_scores.json \
-            --rolling benchmark/results/rolling_scores.json
+            --rolling benchmark/results/rolling_scores.json \
+            --include-tournament
 
       # Upload state + scores (small, needed for next run)
       - name: Upload benchmark data
@@ -111,6 +176,7 @@ jobs:
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json
             benchmark/results/scores_history.jsonl
+            benchmark/results/scored_row_ids.json
             benchmark/results/report.md
           retention-days: 90
 

@@ -2022,6 +2022,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         / "scores_history.jsonl",
         help="Path to scores_history.jsonl",
     )
+    parser.add_argument(
+        "--no-score",
+        action="store_true",
+        help=(
+            "Skip the inline scorer.update() call. Use when the workflow "
+            "will run `scorer --rebuild` explicitly afterwards."
+        ),
+    )
     return parser
 
 
@@ -2111,7 +2119,10 @@ def main() -> None:
         log.info("Appended %d new rows to %s", written, output_path)
 
         # Incremental scoring — update accumulators in scores.json
-        _run_scorer_update(all_rows, args.scores, args.history)
+        if args.no_score:
+            log.info("Inline scoring skipped (--no-score)")
+        else:
+            _run_scorer_update(all_rows, args.scores, args.history)
     else:
         log.info("No new rows to write")
 

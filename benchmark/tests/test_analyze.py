@@ -21,13 +21,16 @@
 from typing import Any
 
 from benchmark.analyze import (
+    _parse_tvm_key,
     generate_report,
     section_best_predictions,
     section_latency,
     section_overall,
     section_parse_breakdown,
     section_sample_size_warnings,
+    section_tool_version_breakdown,
     section_trend,
+    section_version_deltas,
     section_weak_spots,
     section_worst_predictions,
 )
@@ -376,3 +379,238 @@ class TestGenerateReport:
         report = generate_report(s, [])
         assert "# Benchmark Report" in report
         assert "No predictions to score" in report
+
+
+# ---------------------------------------------------------------------------
+# _parse_tvm_key
+# ---------------------------------------------------------------------------
+
+
+class TestParseTvmKey:
+    """Tests for _parse_tvm_key."""
+
+    def test_three_parts(self) -> None:
+        """Standard tool | version | mode key splits cleanly."""
+        assert _parse_tvm_key("tool-a | bafy_v1 | tournament") == (
+            "tool-a",
+            "bafy_v1",
+            "tournament",
+        )
+
+    def test_pads_missing_mode(self) -> None:
+        """Legacy two-part keys get unknown mode."""
+        assert _parse_tvm_key("tool-a | bafy_v1") == (
+            "tool-a",
+            "bafy_v1",
+            "unknown",
+        )
+
+    def test_strips_whitespace(self) -> None:
+        """Leading/trailing whitespace around | is stripped."""
+        tool, version, mode = _parse_tvm_key("tool-a|bafy_v1|tournament")
+        assert (tool, version, mode) == ("tool-a", "bafy_v1", "tournament")
+
+
+# ---------------------------------------------------------------------------
+# Tool × version × mode breakdown
+# ---------------------------------------------------------------------------
+
+
+class TestSectionToolVersionBreakdown:
+    """Tests for section_tool_version_breakdown."""
+
+    def test_empty_returns_blank(self) -> None:
+        """Missing/empty by_tool_version_mode returns empty string."""
+        assert section_tool_version_breakdown({}) == ""
+        assert section_tool_version_breakdown({"by_tool_version_mode": {}}) == ""
+
+    def test_renders_table_with_high_n_no_warning(self) -> None:
+        """Cells with n >= 30 render without ⚠ marker."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | bafy_v1 | production_replay": {
+                    "n": 500,
+                    "valid_n": 480,
+                    "brier": 0.21,
+                    "directional_accuracy": 0.7,
+                    "brier_skill_score": 0.05,
+                },
+            }
+        }
+        result = section_tool_version_breakdown(scores)
+        assert "tool-a" in result
+        assert "`bafy_v1`" in result
+        assert "production_replay" in result
+        assert "500" in result and "0.2100" in result
+        assert "⚠" not in result  # high-n row should not be flagged
+
+    def test_low_n_row_gets_warning_marker(self) -> None:
+        """Cells with n < 30 carry a ⚠ marker on the n cell and a footnote."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | bafy_v1 | tournament": {
+                    "n": 9,
+                    "valid_n": 9,
+                    "brier": 0.18,
+                    "directional_accuracy": 0.78,
+                    "brier_skill_score": 0.10,
+                },
+            }
+        }
+        result = section_tool_version_breakdown(scores)
+        assert "9 ⚠" in result  # per-row marker
+        assert "n < 30" in result  # footnote warning
+
+    def test_custom_title(self) -> None:
+        """Title argument controls the section heading."""
+        scores = {
+            "by_tool_version_mode": {"t | v | m": {"n": 5, "valid_n": 5, "brier": 0.2}}
+        }
+        result = section_tool_version_breakdown(scores, title="Last 7 Days")
+        assert result.startswith("## Last 7 Days")
+
+
+# ---------------------------------------------------------------------------
+# section_version_deltas
+# ---------------------------------------------------------------------------
+
+
+class TestSectionVersionDeltas:
+    """Tests for section_version_deltas."""
+
+    def test_empty_returns_blank(self) -> None:
+        """Missing data returns empty string."""
+        assert section_version_deltas({}) == ""
+
+    def test_single_version_per_tool_returns_blank(self) -> None:
+        """Tools with only one (version, mode) cell yield no delta section."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | v1 | production_replay": {"n": 100, "brier": 0.2},
+            }
+        }
+        assert section_version_deltas(scores) == ""
+
+    def test_renders_pairwise_delta_for_multi_version_tool(self) -> None:
+        """Tool with two versions produces a delta row with direction."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | v1 | production_replay": {
+                    "n": 100,
+                    "valid_n": 100,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                    "log_loss": 0.7,
+                    "sharpness": 0.3,
+                    "reliability": 1.0,
+                },
+                "tool-a | v2 | production_replay": {
+                    "n": 100,
+                    "valid_n": 100,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                    "log_loss": 0.6,
+                    "sharpness": 0.3,
+                    "reliability": 1.0,
+                },
+            }
+        }
+        result = section_version_deltas(scores)
+        assert "## Version Deltas" in result
+        assert "### tool-a" in result
+        assert "improved" in result  # v2 has lower Brier
+        assert "-0.1000" in result
+
+    def test_low_sample_marker_on_delta(self) -> None:
+        """Delta where either side has n < 30 carries the ⚠ marker."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | v1 | production_replay": {
+                    "n": 1000,
+                    "valid_n": 1000,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                    "log_loss": 0.7,
+                    "sharpness": 0.3,
+                    "reliability": 1.0,
+                },
+                "tool-a | v2 | tournament": {
+                    "n": 9,
+                    "valid_n": 9,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                    "log_loss": 0.6,
+                    "sharpness": 0.3,
+                    "reliability": 1.0,
+                },
+            }
+        }
+        result = section_version_deltas(scores)
+        assert "⚠" in result
+        assert "n_b" in result  # column header preserved
+
+
+# ---------------------------------------------------------------------------
+# generate_report — include_tournament toggle
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateReportTournamentToggle:
+    """Tests for the include_tournament flag on generate_report."""
+
+    def _scores_with_versions(self) -> dict[str, Any]:
+        s = _scores(
+            by_tool={"tool-a": {"brier": 0.3, "n": 50, "reliability": 1.0}},
+        )
+        s["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 100,
+                "valid_n": 100,
+                "brier": 0.30,
+                "directional_accuracy": 0.6,
+                "log_loss": 0.7,
+                "sharpness": 0.3,
+                "reliability": 1.0,
+            },
+            "tool-a | v2 | tournament": {
+                "n": 50,
+                "valid_n": 50,
+                "brier": 0.20,
+                "directional_accuracy": 0.7,
+                "log_loss": 0.6,
+                "sharpness": 0.3,
+                "reliability": 1.0,
+            },
+        }
+        return s
+
+    def test_off_by_default_omits_tournament_sections(self) -> None:
+        """Default behavior: no tournament sections in the rendered report."""
+        s = self._scores_with_versions()
+        report = generate_report(s, [])
+        assert "Tool × Version × Mode" not in report
+        assert "Version Deltas" not in report
+
+    def test_on_renders_cumulative_breakdown_and_deltas(self) -> None:
+        """include_tournament=True renders the cumulative breakdown + deltas."""
+        s = self._scores_with_versions()
+        report = generate_report(s, [], include_tournament=True)
+        assert "Tool × Version × Mode (All-Time)" in report
+        assert "## Version Deltas" in report
+
+    def test_rolling_scores_render_separate_section(self) -> None:
+        """When rolling_scores has version cells, a 7d section appears too."""
+        s = self._scores_with_versions()
+        rolling = _scores()
+        rolling["by_tool_version_mode"] = {
+            "tool-a | v2 | tournament": {
+                "n": 35,
+                "valid_n": 35,
+                "brier": 0.18,
+                "directional_accuracy": 0.8,
+                "brier_skill_score": 0.1,
+            }
+        }
+        report = generate_report(s, [], rolling_scores=rolling, include_tournament=True)
+        assert "Tool × Version × Mode (All-Time)" in report
+        assert "Tool × Version × Mode (Last 7 Days)" in report

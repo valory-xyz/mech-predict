@@ -75,11 +75,13 @@ def _row(
     market_liquidity: float | None = None,
     market_spread: float | None = None,
     row_id: str | None = None,
+    tool_ipfs_hash: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """Build a minimal production_log row for testing."""
     if row_id is None:
         row_id = f"test_{uuid.uuid4().hex[:12]}"
-    return {
+    row: dict[str, Any] = {
         "row_id": row_id,
         "prediction_parse_status": status,
         "p_yes": p_yes if status == "valid" else None,
@@ -96,6 +98,11 @@ def _row(
         "market_liquidity_at_prediction": market_liquidity,
         "market_spread_at_prediction": market_spread,
     }
+    if tool_ipfs_hash is not None:
+        row["tool_ipfs_hash"] = tool_ipfs_hash
+    if mode is not None:
+        row["mode"] = mode
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +825,82 @@ class TestToolVersionBreakdown:
 
         assert "t1 | unknown" in result["by_tool_version"]
         assert result["by_tool_version"]["t1 | unknown"]["n"] == 2
+
+
+class TestTournamentVersionNormalization:
+    """Tests that tool_ipfs_hash is treated as tool_version (tournament path)."""
+
+    def test_ipfs_hash_populates_version_when_tool_version_missing(
+        self, tmp_path: Path
+    ) -> None:
+        """Tournament rows store the hash in tool_ipfs_hash, not tool_version."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(tool="t1", tool_ipfs_hash="bafy_abc"),
+            _row(tool="t1", tool_ipfs_hash="bafy_abc"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | bafy_abc" in result["by_tool_version"]
+        assert result["by_tool_version"]["t1 | bafy_abc"]["n"] == 2
+
+    def test_tool_version_takes_precedence_over_ipfs_hash(self, tmp_path: Path) -> None:
+        """If both fields are set, tool_version wins (production semantics)."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(tool="t1", tool_version="prod_v1", tool_ipfs_hash="bafy_other")]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | prod_v1" in result["by_tool_version"]
+        assert "t1 | bafy_other" not in result["by_tool_version"]
+
+
+class TestToolVersionModeBreakdown:
+    """Tests for the (tool, version, mode) aggregation dimension."""
+
+    def test_splits_by_mode_when_hash_matches(self, tmp_path: Path) -> None:
+        """Same tool + same hash but different modes must yield separate cells."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(tool="t1", tool_version="v1", mode="production_replay"),
+            _row(tool="t1", tool_ipfs_hash="v1", mode="tournament"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | v1 | production_replay" in result["by_tool_version_mode"]
+        assert "t1 | v1 | tournament" in result["by_tool_version_mode"]
+        assert result["by_tool_version_mode"]["t1 | v1 | production_replay"]["n"] == 1
+        assert result["by_tool_version_mode"]["t1 | v1 | tournament"]["n"] == 1
+
+    def test_defaults_mode_to_production_replay(self, tmp_path: Path) -> None:
+        """Rows without a mode field default to production_replay."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [_row(tool="t1", tool_version="v1")]
+        result = update(rows, scores_path, history_path)
+
+        assert "t1 | v1 | production_replay" in result["by_tool_version_mode"]
+
+    def test_distinct_versions_within_same_mode(self, tmp_path: Path) -> None:
+        """Two hashes of the same tool in the same mode produce two cells."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(tool="t1", tool_version="v1", mode="production_replay"),
+            _row(tool="t1", tool_version="v1", mode="production_replay"),
+            _row(tool="t1", tool_version="v2", mode="production_replay"),
+        ]
+        result = update(rows, scores_path, history_path)
+
+        assert result["by_tool_version_mode"]["t1 | v1 | production_replay"]["n"] == 2
+        assert result["by_tool_version_mode"]["t1 | v2 | production_replay"]["n"] == 1
 
 
 class TestConfigBreakdown:

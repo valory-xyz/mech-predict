@@ -9,7 +9,7 @@ score_tournament.py when they resolve.
 Usage:
     python benchmark/tournament.py --markets benchmark/datasets/open_markets.jsonl
     python benchmark/tournament.py --markets open_markets.jsonl --tools prediction-online,superforcaster
-    python benchmark/tournament.py --markets open_markets.jsonl --max-markets 10
+    python benchmark/tournament.py --markets open_markets.jsonl --max-markets 10  # 10 per platform
 """
 
 from __future__ import annotations
@@ -323,6 +323,13 @@ def run_tournament(
             by_platform.setdefault(m.get("platform", "unknown"), []).append(m)
         markets = []
         for plat_markets in by_platform.values():
+            missing = [m.get("id") for m in plat_markets if not m.get("fetched_at")]
+            if missing:
+                log.warning(
+                    "%d markets missing fetched_at (will sort last): %s",
+                    len(missing),
+                    missing[:5],
+                )
             plat_markets.sort(key=lambda m: m.get("fetched_at", ""), reverse=True)
             markets.extend(plat_markets[:max_markets])
 
@@ -447,7 +454,7 @@ def main() -> None:
         "--max-markets",
         type=int,
         default=None,
-        help="Max markets to process (default: all)",
+        help="Max markets per platform to process (default: all)",
     )
     parser.add_argument(
         "--timeout",

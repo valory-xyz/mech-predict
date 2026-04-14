@@ -371,6 +371,7 @@ class TestGenerateReport:
         assert "## Best Predictions" in report
         assert "## Trend" in report
         assert "## Sample Size Warnings" in report
+        assert "## Diagnostic Edge Metrics" in report
 
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""

@@ -326,6 +326,16 @@ def _fetch_resolution_map(
     return resolution_map
 
 
+def _parse_iso(ts: Any) -> datetime | None:
+    """Parse an ISO-8601 timestamp, tolerating trailing `Z` on Python 3.10."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _apply_resolution(
     row: dict[str, Any],
     resolution: dict[str, Any],
@@ -335,20 +345,18 @@ def _apply_resolution(
     scored_row["final_outcome"] = resolution["outcome"]
     scored_row["resolved_at"] = resolution["resolved_at"]
 
-    predicted_at = row.get("predicted_at")
-    resolved_at = resolution["resolved_at"]
-    if predicted_at and resolved_at:
-        try:
-            pred_dt = datetime.fromisoformat(predicted_at.replace("Z", "+00:00"))
-            res_dt = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
-            lead_days = (res_dt - pred_dt).total_seconds() / 86400
-            scored_row["prediction_lead_time_days"] = round(lead_days, 1)
-        except (ValueError, TypeError) as exc:
-            log.warning(
-                "Failed to compute lead time for row_id=%s: %s",
-                row.get("row_id"),
-                exc,
-            )
+    pred_dt = _parse_iso(row.get("predicted_at"))
+    res_dt = _parse_iso(resolution["resolved_at"])
+    if pred_dt and res_dt:
+        lead_days = (res_dt - pred_dt).total_seconds() / 86400
+        scored_row["prediction_lead_time_days"] = round(lead_days, 1)
+    elif row.get("predicted_at") and resolution["resolved_at"]:
+        log.warning(
+            "Failed to parse timestamps for row_id=%s: predicted_at=%r resolved_at=%r",
+            row.get("row_id"),
+            row.get("predicted_at"),
+            resolution["resolved_at"],
+        )
 
     scored_row.pop("source_content", None)
     return scored_row

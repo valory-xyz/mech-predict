@@ -47,6 +47,13 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Tool versions:* if the report has a "Tool × Version × Mode" (cumulative or 7d), or "Version Deltas" section, summarize per-version observations: which tool versions changed, mode (production_replay vs tournament), Brier delta where shown. Show full hashes (no truncation) wrapped in backticks. CRITICAL: any row whose n cell ends in ⚠ or whose underlying n is below 30 is a small sample — when mentioning such a row you MUST lead with "small sample (n=X)" before stating any metric, and you MUST NOT use the words "best", "highest", "lowest", "worst", or any superlative for that row. Compare across versions only when both have n >= 30. Skip the section entirely if no Tool × Version × Mode or Version Deltas content is present.
 
+*Diagnostics:*
+If the report includes "Diagnostic Edge Metrics", summarize:
+• Conditional accuracy: X% tool-wins when disagreeing (n=X) — when the tool would trigger a trade, how often is it closer to truth than the market?
+• Disagreement Brier (large trade): X.XX — prediction accuracy on high-disagreement questions where PnL impact is highest
+• Directional bias: ±X.XX — positive = tool overestimates, negative = underestimates, near 0 = no systematic bias
+Only include this section if the report has diagnostic metric data. Skip if insufficient data.
+
 *Recommended actions:* 2-3 concrete next steps based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
 
 Rules:

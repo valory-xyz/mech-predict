@@ -12,11 +12,11 @@ on:
       max_markets:
         description: 'Max markets per platform for tournament'
         required: false
-        default: '10'
+        default: '20'
       tools:
         description: 'Comma-separated tool names for tournament'
         required: false
-        default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme'
+        default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research'
       notify_slack:
         description: 'Post summary to Slack'
         required: false
@@ -76,10 +76,15 @@ jobs:
         run: rm -f benchmark/results/scores.json benchmark/results/scores_history.jsonl
 
       # Fetch writes daily log file + calls scorer.update() inline
+      # Inputs routed through env (not ${{ }} interpolation in the shell script)
+      # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
+      # before the shell runs, so malicious input would become part of the script.
       - name: Fetch production data
+        env:
+          INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
         run: |
           python -m benchmark.datasets.fetch_production \
-            --lookback-days "${{ github.event.inputs.lookback_days || '7' }}"
+            --lookback-days "$INPUT_LOOKBACK_DAYS"
 
       # Fallback: if inline scorer failed, run standalone rebuild.
       # Must run BEFORE the tournament merge so --rebuild has a chance to
@@ -209,17 +214,22 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # Inputs routed via env to avoid shell injection — see note in benchmark job.
       - name: Fetch Omen open markets
+        env:
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '20' }}
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform omen \
-            --max-markets "${{ github.event.inputs.max_markets || '20' }}"
+            --max-markets "$INPUT_MAX_MARKETS"
 
       - name: Fetch Polymarket open markets
+        env:
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '20' }}
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform polymarket \
-            --max-markets "${{ github.event.inputs.max_markets || '20' }}" \
+            --max-markets "$INPUT_MAX_MARKETS" \
             --min-liquidity 1000
 
       - name: Upload tournament markets
@@ -283,6 +293,7 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # Inputs routed via env to avoid shell injection — see note in benchmark job.
       - name: Run tournament predictions
         continue-on-error: true
         env:
@@ -292,11 +303,13 @@ jobs:
           SEARCH_PROVIDER: ${{ secrets.BENCHMARK_SEARCH_PROVIDER }}
           GOOGLE_API_KEY: ${{ secrets.BENCHMARK_GOOGLE_API_KEY }}
           GOOGLE_ENGINE_ID: ${{ secrets.BENCHMARK_GOOGLE_ENGINE_ID }}
+          INPUT_TOOLS: ${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research' }}
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '20' }}
         run: |
           uv run python -m benchmark.tournament \
             --markets benchmark/datasets/open_markets.jsonl \
-            --tools "${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research' }}" \
-            --max-markets "${{ github.event.inputs.max_markets || '20' }}"
+            --tools "$INPUT_TOOLS" \
+            --max-markets "$INPUT_MAX_MARKETS"
 
       - name: Score resolved predictions
         run: uv run python -m benchmark.score_tournament

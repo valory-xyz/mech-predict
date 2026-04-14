@@ -38,7 +38,7 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        by_platform[row.get("platform", "unknown")].append(row)
+        by_platform[row.get("platform") or "unknown"].append(row)
 
     def _metrics(subset: list[dict[str, Any]]) -> dict[str, Any]:
         valid = [r for r in subset if r.get("p_yes") is not None]

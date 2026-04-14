@@ -440,8 +440,8 @@ These metrics are not used to rank or select tools. They diagnose whether accura
 | Metric | Formula | What it diagnoses |
 |--------|---------|-------------------|
 | **ECE** | `sum(n_bin * \|gap_bin\|) / total_n` | Overall calibration quality. 0 = perfect. |
-| **Calibration intercept** | Weighted linear regression intercept (realized vs predicted) | Systematic bias direction. Positive = underestimates. |
-| **Calibration slope** | Weighted linear regression slope | Prediction dispersion. < 1 = overconfident, > 1 = underconfident. |
+| **Calibration intercept** | Row-level logistic regression (Platt scaling) on `logit(p_yes)` — intercept term | Systematic bias direction. Positive = underestimates. |
+| **Calibration slope** | Row-level logistic regression (Platt scaling) on `logit(p_yes)` — slope term | Prediction dispersion. < 1 = overconfident, > 1 = underconfident. |
 | **Sharpness** | `mean(\|p_yes - 0.5\|)` | How decisive predictions are. Only good if calibration is also good. |
 | **Directional accuracy** | `correct / n_directional` (excludes p_yes == 0.5) | Fraction correct when the tool has an opinion. |
 | **No-signal rate** | `count(p_yes == 0.5) / n_valid` | How often the tool says "I don't know." |
@@ -1266,10 +1266,11 @@ The first sprint delivers a minimal but complete pipeline: real production data 
    - Preserve missingness explicitly instead of silently dropping rows
    - Output a first `production_log.jsonl`
 
-3. **`scorer.py` with the gated baseline metrics**
-   - Reliability gate first
-   - Then Brier score
-   - Then edge-over-market where eligible
+3. **`scorer.py` with the staged pipeline**
+   - Reliability gate (80% threshold)
+   - Brier + Log Loss (primary ranking metrics)
+   - Calibration: ECE, intercept/slope via Platt scaling (min 20/bin for ECE)
+   - Edge diagnostics where market_prob available
    - Include `n_total`, `n_eligible`, `n_excluded`, exclusion reasons, and timing
 
 4. **Baseline reporting**

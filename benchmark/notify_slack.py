@@ -41,6 +41,8 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
 
+*Deployment status:* if the report has a "Tool Deployment Status" section, write one line per deployment that has disabled tools, in the form "Disabled on <deployment>: `tool-a`, `tool-b`" (omit the deployment entirely if it has no disabled tools). If the section says config fetch failed for a deployment, note it briefly. Skip the whole block if the section reports no disabled tools.
+
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.

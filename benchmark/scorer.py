@@ -811,6 +811,9 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
 
+    # Tool × category cross breakdown
+    by_tool_category = group_by_composite(rows, ["tool_name", "category"])
+
     # Tool × version (normalized: tool_version OR tool_ipfs_hash) cross breakdown
     tv_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     tvm_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -869,6 +872,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform_difficulty": by_platform_difficulty,
         "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
+        "by_tool_category": by_tool_category,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "by_tool_version": by_tool_version,
         "by_tool_version_mode": by_tool_version_mode,
@@ -930,6 +934,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_category": {},
         "by_horizon": {},
         "by_tool_platform": {},
+        "by_tool_category": {},
         "by_tool_version": {},
         "by_tool_version_mode": {},
         "by_config": {},
@@ -1215,6 +1220,7 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_category"], category, row)
     _ensure_and_accumulate(scores["by_horizon"], horizon, row)
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
+    _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
     _ensure_and_accumulate(
         scores["by_tool_version_mode"],
@@ -1308,6 +1314,7 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1479,6 +1486,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1595,6 +1603,7 @@ def update(
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1731,6 +1740,7 @@ def rebuild(
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",

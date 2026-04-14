@@ -359,6 +359,13 @@ class TestScore:
         # By category
         assert result["by_category"]["crypto"]["n"] == 2
 
+        # By tool × category — fleet-per-category cross breakdown
+        assert "tool-a | crypto" in result["by_tool_category"]
+        assert "tool-a | politics" in result["by_tool_category"]
+        assert "tool-b | crypto" in result["by_tool_category"]
+        assert result["by_tool_category"]["tool-a | crypto"]["n"] == 1
+        assert result["by_tool_category"]["tool-b | crypto"]["n"] == 1
+
     def test_empty_input(self) -> None:
         """Test scoring with empty input."""
         result = score([])

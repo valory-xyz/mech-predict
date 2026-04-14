@@ -41,7 +41,9 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
 
-*Weak categories:* list categories with Brier > 0.40 and brief note
+*Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the fleet-level answer to "where do our agents do well vs poorly" — always include when data is present.
+
+*Fleet × Category highlights:* from the "Tool × Category" section, pick 2–4 standout tool-category combinations (best performers, worst performers, or fleet-wide weaknesses). Only use rows above the sample-size threshold — never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("fleet struggles on X across tools").
 
 *Regressions:* any tools or metrics that worsened vs prior period. Say "None" if trend data shows no worsening. "Regression" means worse over TIME, not just a bad score.
 

@@ -24,7 +24,9 @@ Valory runs the MPP server and pays for all API keys (OpenAI, Anthropic, Google,
 **Two of the three modes are priced below break-even.** This document proves it with traced API calls from source code and published provider rates, then proposes break-even pricing under two scenarios:
 
 1. **Scenario A (Current hardcoded tools):** Wildcard keeps using only `prediction-offline`, `prediction-online`, and `superforcaster` — the 3 tools hardcoded today.
-2. **Scenario B (Dynamic tool pools):** Wildcard adopts the pool-based selection from [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md), where any tool in the pool may be selected. Price must cover the most expensive tool that could run.
+2. **Scenario B (Dynamic tool pools) — CHOSEN:** Wildcard adopts the pool-based selection from [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md), where any tool in the pool may be selected. Price must cover the most expensive tool that could run.
+
+> **Decision:** We propose **Scenario B pricing ($0.015 / $0.04 / $0.08)** directly to Wildcard. Rationale: setting Phase 2 prices now avoids a second pricing change when server-side dynamic selection ships. Scenario A is retained below as reference for understanding the cost floor of current hardcoded tools.
 
 ---
 

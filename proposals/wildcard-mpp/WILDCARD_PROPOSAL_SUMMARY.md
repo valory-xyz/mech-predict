@@ -5,23 +5,84 @@
 
 ---
 
-## Action Required
+## Action Items
 
-**BLOCKER — Wildcard team, before Chrome store submission:**
-- Add 3 fields to the prediction request body: `market_url`, `condition_id`, `market_prob_at_prediction`. The extension already computes all three — it's ~5 lines on each side. **If the extension ships without these, adding them later requires a Chrome store review cycle (days to weeks).** See [details below](#urgent-what-the-wildcard-team-needs-to-do-before-chrome-store-submission).
+### For the Wildcard Team
 
-**IMMEDIATE — Wildcard team:**
-- Reprice Quick from $0.001 → $0.01 and Deep from $0.01 → $0.03. Both modes are currently priced below API cost. See [Phase 1 pricing](#phase-1-keep-current-hardcoded-prices-fix-the-losses-now).
-- Enable Redis AOF persistence (`--appendonly yes` + volume mount). One-line Docker config change. Currently every prediction vanishes after 1 hour with no backup.
+**a. Add metadata to prediction requests (BLOCKER — before Chrome store submission)**
 
-**NEXT — mech-predict team:**
-- Publish `compute_tier` column in IPFS performance CSV (Layer 3 work)
-- Implement BSS + softmax selection logic in MPP server (~100 lines Python)
-- Add JSONL append log for persistent prediction storage
+The extension must include 3 new fields in the prediction request POST body:
+
+| Field | Already Available? | Source in Extension |
+|---|---|---|
+| `market_url` | Yes | `window.location.href` |
+| `condition_id` | Yes | `selectedMarket.conditionId` from Gamma API |
+| `market_prob_at_prediction` | Yes | `marketPriceYes` computed in `PredictionPanel.tsx` |
+
+The extension already computes all three values — it's ~5 lines to include them in the POST body. Without these, we cannot compute edge-over-market, resolve outcomes, or feed the benchmark pipeline. Changing the request schema after Chrome store launch requires a new review cycle (days to weeks). Full details: [MPP_DATA_PIPELINE.md](./MPP_DATA_PIPELINE.md).
+
+**b. Update mode pricing**
+
+Current prices don't cover API costs on Quick and Deep — Valory is losing money on every call. We propose **Phase 2 pricing** directly (covers the full dynamic tool pool including better-performing Claude variants):
+
+| Mode | Current | Proposed |
+|---|---|---|
+| Quick | $0.001 | **$0.015** |
+| Deep | $0.01 | **$0.04** |
+| Super | $0.05 | **$0.08** |
+
+**Why Phase 2 directly, not Phase 1:** Phase 1 prices ($0.01 / $0.03 / $0.05) cover only the 3 tools Wildcard hardcodes today. Once we enable dynamic tool selection on the server side, the price must cover any tool that may be selected (including Claude Sonnet variants at ~2x cost). Setting Phase 2 prices now avoids a second pricing change in a few months when server-side dynamic selection ships. Full cost breakdown per tool: [MPP_COST_PROPOSAL.md](./MPP_COST_PROPOSAL.md).
+
+**c. Nothing else required from Wildcard team.** All other changes (tool selection logic, persistent storage, benchmark integration) are server-side and owned by the mech-predict team.
 
 ---
 
-## What We're Proposing
+### Server-Side Changes (mech-predict team)
+
+**a. Dynamic tool selection and routing**
+
+Replace the hardcoded one-tool-per-mode mapping with a data-driven selection system:
+
+- Each tool declares a `compute_tier` (quick/deep/super) in IPFS metadata
+- Benchmark pipeline publishes a per-platform performance CSV to IPFS with BSS scores per `(tool, category)` cell
+- MPP server filters the CSV by `compute_tier == requested_mode`, classifies the question's category via shared `classify_category()`, computes weights using Brier Skill Score + softmax (T=0.5)
+- Weighted random selection picks the best tool dynamically; fallback chain handles tool failures
+
+This enables tool rotation without code changes, category-aware routing, and a self-improving loop where production predictions feed back into the benchmark scoring. Full architecture: [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md).
+
+**Tool pools (12 existing polystrat tools across 3 modes):**
+
+| Quick (LLM-only) | Deep (LLM + search) | Super (LLM + search + reasoning) |
+|---|---|---|
+| `prediction-offline` (GPT-4.1) | `prediction-online` (GPT-4.1) | `prediction-request-reasoning` (GPT-4.1) |
+| `claude-prediction-offline` (Claude) | `claude-prediction-online` (Claude) | `prediction-request-reasoning-claude` (Claude) |
+| `prediction-offline-sme` (GPT-4o) | `prediction-online-sme` (GPT-4o) | `prediction-request-rag` (GPT-4.1) |
+| `gemini-prediction` (Gemini Flash) | `superforcaster` (GPT-4.1) | `prediction-request-rag-claude` (Claude) |
+
+**b. Persistent storage**
+
+This is a **server-side change** — the MPP server (owned by Valory, not the Chrome extension) currently has zero persistent storage. Every prediction vanishes from Redis after 1 hour. No database, no log files, no exports.
+
+Phased approach:
+
+| Phase | What | Why |
+|---|---|---|
+| **Immediate** | Enable Redis AOF persistence (`--appendonly yes` + volume mount). One-line Docker config change. | Survives server restarts. Minimum viable persistence. |
+| **Before launch** | JSONL append log — after each prediction, append one JSON line to a mounted volume. ~15 lines of Python. | Directly readable by the benchmark pipeline. Simplest queryable persistent layer. |
+| **Post-launch** | PostgreSQL — `predictions` table with async writes. Add `postgres:16-alpine` + `asyncpg`. | Queryable database for dashboards, outcome tracking, per-category analysis. |
+
+Full storage proposal and schema: [MPP_DATA_PIPELINE.md](./MPP_DATA_PIPELINE.md).
+
+**c. Supporting Layer 3 work in the benchmark pipeline**
+
+- Add `compute_tier` column to the IPFS performance CSV
+- Publish per-platform CSVs from benchmark CI
+- Implement BSS + softmax selection logic in MPP server (~100 lines of Python)
+- Capture tool output metadata currently ignored by the server (`cost_dict`, `prompt_used`, `latency_ms`, derived `category`)
+
+---
+
+## What We're Proposing (Overview)
 
 Three user-facing prediction modes (quick / deep / super), defined by compute intensity, with dynamic tool selection behind each mode driven by benchmark performance data.
 
@@ -35,121 +96,13 @@ Each mode has a pool of 4 tools (including Claude and GPT variants). The selecti
 
 ---
 
-## Tool Selection — How the Right Tool Gets Picked
-
-Today Wildcard hardcodes one tool per mode. We propose replacing this with a dynamic, data-driven selection system:
-
-**How it works:**
-1. Each tool declares a `compute_tier` (quick/deep/super) in its IPFS metadata
-2. Our benchmark pipeline scores all tools and publishes a per-platform performance CSV to IPFS
-3. At request time, the MPP server filters the CSV by `compute_tier == requested_mode`
-4. Classifies the question's category (crypto, politics, etc.) via shared `classify_category()`
-5. Computes weights using Brier Skill Score + softmax (T=0.5) — better tools get more traffic
-6. Weighted random selection from the pool
-7. If the selected tool fails, falls back to the next-best tool
-
-**What this enables:**
-- **Rotate tools without code changes.** Update IPFS metadata or the CSV — the server picks it up automatically.
-- **A/B testing built in.** Multiple tools in a pool get traffic proportional to their performance.
-- **Category-aware routing.** A tool that excels on politics questions gets more politics traffic, even if it's weaker on crypto.
-- **Self-improving loop.** Production predictions feed the benchmark pipeline → updated scores → better tool selection.
-
-**Tool pools (12 tools across 3 modes):**
-
-| Quick (LLM-only) | Deep (LLM + search) | Super (LLM + search + reasoning) |
-|---|---|---|
-| `prediction-offline` (GPT-4.1) | `prediction-online` (GPT-4.1) | `prediction-request-reasoning` (GPT-4.1) |
-| `claude-prediction-offline` (Claude) | `claude-prediction-online` (Claude) | `prediction-request-reasoning-claude` (Claude) |
-| `prediction-offline-sme` (GPT-4o) | `prediction-online-sme` (GPT-4o) | `prediction-request-rag` (GPT-4.1) |
-| `gemini-prediction` (Gemini Flash) | `superforcaster` (GPT-4.1) | `prediction-request-rag-claude` (Claude) |
-
-All tools are existing polystrat tools already running on Polymarket with production data.
-
----
-
-## Pricing — Two Phases
-
-### Phase 1: Keep Current Hardcoded Prices, Fix the Losses (Now)
-
-Wildcard currently hardcodes 3 tools with prices that don't cover API costs on two modes:
-
-| Mode | Current Tool | API Cost | Current Price | Proposed Price |
-|---|---|---|---|---|
-| Quick | `prediction-offline` | $0.008 | $0.001 (loss) | **$0.01** |
-| Deep | `prediction-online` | $0.026 | $0.01 (loss) | **$0.03** |
-| Super | `superforcaster` | $0.020 | $0.05 (profitable) | **$0.05** (no change) |
-
-These prices cover the 3 existing hardcoded tools at break-even. No dynamic selection, no Claude variants — just repricing to stop losing money on every Quick and Deep call.
-
-### Phase 2: Dynamic Pool Pricing (Once Selection Logic Ships)
-
-Once the weighted selection logic is live and tools can be rotated dynamically, prices need to cover the most expensive tool in each pool (including Claude Sonnet variants):
-
-| Mode | Break-Even Price | Why Higher |
-|---|---|---|
-| Quick | **$0.015** | Pool includes `claude-prediction-offline` ($0.014/call) |
-| Deep | **$0.04** | Pool includes `claude-prediction-online` ($0.040/call) |
-| Super | **$0.08** | Pool includes `prediction-request-reasoning-claude` ($0.074/call) |
-
-This is a real cost increase driven by Claude variants, which have the best benchmark performance but are 1.5-2x more expensive than GPT-4.1. The tradeoff: better predictions cost more.
-
----
-
-## Urgent: What the Wildcard Team Needs to Do Before Chrome Store Submission
-
-The extension must start sending 3 new fields in the prediction request body:
-
-| Field | Already Available In Extension? | Change Required |
-|---|---|---|
-| `market_url` | Yes — `window.location.href` | Add to POST body |
-| `condition_id` | Yes — `selectedMarket.conditionId` from Gamma API | Add to POST body |
-| `market_prob_at_prediction` | Yes — `marketPriceYes` computed from CLOB/Gamma APIs | Add to POST body |
-
-**This is a blocker.** These fields are needed for:
-- Edge-over-market calculation (was our prediction better than the market?)
-- Outcome resolution (linking predictions to resolved markets via `condition_id`)
-- Benchmark pipeline integration (scoring production predictions)
-
-The extension already computes all three values — it's ~5 lines to include them in the request. The server-side Pydantic model needs 3 new optional fields (~3 lines). **If the extension ships without these fields, adding them later requires a Chrome store review cycle (days to weeks).**
-
----
-
-## Persistent Storage — Phased Approach
-
-**Current state: zero persistent storage.** Every prediction vanishes from Redis after 1 hour. No database, no log files, no exports.
-
-### If Time-Crunched (Minimum Viable)
-
-Increase the Redis TTL from 1 hour to 30 days and enable Redis AOF persistence (one-line Docker config change). This keeps predictions in Redis across restarts and gives us a 30-day window to export data.
-
-```yaml
-# docker-compose.yml — one change
-redis:
-  command: redis-server --appendonly yes
-  volumes:
-    - redis_data:/data
-```
-
-This is not a long-term solution — Redis is an in-memory store and 30 days of predictions will consume RAM. But it buys time.
-
-### End Goal
-
-1. **JSONL append log** — after each prediction, append one JSON line to a Docker-mounted volume. Directly readable by our benchmark pipeline. Simplest persistent layer, ships in ~15 lines of Python.
-
-2. **PostgreSQL** — queryable database with a `predictions` table. Enables dashboards, aggregation, outcome tracking. Add `postgres:16-alpine` to docker-compose + `asyncpg` dependency. Async writes don't block predictions.
-
-Both coexist: JSONL for benchmark pipeline ingestion, PostgreSQL for querying and future features (outcome resolution, per-category analysis, cost tracking).
-
----
-
 ## Decisions Locked
 
 | Decision | Chosen |
 |---|---|
 | Integration architecture | Option A — MPP reads IPFS CSV directly, no mech-interact dependency |
 | Selection algorithm | BSS + softmax, T=0.5 launch default |
-| Pricing (Phase 1) | $0.01 / $0.03 / $0.05 for current 3 hardcoded tools |
-| Pricing (Phase 2) | $0.015 / $0.04 / $0.08 once dynamic pools ship |
+| Proposed pricing | Phase 2 directly: $0.015 / $0.04 / $0.08 |
 | Extension fields | BLOCKER — must ship before Chrome store submission |
 | Storage (immediate) | Redis AOF + longer TTL |
 | Storage (end goal) | JSONL + PostgreSQL |

@@ -22,6 +22,11 @@ from typing import Any
 from benchmark.compare import compare_stats
 from benchmark.io import load_jsonl
 from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
+from benchmark.tool_usage import (
+    failed_deployments,
+    fetch_disabled_tools,
+    iter_tools_with_disabled,
+)
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -127,6 +132,64 @@ def _sample_label(stats: dict[str, Any]) -> str:
     if stats.get("decision_worthy") is False:
         return " ⚠ low sample"
     return ""
+
+
+def section_tool_deployment_status(
+    scores: dict[str, Any],
+    disabled: dict[str, list[str] | None] | None = None,
+) -> str:
+    """Render which benchmarked tools are disabled on each deployment.
+
+    Tools are listed only when they appear in ``scores.by_tool`` (i.e. were
+    actually invoked) AND are on at least one deployment's
+    ``IRRELEVANT_TOOLS`` list.  Deployments whose config fetch failed are
+    called out explicitly so a reader never confuses "unavailable" with
+    "nothing disabled".
+
+    :param scores: parsed ``scores.json`` dict.
+    :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
+        Pass ``None`` to fetch on the fly (the daily-report default).
+    :return: markdown section string.
+    """
+    if disabled is None:
+        disabled = fetch_disabled_tools()
+
+    tools = scores.get("by_tool", {})
+    # Preserve report-wide ordering (Brier ascending) so readers scan this
+    # section in the same order as Tool Ranking below.
+    ordered = sorted(
+        tools.keys(),
+        key=lambda t: (
+            tools[t].get("brier") if tools[t].get("brier") is not None else 999
+        ),
+    )
+    entries = iter_tools_with_disabled(ordered, disabled)
+
+    lines = ["## Tool Deployment Status", ""]
+    failed = failed_deployments(disabled)
+    all_failed = len(failed) == len(disabled) and len(disabled) > 0
+    if failed:
+        lines.append(
+            "> ⚠️ Could not fetch deployment config for: "
+            f"{', '.join(failed)}. Status below may be incomplete."
+        )
+        lines.append("")
+
+    if not entries:
+        # If every fetch failed we already told the reader — don't also claim
+        # "nothing is disabled", which would be a false negative.
+        if all_failed:
+            return "\n".join(lines).rstrip()
+        lines.append(
+            "_No benchmarked tools are disabled on any deployment._"
+            if not failed
+            else "_No disabled tools reported from the deployments that were fetched._"
+        )
+        return "\n".join(lines)
+
+    for tool, deployments in entries:
+        lines.append(f"- `{tool}` — disabled on {', '.join(deployments)}")
+    return "\n".join(lines)
 
 
 def section_tool_ranking(scores: dict[str, Any]) -> str:
@@ -1047,6 +1110,7 @@ def generate_report(
     period_scores: dict[str, Any] | None = None,
     rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
+    disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a full benchmark report from scores and history.
 
@@ -1056,6 +1120,10 @@ def generate_report(
     :param rolling_scores: scores from the last 7 days.
     :param include_tournament: when True, render the Tool × Version × Mode
         (cumulative + 7d rolling) and Version Deltas sections.
+    :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
+        map used by the Tool Deployment Status section.  Pass ``None``
+        (default) to fetch from GitHub at render time; pass an empty
+        dict in tests to skip the network call.
     :return: full markdown report string.
     """
     if history is None:
@@ -1085,6 +1153,7 @@ def generate_report(
         section_period(rolling_scores, scores, "Last 7 Days Rolling"),
         section_overall(scores),
         section_base_rates(scores),
+        section_tool_deployment_status(scores, disabled=disabled_tools),
         section_tool_ranking(scores),
         *tournament_sections,
         section_platform(scores),

@@ -315,6 +315,12 @@ TOTAL:                                  $0.0321
 
 Both scenarios target **break-even** — covering API costs without adding margin. Infrastructure costs (server, Redis, monitoring) are not included and would need to be accounted for separately.
 
+> **Why not per-tool dynamic pricing?**
+>
+> Payment happens before tool selection. MPP uses payment channels — the user signs a voucher for a fixed price the moment they click a mode, but the tool is only picked a split-second later on the server. You can't charge a dynamic price for something that hasn't been chosen yet.
+>
+> Refunding is complicated. We could charge max then refund the difference per request, but that means two on-chain operations per prediction (expensive) or trusting off-chain bookkeeping (fragile). Fixed per-mode pricing is simpler and matches how MPP works today.
+
 ### Scenario A: Current Hardcoded Tools (No Change to Selection Logic)
 
 Wildcard keeps using exactly the 3 tools currently hardcoded in `registry.py`. No pool selection, no dynamic routing.

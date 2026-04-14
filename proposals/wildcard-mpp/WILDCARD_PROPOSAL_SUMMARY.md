@@ -33,11 +33,11 @@ Current prices don't cover API costs on Quick and Deep — Valory is losing mone
 
 **Why Phase 2 directly, not Phase 1:** Phase 1 prices ($0.01 / $0.03 / $0.05) cover only the 3 tools Wildcard hardcodes today. Once we enable dynamic tool selection on the server side, the price must cover any tool that may be selected (including Claude Sonnet variants at ~2x cost). Setting Phase 2 prices now avoids a second pricing change in a few months when server-side dynamic selection ships. Full cost breakdown per tool: [MPP_COST_PROPOSAL.md](./MPP_COST_PROPOSAL.md).
 
-**c. Nothing else required from Wildcard team.** All other changes (tool selection logic, persistent storage, benchmark integration) are server-side and owned by the mech-predict team.
+**c. Nothing else required from Wildcard team.** All other changes (tool selection logic, persistent storage, benchmark integration) are server-side.
 
 ---
 
-### Server-Side Changes (mech-predict team)
+### Server-Side Changes
 
 **a. Dynamic tool selection and routing**
 

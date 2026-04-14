@@ -234,8 +234,10 @@ class TestSectionCategory:
         assert "n=100" in result
 
     def test_insufficient_data_flagged_not_skipped(self) -> None:
-        """Category with n < MIN_SAMPLE_SIZE renders insufficient-data line,
-        not silently omitted — reader must see the dimension was considered."""
+        """Render insufficient-data line for categories below MIN_SAMPLE_SIZE.
+
+        Do not silently omit — reader must see the dimension was considered.
+        """
         s = _scores(by_category={"crypto": {"brier": 0.3, "n": 5, "reliability": 1.0}})
         result = section_category(s)
         assert "**crypto**" in result
@@ -315,9 +317,11 @@ class TestSectionToolCategory:
         )
 
     def test_sparse_cell_listed_in_sparse_section_not_table(self) -> None:
-        """Cells with n < MIN_SAMPLE_SIZE appear only in the sparse list, not
-        the ranking table — so a bug flipping the gate would flip which
-        section they land in."""
+        """Route sparse cells to the list-only path, never the ranking table.
+
+        A bug flipping the gate would flip which section a cell lands in,
+        so both assertions below together catch it.
+        """
         s = _scores(
             by_tool_category={
                 "tool-a | crypto": {
@@ -335,8 +339,10 @@ class TestSectionToolCategory:
         assert "insufficient data (n=5)" in post_sparse
 
     def test_all_sparse_shows_placeholder_row(self) -> None:
-        """When no cell meets the threshold, the table body states so
-        explicitly rather than rendering an empty table."""
+        """Show an explicit placeholder row when no cell meets the threshold.
+
+        Rendering an empty table instead would be confusing.
+        """
         s = _scores(
             by_tool_category={
                 "tool-a | x": {"brier": 0.1, "n": 2},
@@ -363,9 +369,11 @@ class TestSectionToolCategory:
         assert "below n=" not in result  # no sparse section
 
     def test_sparse_examples_capped_at_five(self) -> None:
-        """When more than 5 sparse cells exist, only 5 examples render but
-        the count line reports the true total — keeps the table readable
-        while still signaling how many cells were considered."""
+        """Cap rendered sparse examples at 5 while reporting the true total.
+
+        Keeps the table readable while still signaling how many cells were
+        considered.
+        """
         sparse_cells = {
             f"tool-{i} | cat-{i}": {"brier": 0.1 + i * 0.01, "n": 5} for i in range(7)
         }

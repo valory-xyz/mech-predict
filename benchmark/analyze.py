@@ -210,9 +210,16 @@ def section_category(scores: dict[str, Any]) -> str:
         key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
     ):
         if stats["n"] < MIN_SAMPLE_SIZE:
+            # Include the (noisy) Brier so the ascending-Brier sort is
+            # traceable to the reader — otherwise a sparse category ranking
+            # above a sufficient one looks arbitrary.
+            noisy_brier = stats.get("brier")
+            brier_hint = (
+                f" noisy Brier: {noisy_brier}" if noisy_brier is not None else ""
+            )
             lines.append(
                 f"- **{category}**: insufficient data"
-                f" (n={stats['n']}, need {MIN_SAMPLE_SIZE})"
+                f" (n={stats['n']}, need {MIN_SAMPLE_SIZE}){brier_hint}"
             )
             continue
         baseline = stats.get("baseline_brier")
@@ -253,6 +260,10 @@ def section_tool_category(scores: dict[str, Any]) -> str:
 
     lines = [
         "## Tool × Category",
+        "",
+        f"> Cells with n < {MIN_SAMPLE_SIZE} are moved to a separate list below"
+        " the ranking. This differs from Tool × Platform, which renders every"
+        " cell inline and marks small samples with ⚠.",
         "",
         "| Tool | Category | Brier | BSS | LogLoss | Edge | Edge n | DirAcc | Sharpness | n |",
         "|------|----------|-------|-----|---------|------|--------|--------|-----------|---|",

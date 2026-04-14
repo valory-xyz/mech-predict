@@ -244,7 +244,12 @@ class TestSectionCategory:
         # A missing `continue` in the insufficient branch would emit both
         # the insufficient line AND the metric line — catch that.
         assert result.count("**crypto**") == 1
-        assert "Brier: 0.3" not in result
+        # The sufficient-path metric line uses "Brier: X, n=..." with a
+        # comma; the insufficient line embeds Brier as "noisy Brier: X"
+        # without a comma. Assert the sufficient-path format does NOT appear.
+        assert "Brier: 0.3, " not in result
+        # But the noisy-Brier hint IS present so the sort is traceable.
+        assert "noisy Brier: 0.3" in result
 
     def test_sorted_by_brier_ascending(self) -> None:
         """Best (lowest Brier) category appears before worst."""

@@ -1966,8 +1966,14 @@ def main() -> None:
             f"WARNING: Reliability {overall['reliability']} is below {RELIABILITY_GATE} gate"
         )
 
+    def _brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
+        # Use explicit None check; `.get("brier") or 999` collapses brier=0.0
+        # (perfect score) to 999 via falsy-or, sorting best cells to the end.
+        brier = item[1].get("brier")
+        return brier if brier is not None else 999.0
+
     print("\nBy tool (decision-worthy):")
-    ranked = sorted(result["by_tool"].items(), key=lambda x: x[1].get("brier") or 999)
+    ranked = sorted(result["by_tool"].items(), key=_brier_sort_key)
     for tool, stats in ranked:
         flags = []
         if stats["reliability"] is not None and stats["reliability"] < RELIABILITY_GATE:
@@ -1986,14 +1992,14 @@ def main() -> None:
     print("\nBy tool × platform:")
     for key, stats in sorted(
         result["by_tool_platform"].items(),
-        key=lambda x: x[1].get("brier") or 999,
+        key=_brier_sort_key,
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 
     print("\nBy tool × category:")
     for key, stats in sorted(
         result["by_tool_category"].items(),
-        key=lambda x: x[1].get("brier") or 999,
+        key=_brier_sort_key,
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 

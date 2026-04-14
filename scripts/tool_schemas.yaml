@@ -1,0 +1,118 @@
+# Central registry for per-tool input/output JSON schemas.
+#
+# `defaults` maps a tool-kind to input/output schemas.
+# `tool_kinds` maps a wire-name (as registered in the tool's ALLOWED_TOOLS /
+# AVAILABLE_TOOLS) to a kind. Any wire-name not listed falls back to
+# `prediction` (the historical default, so unknown tools don't regress).
+
+defaults:
+  prediction:
+    input:
+      type: text
+      description: The text to make a prediction on
+    output:
+      type: object
+      description: A JSON object containing the prediction and confidence
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: Result information in JSON format as a string
+            example: "{\n  \"p_yes\": 0.6,\n  \"p_no\": 0.4,\n  \"confidence\": 0.8,\n  \"info_utility\": 0.6\n}"
+          prompt:
+            type: string
+            description: The prompt used to make the prediction.
+        required:
+          - requestId
+          - result
+          - prompt
+
+  resolve:
+    input:
+      type: text
+      description: The market question to resolve against real-world evidence
+    output:
+      type: object
+      description: A JSON object containing the market resolution verdict
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: Resolution verdict in JSON format as a string
+            example: "{\n  \"is_valid\": true,\n  \"is_determinable\": true,\n  \"has_occurred\": true\n}"
+          prompt:
+            type: string
+            description: The prompt used to resolve the market.
+        required:
+          - requestId
+          - result
+          - prompt
+
+  chat:
+    input:
+      type: text
+      description: The prompt to send to the chat model
+    output:
+      type: object
+      description: A JSON object containing the chat model response
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: The chat model's text response
+          prompt:
+            type: string
+            description: The prompt sent to the chat model.
+        required:
+          - requestId
+          - result
+          - prompt
+
+  image:
+    input:
+      type: text
+      description: The text prompt describing the image to generate
+    output:
+      type: object
+      description: A JSON object containing the generated image reference
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: URL or base64 payload of the generated image
+          prompt:
+            type: string
+            description: The prompt used to generate the image.
+        required:
+          - requestId
+          - result
+          - prompt
+
+tool_kinds:
+  close_market: resolve
+  resolve-market-jury-v1: resolve
+  resolve-market-reasoning-gpt-4.1: resolve
+  dall-e-2: image
+  dall-e-3: image
+  gemini-2.0-flash: chat
+  gemini-2.0-flash-lite: chat
+  corcel-prediction: chat
+  corcel-completion: chat
+  gemini-prediction: chat
+  gemini-completion: chat

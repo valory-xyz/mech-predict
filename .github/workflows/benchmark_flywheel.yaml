@@ -70,44 +70,63 @@ jobs:
           path: benchmark/results/
         continue-on-error: true
 
-      # Discard cached scores when force_rebuild is requested
+      # force_rebuild semantics: wipe ALL derived scoring state as a set
+      # (scores.json, scores_history.jsonl, scored_row_ids.json) so the
+      # subsequent Score step rebuilds from raw logs without stale dedup
+      # state poisoning the result.
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true'
-        run: rm -f benchmark/results/scores.json benchmark/results/scores_history.jsonl
+        run: |
+          rm -f benchmark/results/scores.json \
+                benchmark/results/scores_history.jsonl \
+                benchmark/results/scored_row_ids.json
 
-      # Fetch writes daily log file + calls scorer.update() inline
+      # Fetch writes daily log file + calls scorer.update() inline (fast path).
+      # On force_rebuild, --no-score disables the inline scoring so the
+      # dedicated Score step below owns scores.json creation (slow path).
       # Inputs routed through env (not ${{ }} interpolation in the shell script)
       # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
       # before the shell runs, so malicious input would become part of the script.
       - name: Fetch production data
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
+          NO_SCORE_FLAG=""
+          if [ "$FORCE_REBUILD" = "true" ]; then
+            NO_SCORE_FLAG="--no-score"
+          fi
           python -m benchmark.datasets.fetch_production \
-            --lookback-days "$INPUT_LOOKBACK_DAYS"
+            --lookback-days "$INPUT_LOOKBACK_DAYS" \
+            $NO_SCORE_FLAG
 
-      # Fallback: if inline scorer failed, run standalone rebuild.
-      # Must run BEFORE the tournament merge so --rebuild has a chance to
-      # reprocess all logs from scratch on force_rebuild / first run. If
-      # merge ran first, it would create a scores.json containing only
-      # tournament rows (plus whatever fetch_production accumulated from
-      # the last lookback_days window) and this guard would skip --rebuild.
-      - name: Score (fallback)
+      # Slow-path scoring: run --rebuild when either (a) scores.json is
+      # missing (first run, or prior run crashed before fetch's inline
+      # update), or (b) force_rebuild=true (explicit full rebuild). On
+      # normal runs the fast path in fetch_production already produced
+      # scores.json, and this step is a no-op.
+      - name: Score
+        env:
+          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          if [ ! -f benchmark/results/scores.json ]; then
-            echo "scores.json missing — running standalone scorer rebuild"
+          if [ ! -f benchmark/results/scores.json ] || [ "$FORCE_REBUILD" = "true" ]; then
+            echo "Running full rebuild (missing scores.json or force_rebuild=true)"
             python -m benchmark.scorer --rebuild \
               --logs-dir benchmark/datasets/logs/ \
               $TOURNAMENT_FLAG
+          else
+            echo "scores.json present and not force_rebuild — fast path already ran in fetch"
           fi
 
       # Incrementally merge tournament-scored rows into the cumulative
       # scores.json. Dedup by row_id (via scored_row_ids.json) makes this
-      # a no-op for already-merged rows, so it's safe to run every day.
+      # a no-op on force_rebuild (rebuild already included --tournament-input
+      # and wrote the full row_id set), and adds only genuinely new rows
+      # on normal runs.
       - name: Merge tournament into cumulative scores
         if: hashFiles('benchmark/results/tournament_scored.jsonl') != ''
         run: |

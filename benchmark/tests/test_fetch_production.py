@@ -949,3 +949,118 @@ class TestPendingInState:  # pylint: disable=too-few-public-methods
         loaded_pending = loaded["omen"]["pending_deliveries"]
         assert len(loaded_pending) == 1
         assert loaded_pending[0]["deliver_id"] == "0xpending1"
+
+
+class TestNoScoreFlag:
+    """Tests for the --no-score flag that gates the inline scorer call."""
+
+    def test_flag_sets_attribute_true(self) -> None:
+        """--no-score on the CLI sets args.no_score to True."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets.fetch_production import _build_arg_parser
+
+        args = _build_arg_parser().parse_args(["--no-score"])
+        assert args.no_score is True
+
+    def test_default_is_false(self) -> None:
+        """Omitting --no-score keeps the fast path (inline scoring) enabled."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets.fetch_production import _build_arg_parser
+
+        args = _build_arg_parser().parse_args([])
+        assert args.no_score is False
+
+    def _stub_main_deps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        row: dict[str, Any],
+    ) -> list[tuple]:
+        """Stub out fetch/state deps for main() and capture scorer calls."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls: list[tuple] = []
+
+        monkeypatch.setattr(fp, "_migrate_legacy_log", lambda *a, **kw: None)
+        monkeypatch.setattr(fp, "load_fetch_state", lambda *a, **kw: {})
+        monkeypatch.setattr(fp, "load_existing_row_ids", lambda *a, **kw: set())
+        monkeypatch.setattr(fp, "fetch_omen_resolved", lambda *a, **kw: [])
+        monkeypatch.setattr(fp, "fetch_polymarket_resolved", lambda *a, **kw: [])
+        # Omen returns one row, polymarket returns none.
+        responses = iter([([row], [], 0, 0), ([], [], 0, 0)])
+        monkeypatch.setattr(fp, "process_platform", lambda *a, **kw: next(responses))
+        monkeypatch.setattr(fp, "append_rows", lambda *a, **kw: 1)
+        monkeypatch.setattr(fp, "_update_platform_state", lambda *a, **kw: None)
+        monkeypatch.setattr(fp, "save_fetch_state", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            fp,
+            "_run_scorer_update",
+            lambda rows, scores, history: calls.append((rows, scores, history)),
+        )
+        return calls
+
+    def test_main_skips_scorer_update_with_no_score(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """main(--no-score) must not call _run_scorer_update even when rows exist."""
+        # pylint: disable-next=import-outside-toplevel
+        import sys
+
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls = self._stub_main_deps(
+            monkeypatch, tmp_path, {"row_id": "r1", "prediction_parse_status": "valid"}
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "fetch_production",
+                "--no-score",
+                "--logs-dir",
+                str(tmp_path),
+                "--state-file",
+                str(tmp_path / "state.json"),
+                "--scores",
+                str(tmp_path / "scores.json"),
+                "--history",
+                str(tmp_path / "history.jsonl"),
+            ],
+        )
+        fp.main()
+        assert calls == []
+
+    def test_main_calls_scorer_update_by_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """main() without --no-score runs the fast-path inline scorer once."""
+        # pylint: disable-next=import-outside-toplevel
+        import sys
+
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls = self._stub_main_deps(
+            monkeypatch, tmp_path, {"row_id": "r1", "prediction_parse_status": "valid"}
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "fetch_production",
+                "--logs-dir",
+                str(tmp_path),
+                "--state-file",
+                str(tmp_path / "state.json"),
+                "--scores",
+                str(tmp_path / "scores.json"),
+                "--history",
+                str(tmp_path / "history.jsonl"),
+            ],
+        )
+        fp.main()
+        assert len(calls) == 1
+        rows, _scores, _history = calls[0]
+        assert rows == [{"row_id": "r1", "prediction_parse_status": "valid"}]

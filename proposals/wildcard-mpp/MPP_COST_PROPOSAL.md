@@ -26,7 +26,7 @@ Valory runs the MPP server and pays for all API keys (OpenAI, Anthropic, Google,
 1. **Scenario A (Current hardcoded tools):** Wildcard keeps using only `prediction-offline`, `prediction-online`, and `superforcaster` — the 3 tools hardcoded today.
 2. **Scenario B (Dynamic tool pools) — CHOSEN:** Wildcard adopts the pool-based selection from [MPP_MODE_DEFINITIONS.md](./MPP_MODE_DEFINITIONS.md), where any tool in the pool may be selected. Price must cover the most expensive tool that could run.
 
-> **Decision:** We propose **Scenario B pricing ($0.015 / $0.04 / $0.08)** directly to Wildcard. Rationale: setting Phase 2 prices now avoids a second pricing change when server-side dynamic selection ships. Scenario A is retained below as reference for understanding the cost floor of current hardcoded tools.
+> **Decision:** We propose **Scenario B pricing ($0.02 / $0.04 / $0.08)** directly to Wildcard. Rationale: setting Phase 2 prices now avoids a second pricing change when server-side dynamic selection ships. Scenario A is retained below as reference for understanding the cost floor of current hardcoded tools.
 
 ---
 
@@ -343,7 +343,7 @@ Wildcard adopts pool-based weighted selection. Any tool in a mode's pool may be 
 
 | Mode | Cheapest Tool | Most Expensive Tool | Weighted Average (est.) | Proposed Break-Even Price |
 |---|---|---|---|---|
-| Quick | `gemini-prediction` ($0.0004) | `claude-prediction-offline` ($0.014) | ~$0.009 | **$0.015** |
+| Quick | `gemini-prediction` ($0.0004) | `claude-prediction-offline` ($0.014) | ~$0.009 | **$0.02** |
 | Deep | `superforcaster` ($0.020) | `claude-prediction-online` ($0.040) | ~$0.028 | **$0.04** |
 | Super | `prediction-request-rag` ($0.021) | `prediction-request-reasoning-claude` ($0.074) | ~$0.048 | **$0.08** |
 
@@ -355,14 +355,14 @@ Wildcard adopts pool-based weighted selection. Any tool in a mode's pool may be 
 
 | Mode | Current Price | Scenario A (break-even, hardcoded) | Scenario B (break-even, dynamic) |
 |---|---|---|---|
-| **Quick** | $0.001 | **$0.01** (+10x) | **$0.015** (+15x) |
+| **Quick** | $0.001 | **$0.01** (+10x) | **$0.02** (+20x) |
 | **Deep** | $0.01 | **$0.03** (+3x) | **$0.04** (+4x) |
 | **Super** | $0.05 | **$0.02** (-60%) | **$0.08** (+60%) |
 
 **Scenario A** reveals that Quick and Deep are underpriced and must be raised. Super's break-even floor is $0.02, but its current price ($0.05) is profitable — lowering it is a separate policy choice, not a cost requirement.
 
 **Scenario B is a real pricing tradeoff, not just added flexibility.** The pool includes Claude Sonnet variants, which are ~1.5-2x more expensive than GPT-4.1 for the same task. The best-performing tool (`prediction-request-reasoning-claude`, Brier 0.2058) is also the most expensive ($0.074/call). Dynamic pools mean either:
-- **Higher user prices** (as proposed: $0.015 / $0.04 / $0.08) to cover worst-case tool costs, or
+- **Higher user prices** (as proposed: $0.02 / $0.04 / $0.08) to cover worst-case tool costs, or
 - **An intentional subsidy** where we absorb the cost difference when expensive tools are selected, pricing at the weighted average instead of the max.
 
 The break-even prices above assume no subsidy — every possible tool selection must be cost-covered. If Valory is willing to subsidize Claude routing to drive better predictions, the prices can be lower but the expected loss per Claude selection should be quantified and budgeted.

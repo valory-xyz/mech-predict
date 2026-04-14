@@ -27,7 +27,7 @@ Current prices don't cover API costs on Quick and Deep — Valory is losing mone
 
 | Mode | Current | Proposed |
 |---|---|---|
-| Quick | $0.001 | **$0.015** |
+| Quick | $0.001 | **$0.02** |
 | Deep | $0.01 | **$0.04** |
 | Super | $0.05 | **$0.08** |
 
@@ -102,7 +102,7 @@ Each mode has a pool of 4 tools (including Claude and GPT variants). The selecti
 |---|---|
 | Integration architecture | Option A — MPP reads IPFS CSV directly, no mech-interact dependency |
 | Selection algorithm | BSS + softmax, T=0.5 launch default |
-| Proposed pricing | Phase 2 directly: $0.015 / $0.04 / $0.08 |
+| Proposed pricing | Phase 2 directly: $0.02 / $0.04 / $0.08 |
 | Extension fields | BLOCKER — must ship before Chrome store submission |
 | Storage (immediate) | Redis AOF + longer TTL |
 | Storage (end goal) | JSONL + PostgreSQL |

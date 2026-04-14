@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.io import load_jsonl
+from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -519,6 +520,166 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_DIAG_SECTION_HEADER = "## Diagnostic Edge Metrics"
+
+
+def _bias_label(bias: float) -> str:
+    """Return a human-readable label for a directional bias value.
+
+    :param bias: directional bias value.
+    :return: label string.
+    """
+    if bias > 0:
+        return "overestimates"
+    if bias < 0:
+        return "underestimates"
+    return "no bias"
+
+
+def _render_conditional_accuracy(
+    overall: dict[str, Any], scores: dict[str, Any], lines: list[str]
+) -> None:
+    """Render conditional accuracy subsection.
+
+    :param overall: overall stats dict.
+    :param scores: full scores dict (for by_platform).
+    :param lines: output list to append to.
+    """
+    disagree_n = overall.get("disagree_n", 0)
+    lines.append("### Conditional Accuracy When Disagreeing")
+    lines.append("")
+    lines.append(
+        "When the tool disagrees with the market enough to trigger a trade"
+        f" (|p_yes - market_prob| > {DISAGREE_THRESHOLD}),"
+        " is the tool or market closer to truth?"
+    )
+    lines.append("")
+
+    ca = overall.get("conditional_accuracy_rate")
+    if ca is not None:
+        lines.append(
+            f"- **Overall**: {ca:.0%} tool-wins (n={disagree_n} disagreements)"
+        )
+    else:
+        lines.append(
+            f"- **Overall**: insufficient data (n={disagree_n} disagreements,"
+            f" need {MIN_SAMPLE_SIZE})"
+        )
+
+    for plat, stats in sorted(scores.get("by_platform", {}).items()):
+        p_ca = stats.get("conditional_accuracy_rate")
+        p_dn = stats.get("disagree_n", 0)
+        if p_ca is not None:
+            lines.append(f"- **{plat}**: {p_ca:.0%} tool-wins (n={p_dn})")
+        elif p_dn > 0:
+            lines.append(
+                f"- **{plat}**: insufficient data (n={p_dn},"
+                f" need {MIN_SAMPLE_SIZE})"
+            )
+    lines.append("")
+
+
+def _render_disagreement_brier(overall: dict[str, Any], lines: list[str]) -> None:
+    """Render disagreement-stratified Brier subsection.
+
+    :param overall: overall stats dict.
+    :param lines: output list to append to.
+    """
+    lines.append("### Disagreement-Stratified Brier")
+    lines.append("")
+    lines.append(
+        "Brier score bucketed by how much the tool disagrees with the market."
+        " Worse accuracy on large_trade = losing money where it matters."
+    )
+    lines.append("")
+
+    bucket_labels = [
+        ("no_trade", f"No trade (|d| \u2264 {DISAGREE_THRESHOLD})"),
+        (
+            "small_trade",
+            f"Small trade ({DISAGREE_THRESHOLD} < |d| \u2264 {LARGE_TRADE_THRESHOLD})",
+        ),
+        ("large_trade", f"Large trade (|d| > {LARGE_TRADE_THRESHOLD})"),
+    ]
+    for bucket_key, label in bucket_labels:
+        b = overall.get(f"brier_{bucket_key}")
+        n = overall.get(f"n_{bucket_key}", 0)
+        if b is not None:
+            lines.append(f"- **{label}**: Brier {b:.4f} (n={n})")
+        else:
+            lines.append(f"- **{label}**: insufficient data (n={n})")
+    lines.append("")
+
+
+def _render_directional_bias(
+    overall: dict[str, Any], scores: dict[str, Any], lines: list[str]
+) -> None:
+    """Render directional bias subsection.
+
+    :param overall: overall stats dict.
+    :param scores: full scores dict (for by_category).
+    :param lines: output list to append to.
+    """
+    lines.append("### Directional Bias (When Tool Loses)")
+    lines.append("")
+    lines.append(
+        "When the tool disagrees and the market was closer to truth,"
+        " does the tool tend to overestimate (positive) or underestimate"
+        " (negative)?"
+    )
+    lines.append("")
+
+    bias = overall.get("directional_bias")
+    n_losses = overall.get("n_bias_losses", 0)
+    if bias is not None:
+        lines.append(
+            f"- **Overall**: {bias:+.4f} ({_bias_label(bias)}," f" n={n_losses} losses)"
+        )
+    else:
+        lines.append(
+            f"- **Overall**: insufficient data (n={n_losses} losses,"
+            f" need {MIN_SAMPLE_SIZE})"
+        )
+
+    for cat, stats in sorted(scores.get("by_category", {}).items()):
+        c_bias = stats.get("directional_bias")
+        c_n = stats.get("n_bias_losses", 0)
+        if c_bias is not None:
+            lines.append(f"- **{cat}**: {c_bias:+.4f} ({_bias_label(c_bias)}, n={c_n})")
+        elif c_n > 0:
+            lines.append(
+                f"- **{cat}**: insufficient data" f" (n={c_n}, need {MIN_SAMPLE_SIZE})"
+            )
+        else:
+            lines.append(f"- **{cat}**: no losses to measure")
+
+
+def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
+    """Conditional accuracy, disagreement-stratified Brier, and directional bias."""
+    overall = scores.get("overall", {})
+    disagree_n = overall.get("disagree_n", 0)
+    if disagree_n == 0 and overall.get("edge_n", 0) == 0:
+        return (
+            f"{_DIAG_SECTION_HEADER}\n\n"
+            "No edge-eligible rows — diagnostic metrics require "
+            "market_prob_at_prediction."
+        )
+
+    lines = [
+        _DIAG_SECTION_HEADER,
+        "",
+        "These metrics diagnose whether accuracy translates to profit and"
+        " where the system loses. They are not used for tool ranking.",
+        "",
+    ]
+
+    _render_conditional_accuracy(overall, scores, lines)
+    _render_disagreement_brier(overall, lines)
+    _render_directional_bias(overall, scores, lines)
+
+    return "\n".join(lines)
+
+
 def section_calibration(scores: dict[str, Any]) -> str:
     """Calibration analysis — are predictions overconfident or underconfident?"""
     cal = scores.get("calibration", [])
@@ -808,6 +969,7 @@ def generate_report(
         section_platform(scores),
         section_tool_platform(scores),
         section_edge_analysis(scores),
+        section_diagnostic_metrics(scores),
         section_calibration(scores),
         section_weak_spots(scores),
         section_reliability_issues(scores),

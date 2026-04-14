@@ -70,6 +70,11 @@ def compare_stats(
         "directional_accuracy": {"lower_is_better": False},
         "sharpness": {"lower_is_better": False},
         "reliability": {"lower_is_better": False},
+        # Diagnostic edge metrics
+        "conditional_accuracy_rate": {"lower_is_better": False},
+        "brier_no_trade": {"lower_is_better": True},
+        "brier_small_trade": {"lower_is_better": True},
+        "brier_large_trade": {"lower_is_better": True},
     }
 
     result: dict[str, Any] = {
@@ -87,6 +92,30 @@ def compare_stats(
             "delta": d,
             "direction": _direction(d, opts["lower_is_better"]),
         }
+
+    # Directional bias — closer to 0 is better (use abs comparison).
+    # A sign-flip with same magnitude (e.g. +0.05 → -0.05) yields
+    # abs-delta=0 but is qualitatively significant — flag it explicitly.
+    b_bias = baseline.get("directional_bias")
+    c_bias = candidate.get("directional_bias")
+    bias_delta = _delta(
+        abs(b_bias) if b_bias is not None else None,
+        abs(c_bias) if c_bias is not None else None,
+    )
+    bias_direction = _direction(bias_delta, lower_is_better=True)
+    if (
+        b_bias is not None
+        and c_bias is not None
+        and (b_bias > 0) != (c_bias > 0)
+        and bias_direction == "unchanged"
+    ):
+        bias_direction = "sign-flip"
+    result["directional_bias"] = {
+        "baseline": b_bias,
+        "candidate": c_bias,
+        "delta": bias_delta,
+        "direction": bias_direction,
+    }
 
     return result
 
@@ -259,7 +288,58 @@ def format_markdown(comparison: dict[str, Any]) -> str:
             lines.append(_table_row(cat, by_category[cat]))
         lines.append("")
 
+    _format_diagnostic_table(comparison.get("overall", {}), lines)
+
     return "\n".join(lines)
+
+
+_DIAG_METRICS = [
+    ("Conditional Accuracy", "conditional_accuracy_rate"),
+    ("Brier (no trade)", "brier_no_trade"),
+    ("Brier (small trade)", "brier_small_trade"),
+    ("Brier (large trade)", "brier_large_trade"),
+    ("Directional Bias (|abs|)", "directional_bias"),
+]
+
+
+def _format_diagnostic_table(overall: dict[str, Any], lines: list[str]) -> None:
+    """Append the diagnostic edge metrics comparison table to *lines*.
+
+    :param overall: overall comparison stats dict.
+    :param lines: output list to append to.
+    """
+    has_diag = any(
+        (overall.get(m) or {}).get("baseline") is not None
+        or (overall.get(m) or {}).get("candidate") is not None
+        for _, m in _DIAG_METRICS
+    )
+    if not has_diag:
+        return
+
+    lines.append("## Diagnostic Edge Metrics")
+    lines.append("")
+    lines.append("| Metric | Baseline | Candidate | Delta | Direction |")
+    lines.append("|--------|----------|-----------|-------|-----------|")
+    for label, key in _DIAG_METRICS:
+        m = overall.get(key, {})
+        if not m:
+            continue
+        b_val = m.get("baseline")
+        c_val = m.get("candidate")
+        if key == "directional_bias":
+            b_display = _fmt(abs(b_val) if b_val is not None else None)
+            c_display = _fmt(abs(c_val) if c_val is not None else None)
+        else:
+            b_display = _fmt(b_val)
+            c_display = _fmt(c_val)
+        lines.append(
+            f"| {label} "
+            f"| {b_display} "
+            f"| {c_display} "
+            f"| {_fmt_delta(m.get('delta'))} "
+            f"| {m.get('direction', '—')} |"
+        )
+    lines.append("")
 
 
 # ---------------------------------------------------------------------------

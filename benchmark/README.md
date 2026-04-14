@@ -245,21 +245,22 @@ python benchmark/sweep.py \
 
 ```
 ## Overall
-|                     |  B.Brier |  C.Brier |    Delta |    B.Acc |    C.Acc |    Delta |   B.N |   C.N | Direction  |
-|---------------------|----------|----------|----------|----------|----------|----------|-------|-------|------------|
-| Overall             |   0.2217 |   0.0358 |  -0.1859 |   0.6667 |   1.0000 |  +0.3333 |     3 |     3 | improved   |
+|                                     |  B.Brier |  C.Brier |    Delta |     B.LL |     C.LL |    Delta |   B.DAcc |   C.DAcc |    Delta |   B.N |   C.N | Direction  |
+|-------------------------------------|----------|----------|----------|----------|----------|----------|----------|----------|----------|-------|-------|------------|
+| Overall                             |   0.2217 |   0.0358 |  -0.1859 |   0.6931 |   0.1054 |  -0.5877 |   0.6667 |   1.0000 |  +0.3333 |     3 |     3 | improved   |
 
 ## By Tool
-|                     |  B.Brier |  C.Brier |    Delta |    B.Acc |    C.Acc |    Delta |   B.N |   C.N | Direction  |
-|---------------------|----------|----------|----------|----------|----------|----------|-------|-------|------------|
-| superforcaster      |   0.2300 |   0.2400 |  +0.0100 |   0.7300 |   0.7200 |  -0.0100 |    85 |    85 | regressed  |
+|                                     |  B.Brier |  C.Brier |    Delta |     B.LL |     C.LL |    Delta |   B.DAcc |   C.DAcc |    Delta |   B.N |   C.N | Direction  |
+|-------------------------------------|----------|----------|----------|----------|----------|----------|----------|----------|----------|-------|-------|------------|
+| superforcaster                      |   0.2300 |   0.2400 |  +0.0100 |   0.5200 |   0.5400 |  +0.0200 |   0.7300 |   0.7200 |  -0.0100 |    85 |    85 | regressed  |
 ```
 
 - **B.Brier / C.Brier**: Baseline / Candidate Brier score (lower is better, 0 = perfect)
-- **B.Acc / C.Acc**: Baseline / Candidate accuracy (higher is better)
+- **B.LL / C.LL**: Baseline / Candidate Log Loss (lower is better; punishes confident wrong predictions harder than Brier)
+- **B.DAcc / C.DAcc**: Baseline / Candidate Directional Accuracy (higher is better; excludes p_yes = 0.5)
 - **B.N / C.N**: Sample sizes (should match for fair comparison)
-- **Delta**: Candidate minus baseline (negative Brier delta = improvement)
-- **Direction**: `improved` / `regressed` / `unchanged`
+- **Delta**: Candidate minus baseline (negative Brier/LL delta = improvement)
+- **Direction**: `improved` / `regressed` / `unchanged` (based on combined Brier + LL + DAcc movement)
 
 ## Scoring metrics — formulas
 
@@ -370,8 +371,8 @@ gap           = avg_predicted - realized_rate
 
 | Gap sign | Meaning |
 |----------|---------|
-| Positive | Overconfident — predicts higher than reality |
-| Negative | Underconfident — predicts lower than reality |
+| Positive | Overpredicts — predicted probability higher than realized rate |
+| Negative | Underpredicts — predicted probability lower than realized rate |
 
 A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (reliability diagram) shows avg_predicted vs realized_rate; the diagonal line is perfect calibration.
 
@@ -380,17 +381,17 @@ A perfectly calibrated tool has gap ≈ 0 in every bin. The calibration plot (re
 **ECE (Expected Calibration Error)** — a single scalar summarizing calibration quality:
 
 ```
-ECE = sum(n_bin * |gap_bin|) / sum(n_bin)
+ECE = sum(n_bin * |gap_bin|) / sum(n_bin)    (bins with n < 20 excluded)
 ```
 
-ECE = 0 means perfectly calibrated. ECE = 0.10 means predictions are off by 10pp on average.
+Bins with fewer than 20 samples (`MIN_CALIBRATION_BIN_SIZE`) are excluded to avoid noisy calibration estimates dominating the score. ECE = 0 means perfectly calibrated. ECE = 0.10 means predictions are off by 10pp on average.
 
 **Calibration intercept and slope** — Platt scaling on the logit scale: `logit(P(y=1|p)) = intercept + slope * logit(p_yes)`.
 
 ```
 slope = 1.0 → perfectly calibrated
-slope < 1.0 → overconfident (predictions too extreme)
-slope > 1.0 → underconfident (predictions too compressed toward 0.5)
+slope < 1.0 → predictions too extreme (overconfident)
+slope > 1.0 → predictions too compressed toward 0.5 (underconfident)
 
 intercept evaluated at p_yes = 0.5 (logit midpoint)
 ```
@@ -426,10 +427,12 @@ Used in PR-comment replay comparisons. Counts predictions where the tool was con
 overconf_wrong_i = 1  if max(p_yes, 1 - p_yes) > 0.80 AND predicted direction ≠ outcome
                    0  otherwise
 Overconfident wrong count = sum(overconf_wrong_i)
-Overconfident wrong rate  = count / n
+Overconfident wrong rate  = count / n_valid
 ```
 
-These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction. The rate normalizes by sample size for cross-dataset comparison.
+Where `n_valid` is the count of predictions with non-null `p_yes`. Rows with p_yes = 0.5 can never be overconfident-wrong (max(0.5, 0.5) = 0.5 < 0.80), so the numerator is unaffected; the denominator normalizes against total valid sample size.
+
+These are the most expensive mistakes — high-conviction wrong predictions that would trigger large Kelly bets in the wrong direction.
 
 ### Stratification dimensions
 

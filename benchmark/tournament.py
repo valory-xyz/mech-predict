@@ -323,6 +323,13 @@ def run_tournament(
             by_platform.setdefault(m.get("platform", "unknown"), []).append(m)
         markets = []
         for plat_markets in by_platform.values():
+            missing = [m.get("id") for m in plat_markets if not m.get("fetched_at")]
+            if missing:
+                log.warning(
+                    "%d markets missing fetched_at (will sort last): %s",
+                    len(missing),
+                    missing[:5],
+                )
             plat_markets.sort(key=lambda m: m.get("fetched_at", ""), reverse=True)
             markets.extend(plat_markets[:max_markets])
 

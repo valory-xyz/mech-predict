@@ -220,8 +220,7 @@ def disabled_deployments_for_tool(
     return [
         deployment
         for deployment, tools in disabled.items()
-        if tools is not None
-        and any(_normalize_tool_name(t) == needle for t in tools)
+        if tools is not None and any(_normalize_tool_name(t) == needle for t in tools)
     ]
 
 

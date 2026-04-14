@@ -197,6 +197,111 @@ def section_platform(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def section_category(scores: dict[str, Any]) -> str:
+    """Fleet-level category performance — Brier/LogLoss/BSS/Edge per category."""
+    categories = scores.get("by_category") or {}
+    lines = ["## Category Performance", ""]
+    if not categories:
+        lines.append("No per-category data available.")
+        return "\n".join(lines)
+
+    for category, stats in sorted(
+        categories.items(),
+        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+    ):
+        if stats["n"] < MIN_SAMPLE_SIZE:
+            lines.append(
+                f"- **{category}**: insufficient data"
+                f" (n={stats['n']}, need {MIN_SAMPLE_SIZE})"
+            )
+            continue
+        baseline = stats.get("baseline_brier")
+        bss = stats.get("brier_skill_score")
+        ll = stats.get("log_loss")
+        yes_rate = stats.get("outcome_yes_rate")
+        edge = stats.get("edge")
+        edge_n = stats.get("edge_n", 0)
+        brier = stats.get("brier")
+        parts = [f"Brier: {brier}" if brier is not None else "Brier: N/A"]
+        if ll is not None:
+            parts.append(f"LogLoss: {ll:.4f}")
+        if baseline is not None:
+            parts.append(f"baseline: {baseline}")
+        if bss is not None:
+            parts.append(f"BSS: {bss:+.4f}")
+        if edge is not None:
+            parts.append(f"edge: {edge:+.4f} (n={edge_n})")
+        if yes_rate is not None:
+            parts.append(f"yes rate: {yes_rate:.0%}")
+        parts.append(f"n={stats['n']}")
+        lines.append(f"- **{category}**: {', '.join(parts)}")
+    return "\n".join(lines)
+
+
+def section_tool_category(scores: dict[str, Any]) -> str:
+    """Tool × category cross breakdown — gated by MIN_SAMPLE_SIZE."""
+    data = scores.get("by_tool_category") or {}
+    if not data:
+        return "## Tool × Category\n\nNo cross-breakdown data available."
+
+    ranked = sorted(
+        data.items(),
+        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+    )
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+    sparse = [(k, s) for k, s in ranked if s["n"] < MIN_SAMPLE_SIZE]
+
+    lines = [
+        "## Tool × Category",
+        "",
+        "| Tool | Category | Brier | BSS | LogLoss | Edge | Edge n | DirAcc | Sharpness | n |",
+        "|------|----------|-------|-----|---------|------|--------|--------|-----------|---|",
+    ]
+    if not sufficient:
+        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | | | | | |")
+    for key, stats in sufficient:
+        parts = key.split(" | ")
+        tool = parts[0] if parts else key
+        category = parts[1] if len(parts) > 1 else "?"
+        brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        bss = stats.get("brier_skill_score")
+        bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        ll = stats.get("log_loss")
+        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+        edge = stats.get("edge")
+        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+        edge_n = stats.get("edge_n", 0)
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
+        sharp = (
+            f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        )
+        label = _sample_label(stats)
+        lines.append(
+            f"| {tool} | {category} | {brier} | {bss_str} | {ll_str} | {edge_str}"
+            f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
+        )
+
+    if sparse:
+        lines.append("")
+        lines.append(
+            f"_{len(sparse)} cell(s) below n={MIN_SAMPLE_SIZE} threshold omitted"
+            " from ranking. Examples:_"
+        )
+        for key, stats in sparse[:5]:
+            parts = key.split(" | ")
+            tool = parts[0] if parts else key
+            category = parts[1] if len(parts) > 1 else "?"
+            lines.append(
+                f"- **{tool} | {category}**: insufficient data (n={stats['n']})"
+            )
+
+    return "\n".join(lines)
+
+
 def section_weak_spots(scores: dict[str, Any]) -> str:
     """Generate the weak spots section."""
     lines = ["## Weak Spots", ""]
@@ -1088,7 +1193,9 @@ def generate_report(
         section_tool_ranking(scores),
         *tournament_sections,
         section_platform(scores),
+        section_category(scores),
         section_tool_platform(scores),
+        section_tool_category(scores),
         section_edge_analysis(scores),
         section_diagnostic_metrics(scores),
         section_calibration(scores),

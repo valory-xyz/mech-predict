@@ -24,16 +24,19 @@ from benchmark.analyze import (
     _parse_tvm_key,
     generate_report,
     section_best_predictions,
+    section_category,
     section_latency,
     section_overall,
     section_parse_breakdown,
     section_sample_size_warnings,
+    section_tool_category,
     section_tool_version_breakdown,
     section_trend,
     section_version_deltas,
     section_weak_spots,
     section_worst_predictions,
 )
+from benchmark.scorer import MIN_SAMPLE_SIZE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +51,7 @@ def _scores(
     by_tool: dict | None = None,
     by_platform: dict | None = None,
     by_category: dict | None = None,
+    by_tool_category: dict | None = None,
     worst_10: list | None = None,
     best_10: list | None = None,
     parse_breakdown: dict | None = None,
@@ -62,6 +66,7 @@ def _scores(
         "by_tool": by_tool or {},
         "by_platform": by_platform or {},
         "by_category": by_category or {},
+        "by_tool_category": by_tool_category or {},
         "by_horizon": {},
         "by_tool_platform": {},
         "calibration": [],
@@ -188,6 +193,184 @@ class TestSectionTrend:
 # ---------------------------------------------------------------------------
 # section_sample_size_warnings
 # ---------------------------------------------------------------------------
+
+
+class TestSectionCategory:
+    """Tests for section_category (fleet-level category performance)."""
+
+    def test_header_present(self) -> None:
+        """Always emits the Category Performance header."""
+        result = section_category(_scores(by_category={}))
+        assert "## Category Performance" in result
+
+    def test_empty_says_no_data(self) -> None:
+        """Explicit 'no data' when dimension is empty — do not silently skip."""
+        result = section_category(_scores(by_category={}))
+        assert "No per-category data available" in result
+
+    def test_sufficient_category_rendered_with_metrics(self) -> None:
+        """Categories with n >= MIN_SAMPLE_SIZE render Brier/LogLoss/Edge/BSS."""
+        s = _scores(
+            by_category={
+                "politics": {
+                    "brier": 0.22,
+                    "log_loss": 0.64,
+                    "baseline_brier": 0.25,
+                    "brier_skill_score": 0.12,
+                    "edge": -0.04,
+                    "edge_n": 80,
+                    "outcome_yes_rate": 0.37,
+                    "n": 100,
+                }
+            }
+        )
+        result = section_category(s)
+        assert "**politics**" in result
+        assert "Brier: 0.22" in result
+        assert "LogLoss: 0.6400" in result
+        assert "BSS: +0.1200" in result
+        assert "edge: -0.0400 (n=80)" in result
+        assert "yes rate: 37%" in result
+        assert "n=100" in result
+
+    def test_insufficient_data_flagged_not_skipped(self) -> None:
+        """Category with n < MIN_SAMPLE_SIZE renders insufficient-data line,
+        not silently omitted — reader must see the dimension was considered."""
+        s = _scores(by_category={"crypto": {"brier": 0.3, "n": 5, "reliability": 1.0}})
+        result = section_category(s)
+        assert "**crypto**" in result
+        assert "insufficient data" in result
+        assert f"need {MIN_SAMPLE_SIZE}" in result
+
+    def test_sorted_by_brier_ascending(self) -> None:
+        """Best (lowest Brier) category appears before worst."""
+        s = _scores(
+            by_category={
+                "bad": {"brier": 0.45, "n": 100},
+                "good": {"brier": 0.15, "n": 100},
+            }
+        )
+        result = section_category(s)
+        assert result.find("**good**") < result.find("**bad**")
+
+    def test_none_brier_sorts_last(self) -> None:
+        """Categories with Brier=None sort after populated rows."""
+        s = _scores(
+            by_category={
+                "none_brier": {"brier": None, "n": 100},
+                "good": {"brier": 0.15, "n": 100},
+            }
+        )
+        result = section_category(s)
+        assert result.find("**good**") < result.find("**none_brier**")
+
+    def test_omits_optional_fields_when_missing(self) -> None:
+        """Categories without BSS/edge/yes_rate still render a line with n."""
+        s = _scores(by_category={"weather": {"brier": 0.2, "n": 50}})
+        result = section_category(s)
+        assert "**weather**" in result
+        assert "Brier: 0.2" in result
+        assert "n=50" in result
+
+
+class TestSectionToolCategory:
+    """Tests for section_tool_category (fleet × category cross-breakdown)."""
+
+    def test_empty_returns_no_data(self) -> None:
+        """Empty dimension returns an explicit no-data message."""
+        result = section_tool_category(_scores(by_tool_category={}))
+        assert "## Tool × Category" in result
+        assert "No cross-breakdown data" in result
+
+    def test_sufficient_cell_rendered_in_table(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | politics": {
+                    "brier": 0.19,
+                    "brier_skill_score": 0.05,
+                    "log_loss": 0.60,
+                    "edge": -0.03,
+                    "edge_n": 40,
+                    "directional_accuracy": 0.76,
+                    "sharpness": 0.12,
+                    "n": 60,
+                    "decision_worthy": True,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        assert (
+            "| tool-a | politics | 0.1900 | +0.0500 | 0.6000 | -0.0300 | 40 | 76% | 0.1200 | 60 |"
+            in result
+        )
+
+    def test_sparse_cell_listed_in_sparse_section_not_table(self) -> None:
+        """Cells with n < MIN_SAMPLE_SIZE appear only in the sparse list, not
+        the ranking table — so a bug flipping the gate would flip which
+        section they land in."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | crypto": {
+                    "brier": 0.10,
+                    "n": 5,
+                    "decision_worthy": False,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        # Not in the ranking table body (between header and sparse marker)
+        pre_sparse, _, post_sparse = result.partition("below n=")
+        assert "| tool-a | crypto | 0.1000" not in pre_sparse
+        # But listed in the sparse section with insufficient-data marker
+        assert "insufficient data (n=5)" in post_sparse
+
+    def test_all_sparse_shows_placeholder_row(self) -> None:
+        """When no cell meets the threshold, the table body states so
+        explicitly rather than rendering an empty table."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | x": {"brier": 0.1, "n": 2},
+                "tool-b | y": {"brier": 0.2, "n": 3},
+            }
+        )
+        result = section_tool_category(s)
+        assert f"no cells with n ≥ {MIN_SAMPLE_SIZE}" in result
+        assert "2 cell(s) below" in result
+
+    def test_threshold_boundary(self) -> None:
+        """A cell with exactly n = MIN_SAMPLE_SIZE is included (gate is >=)."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | politics": {
+                    "brier": 0.2,
+                    "n": MIN_SAMPLE_SIZE,
+                    "decision_worthy": True,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        assert "| tool-a | politics | 0.2000" in result
+        assert "below n=" not in result  # no sparse section
+
+    def test_table_ranked_by_brier_ascending(self) -> None:
+        """Best cell ranks above worst."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | good": {
+                    "brier": 0.1,
+                    "n": 50,
+                    "decision_worthy": True,
+                },
+                "tool-b | bad": {
+                    "brier": 0.4,
+                    "n": 50,
+                    "decision_worthy": True,
+                },
+            }
+        )
+        result = section_tool_category(s)
+        assert result.find("tool-a | good") < result.find("tool-b | bad")
 
 
 class TestSectionSampleSizeWarnings:

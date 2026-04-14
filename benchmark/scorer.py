@@ -1990,6 +1990,13 @@ def main() -> None:
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 
+    print("\nBy tool × category:")
+    for key, stats in sorted(
+        result["by_tool_category"].items(),
+        key=lambda x: x[1].get("brier") or 999,
+    ):
+        print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
+
     print("\nCalibration (overall):")
     print(f"  {'Bin':<10} {'Predicted':>10} {'Realized':>10} {'Gap':>8} {'n':>6}")
     for b in result["calibration"]:

@@ -241,6 +241,10 @@ class TestSectionCategory:
         assert "**crypto**" in result
         assert "insufficient data" in result
         assert f"need {MIN_SAMPLE_SIZE}" in result
+        # A missing `continue` in the insufficient branch would emit both
+        # the insufficient line AND the metric line — catch that.
+        assert result.count("**crypto**") == 1
+        assert "Brier: 0.3" not in result
 
     def test_sorted_by_brier_ascending(self) -> None:
         """Best (lowest Brier) category appears before worst."""
@@ -352,6 +356,23 @@ class TestSectionToolCategory:
         result = section_tool_category(s)
         assert "| tool-a | politics | 0.2000" in result
         assert "below n=" not in result  # no sparse section
+
+    def test_sparse_examples_capped_at_five(self) -> None:
+        """When more than 5 sparse cells exist, only 5 examples render but
+        the count line reports the true total — keeps the table readable
+        while still signaling how many cells were considered."""
+        sparse_cells = {
+            f"tool-{i} | cat-{i}": {"brier": 0.1 + i * 0.01, "n": 5} for i in range(7)
+        }
+        s = _scores(by_tool_category=sparse_cells)
+        result = section_tool_category(s)
+        assert "7 cell(s) below" in result  # true total
+        rendered = sum(
+            1
+            for line in result.splitlines()
+            if line.startswith("- **tool-") and "insufficient data" in line
+        )
+        assert rendered == 5
 
     def test_table_ranked_by_brier_ascending(self) -> None:
         """Best cell ranks above worst."""
@@ -548,6 +569,8 @@ class TestGenerateReport:
         assert "## Overall" in report
         assert "## Tool Ranking" in report
         assert "## Platform Comparison" in report
+        assert "## Category Performance" in report
+        assert "## Tool × Category" in report
         assert "## Weak Spots" in report
         assert "## Reliability Issues" in report
         assert "## Worst Predictions" in report

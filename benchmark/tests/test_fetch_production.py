@@ -988,8 +988,10 @@ class TestNoScoreFlag:
         monkeypatch.setattr(fp, "fetch_omen_resolved", lambda *a, **kw: [])
         monkeypatch.setattr(fp, "fetch_polymarket_resolved", lambda *a, **kw: [])
         # Omen returns one row, polymarket returns none.
-        responses = iter([([row], [], 0, 0), ([], [], 0, 0)])
-        monkeypatch.setattr(fp, "process_platform", lambda *a, **kw: next(responses))
+        response_queue: list[Any] = [([row], [], 0, 0), ([], [], 0, 0)]
+        monkeypatch.setattr(
+            fp, "process_platform", lambda *a, **kw: response_queue.pop(0)
+        )
         monkeypatch.setattr(fp, "append_rows", lambda *a, **kw: 1)
         monkeypatch.setattr(fp, "_update_platform_state", lambda *a, **kw: None)
         monkeypatch.setattr(fp, "save_fetch_state", lambda *a, **kw: None)
@@ -1030,7 +1032,7 @@ class TestNoScoreFlag:
             ],
         )
         fp.main()
-        assert calls == []
+        assert not calls
 
     def test_main_calls_scorer_update_by_default(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

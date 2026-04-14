@@ -65,6 +65,7 @@ customs:
 - dvilela/corcel_request:0.1.0:bafybeic74xc32orfiffumv3cxe7o4vktzobk6gszjecuhto4or7k5ppi5y
 - dvilela/gemini_prediction:0.1.0:bafybeifpoil2wjh6hr7sqoomlilhsyt3ktpy6tjzmisrlopxcjbkr3hhfq
 - nickcom007/prediction_request_sme:0.1.0:bafybeiefnlbjs4ctqz3hrs5h6bkcqodjgzlcmrew2f4db5p5btdxs63gfu
+- valory/factual_research:0.1.0:bafybeiekzoxduhailchwql7vjtzkbsfdxxngo2by7upcndgpjpxa7p3vvu
 default_ledger: ethereum
 required_ledgers:
 - ethereum

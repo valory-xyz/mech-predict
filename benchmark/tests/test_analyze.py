@@ -592,9 +592,10 @@ class TestGenerateReportTournamentToggle:
         assert "Version Deltas" not in report
 
     def test_on_renders_cumulative_breakdown_and_deltas(self) -> None:
-        """include_tournament=True renders the cumulative breakdown. Version
-        Deltas is temporarily disabled pending rework (see
-        BENCHMARK_REPORT_FIXES.md §0)."""
+        """include_tournament=True renders the cumulative breakdown.
+
+        Version Deltas is temporarily disabled pending rework.
+        """
         s = self._scores_with_versions()
         report = generate_report(s, [], include_tournament=True)
         assert "Tool × Version × Mode (All-Time)" in report

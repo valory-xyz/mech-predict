@@ -18,4 +18,4 @@ params:
   default_model: claude-sonnet-4-20250514
 dependencies:
   openai:
-    version: '>=1.30.0'
+    version: ==1.93.0

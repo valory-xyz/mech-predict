@@ -148,11 +148,19 @@ def section_tool_deployment_status(
 
     :param scores: parsed ``scores.json`` dict.
     :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
-        Pass ``None`` to fetch on the fly (the daily-report default).
-    :return: markdown section string.
+        Pass ``None`` to fetch on the fly (the daily-report default).  Pass
+        an empty dict to skip the section entirely (tests use this to avoid
+        the live GitHub fetch).
+    :return: markdown section string, or ``""`` when the caller opted out.
     """
     if disabled is None:
         disabled = fetch_disabled_tools()
+
+    # Explicit skip contract: an empty dict means "caller opted out" (used by
+    # unit tests).  Returning "" means the section heading is omitted so the
+    # report doesn't advertise a section that was never computed.
+    if not disabled:
+        return ""
 
     tools = scores.get("by_tool", {})
     # Preserve report-wide ordering (Brier ascending) so readers scan this

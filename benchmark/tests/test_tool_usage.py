@@ -363,6 +363,17 @@ class TestSectionToolDeploymentStatus:
         # And the known-disabled entry still renders
         assert "`echo`" in result
 
+    def test_empty_dict_opts_out_entirely(self) -> None:
+        """Empty dict means "caller opted out" and returns an empty string.
+
+        Otherwise ``failed_deployments`` would flag every declared
+        deployment as missing and render a warning banner that contradicts
+        the "nothing was fetched" reality.
+        """
+        scores = _scores_with_tools(["echo"])
+        result = section_tool_deployment_status(scores, disabled={})
+        assert result == ""
+
     def test_all_fetches_fail_no_false_negative(self) -> None:
         """If everything fails, we must not say 'no tools disabled'."""
         scores = _scores_with_tools(["echo"])

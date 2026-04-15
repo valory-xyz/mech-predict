@@ -21,7 +21,12 @@ from typing import Any
 
 from benchmark.compare import compare_stats
 from benchmark.io import load_jsonl
-from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
+from benchmark.scorer import (
+    DISAGREE_THRESHOLD,
+    LARGE_TRADE_THRESHOLD,
+    MIN_SAMPLE_SIZE,
+    brier_sort_key,
+)
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -205,10 +210,7 @@ def section_category(scores: dict[str, Any]) -> str:
         lines.append("No per-category data available.")
         return "\n".join(lines)
 
-    for category, stats in sorted(
-        categories.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
-    ):
+    for category, stats in sorted(categories.items(), key=brier_sort_key):
         if stats["n"] < MIN_SAMPLE_SIZE:
             # Include the (noisy) Brier so the ascending-Brier sort is
             # traceable to the reader — otherwise a sparse category ranking
@@ -251,10 +253,7 @@ def section_tool_category(scores: dict[str, Any]) -> str:
     if not data:
         return "## Tool × Category\n\nNo cross-breakdown data available."
 
-    ranked = sorted(
-        data.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
-    )
+    ranked = sorted(data.items(), key=brier_sort_key)
     sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
     sparse = [(k, s) for k, s in ranked if s["n"] < MIN_SAMPLE_SIZE]
 

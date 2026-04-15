@@ -752,6 +752,22 @@ def _compute_calibration_regression_from_bins(
 # ---------------------------------------------------------------------------
 
 
+def brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
+    """Sort key for ranking (name, stats) entries by Brier ascending.
+
+    Used by both the scorer CLI preview and the analyze.py report
+    sections so there is a single source of truth. Uses an explicit
+    ``is not None`` check; ``.get("brier") or 999`` collapses
+    ``brier=0.0`` (perfect score) to 999 via falsy-or and sorts best
+    cells to the end.
+
+    :param item: a (key, stats) pair from a ``by_*`` dim dict.
+    :return: the Brier value, or 999.0 when Brier is None.
+    """
+    brier = item[1].get("brier")
+    return brier if brier is not None else 999.0
+
+
 def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute all scores from production log rows."""
     total = len(rows)
@@ -1966,14 +1982,8 @@ def main() -> None:
             f"WARNING: Reliability {overall['reliability']} is below {RELIABILITY_GATE} gate"
         )
 
-    def _brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
-        # Use explicit None check; `.get("brier") or 999` collapses brier=0.0
-        # (perfect score) to 999 via falsy-or, sorting best cells to the end.
-        brier = item[1].get("brier")
-        return brier if brier is not None else 999.0
-
     print("\nBy tool (decision-worthy):")
-    ranked = sorted(result["by_tool"].items(), key=_brier_sort_key)
+    ranked = sorted(result["by_tool"].items(), key=brier_sort_key)
     for tool, stats in ranked:
         flags = []
         if stats["reliability"] is not None and stats["reliability"] < RELIABILITY_GATE:
@@ -1992,14 +2002,14 @@ def main() -> None:
     print("\nBy tool × platform:")
     for key, stats in sorted(
         result["by_tool_platform"].items(),
-        key=_brier_sort_key,
+        key=brier_sort_key,
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 
     print("\nBy tool × category:")
     for key, stats in sorted(
         result["by_tool_category"].items(),
-        key=_brier_sort_key,
+        key=brier_sort_key,
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 

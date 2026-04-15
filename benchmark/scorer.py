@@ -32,9 +32,48 @@ from benchmark.io import load_jsonl as load_rows
 
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
+DEFAULT_OUTPUT_TOURNAMENT = Path(__file__).parent / "results" / "scores_tournament.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
+
+PRODUCTION_MODE = "production_replay"
+TOURNAMENT_MODE = "tournament"
+
+
+def _derive_tournament_path(scores_path: Path) -> Path:
+    """Return the tournament scores path paired with *scores_path*.
+
+    Convention: ``<stem>.json`` -> ``<stem>_tournament.json`` in the same dir.
+    Used so a single ``--output`` flag (or default) implies both files.
+
+    :param scores_path: production scores path.
+    :return: paired tournament scores path.
+    """
+    return scores_path.with_name(f"{scores_path.stem}_tournament{scores_path.suffix}")
+
+
+def _partition_rows_by_mode(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split rows into (production, tournament) lists.
+
+    Rows are routed by ``row["mode"]``. Missing mode defaults to
+    production — matches the historical default in ``_accumulate_row``.
+
+    :param rows: input rows (any mode).
+    :return: tuple of (production_rows, tournament_rows).
+    """
+    prod: list[dict[str, Any]] = []
+    tourn: list[dict[str, Any]] = []
+    for row in rows:
+        mode = row.get("mode") or PRODUCTION_MODE
+        if mode == TOURNAMENT_MODE:
+            tourn.append(row)
+        else:
+            prod.append(row)
+    return prod, tourn
+
 
 LATENCY_RESERVOIR_SIZE = 200
 CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
@@ -1514,76 +1553,50 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     return scores
 
 
-def update(
-    new_rows: list[dict[str, Any]],
-    scores_path: Path = DEFAULT_OUTPUT,
-    history_path: Path = DEFAULT_HISTORY,
-    dedup_path: Path | None = None,
+def _accumulate_and_write(
+    rows: list[dict[str, Any]],
+    scores_path: Path,
+    history_path: Path | None,
+    emit_history: bool,
 ) -> dict[str, Any]:
-    """Incrementally merge new rows into the scores accumulators.
+    """Load existing scores (if any), accumulate *rows*, write output.
 
-    If ``scores.json`` exists with valid accumulators, loads and extends.
-    Otherwise initializes fresh accumulators.
+    Shared post-dedup implementation of update(). Callers pass an
+    already-deduplicated, single-mode slice of rows. When
+    ``emit_history`` is False (tournament path), the month-boundary
+    snapshot step is skipped and ``history_path`` may be None.
 
-    Handles month boundaries: if the stored ``current_month`` differs from
-    today's month, snapshots the completed month to ``scores_history.jsonl``
-    and resets accumulators. Dedup state is stored in a separate file
-    (``scored_row_ids.json``) so it persists across month rollovers.
-
-    :param new_rows: list of production log row dicts.
-    :param scores_path: path to ``scores.json``.
-    :param history_path: path to ``scores_history.jsonl``.
-    :param dedup_path: path to ``scored_row_ids.json``.
+    :param rows: pre-deduplicated rows for a single mode.
+    :param scores_path: output path for the accumulator dict.
+    :param history_path: optional history file for monthly snapshots.
+    :param emit_history: when False, skip the snapshot step entirely.
     :return: finalized scores dict (also written to disk).
     """
-    if dedup_path is None:
-        dedup_path = scores_path.parent / "scored_row_ids.json"
-
     today_month = datetime.now(timezone.utc).strftime("%Y-%m")
 
     existing = _load_scores_for_resume(scores_path)
     if existing is not None:
         scores = existing
-        # Month boundary check
         if scores["current_month"] != today_month:
-            _snapshot_month(scores, history_path)
-            scores = _empty_scores(today_month)
+            if emit_history and history_path is not None:
+                _snapshot_month(scores, history_path)
+                scores = _empty_scores(today_month)
+            else:
+                # Tournament path: keep accumulating across month boundaries
+                # so cross-mode comparisons (and callout thresholds) don't
+                # reset to zero on the 1st of every month. Only advance the
+                # stored month label.
+                scores["current_month"] = today_month
     else:
         scores = _empty_scores(today_month)
 
-    # Dedup state lives in its own file — survives month rollover
-    scored_ids = _load_dedup_ids(dedup_path)
-    # Migrate: if old scores.json had scored_row_ids, merge them
-    scored_ids.update(scores.pop("scored_row_ids", set()))
+    # Drop any migrated dedup set — dedup is owned by the caller now.
+    scores.pop("scored_row_ids", None)
 
-    skipped = 0
-    no_id = 0
-    for row in new_rows:
-        row_id = row.get("row_id")
-        if not row_id:
-            no_id += 1
-            _accumulate_row(scores, row)
-            continue
-        if row_id in scored_ids:
-            skipped += 1
-            continue
+    for row in rows:
         _accumulate_row(scores, row)
-        scored_ids.add(row_id)
 
-    _save_dedup_ids(dedup_path, scored_ids)
-
-    if skipped:
-        logging.getLogger(__name__).warning(
-            "Skipped %d duplicate rows (already scored)", skipped
-        )
-    if no_id:
-        logging.getLogger(__name__).warning(
-            "%d rows without row_id cannot be deduplicated", no_id
-        )
-
-    # Write raw accumulators (for future incremental loads)
     finalized = _finalize_scores(scores)
-    # Merge accumulators into the output so next load can resume
     output = dict(finalized)
     output["overall"] = {
         **finalized["overall"],
@@ -1608,7 +1621,6 @@ def update(
                 **finalized[dim][key],
                 **{k: group[k] for k in _ACCUM_KEYS},
             }
-    # Preserve raw calibration accumulators alongside derived
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
 
@@ -1616,6 +1628,85 @@ def update(
     scores_path.write_text(json.dumps(output, indent=2))
 
     return finalized
+
+
+def update(
+    new_rows: list[dict[str, Any]],
+    scores_path: Path = DEFAULT_OUTPUT,
+    history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
+    tournament_scores_path: Path | None = None,
+) -> dict[str, Any]:
+    """Incrementally merge new rows into the scores accumulators.
+
+    Splits rows by ``row["mode"]``: production rows land in
+    ``scores_path``; tournament rows land in ``tournament_scores_path``
+    (derived from ``scores_path`` when omitted). Dedup is global across
+    both modes. Monthly history snapshots are emitted for the production
+    file only.
+
+    :param new_rows: list of log row dicts (any mode).
+    :param scores_path: path to production ``scores.json``.
+    :param history_path: path to ``scores_history.jsonl`` (production only).
+    :param dedup_path: path to ``scored_row_ids.json`` (shared).
+    :param tournament_scores_path: path to ``scores_tournament.json``.
+        Derived from ``scores_path`` when None.
+    :return: finalized production scores dict. Tournament result is
+        written to disk but not returned (backward compat).
+    """
+    if dedup_path is None:
+        dedup_path = scores_path.parent / "scored_row_ids.json"
+    if tournament_scores_path is None:
+        tournament_scores_path = _derive_tournament_path(scores_path)
+
+    scored_ids = _load_dedup_ids(dedup_path)
+    # Legacy migration: if an older scores.json still carries scored_row_ids
+    # inline (pre-dedup-file format), fold it into the shared dedup set now
+    # so the downstream partitioned accumulators start from a clean slate.
+    for legacy_path in (scores_path, tournament_scores_path):
+        if legacy_path.exists():
+            try:
+                legacy = json.loads(legacy_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            legacy_ids = legacy.get("scored_row_ids")
+            if legacy_ids:
+                scored_ids.update(legacy_ids)
+
+    deduped_rows: list[dict[str, Any]] = []
+    skipped = 0
+    no_id = 0
+    for row in new_rows:
+        row_id = row.get("row_id")
+        if not row_id:
+            no_id += 1
+            deduped_rows.append(row)
+            continue
+        if row_id in scored_ids:
+            skipped += 1
+            continue
+        deduped_rows.append(row)
+        scored_ids.add(row_id)
+
+    _save_dedup_ids(dedup_path, scored_ids)
+
+    if skipped:
+        logging.getLogger(__name__).warning(
+            "Skipped %d duplicate rows (already scored)", skipped
+        )
+    if no_id:
+        logging.getLogger(__name__).warning(
+            "%d rows without row_id cannot be deduplicated", no_id
+        )
+
+    prod_rows, tourn_rows = _partition_rows_by_mode(deduped_rows)
+
+    prod_result = _accumulate_and_write(
+        prod_rows, scores_path, history_path, emit_history=True
+    )
+    _accumulate_and_write(tourn_rows, tournament_scores_path, None, emit_history=False)
+
+    return prod_result
 
 
 def _collect_rebuild_rows(
@@ -1636,90 +1727,68 @@ def _collect_rebuild_rows(
     return rows
 
 
-def rebuild(
-    logs_dir: Path = DEFAULT_LOGS_DIR,
-    scores_path: Path = DEFAULT_OUTPUT,
-    history_path: Path = DEFAULT_HISTORY,
-    dedup_path: Path | None = None,
-    tournament_input: Path | None = None,
-) -> dict[str, Any]:
-    """Rebuild scores.json from all log files in the logs directory.
+def _rebuild_single_mode(
+    mode_rows: list[dict[str, Any]],
+    scores_path: Path,
+    history_path: Path | None,
+    emit_history: bool,
+) -> tuple[dict[str, Any], set[str]]:
+    """Rebuild one mode's scores from a pre-filtered row list.
 
-    Reads all ``production_log_*.jsonl`` files (including legacy), processes
-    rows month by month, and writes snapshots + final scores.
+    Returns the finalized scores plus the set of row_ids seen (for
+    dedup-file regeneration at the caller level).
 
-    :param logs_dir: directory containing daily log files.
-    :param scores_path: output path for ``scores.json``.
-    :param history_path: output path for ``scores_history.jsonl``.
-    :param dedup_path: path to ``scored_row_ids.json``.
-    :param tournament_input: optional path to ``tournament_scored.jsonl`` to
-        merge into the rebuild input.
-    :return: finalized scores dict.
+    :param mode_rows: rows already filtered to a single mode.
+    :param scores_path: output path for the accumulator dict.
+    :param history_path: optional history file for monthly snapshots.
+    :param emit_history: when False, snapshots are skipped and
+        ``history_path`` is ignored.
+    :return: tuple of (finalized scores dict, set of row_ids consumed).
     """
-
-    if dedup_path is None:
-        dedup_path = scores_path.parent / "scored_row_ids.json"
-
-    all_rows = _collect_rebuild_rows(logs_dir, tournament_input)
-
-    if not all_rows:
+    if not mode_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
         finalized = _finalize_scores(scores)
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
-        # Clear dedup file — empty rebuild means fresh start
-        _save_dedup_ids(dedup_path, set())
-        return finalized
+        return finalized, set()
 
-    # Sort rows by predicted_at to process chronologically
-    all_rows.sort(key=lambda r: r.get("predicted_at") or "")
+    mode_rows.sort(key=lambda r: r.get("predicted_at") or "")
 
-    # Group by month and process
     months: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in all_rows:
+    for row in mode_rows:
         predicted_at = row.get("predicted_at")
-        if predicted_at:
-            month = predicted_at[:7]
-        else:
-            month = "unknown"
+        month = predicted_at[:7] if predicted_at else "unknown"
         months[month].append(row)
 
-    # Clear history file for rebuild
-    if history_path.exists():
+    if emit_history and history_path is not None and history_path.exists():
         history_path.unlink()
 
     sorted_months = sorted(months.keys())
     last_month = sorted_months[-1]
-
-    # Collect all row_ids across all months for dedup on subsequent update() calls
     all_row_ids: set[str] = set()
 
-    # Process all months except the last one as snapshots
     for month in sorted_months[:-1]:
         scores = _empty_scores(month)
         for row in months[month]:
             row_id = row.get("row_id")
             if row_id and row_id in all_row_ids:
-                continue  # skip duplicate across log files
+                continue
             _accumulate_row(scores, row)
             if row_id:
                 all_row_ids.add(row_id)
-        _snapshot_month(scores, history_path)
+        if emit_history and history_path is not None:
+            _snapshot_month(scores, history_path)
 
-    # The last month becomes the current scores.json
     scores = _empty_scores(last_month)
     for row in months[last_month]:
         row_id = row.get("row_id")
         if row_id and row_id in all_row_ids:
-            continue  # skip duplicate across log files
+            continue
         _accumulate_row(scores, row)
         if row_id:
             all_row_ids.add(row_id)
-    # Save dedup state to its own file — persists across month rollovers
-    _save_dedup_ids(dedup_path, all_row_ids)
 
     finalized = _finalize_scores(scores)
-    # Write with accumulators for future incremental use
     output = dict(finalized)
     output["overall"] = {
         **finalized["overall"],
@@ -1750,7 +1819,68 @@ def rebuild(
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
 
-    return finalized
+    return finalized, all_row_ids
+
+
+def rebuild(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    scores_path: Path = DEFAULT_OUTPUT,
+    history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
+    tournament_input: Path | None = None,
+    tournament_scores_path: Path | None = None,
+) -> dict[str, Any]:
+    """Rebuild both production and tournament scores from all log files.
+
+    Production rows land in ``scores_path`` (default ``scores.json``)
+    and emit monthly history snapshots. Tournament rows (from
+    ``tournament_input`` and/or ``mode=tournament`` entries in the logs)
+    land in ``tournament_scores_path`` (default
+    ``scores_tournament.json``) and do **not** emit history.
+
+    Dedup is global across both modes: the combined set of row_ids is
+    written to ``dedup_path``.
+
+    :param logs_dir: directory containing daily log files.
+    :param scores_path: output path for production ``scores.json``.
+    :param history_path: output path for ``scores_history.jsonl``
+        (production only).
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        to merge into the rebuild input.
+    :param tournament_scores_path: path to ``scores_tournament.json``.
+        Derived from ``scores_path`` when None.
+    :return: finalized production scores dict.
+    """
+    if dedup_path is None:
+        dedup_path = scores_path.parent / "scored_row_ids.json"
+    if tournament_scores_path is None:
+        tournament_scores_path = _derive_tournament_path(scores_path)
+
+    all_rows = _collect_rebuild_rows(logs_dir, tournament_input)
+
+    if not all_rows:
+        scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
+        finalized = _finalize_scores(scores)
+        scores_path.parent.mkdir(parents=True, exist_ok=True)
+        scores_path.write_text(json.dumps(finalized, indent=2))
+        tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
+        tournament_scores_path.write_text(json.dumps(finalized, indent=2))
+        _save_dedup_ids(dedup_path, set())
+        return finalized
+
+    prod_rows, tourn_rows = _partition_rows_by_mode(all_rows)
+
+    prod_finalized, prod_ids = _rebuild_single_mode(
+        prod_rows, scores_path, history_path, emit_history=True
+    )
+    _, tourn_ids = _rebuild_single_mode(
+        tourn_rows, tournament_scores_path, None, emit_history=False
+    )
+
+    _save_dedup_ids(dedup_path, prod_ids | tourn_ids)
+
+    return prod_finalized
 
 
 # ---------------------------------------------------------------------------
@@ -1776,32 +1906,26 @@ def _extract_date_from_log_path(path: str) -> str:
     return ""
 
 
-def score_period(
+def score_period_split(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
-) -> dict[str, Any]:
-    """Score rows whose ``predicted_at`` falls within the last *days* days.
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Score the last *days* days, returning (production, tournament).
 
-    Reads all log files in *logs_dir*, filters rows by timestamp, and
-    runs ``score()`` on the matching subset.  This works correctly even
-    when all data lands in a single file (e.g. after a force rebuild),
-    when multiple files cover the same date, or when days are missing.
-
-    Handles both ``YYYY-MM-DD.jsonl`` and ``production_log_YYYY_MM_DD.jsonl``
-    naming conventions (the flywheel uses the latter).
+    Same collection rules as ``score_period`` but returns a tuple so
+    callers can write both files separately.
 
     :param logs_dir: directory containing daily log files.
     :param days: score rows from the last N calendar days.
-    :param tournament_input: optional path to ``tournament_scored.jsonl`` whose
-        rows are filtered to the same window and merged into the input.
-    :return: scores dict from ``score()``, or empty scores if no matching rows.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :return: tuple of (production_scores, tournament_scores).
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
 
-    # Both naming conventions: YYYY-MM-DD.jsonl and production_log_YYYY_MM_DD.jsonl
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
     all_files = sorted(
@@ -1822,10 +1946,29 @@ def score_period(
             if predicted_at >= cutoff:
                 rows.append(row)
 
-    if not rows:
-        return score([])
+    prod_rows, tourn_rows = _partition_rows_by_mode(rows)
+    return score(prod_rows), score(tourn_rows)
 
-    return score(rows)
+
+def score_period(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+    tournament_input: Path | None = None,
+) -> dict[str, Any]:
+    """Score production rows in the last *days* days (backward-compat).
+
+    Backward-compat wrapper around ``score_period_split``; returns the
+    production partition only. Callers that need the tournament scores
+    should use ``score_period_split`` directly.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N calendar days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :return: production scores dict.
+    """
+    prod, _ = score_period_split(logs_dir, days, tournament_input)
+    return prod
 
 
 # ---------------------------------------------------------------------------
@@ -1848,7 +1991,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
-        help="Output JSON file path",
+        help="Production scores JSON output path",
+    )
+    parser.add_argument(
+        "--output-tournament",
+        type=Path,
+        default=None,
+        help=(
+            "Tournament scores JSON output path. If omitted, derived from "
+            "--output by appending '_tournament' to the stem."
+        ),
     )
     parser.add_argument(
         "--rebuild",
@@ -1888,60 +2040,106 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cli_update(args: argparse.Namespace, output_tournament: Path) -> None:
+    """Handle the ``--update`` CLI mode."""
+    rows = load_rows(args.update)
+    result = update(
+        rows,
+        args.output,
+        args.history,
+        tournament_scores_path=output_tournament,
+    )
+    overall = result["overall"]
+    print(
+        f"Merged {len(rows)} rows from {args.update}: Brier={overall['brier']},"
+        f" n={overall['n']}"
+    )
+
+
+def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
+    """Handle the ``--period-days`` CLI mode."""
+    prod_result, tourn_result = score_period_split(
+        logs_dir=args.logs_dir,
+        days=args.period_days,
+        tournament_input=args.tournament_input,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(prod_result, indent=2))
+    output_tournament.parent.mkdir(parents=True, exist_ok=True)
+    output_tournament.write_text(json.dumps(tourn_result, indent=2))
+    overall = prod_result["overall"]
+    t_overall = tourn_result["overall"]
+    print(
+        f"Period ({args.period_days}d) production: Brier={overall['brier']},"
+        f" n={overall['n']} | tournament: Brier={t_overall['brier']},"
+        f" n={t_overall['n']}"
+    )
+
+
+def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
+    """Handle the ``--rebuild`` CLI mode."""
+    print(f"Rebuilding scores from {args.logs_dir}")
+    result = rebuild(
+        logs_dir=args.logs_dir,
+        scores_path=args.output,
+        history_path=args.history,
+        tournament_input=args.tournament_input,
+        tournament_scores_path=output_tournament,
+    )
+    print(
+        f"Scores written to {args.output} (production) and "
+        f"{output_tournament} (tournament)"
+    )
+    overall = result["overall"]
+    print(
+        f"Production: Brier={overall['brier']},"
+        f" DirAcc={overall.get('directional_accuracy')}, n={overall['n']}"
+    )
+
+
+def _cli_legacy_full_recompute(
+    args: argparse.Namespace, output_tournament: Path
+) -> dict[str, Any]:
+    """Legacy full-recompute path; returns the production scores dict."""
+    rows = load_rows(args.input)
+    print(f"Loaded {len(rows)} rows from {args.input}")
+
+    prod_rows, tourn_rows = _partition_rows_by_mode(rows)
+    result = score(prod_rows)
+    tourn_result = score(tourn_rows)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(result, indent=2))
+    output_tournament.parent.mkdir(parents=True, exist_ok=True)
+    output_tournament.write_text(json.dumps(tourn_result, indent=2))
+    print(
+        f"Scores written to {args.output} (production, n={result['overall']['n']}) "
+        f"and {output_tournament} (tournament, n={tourn_result['overall']['n']})"
+    )
+    return result
+
+
 def main() -> None:
     """CLI entry point for scoring."""
     args = _build_arg_parser().parse_args()
 
+    output_tournament: Path = args.output_tournament or _derive_tournament_path(
+        args.output
+    )
+
     if args.update is not None:
-        rows = load_rows(args.update)
-        result = update(rows, args.output, args.history)
-        overall = result["overall"]
-        print(
-            f"Merged {len(rows)} rows from {args.update}: Brier={overall['brier']},"
-            f" n={overall['n']}"
-        )
+        _cli_update(args, output_tournament)
         return
 
     if args.period_days is not None:
-        result = score_period(
-            logs_dir=args.logs_dir,
-            days=args.period_days,
-            tournament_input=args.tournament_input,
-        )
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2))
-        overall = result["overall"]
-        print(
-            f"Period ({args.period_days}d): Brier={overall['brier']},"
-            f" n={overall['n']}"
-        )
+        _cli_period(args, output_tournament)
         return
 
     if args.rebuild:
-        print(f"Rebuilding scores from {args.logs_dir}")
-        result = rebuild(
-            logs_dir=args.logs_dir,
-            scores_path=args.output,
-            history_path=args.history,
-            tournament_input=args.tournament_input,
-        )
-        print(f"Scores written to {args.output}")
-        overall = result["overall"]
-        print(
-            f"Overall: Brier={overall['brier']}, DirAcc={overall.get('directional_accuracy')},"
-            f" n={overall['n']}"
-        )
+        _cli_rebuild(args, output_tournament)
         return
 
-    # Legacy full-recompute mode
-    rows = load_rows(args.input)
-    print(f"Loaded {len(rows)} rows from {args.input}")
-
-    result = score(rows)
-
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, indent=2))
-    print(f"Scores written to {args.output}")
+    result = _cli_legacy_full_recompute(args, output_tournament)
 
     # Print summary
     overall = result["overall"]

@@ -862,20 +862,29 @@ class TestToolVersionModeBreakdown:
     """Tests for the (tool, version, mode) aggregation dimension."""
 
     def test_splits_by_mode_when_hash_matches(self, tmp_path: Path) -> None:
-        """Same tool + same hash but different modes must yield separate cells."""
+        """Same tool + same hash, different modes, land in separate files.
+
+        :param tmp_path: pytest tmpdir fixture.
+        """
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
 
         rows = [
             _row(tool="t1", tool_version="v1", mode="production_replay"),
             _row(tool="t1", tool_ipfs_hash="v1", mode="tournament"),
         ]
-        result = update(rows, scores_path, history_path)
+        prod_result = update(
+            rows, scores_path, history_path, tournament_scores_path=tournament_path
+        )
+        tourn_result = json.loads(tournament_path.read_text())
 
-        assert "t1 | v1 | production_replay" in result["by_tool_version_mode"]
-        assert "t1 | v1 | tournament" in result["by_tool_version_mode"]
-        assert result["by_tool_version_mode"]["t1 | v1 | production_replay"]["n"] == 1
-        assert result["by_tool_version_mode"]["t1 | v1 | tournament"]["n"] == 1
+        assert "t1 | v1 | production_replay" in prod_result["by_tool_version_mode"]
+        assert (
+            prod_result["by_tool_version_mode"]["t1 | v1 | production_replay"]["n"] == 1
+        )
+        assert "t1 | v1 | tournament" in tourn_result["by_tool_version_mode"]
+        assert tourn_result["by_tool_version_mode"]["t1 | v1 | tournament"]["n"] == 1
 
     def test_defaults_mode_to_production_replay(self, tmp_path: Path) -> None:
         """Rows without a mode field default to production_replay."""
@@ -2054,3 +2063,201 @@ class TestDiagnosticAccumulators:
             assert (
                 batch[key] == incremental[key]
             ), f"{key}: batch={batch[key]} != incremental={incremental[key]}"
+
+
+# ---------------------------------------------------------------------------
+# Mode split: scores.json vs scores_tournament.json (BENCHMARK_MODE_SPLIT_SPEC)
+# ---------------------------------------------------------------------------
+
+
+class TestModeSplit:
+    """Tests for production/tournament scoring split."""
+
+    def test_partition_rows_by_mode(self) -> None:
+        """_partition_rows_by_mode routes rows by the mode field; missing mode defaults to production."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import _partition_rows_by_mode
+
+        rows = [
+            _row(mode="tournament", row_id="t1"),
+            _row(mode="production_replay", row_id="p1"),
+            _row(mode=None, row_id="p2"),  # missing mode -> production
+            _row(mode="tournament", row_id="t2"),
+        ]
+        prod, tourn = _partition_rows_by_mode(rows)
+        prod_ids = {r["row_id"] for r in prod}
+        tourn_ids = {r["row_id"] for r in tourn}
+        assert prod_ids == {"p1", "p2"}
+        assert tourn_ids == {"t1", "t2"}
+
+    def test_derive_tournament_path(self) -> None:
+        """_derive_tournament_path appends _tournament to the stem."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import _derive_tournament_path
+
+        assert _derive_tournament_path(Path("/tmp/results/scores.json")) == Path(
+            "/tmp/results/scores_tournament.json"
+        )
+
+    def test_update_writes_both_files_and_preserves_split(self, tmp_path: Path) -> None:
+        """update() splits rows by mode and writes two score files; modes don't cross-contaminate."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+
+        rows = [
+            _row(mode="production_replay", tool="prod-tool", row_id="p1"),
+            _row(mode="production_replay", tool="prod-tool", row_id="p2"),
+            _row(mode="tournament", tool="tourn-tool", row_id="t1"),
+        ]
+        update(rows, scores_path, history_path, tournament_scores_path=tournament_path)
+
+        prod = json.loads(scores_path.read_text())
+        tourn = json.loads(tournament_path.read_text())
+
+        assert "prod-tool" in prod["by_tool"]
+        assert "tourn-tool" not in prod["by_tool"]
+        assert "tourn-tool" in tourn["by_tool"]
+        assert "prod-tool" not in tourn["by_tool"]
+
+    def test_update_shares_dedup_across_modes(self, tmp_path: Path) -> None:
+        """Both modes write to a single dedup file; re-feeding same rows is a no-op."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "ids.json"
+        tournament_path = tmp_path / "scores_tournament.json"
+
+        rows = [
+            _row(mode="production_replay", row_id="p1"),
+            _row(mode="tournament", row_id="t1"),
+        ]
+        update(
+            rows,
+            scores_path,
+            history_path,
+            dedup_path=dedup_path,
+            tournament_scores_path=tournament_path,
+        )
+        ids_after_first = set(json.loads(dedup_path.read_text()))
+        assert ids_after_first == {"p1", "t1"}
+
+        # Second call with the same rows should skip both
+        update(
+            rows,
+            scores_path,
+            history_path,
+            dedup_path=dedup_path,
+            tournament_scores_path=tournament_path,
+        )
+        prod = json.loads(scores_path.read_text())
+        tourn = json.loads(tournament_path.read_text())
+        # Sample size unchanged after no-op second update
+        assert prod["overall"]["n"] == 1
+        assert tourn["overall"]["n"] == 1
+
+    def test_tournament_accumulates_across_month_rollover(self, tmp_path: Path) -> None:
+        """Tournament scores must not reset on calendar month rollover.
+
+        Spec requires tournament cells to accumulate cumulatively so the
+        CALLOUT_MIN_N threshold holds across month boundaries. Production
+        still snapshots + resets; tournament only updates the month label.
+
+        :param tmp_path: pytest tmpdir fixture.
+        """
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+
+        # Seed tournament scores with "previous month" rows
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 20, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            update(
+                [
+                    _row(
+                        row_id="prev_m_1",
+                        predicted_at="2026-03-20T10:00:00Z",
+                        mode="tournament",
+                    )
+                ],
+                scores_path,
+                history_path,
+                tournament_scores_path=tournament_path,
+            )
+
+        seeded = json.loads(tournament_path.read_text())
+        assert seeded["overall"]["n"] == 1
+
+        # Now run again under "current month" — tournament must keep the
+        # seeded accumulator, not reset to zero.
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 5, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            update(
+                [
+                    _row(
+                        row_id="curr_m_1",
+                        predicted_at="2026-04-05T10:00:00Z",
+                        mode="tournament",
+                    )
+                ],
+                scores_path,
+                history_path,
+                tournament_scores_path=tournament_path,
+            )
+
+        final = json.loads(tournament_path.read_text())
+        assert (
+            final["overall"]["n"] == 2
+        ), "tournament accumulator reset on month rollover"
+
+    def test_rebuild_history_production_only(self, tmp_path: Path) -> None:
+        """rebuild() emits monthly history snapshots only for production rows."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+
+        # Two months of production + tournament rows each
+        log_file = logs_dir / "production_log_2026_01.jsonl"
+        rows = [
+            _row(
+                mode="production_replay",
+                predicted_at="2026-01-15T10:00:00Z",
+                row_id="p_jan",
+            ),
+            _row(
+                mode="production_replay",
+                predicted_at="2026-02-15T10:00:00Z",
+                row_id="p_feb",
+            ),
+            _row(
+                mode="tournament",
+                predicted_at="2026-01-15T10:00:00Z",
+                row_id="t_jan",
+            ),
+            _row(
+                mode="tournament",
+                predicted_at="2026-02-15T10:00:00Z",
+                row_id="t_feb",
+            ),
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(
+            logs_dir=logs_dir,
+            scores_path=scores_path,
+            history_path=history_path,
+            tournament_scores_path=tournament_path,
+        )
+
+        # History exists and contains at most production months (1 snapshot for Jan).
+        assert history_path.exists()
+        history_lines = [
+            json.loads(ln) for ln in history_path.read_text().splitlines() if ln.strip()
+        ]
+        # One closed prior month (January); current month doesn't snapshot.
+        # Verify the snapshot reflects production (n=1, not n=2 from pooled modes).
+        assert len(history_lines) == 1
+        assert history_lines[0]["overall"]["n"] == 1

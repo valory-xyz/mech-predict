@@ -243,11 +243,12 @@ class TestSectionWeakSpots:
 
 
 class TestActiveCategoriesInvariants:
-    """Pin ACTIVE_CATEGORIES membership against silent shrinking.
+    """Pin the contents of ACTIVE_CATEGORIES.
 
-    These assertions guard against the mutation: "remove a single label from
-    OMEN_CATEGORIES or POLYMARKET_ACTIVE_CATEGORIES" which the behavioural
-    weak-spots tests would not catch on its own.
+    Guards against accidental edits that silently shrink the filter set.
+    The behavioural weak-spots tests would not catch the mutation "remove a
+    single label from OMEN_CATEGORIES or POLYMARKET_ACTIVE_CATEGORIES" on
+    their own.
     """
 
     def test_shared_categories_are_active(self) -> None:

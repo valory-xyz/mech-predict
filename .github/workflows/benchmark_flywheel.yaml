@@ -159,12 +159,15 @@ jobs:
             $TOURNAMENT_FLAG
         continue-on-error: true
 
-      # Analyze reads scores.json + history + period scores
+      # Analyze reads scores.json + tournament scores + history + period scores
       - name: Analyze
         run: |
           python -m benchmark.analyze \
             --period benchmark/results/period_scores.json \
             --rolling benchmark/results/rolling_scores.json \
+            --scores-tournament benchmark/results/scores_tournament.json \
+            --period-tournament benchmark/results/period_scores_tournament.json \
+            --rolling-tournament benchmark/results/rolling_scores_tournament.json \
             --include-tournament
 
       # Upload state + scores (small, needed for next run)
@@ -175,6 +178,7 @@ jobs:
           path: |
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json
+            benchmark/results/scores_tournament.json
             benchmark/results/scores_history.jsonl
             benchmark/results/scored_row_ids.json
             benchmark/results/report.md
@@ -278,7 +282,7 @@ jobs:
     needs: [tournament-fetch, check-secrets]
     if: needs.check-secrets.outputs.has_keys == 'true'
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4

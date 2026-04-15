@@ -134,6 +134,20 @@ def _sample_label(stats: dict[str, Any]) -> str:
     return ""
 
 
+def _brier_key(stats: dict[str, Any]) -> float:
+    """Return a sort key that places entries without a Brier last.
+
+    Every ranking in the report sorts by Brier ascending.  Missing scores
+    (``None``) need to sort last; ``float("inf")`` is the canonical way
+    to do that and is used instead of a magic ``999`` sentinel.
+
+    :param stats: stats dict for a tool, platform, or composite group.
+    :return: the Brier score, or ``float("inf")`` when it is missing.
+    """
+    brier = stats.get("brier")
+    return brier if brier is not None else float("inf")
+
+
 def section_tool_deployment_status(
     scores: dict[str, Any],
     disabled: dict[str, list[str] | None] | None = None,
@@ -165,12 +179,7 @@ def section_tool_deployment_status(
     tools = scores.get("by_tool", {})
     # Preserve report-wide ordering (Brier ascending) so readers scan this
     # section in the same order as Tool Ranking below.
-    ordered = sorted(
-        tools.keys(),
-        key=lambda t: (
-            tools[t].get("brier") if tools[t].get("brier") is not None else 999
-        ),
-    )
+    ordered = sorted(tools.keys(), key=lambda t: _brier_key(tools[t]))
     entries = iter_tools_with_disabled(ordered, disabled)
 
     lines = ["## Tool Deployment Status", ""]
@@ -205,7 +214,7 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
     tools = scores.get("by_tool", {})
     ranked = sorted(
         tools.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=lambda x: _brier_key(x[1]),
     )
 
     lines = ["## Tool Ranking", ""]
@@ -247,7 +256,7 @@ def section_platform(scores: dict[str, Any]) -> str:
     lines = ["## Platform Comparison", ""]
     for platform, stats in sorted(
         platforms.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=lambda x: _brier_key(x[1]),
     ):
         baseline = stats.get("baseline_brier")
         bss = stats.get("brier_skill_score")
@@ -465,7 +474,7 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     ]
     for key, stats in sorted(
         data.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=lambda x: _brier_key(x[1]),
     ):
         parts = key.split(" | ")
         tool = parts[0] if parts else key
@@ -990,7 +999,7 @@ def section_period(
         at_tools = alltime_scores.get("by_tool", {})
         for tool, stats in sorted(
             by_tool.items(),
-            key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+            key=lambda x: _brier_key(x[1]),
         ):
             tb = stats.get("brier")
             if tb is None:

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from benchmark.compare import compare_stats
+from benchmark import release_map
 from benchmark.io import load_jsonl
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
@@ -1234,6 +1234,8 @@ def section_period(
 
 
 VERSION_DELTA_LOW_SAMPLE = 30
+VERSION_DELTA_LOW_SAMPLE_STRICT = 300
+VERSION_DELTA_UNCHANGED_EPSILON = 0.001
 
 
 def _parse_tvm_key(key: str) -> tuple[str, str, str]:
@@ -1244,18 +1246,120 @@ def _parse_tvm_key(key: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+def _version_label(cid: str, rm: dict[str, Any] | None = None) -> str:
+    """Return the release-tag label for a CID, or the untagged fallback.
+
+    Wraps :func:`benchmark.release_map.resolve` so callers inside
+    ``analyze.py`` don't need to import the module directly.
+
+    :param cid: IPFS CID string.
+    :param rm: optional pre-loaded release map; defaults to the cached one.
+    :return: release tag (e.g. ``"v0.17.2"``) or ``"untagged@..."``.
+    """
+    return release_map.resolve(cid, rm)
+
+
+def _most_recent_prod_cid(
+    tool: str,
+    scores_prod: dict[str, Any],
+    rm: dict[str, Any],
+) -> str | None:
+    """Return the production-mode CID with the latest release tag for *tool*.
+
+    Iterates ``scores_prod["by_tool_version_mode"]``, keeps the cells
+    whose tool matches *tool* and whose mode is ``production_replay``,
+    and returns the CID of the latest (by release tag). Untagged CIDs
+    fall through to the end; ties among them break arbitrarily but
+    deterministically (by sort order of the fallback label).
+
+    :param tool: runtime tool name.
+    :param scores_prod: production scores dict.
+    :param rm: release map.
+    :return: production CID or None when no prod cell exists for *tool*.
+    """
+    tvm = scores_prod.get("by_tool_version_mode", {}) if scores_prod else {}
+    tags_scanned = rm.get("tags_scanned", []) if rm else []
+    candidates: list[tuple[str, str]] = []  # (cid, label)
+    for key in tvm:
+        t, cid, mode = _parse_tvm_key(key)
+        if t != tool or mode != "production_replay":
+            continue
+        candidates.append((cid, release_map.resolve(cid, rm)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: release_map.sort_key(c[1], tags_scanned))
+    return candidates[-1][0]
+
+
+def _pool_cells(cells: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pool a list of stats dicts via n-weighted mean of row-mean metrics.
+
+    Exact for Brier, LogLoss, directional accuracy, baseline Brier —
+    all of which are row-level means whose weighted mean by n equals
+    the pooled row mean.
+
+    :param cells: list of stats dicts with ``n`` and per-metric fields.
+    :return: single stats dict representing the pool.
+    """
+    total_n = sum(c.get("n", 0) or 0 for c in cells)
+    if total_n == 0:
+        return {"n": 0, "brier": None, "directional_accuracy": None}
+
+    def _wmean(key: str) -> float | None:
+        num = 0.0
+        denom = 0
+        for cell in cells:
+            val = cell.get(key)
+            if val is None:
+                continue
+            cell_n = cell.get("n", 0) or 0
+            num += cell_n * val
+            denom += cell_n
+        return num / denom if denom else None
+
+    return {
+        "n": total_n,
+        "brier": _wmean("brier"),
+        "directional_accuracy": _wmean("directional_accuracy"),
+        "log_loss": _wmean("log_loss"),
+        "baseline_brier": _wmean("baseline_brier"),
+    }
+
+
 def section_tool_version_breakdown(
     scores: dict[str, Any],
     title: str = "Tool × Version × Mode",
+    release_map_data: dict[str, Any] | None = None,
 ) -> str:
-    """Per (tool, version, mode) metrics table — combines prod and tournament."""
+    """Per (tool, version, mode) metrics table — combines prod and tournament.
+
+    The Version column shows release-tag labels (via
+    :func:`benchmark.release_map.resolve`) when a CID resolves, or
+    ``untagged@<short>`` otherwise. Rows are sorted by
+    ``(tool, release_chronology, mode)`` so readers scan a tool's
+    versions in deploy order.
+
+    :param scores: scores dict containing ``by_tool_version_mode``.
+    :param title: markdown heading text (without the leading ``##``).
+    :param release_map_data: optional pre-loaded release map.
+    :return: rendered markdown section, or empty string when empty.
+    """
     tvm = scores.get("by_tool_version_mode", {})
     if not tvm:
         return ""
 
-    rows = sorted(
-        (_parse_tvm_key(k) + (v,) for k, v in tvm.items()),
-        key=lambda r: (r[0], r[1], r[2]),
+    if release_map_data is None:
+        release_map_data = release_map.get_release_map()
+    tags_scanned = release_map_data.get("tags_scanned", [])
+
+    enriched: list[tuple[str, str, str, str, dict[str, Any]]] = []
+    for key, stats in tvm.items():
+        tool, cid, mode = _parse_tvm_key(key)
+        label = release_map.resolve(cid, release_map_data)
+        enriched.append((tool, cid, label, mode, stats))
+
+    enriched.sort(
+        key=lambda r: (r[0], release_map.sort_key(r[2], tags_scanned), r[3]),
     )
 
     lines = [
@@ -1265,7 +1369,7 @@ def section_tool_version_breakdown(
         "|------|---------|------|---:|---:|---:|---:|---:|",
     ]
     has_low_sample = False
-    for tool, version, mode, stats in rows:
+    for tool, _cid, label, mode, stats in enriched:
         n = stats.get("n", 0)
         valid_n = stats.get("valid_n", 0)
         low = n < VERSION_DELTA_LOW_SAMPLE
@@ -1279,59 +1383,177 @@ def section_tool_version_breakdown(
         bss = stats.get("brier_skill_score")
         bss_s = f"{bss:+.4f}" if bss is not None else "—"
         lines.append(
-            f"| {tool} | `{version}` | {mode} | {n_cell} | {valid_n} | {brier_s} | {acc_s} | {bss_s} |"
+            f"| {tool} | `{label}` | {mode} | {n_cell} | {valid_n}"
+            f" | {brier_s} | {acc_s} | {bss_s} |"
         )
 
     if has_low_sample:
         lines.extend(
             [
                 "",
-                f"⚠ Rows marked with ⚠ have n < {VERSION_DELTA_LOW_SAMPLE}; metrics from these cells are statistically unreliable and superlatives should not be drawn from them.",
+                f"⚠ Rows marked with ⚠ have n < {VERSION_DELTA_LOW_SAMPLE};"
+                " metrics from these cells are statistically unreliable and"
+                " superlatives should not be drawn from them.",
             ]
         )
     return "\n".join(lines)
 
 
-def section_version_deltas(scores: dict[str, Any]) -> str:
-    """Pairwise Brier deltas across versions/modes for each tool with multiple cells."""
+def _delta_direction(delta: float | None) -> str:
+    """Return a one-word direction label for a Brier delta."""
+    if delta is None:
+        return "—"
+    if delta < -VERSION_DELTA_UNCHANGED_EPSILON:
+        return "improved"
+    if delta > VERSION_DELTA_UNCHANGED_EPSILON:
+        return "regressed"
+    return "unchanged"
+
+
+def _format_delta_row(
+    baseline_label: str,
+    candidate_label: str,
+    baseline_stats: dict[str, Any],
+    candidate_stats: dict[str, Any],
+) -> str:
+    """Render a single markdown row for a (baseline, candidate) pair.
+
+    :param baseline_label: release-tag label (or pooled range).
+    :param candidate_label: release-tag label for the candidate version.
+    :param baseline_stats: baseline cell stats (or pooled stats dict).
+    :param candidate_stats: candidate cell stats.
+    :return: pipe-delimited markdown table row.
+    """
+    b_brier = baseline_stats.get("brier")
+    c_brier = candidate_stats.get("brier")
+    delta: float | None
+    if b_brier is None or c_brier is None:
+        delta = None
+        delta_s = "—"
+    else:
+        delta = c_brier - b_brier
+        delta_s = f"{delta:+.4f}"
+    n_b = baseline_stats.get("n", 0) or 0
+    n_c = candidate_stats.get("n", 0) or 0
+    low_flag = " ⚠" if min(n_b, n_c) < VERSION_DELTA_LOW_SAMPLE_STRICT else ""
+    return (
+        f"| `{baseline_label}` | `{candidate_label}` | {delta_s}{low_flag}"
+        f" | {_delta_direction(delta)} | {n_b} | {n_c} |"
+    )
+
+
+def section_version_deltas(
+    scores: dict[str, Any],
+    release_map_data: dict[str, Any] | None = None,
+) -> str:
+    """Per-tool, per-mode version timeline with prior + previous-pooled deltas.
+
+    Replaces the alphabetical-by-CID pairwise table that was disabled
+    in PR #215. Versions are ordered chronologically by release tag
+    (via :mod:`benchmark.release_map`), with ``first_seen`` currently
+    unused as a tiebreaker. For each (tool, mode) with ≥ 2 versions,
+    two sub-tables render:
+
+    - **vs prior version:** each V_i compared to V_{i-1}.
+    - **vs previous pooled:** each V_i compared to the n-weighted pool
+      of V_0..V_{i-1}.
+
+    Within-mode only. Low-sample rows (``min(n) <
+    VERSION_DELTA_LOW_SAMPLE_STRICT``) are flagged ⚠, not dropped.
+
+    :param scores: merged scores dict whose ``by_tool_version_mode``
+        holds cells for both production and tournament.
+    :param release_map_data: optional pre-loaded release map.
+    :return: markdown section, or empty string when no tool has ≥ 2
+        versions in any single mode.
+    """
     tvm = scores.get("by_tool_version_mode", {})
     if not tvm:
         return ""
 
-    by_tool: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
-    for key, stats in tvm.items():
-        tool, version, mode = _parse_tvm_key(key)
-        by_tool.setdefault(tool, []).append((version, mode, stats))
+    if release_map_data is None:
+        release_map_data = release_map.get_release_map()
+    tags_scanned = release_map_data.get("tags_scanned", [])
 
-    multi = {t: cells for t, cells in by_tool.items() if len(cells) >= 2}
+    # (tool, mode) -> list of (cid, label, stats) sorted by release chronology.
+    by_tool_mode: dict[tuple[str, str], list[tuple[str, str, dict[str, Any]]]] = {}
+    for key, stats in tvm.items():
+        tool, cid, mode = _parse_tvm_key(key)
+        label = release_map.resolve(cid, release_map_data)
+        by_tool_mode.setdefault((tool, mode), []).append((cid, label, stats))
+
+    multi = {k: cells for k, cells in by_tool_mode.items() if len(cells) >= 2}
     if not multi:
         return ""
 
+    for cells in multi.values():
+        cells.sort(key=lambda c: release_map.sort_key(c[1], tags_scanned))
+
     lines = ["## Version Deltas", ""]
-    for tool in sorted(multi):
-        cells = sorted(multi[tool], key=lambda c: (c[0], c[1]))
-        lines.append(f"### {tool}")
+    has_low_sample = False
+    for (tool, mode), cells in sorted(multi.items()):
+        lines.append(f"### {tool} ({mode})")
+        lines.append("")
+
+        lines.append("**vs prior version:**")
+        lines.append("")
+        lines.append("| Baseline | Candidate | Brier Δ | Direction | n_b | n_c |")
+        lines.append("|---|---|---:|---|---:|---:|")
+        for i in range(1, len(cells)):
+            _, prior_label, prior_stats = cells[i - 1]
+            _, cand_label, cand_stats = cells[i]
+            if (
+                min(prior_stats.get("n", 0) or 0, cand_stats.get("n", 0) or 0)
+                < VERSION_DELTA_LOW_SAMPLE_STRICT
+            ):
+                has_low_sample = True
+            lines.append(
+                _format_delta_row(prior_label, cand_label, prior_stats, cand_stats)
+            )
+        lines.append("")
+
+        lines.append("**vs previous pooled:**")
         lines.append("")
         lines.append(
-            "| Baseline (version, mode) | Candidate (version, mode) | Brier Δ | Direction | n_b | n_c |"
+            "| Baseline (pool) | Candidate | Brier Δ | Direction | n_b | n_c |"
         )
         lines.append("|---|---|---:|---|---:|---:|")
-        for i, (v_b, m_b, s_b) in enumerate(cells):
-            for v_c, m_c, s_c in cells[i + 1 :]:
-                cmp = compare_stats(s_b, s_c)
-                brier_cmp = cmp.get("brier", {})
-                delta = brier_cmp.get("delta")
-                direction = brier_cmp.get("direction") or "—"
-                delta_s = f"{delta:+.4f}" if isinstance(delta, (int, float)) else "—"
-                low = (
-                    " ⚠"
-                    if min(s_b.get("n", 0), s_c.get("n", 0)) < VERSION_DELTA_LOW_SAMPLE
-                    else ""
-                )
-                lines.append(
-                    f"| `{v_b}` / {m_b} | `{v_c}` / {m_c} | {delta_s}{low} | {direction} | {s_b.get('n', 0)} | {s_c.get('n', 0)} |"
-                )
+        for i in range(1, len(cells)):
+            prior_cells = [c[2] for c in cells[:i]]
+            pool_stats = _pool_cells(prior_cells)
+            start_label = cells[0][1]
+            end_label = cells[i - 1][1]
+            pool_label = (
+                start_label
+                if start_label == end_label
+                else f"{start_label}..{end_label}"
+            )
+            _, cand_label, cand_stats = cells[i]
+            if (
+                min(pool_stats.get("n", 0) or 0, cand_stats.get("n", 0) or 0)
+                < VERSION_DELTA_LOW_SAMPLE_STRICT
+            ):
+                has_low_sample = True
+            lines.append(
+                _format_delta_row(pool_label, cand_label, pool_stats, cand_stats)
+            )
         lines.append("")
+
+    if has_low_sample:
+        lines.append(
+            f"⚠ Rows marked with ⚠ have min(n) <"
+            f" {VERSION_DELTA_LOW_SAMPLE_STRICT}; the delta is within noise and"
+            " the flagged version wasn't in production long enough to produce a"
+            " load-bearing baseline."
+        )
+        lines.append("")
+    lines.append(
+        "The **vs previous pooled** table shows each candidate against the"
+        " n-weighted pool of all earlier versions — the cumulative baseline."
+        " For tools with exactly 2 versions, pool(V_0) equals V_0, so the"
+        " pooled row matches the prior-version row; the two diverge once a"
+        " tool has 3+ versions in that mode."
+    )
     return "\n".join(lines).rstrip()
 
 
@@ -1390,6 +1612,7 @@ def _merged_tvm_scores(
 def section_tournament_callouts(
     scores_prod: dict[str, Any],
     scores_tournament: dict[str, Any] | None,
+    release_map_data: dict[str, Any] | None = None,
 ) -> str:
     """Flag tool versions whose tournament Brier diverges from prod.
 
@@ -1399,22 +1622,35 @@ def section_tournament_callouts(
     (tournament better); positive deltas become tournament regressions
     (tournament worse — a warning before the version reaches production).
 
-    :param scores_prod: production scores dict (provides tool-level baselines).
-    :param scores_tournament: tournament scores dict (candidate cells), or None.
+    The production baseline is the **specific production CID with the
+    latest release tag** for the same tool — not the tool-level
+    aggregate. That way a rollout scenario (v2 partially in prod,
+    tournament evaluating v2) compares against the right thing and
+    doesn't get washed out by older versions' numbers.
+
+    :param scores_prod: production scores dict.
+    :param scores_tournament: tournament scores dict, or None.
+    :param release_map_data: optional pre-loaded release map.
     :return: markdown section, or empty string when no callouts qualify.
     """
     if not _has_tournament_data(scores_tournament):
         return ""
 
-    prod_by_tool = scores_prod.get("by_tool", {}) if scores_prod else {}
+    if release_map_data is None:
+        release_map_data = release_map.get_release_map()
+
     assert scores_tournament is not None  # narrowed by _has_tournament_data
     tournament_tvm = scores_tournament.get("by_tool_version_mode", {})
+    prod_tvm = (scores_prod or {}).get("by_tool_version_mode", {})
 
-    promotions: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
-    regressions: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    # Callout tuple layout:
+    #   tool, cand_cid, cand_label, t_stats, prod_cid, prod_label, p_stats
+    Callout = tuple[str, str, str, dict[str, Any], str, str, dict[str, Any]]
+    promotions: list[Callout] = []
+    regressions: list[Callout] = []
 
     for key, t_stats in tournament_tvm.items():
-        tool, version, mode = _parse_tvm_key(key)
+        tool, cand_cid, mode = _parse_tvm_key(key)
         if mode != "tournament":
             continue
         if t_stats.get("n", 0) < CALLOUT_MIN_N:
@@ -1423,44 +1659,59 @@ def section_tournament_callouts(
         if t_brier is None:
             continue
 
-        p_stats = prod_by_tool.get(tool)
-        if not p_stats:
+        prod_cid = _most_recent_prod_cid(tool, scores_prod or {}, release_map_data)
+        if prod_cid is None:
+            # Tournament-only tool — no prod baseline to compare against.
             continue
+        if cand_cid == prod_cid:
+            # Candidate has rolled out; comparing two samples of the same
+            # version is eval-pipeline noise, not a promotion signal.
+            continue
+        p_stats = prod_tvm.get(f"{tool} | {prod_cid} | production_replay") or {}
         p_brier = p_stats.get("brier")
         if p_brier is None:
             continue
 
+        cand_label = release_map.resolve(cand_cid, release_map_data)
+        prod_label = release_map.resolve(prod_cid, release_map_data)
+
         delta = t_brier - p_brier
+        entry: Callout = (
+            tool,
+            cand_cid,
+            cand_label,
+            t_stats,
+            prod_cid,
+            prod_label,
+            p_stats,
+        )
         if delta <= -CALLOUT_DELTA:
-            promotions.append((tool, version, t_stats, p_stats))
+            promotions.append(entry)
         elif delta >= CALLOUT_DELTA:
-            regressions.append((tool, version, t_stats, p_stats))
+            regressions.append(entry)
 
     if not promotions and not regressions:
         return ""
+
+    def _bullet(entry: Callout) -> str:
+        tool, _cand_cid, cand_label, t_stats, _prod_cid, prod_label, p_stats = entry
+        delta = t_stats["brier"] - p_stats["brier"]
+        return (
+            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}) Brier"
+            f" {t_stats['brier']:.4f} vs `{prod_label}` (production,"
+            f" n={p_stats['n']}) Brier {p_stats['brier']:.4f}. Δ {delta:+.4f}."
+        )
 
     lines = ["## Tournament Callouts", ""]
     if promotions:
         lines.append("**Promotion candidates:**")
         lines.append("")
-        for tool, version, t_stats, p_stats in promotions:
-            delta = t_stats["brier"] - p_stats["brier"]
-            lines.append(
-                f"- `{tool}` version `{version}` — tournament Brier"
-                f" {t_stats['brier']:.4f} (n={t_stats['n']}) vs production Brier"
-                f" {p_stats['brier']:.4f} (n={p_stats['n']}). Δ {delta:+.4f}."
-            )
+        lines.extend(_bullet(e) for e in promotions)
         lines.append("")
     if regressions:
         lines.append("**Tournament regressions:**")
         lines.append("")
-        for tool, version, t_stats, p_stats in regressions:
-            delta = t_stats["brier"] - p_stats["brier"]
-            lines.append(
-                f"- `{tool}` version `{version}` — tournament Brier"
-                f" {t_stats['brier']:.4f} (n={t_stats['n']}) vs production Brier"
-                f" {p_stats['brier']:.4f} (n={p_stats['n']}). Δ {delta:+.4f}."
-            )
+        lines.extend(_bullet(e) for e in regressions)
     return "\n".join(lines).rstrip()
 
 
@@ -1580,6 +1831,10 @@ def generate_report(
             )
             if tvm_rolling:
                 sections.append(tvm_rolling)
+        # Version Deltas — temporal ordering, within-mode only, per tool.
+        deltas = section_version_deltas(merged)
+        if deltas:
+            sections.append(deltas)
 
     # Remaining production-only sections
     sections.extend(

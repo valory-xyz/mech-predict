@@ -20,6 +20,8 @@
 
 from typing import Any
 
+import pytest
+
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
     OMEN_CATEGORIES,
@@ -43,6 +45,31 @@ from benchmark.analyze import (
     section_worst_predictions,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
+
+
+@pytest.fixture(autouse=True)
+def _stub_release_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent any test from building the real release map via gh/git.
+
+    Every analyze helper that touches CIDs calls release_map.get_release_map()
+    when no explicit map is passed. In tests, redirect that call to an empty
+    map so CIDs render as ``untagged@...`` and no subprocess is spawned.
+
+    :param monkeypatch: pytest fixture for per-test attribute swapping.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark import release_map
+
+    empty_map = {
+        "generated_at": "test",
+        "tags_scanned": [],
+        "cid_to_tag": {},
+        "cid_to_package": {},
+    }
+    monkeypatch.setattr(
+        release_map, "get_release_map", lambda force_rebuild=False: empty_map
+    )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1097,7 +1124,7 @@ class TestSectionToolVersionBreakdown:
         assert section_tool_version_breakdown({"by_tool_version_mode": {}}) == ""
 
     def test_renders_table_with_high_n_no_warning(self) -> None:
-        """Cells with n >= 30 render without ⚠ marker."""
+        """Cells with n >= 30 render without ⚠ marker; CIDs become release-tag labels."""
         scores = {
             "by_tool_version_mode": {
                 "tool-a | bafy_v1 | production_replay": {
@@ -1109,9 +1136,14 @@ class TestSectionToolVersionBreakdown:
                 },
             }
         }
-        result = section_tool_version_breakdown(scores)
+        rm = {
+            "tags_scanned": ["v1.0.0"],
+            "cid_to_tag": {"bafy_v1": "v1.0.0"},
+            "cid_to_package": {},
+        }
+        result = section_tool_version_breakdown(scores, release_map_data=rm)
         assert "tool-a" in result
-        assert "`bafy_v1`" in result
+        assert "`v1.0.0`" in result
         assert "production_replay" in result
         assert "500" in result and "0.2100" in result
         assert "⚠" not in result  # high-n row should not be flagged
@@ -1129,7 +1161,12 @@ class TestSectionToolVersionBreakdown:
                 },
             }
         }
-        result = section_tool_version_breakdown(scores)
+        rm = {
+            "tags_scanned": ["v1.0.0"],
+            "cid_to_tag": {"bafy_v1": "v1.0.0"},
+            "cid_to_package": {},
+        }
+        result = section_tool_version_breakdown(scores, release_map_data=rm)
         assert "9 ⚠" in result  # per-row marker
         assert "n < 30" in result  # footnote warning
 
@@ -1147,79 +1184,228 @@ class TestSectionToolVersionBreakdown:
 # ---------------------------------------------------------------------------
 
 
+def _rm(cid_to_tag: dict[str, str], tags: list[str]) -> dict[str, Any]:
+    """Build a minimal release map for tests."""
+    return {
+        "generated_at": "2026-04-15T00:00:00Z",
+        "tags_scanned": tags,
+        "cid_to_tag": cid_to_tag,
+        "cid_to_package": {},
+    }
+
+
 class TestSectionVersionDeltas:
     """Tests for section_version_deltas."""
 
     def test_empty_returns_blank(self) -> None:
         """Missing data returns empty string."""
-        assert section_version_deltas({}) == ""
+        assert section_version_deltas({}, _rm({}, [])) == ""
 
     def test_single_version_per_tool_returns_blank(self) -> None:
         """Tools with only one (version, mode) cell yield no delta section."""
         scores = {
             "by_tool_version_mode": {
-                "tool-a | v1 | production_replay": {"n": 100, "brier": 0.2},
+                "tool-a | cidA | production_replay": {"n": 100, "brier": 0.2},
             }
         }
-        assert section_version_deltas(scores) == ""
+        assert section_version_deltas(scores, _rm({"cidA": "v1.0.0"}, ["v1.0.0"])) == ""
 
-    def test_renders_pairwise_delta_for_multi_version_tool(self) -> None:
-        """Tool with two versions produces a delta row with direction."""
+    def test_renders_prior_and_pooled_tables(self) -> None:
+        """Tool with 3 versions renders both sub-tables with release-tag labels."""
         scores = {
             "by_tool_version_mode": {
-                "tool-a | v1 | production_replay": {
-                    "n": 100,
-                    "valid_n": 100,
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
                     "brier": 0.30,
                     "directional_accuracy": 0.6,
-                    "log_loss": 0.7,
-                    "sharpness": 0.3,
-                    "reliability": 1.0,
                 },
-                "tool-a | v2 | production_replay": {
-                    "n": 100,
-                    "valid_n": 100,
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.25,
+                    "directional_accuracy": 0.7,
+                },
+                "tool-a | cidC | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
                     "brier": 0.20,
                     "directional_accuracy": 0.7,
-                    "log_loss": 0.6,
-                    "sharpness": 0.3,
-                    "reliability": 1.0,
                 },
             }
         }
-        result = section_version_deltas(scores)
+        rm = _rm(
+            {"cidA": "v1.0.0", "cidB": "v1.1.0", "cidC": "v1.2.0"},
+            ["v1.0.0", "v1.1.0", "v1.2.0"],
+        )
+        result = section_version_deltas(scores, rm)
         assert "## Version Deltas" in result
-        assert "### tool-a" in result
-        assert "improved" in result  # v2 has lower Brier
-        assert "-0.1000" in result
+        assert "### tool-a (production_replay)" in result
+        assert "**vs prior version:**" in result
+        assert "**vs previous pooled:**" in result
+        # Release-tag labels in rows, not CIDs
+        assert "v1.0.0" in result
+        assert "v1.1.0" in result
+        assert "v1.2.0" in result
+        assert "cidA" not in result
+        assert "improved" in result  # each step reduces Brier
 
-    def test_low_sample_marker_on_delta(self) -> None:
-        """Delta where either side has n < 30 carries the ⚠ marker."""
+    def test_within_mode_only(self) -> None:
+        """Prod and tournament versions never appear in the same sub-table."""
         scores = {
             "by_tool_version_mode": {
-                "tool-a | v1 | production_replay": {
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+                "tool-a | cidB | tournament": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.15,
+                    "directional_accuracy": 0.8,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        # Production sub-section renders (2 versions); tournament does not
+        # (only 1 version). No cross-mode row either way.
+        assert "### tool-a (production_replay)" in result
+        assert "### tool-a (tournament)" not in result
+
+    def test_low_sample_marker_on_delta(self) -> None:
+        """Delta with min(n) < VERSION_DELTA_LOW_SAMPLE_STRICT carries ⚠."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
                     "n": 1000,
                     "valid_n": 1000,
                     "brier": 0.30,
                     "directional_accuracy": 0.6,
-                    "log_loss": 0.7,
-                    "sharpness": 0.3,
-                    "reliability": 1.0,
                 },
-                "tool-a | v2 | tournament": {
-                    "n": 9,
-                    "valid_n": 9,
+                "tool-a | cidB | production_replay": {
+                    "n": 50,
+                    "valid_n": 50,
                     "brier": 0.20,
                     "directional_accuracy": 0.7,
-                    "log_loss": 0.6,
-                    "sharpness": 0.3,
-                    "reliability": 1.0,
                 },
             }
         }
-        result = section_version_deltas(scores)
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
         assert "⚠" in result
-        assert "n_b" in result  # column header preserved
+
+    def test_pooling_is_n_weighted_mean(self) -> None:
+        """pool(n=100 B=0.20, n=200 B=0.30) == B=0.2667."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 100,
+                    "valid_n": 100,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 200,
+                    "valid_n": 200,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidC | production_replay": {
+                    "n": 300,
+                    "valid_n": 300,
+                    "brier": 0.2667,
+                    "directional_accuracy": 0.65,
+                },
+            }
+        }
+        rm = _rm(
+            {"cidA": "v1.0.0", "cidB": "v1.1.0", "cidC": "v1.2.0"},
+            ["v1.0.0", "v1.1.0", "v1.2.0"],
+        )
+        result = section_version_deltas(scores, rm)
+        # Pooled baseline for v1.2.0 is (0.20*100 + 0.30*200)/300 = 0.2667,
+        # so the delta in the pooled table is +0.0000 (unchanged direction).
+        assert "v1.0.0..v1.1.0" in result
+        assert "unchanged" in result
+        assert "flat" not in result  # renamed for repo-wide vocabulary consistency
+
+    def test_no_low_sample_footer_when_no_rows_flagged(self) -> None:
+        """The ⚠ legend is absent when every row's n clears the threshold."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        assert "Rows marked with ⚠" not in result
+
+    def test_low_sample_footer_when_rows_flagged(self) -> None:
+        """The ⚠ legend is present when at least one row carries the marker."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 1000,
+                    "valid_n": 1000,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 50,
+                    "valid_n": 50,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        assert "Rows marked with ⚠" in result
+
+    def test_pool_label_collapses_when_start_equals_end(self) -> None:
+        """With exactly 2 versions, pool baseline renders without a range."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        # The pool row's baseline is V_0 alone; no "v1.0.0..v1.0.0" degenerate range.
+        assert "v1.0.0..v1.0.0" not in result
+        # And the collapsed label does appear in the pooled sub-table.
+        assert "| `v1.0.0` | `v1.1.0` |" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1244,6 +1430,15 @@ class TestGenerateReportTournamentToggle:
                 "sharpness": 0.3,
                 "reliability": 1.0,
             },
+            "tool-a | v2 | production_replay": {
+                "n": 100,
+                "valid_n": 100,
+                "brier": 0.25,
+                "directional_accuracy": 0.7,
+                "log_loss": 0.6,
+                "sharpness": 0.3,
+                "reliability": 1.0,
+            },
             "tool-a | v2 | tournament": {
                 "n": 50,
                 "valid_n": 50,
@@ -1264,14 +1459,14 @@ class TestGenerateReportTournamentToggle:
         assert "Version Deltas" not in report
 
     def test_on_renders_cumulative_breakdown_and_deltas(self) -> None:
-        """include_tournament=True renders the cumulative breakdown.
+        """Tournament flag renders both the breakdown table and Version Deltas.
 
-        Version Deltas is temporarily disabled pending rework.
+        Version Deltas emerges only when a tool has 2+ versions in one mode.
         """
         s = self._scores_with_versions()
         report = generate_report(s, [], include_tournament=True, disabled_tools={})
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "## Version Deltas" not in report
+        assert "## Version Deltas" in report
 
     def test_rolling_scores_render_separate_section(self) -> None:
         """When rolling_scores has version cells, a 7d section appears too."""
@@ -1304,8 +1499,9 @@ def _scores_with_tool(
     n: int,
     valid: int | None = None,
     baseline: float = 0.25,
+    prod_cid: str = "cid_prod",
 ) -> dict[str, Any]:
-    """Build a production scores dict with one by_tool entry."""
+    """Build a production scores dict with one by_tool entry and matching TVM cell."""
     valid_n = n if valid is None else valid
     return {
         "generated_at": "2026-03-31T06:00:00Z",
@@ -1327,7 +1523,16 @@ def _scores_with_tool(
         "by_category": {},
         "by_horizon": {},
         "by_tool_platform": {},
-        "by_tool_version_mode": {},
+        "by_tool_version_mode": {
+            f"{tool} | {prod_cid} | production_replay": {
+                "brier": brier,
+                "baseline_brier": baseline,
+                "n": n,
+                "valid_n": valid_n,
+                "directional_accuracy": 0.7,
+                "brier_skill_score": 0.0,
+            }
+        },
         "calibration": [],
         "worst_10": [],
         "best_10": [],
@@ -1408,6 +1613,26 @@ class TestTournamentCallouts:
 
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
+        assert section_tournament_callouts(prod, tourn) == ""
+
+    def test_same_cid_on_both_sides_is_skipped(self) -> None:
+        """After rollout, tournament and production share a CID; don't flag noise.
+
+        ``_most_recent_prod_cid`` returns the latest-tagged prod CID.
+        Once the candidate has rolled out, ``cand_cid == prod_cid`` and
+        the loop compares two samples of the same version — sampling
+        noise alone can exceed ``CALLOUT_DELTA`` at small n. The section
+        must suppress this, otherwise the rollout fix promised by this
+        PR is itself a regression.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        shared_cid = "cid_v2"
+        prod = _scores_with_tool("tool-a", 0.20, 1000, prod_cid=shared_cid)
+        # Tournament cell uses the same CID; Brier diverges enough to
+        # trigger a promotion bullet if the same-CID guard is missing.
+        tourn = _tournament_scores_with_version("tool-a", shared_cid, 0.10, 50)
         assert section_tournament_callouts(prod, tourn) == ""
 
 

@@ -417,6 +417,25 @@ class TestSortKey:
         items.sort(key=lambda x: sort_key(x[0], tags, first_seen=x[2]))
         assert [x[1] for x in items] == ["earlier", "later"]
 
+    def test_untagged_without_first_seen_is_deterministic_by_label(self) -> None:
+        """Untagged entries without first_seen sort by label, not input order.
+
+        Regression guard: when no first_seen is provided, two distinct
+        untagged labels must still sort into a stable, content-defined
+        order so that callers don't get nondeterministic results driven
+        by dict-iteration order.
+        """
+        tags: list[str] = []
+        order_a = [
+            (f"{UNTAGGED_PREFIX}b2cidxxx", "b"),
+            (f"{UNTAGGED_PREFIX}a1cidxxx", "a"),
+        ]
+        order_b = list(reversed(order_a))
+        order_a.sort(key=lambda x: sort_key(x[0], tags))
+        order_b.sort(key=lambda x: sort_key(x[0], tags))
+        assert [x[1] for x in order_a] == ["a", "b"]
+        assert [x[1] for x in order_b] == ["a", "b"]
+
 
 # ---------------------------------------------------------------------------
 # CLI JSON surface (smoke test)

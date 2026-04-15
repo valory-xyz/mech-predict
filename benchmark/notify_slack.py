@@ -18,11 +18,12 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from benchmark.analyze import VERSION_DELTA_LOW_SAMPLE_STRICT
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
-SUMMARY_SYSTEM_PROMPT = """\
+SUMMARY_SYSTEM_PROMPT = f"""\
 Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
 *Summary:* 2-3 sentence high-level takeaway — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
@@ -47,7 +48,20 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Fleet × Category highlights:* from the "Tool × Category" section, pick 2–4 standout tool-category combinations (best performers, worst performers, or fleet-wide weaknesses). Only use rows above the sample-size threshold — never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("fleet struggles on X across tools"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
 
-*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, full version hash in backticks, tournament Brier + n, production Brier + n, Brier delta. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
+*Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes, one bullet per row.
+
+REQUIRED bullet format — reproduce exactly, with both versions wrapped in backticks:
+• `tool-name` (mode): `baseline-label` → `candidate-label` — Brier Δ X.XXXX direction (n_b=X, n_c=X)
+
+Example (copy this style exactly):
+• `prediction-request-reasoning` (production_replay): `v0.16.5` → `v0.17.0` — Brier Δ -0.0725 improved (n_b=433, n_c=4485)
+
+Rules:
+- The baseline and candidate labels come verbatim from the Baseline and Candidate columns of the report's "**vs prior version:**" sub-table (they look like `v0.17.0` or `untagged@bafybei1`). Never invent labels, never truncate, never summarize them as generic "v1/v2".
+- Only include rows where min(n_b, n_c) ≥ {VERSION_DELTA_LOW_SAMPLE_STRICT} and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
+- Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
+
+*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
 
 *Diagnostics:*
 If the report includes "Diagnostic Edge Metrics", summarize:

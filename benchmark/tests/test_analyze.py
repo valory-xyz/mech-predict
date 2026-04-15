@@ -223,7 +223,7 @@ class TestSectionWeakSpots:
             by_category={"travel": {"brier": 0.80, "n": 100, "reliability": 0.9}}
         )
         result = section_weak_spots(s)
-        assert "travel" not in result.split("_Skipped")[0]
+        assert "travel" not in result.split("_Skipped", maxsplit=1)[0]
         assert "No weak spots detected" in result
 
     def test_legacy_category_footnote_listed(self) -> None:
@@ -243,8 +243,7 @@ class TestSectionWeakSpots:
 
 
 class TestActiveCategoriesInvariants:
-    """Pin the contents of ACTIVE_CATEGORIES so accidental edits don't silently
-    shrink the filter set.
+    """Pin ACTIVE_CATEGORIES membership against silent shrinking.
 
     These assertions guard against the mutation: "remove a single label from
     OMEN_CATEGORIES or POLYMARKET_ACTIVE_CATEGORIES" which the behavioural

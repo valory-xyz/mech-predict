@@ -43,8 +43,6 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
-*Tool versions:* if the report has a "Tool × Version × Mode" (cumulative or 7d) section, summarize per-version observations: which tool versions are present, mode (production_replay vs tournament), Brier per cell. Show full hashes (no truncation) wrapped in backticks. CRITICAL: any row whose n cell ends in ⚠ or whose underlying n is below 30 is a small sample — when mentioning such a row you MUST lead with "small sample (n=X)" before stating any metric, and you MUST NOT use the words "best", "highest", "lowest", "worst", or any superlative for that row. Compare across versions only when both have n >= 30. Do NOT call out regressions or per-version Brier deltas — that section is temporarily disabled pending rework. Skip this section entirely if no Tool × Version × Mode content is present.
-
 *Diagnostics:*
 If the report includes "Diagnostic Edge Metrics", summarize:
 • Conditional accuracy: X% tool-wins when disagreeing (n=X) — when the tool would trigger a trade, how often is it closer to truth than the market?

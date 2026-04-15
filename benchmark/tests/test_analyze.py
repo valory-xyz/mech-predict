@@ -142,7 +142,7 @@ class TestSampleLabel:
         assert _sample_label({"n": 5, "valid_n": 5}) == " ⚠ low sample"
 
     def test_all_malformed_large_n(self) -> None:
-        """n large, valid_n == 0 renders 'all malformed', not 'low sample'."""
+        """Large n with valid_n == 0 renders 'all malformed', not 'low sample'."""
         assert _sample_label({"n": 55, "valid_n": 0}) == " ⚠ all malformed"
 
     def test_sufficient_returns_empty(self) -> None:
@@ -150,10 +150,11 @@ class TestSampleLabel:
         assert _sample_label({"n": 100, "valid_n": 80}) == ""
 
     def test_small_n_all_malformed_falls_through_to_low_sample(self) -> None:
-        """n below gate with valid_n==0 stays as 'low sample'.
+        """Tiny n with valid_n==0 stays as 'low sample', not 'all malformed'.
 
-        'all malformed' only applies when there is enough volume to be
-        confident the malformed-ness is systemic, not just a tiny tail.
+        The 'all malformed' label only applies when there is enough
+        volume to be confident the malformed-ness is systemic, not just
+        a tiny tail. Below the reporting gate it stays 'low sample'.
         """
         assert _sample_label({"n": 3, "valid_n": 0}) == " ⚠ low sample"
 

@@ -181,6 +181,10 @@ def _sample_label(stats: dict[str, Any]) -> str:
       pipeline issue, not a sample size issue.
     - valid_n < MIN_SAMPLE_SIZE: genuinely too few valid predictions
       to draw conclusions.
+
+    :param stats: group stats dict with ``n`` and ``valid_n`` keys.
+    :return: a leading-space string label, or empty when stats pass
+        the sample-size gate.
     """
     n = stats.get("n", 0)
     valid_n = stats.get("valid_n", 0)
@@ -444,6 +448,9 @@ def section_sample_size_warnings(scores: dict[str, Any]) -> str:
     (e.g. n_losses within a category); the wording below makes that
     explicit so the "all categories sufficient" line does not read as
     contradicting a per-subsection "insufficient data" note.
+
+    :param scores: parsed scores dict with a ``by_category`` mapping.
+    :return: markdown section string.
     """
     lines = ["## Sample Size Warnings", ""]
     found = False

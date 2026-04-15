@@ -41,7 +41,7 @@ DEFAULT_LIMIT = 200
 UNTAGGED_PREFIX = "untagged@"
 UNTAGGED_CID_CHARS = 8
 
-_CACHE: dict[str, Any] | None = None
+_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
 
 
 def _run_gh_release_list(repo: str, limit: int) -> list[dict[str, str]]:
@@ -69,13 +69,21 @@ def _run_gh_release_list(repo: str, limit: int) -> list[dict[str, str]]:
             stderr=subprocess.PIPE,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as err:
-        log.warning("gh release list failed: %s", err)
+        stderr = getattr(err, "stderr", "") or ""
+        log.warning("gh release list failed: %s | stderr=%s", err, stderr.strip())
         return []
     try:
         releases = json.loads(out)
     except json.JSONDecodeError as err:
         log.warning("gh release list returned non-JSON: %s", err)
         return []
+    if len(releases) >= limit:
+        log.warning(
+            "gh release list hit --limit=%d; older tags may be truncated and "
+            "CIDs from those tags will be misattributed to later tags. "
+            "Raise DEFAULT_LIMIT or paginate.",
+            limit,
+        )
     return sorted(releases, key=lambda r: r.get("createdAt", ""))
 
 
@@ -92,13 +100,22 @@ def _run_git_show_packages_json(tag: str) -> dict[str, Any] | None:
             text=True,
             stderr=subprocess.PIPE,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError) as err:
         # Tag missing packages.json, shallow clone, or git unavailable.
-        # All treated as "skip this tag".
+        # All treated as "skip this tag". Debug-level so early tags that
+        # legitimately predate packages.json don't spam WARN every run.
+        stderr = getattr(err, "stderr", "") or ""
+        log.debug(
+            "git show %s:packages/packages.json failed: %s | stderr=%s",
+            tag,
+            err,
+            stderr.strip(),
+        )
         return None
     try:
         return json.loads(out)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as err:
+        log.debug("git show %s:packages/packages.json returned non-JSON: %s", tag, err)
         return None
 
 
@@ -142,19 +159,30 @@ def _build(repo: str = DEFAULT_REPO, limit: int = DEFAULT_LIMIT) -> dict[str, An
     }
 
 
-def get_release_map(force_rebuild: bool = False) -> dict[str, Any]:
+def get_release_map(
+    repo: str = DEFAULT_REPO,
+    limit: int = DEFAULT_LIMIT,
+    force_rebuild: bool = False,
+) -> dict[str, Any]:
     """Return the cached release map. Builds on first call; cached after.
 
-    :param force_rebuild: when True, ignore the cache and rebuild. Used
-        only by tests; no production caller should need this.
+    Cache is keyed on ``(repo, limit)`` so non-default callers get their
+    own entry instead of silently receiving a map built for a different
+    repo or limit.
+
+    :param repo: ``owner/name`` slug passed to ``gh release list``.
+    :param limit: ``--limit`` value (number of releases to fetch).
+    :param force_rebuild: when True, bypass the cache entry for this
+        ``(repo, limit)`` and rebuild. Used by tests; production callers
+        typically don't need this.
     :return: dict with keys ``generated_at``, ``tags_scanned``,
         ``cid_to_tag``, ``cid_to_package``. Always returns a shape-valid
         dict, even on failure (empty inner dicts).
     """
-    global _CACHE  # noqa: PLW0603 — single-module cache is intentional
-    if _CACHE is None or force_rebuild:
-        _CACHE = _build()
-    return _CACHE
+    key = (repo, limit)
+    if force_rebuild or key not in _CACHE:
+        _CACHE[key] = _build(repo=repo, limit=limit)
+    return _CACHE[key]
 
 
 def _untagged_label(cid: str) -> str:

@@ -37,7 +37,7 @@ from benchmark.release_map import (
 @pytest.fixture(autouse=True)
 def _reset_cache() -> None:
     """Wipe module-level cache between tests."""
-    release_map._CACHE = None  # pylint: disable=protected-access
+    release_map._CACHE = {}  # pylint: disable=protected-access
 
 
 def _fake_releases(
@@ -206,6 +206,55 @@ class TestBuild:
 
 
 # ---------------------------------------------------------------------------
+# _run_gh_release_list diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestRunGhReleaseList:
+    """Tests for diagnostic behavior of _run_gh_release_list()."""
+
+    def test_warns_when_result_count_hits_limit(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Logs a truncation warning when len(releases) >= limit."""
+        import subprocess  # pylint: disable=import-outside-toplevel
+
+        fake_json = json.dumps(
+            [
+                {"tagName": f"v0.0.{i}", "createdAt": f"2026-01-{i:02d}T00:00:00Z"}
+                for i in range(1, 4)
+            ]
+        )
+        run_list = release_map._run_gh_release_list  # pylint: disable=protected-access
+        with (
+            caplog.at_level("WARNING", logger=release_map.log.name),
+            patch.object(subprocess, "check_output", return_value=fake_json),
+        ):
+            run_list("owner/repo", limit=3)
+        assert any(
+            "hit --limit=3" in rec.message and "truncated" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_no_truncation_warning_when_below_limit(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """No truncation warning when release count is below the limit."""
+        import subprocess  # pylint: disable=import-outside-toplevel
+
+        fake_json = json.dumps(
+            [{"tagName": "v0.0.1", "createdAt": "2026-01-01T00:00:00Z"}]
+        )
+        run_list = release_map._run_gh_release_list  # pylint: disable=protected-access
+        with (
+            caplog.at_level("WARNING", logger=release_map.log.name),
+            patch.object(subprocess, "check_output", return_value=fake_json),
+        ):
+            run_list("owner/repo", limit=200)
+        assert not any("truncated" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # Caching
 # ---------------------------------------------------------------------------
 
@@ -231,6 +280,22 @@ class TestCache:
             get_release_map()
             get_release_map(force_rebuild=True)
         assert mock_build.call_count == 2
+
+    def test_cache_keyed_on_repo_and_limit(self) -> None:
+        """Different (repo, limit) tuples get independent cache entries."""
+        with patch.object(
+            release_map, "_build", return_value={"cid_to_tag": {}}
+        ) as mock_build:
+            get_release_map(repo="a/b", limit=50)
+            get_release_map(repo="a/b", limit=50)  # cached
+            get_release_map(repo="a/b", limit=100)  # different limit
+            get_release_map(repo="c/d", limit=50)  # different repo
+            get_release_map(repo="a/b", limit=100)  # cached
+        assert mock_build.call_count == 3
+        calls = [c.kwargs for c in mock_build.call_args_list]
+        assert {"repo": "a/b", "limit": 50} in calls
+        assert {"repo": "a/b", "limit": 100} in calls
+        assert {"repo": "c/d", "limit": 50} in calls
 
 
 # ---------------------------------------------------------------------------

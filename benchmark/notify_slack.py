@@ -18,11 +18,12 @@ import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from benchmark.analyze import VERSION_DELTA_LOW_SAMPLE_STRICT
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
-SUMMARY_SYSTEM_PROMPT = """\
+SUMMARY_SYSTEM_PROMPT = f"""\
 Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
 
 *Summary:* 2-3 sentence high-level takeaway — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
@@ -53,7 +54,7 @@ Example (copy this style exactly):
 
 Rules:
 - The baseline and candidate labels come verbatim from the Baseline and Candidate columns of the report's "**vs prior version:**" sub-table (they look like `v0.17.0` or `untagged@bafybei1`). Never invent labels, never truncate, never summarize them as generic "v1/v2".
-- Only include rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
+- Only include rows where min(n_b, n_c) ≥ {VERSION_DELTA_LOW_SAMPLE_STRICT} and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
 - Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
 
 *Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.

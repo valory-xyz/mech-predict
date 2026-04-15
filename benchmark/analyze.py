@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmark import release_map
 from benchmark.io import load_jsonl
 from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
 
@@ -1016,9 +1017,6 @@ def _version_label(cid: str, rm: dict[str, Any] | None = None) -> str:
     :param rm: optional pre-loaded release map; defaults to the cached one.
     :return: release tag (e.g. ``"v0.17.2"``) or ``"untagged@..."``.
     """
-    # pylint: disable=import-outside-toplevel
-    from benchmark import release_map
-
     return release_map.resolve(cid, rm)
 
 
@@ -1040,9 +1038,6 @@ def _most_recent_prod_cid(
     :param rm: release map.
     :return: production CID or None when no prod cell exists for *tool*.
     """
-    # pylint: disable=import-outside-toplevel
-    from benchmark import release_map
-
     tvm = scores_prod.get("by_tool_version_mode", {}) if scores_prod else {}
     tags_scanned = rm.get("tags_scanned", []) if rm else []
     candidates: list[tuple[str, str]] = []  # (cid, label)
@@ -1113,9 +1108,6 @@ def section_tool_version_breakdown(
     tvm = scores.get("by_tool_version_mode", {})
     if not tvm:
         return ""
-
-    # pylint: disable=import-outside-toplevel
-    from benchmark import release_map
 
     if release_map_data is None:
         release_map_data = release_map.get_release_map()
@@ -1239,9 +1231,6 @@ def section_version_deltas(
     tvm = scores.get("by_tool_version_mode", {})
     if not tvm:
         return ""
-
-    # pylint: disable=import-outside-toplevel
-    from benchmark import release_map
 
     if release_map_data is None:
         release_map_data = release_map.get_release_map()
@@ -1408,9 +1397,6 @@ def section_tournament_callouts(
     if not _has_tournament_data(scores_tournament):
         return ""
 
-    # pylint: disable=import-outside-toplevel
-    from benchmark import release_map
-
     if release_map_data is None:
         release_map_data = release_map.get_release_map()
 
@@ -1437,6 +1423,10 @@ def section_tournament_callouts(
         prod_cid = _most_recent_prod_cid(tool, scores_prod or {}, release_map_data)
         if prod_cid is None:
             # Tournament-only tool — no prod baseline to compare against.
+            continue
+        if cand_cid == prod_cid:
+            # Candidate has rolled out; comparing two samples of the same
+            # version is eval-pipeline noise, not a promotion signal.
             continue
         p_stats = prod_tvm.get(f"{tool} | {prod_cid} | production_replay") or {}
         p_brier = p_stats.get("brier")

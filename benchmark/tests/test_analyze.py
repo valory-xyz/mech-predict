@@ -1008,6 +1008,26 @@ class TestTournamentCallouts:
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
         assert section_tournament_callouts(prod, tourn) == ""
 
+    def test_same_cid_on_both_sides_is_skipped(self) -> None:
+        """After rollout, tournament and production share a CID; don't flag noise.
+
+        ``_most_recent_prod_cid`` returns the latest-tagged prod CID.
+        Once the candidate has rolled out, ``cand_cid == prod_cid`` and
+        the loop compares two samples of the same version — sampling
+        noise alone can exceed ``CALLOUT_DELTA`` at small n. The section
+        must suppress this, otherwise the rollout fix promised by this
+        PR is itself a regression.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        shared_cid = "cid_v2"
+        prod = _scores_with_tool("tool-a", 0.20, 1000, prod_cid=shared_cid)
+        # Tournament cell uses the same CID; Brier diverges enough to
+        # trigger a promotion bullet if the same-CID guard is missing.
+        tourn = _tournament_scores_with_version("tool-a", shared_cid, 0.10, 50)
+        assert section_tournament_callouts(prod, tourn) == ""
+
 
 class TestGenerateReportWithTournamentFiles:
     """Tests for generate_report dual-mode rendering."""

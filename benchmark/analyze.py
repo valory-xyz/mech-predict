@@ -1076,7 +1076,6 @@ def generate_report(
                     rolling_scores, "Tool × Version × Mode (Last 7 Days)"
                 )
             )
-        candidates.append(section_version_deltas(scores))
         tournament_sections = [s for s in candidates if s]
 
     sections = [

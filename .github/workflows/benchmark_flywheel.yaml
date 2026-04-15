@@ -278,7 +278,7 @@ jobs:
     needs: [tournament-fetch, check-secrets]
     if: needs.check-secrets.outputs.has_keys == 'true'
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4

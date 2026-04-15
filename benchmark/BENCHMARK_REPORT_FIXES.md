@@ -71,16 +71,44 @@ the dedup file going forward will persist. But:
 1. `.github/workflows/benchmark_flywheel.yaml`: add
    `include-hidden-files: true` to the `benchmark-data` upload step.
    Unblocks `.fetch_state.json`.
+2. Same workflow: add `benchmark/datasets/.fetch_state.json` to the
+   `rm -f` list inside the "Clear cached scores (force rebuild)" step.
+   Before fix #1, `.fetch_state.json` never persisted, so deleting it
+   on force_rebuild was a no-op. After fix #1 it persists — and without
+   this additional delete, `force_rebuild=true` would inherit a stale
+   cursor and fetch ~0 new rows, producing an empty rebuild.
 
-### Fix (manual, requires triggering CI)
+### Recovery procedure (manual, requires triggering CI)
 
-2. Once this branch is merged, trigger one `workflow_dispatch` run with
-   `force_rebuild=true`. That wipes `scores.json`,
-   `scores_history.jsonl`, and `scored_row_ids.json`, then rebuilds
-   from raw logs via `scorer.rebuild()`. After the run, `total_rows`
-   should equal `len(scored_row_ids.json)` (give or take rows without
-   `row_id`, which should be zero since `fetch_production._make_row_id`
-   guarantees one per row).
+Run these steps in order:
+
+1. **Land this branch.** This deploys fixes #1 and #2 above.
+2. **Wait for one normal cron run** to execute with the new workflow.
+   That run will be the first one to successfully upload
+   `.fetch_state.json` as part of the `benchmark-data` artifact.
+   Confirm by downloading the artifact and checking the file is
+   present. Skipping this step means the next force_rebuild would
+   still run without a starting cursor in place.
+3. **Trigger a `workflow_dispatch` run with `force_rebuild=true`.**
+   The Clear step now wipes `scores.json`, `scores_history.jsonl`,
+   `scored_row_ids.json`, **and** `.fetch_state.json`. Fetch will
+   refetch the full 7-day lookback from the subgraph; `scorer.rebuild()`
+   will reconstruct `scores.json` and a fresh dedup set from that fetch.
+
+### What recovery can and cannot restore
+
+**Can restore:** a clean `scores.json` / `scored_row_ids.json` covering
+the last 7 days of production data, with counts matching the fetch.
+
+**Cannot restore:** pre-recovery monthly snapshots. Raw production log
+files are uploaded per run under `benchmark-log-${run_id}` artifacts
+but are **never re-downloaded** by any workflow step. `scorer.rebuild()`
+therefore only ever sees the log file produced by the current run's
+fetch (i.e. at most the lookback window). All historical month
+snapshots that lived in `scores_history.jsonl` before recovery are
+permanently lost. This is an acceptable cost here because those
+snapshots were themselves polluted by the double-counting bug — but
+it is a one-way operation.
 
 ### How to verify the workflow fix
 
@@ -91,7 +119,7 @@ With the provided path, there will be 4 files uploaded
 ```
 
 (5 if the month rollover has created `scores_history.jsonl`.) Download
-the artifact and confirm `.fetch_state.json` is present. The next run
+the artifact and confirm `.fetch_state.json` is present. The cron run
 after that should log `state_loss=False` and the "Loaded N existing
 row IDs" line should show N close to the cumulative count, not zero.
 
@@ -110,8 +138,10 @@ print('match        :', s['total_rows'] == len(ids))
 "
 ```
 
-Expect the two numbers to match. A drift of more than ~10 means
-something still persists stale state.
+Expect the two numbers to match (modulo rows without `row_id`, which
+should be zero since `fetch_production._make_row_id` guarantees one
+per row). A drift of more than ~10 means something still persists
+stale state.
 
 **Files touched:**
 

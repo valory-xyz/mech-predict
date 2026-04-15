@@ -39,6 +39,7 @@ from benchmark.analyze import (
     section_weak_spots,
     section_worst_predictions,
 )
+from benchmark.scorer import MIN_SAMPLE_SIZE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -155,6 +156,25 @@ class TestSampleLabel:
         confident the malformed-ness is systemic, not just a tiny tail.
         """
         assert _sample_label({"n": 3, "valid_n": 0}) == " ⚠ low sample"
+
+    def test_boundary_exact_min_sample_size(self) -> None:
+        """Boundary cases at exactly MIN_SAMPLE_SIZE pin >= vs > choice.
+
+        Guards against a mutation from ``valid_n >= MIN_SAMPLE_SIZE`` to
+        ``valid_n > MIN_SAMPLE_SIZE`` (or the same for the ``n`` side)
+        going unnoticed. MIN_SAMPLE_SIZE is the reporting gate; exactly
+        hitting it is supposed to count as sufficient.
+        """
+        # valid_n exactly at the gate → no label.
+        assert _sample_label({"n": MIN_SAMPLE_SIZE, "valid_n": MIN_SAMPLE_SIZE}) == ""
+        # n exactly at the gate with zero valid → 'all malformed'
+        # (n >= gate, not n > gate).
+        assert _sample_label({"n": MIN_SAMPLE_SIZE, "valid_n": 0}) == " ⚠ all malformed"
+        # One below the gate → 'low sample'.
+        assert (
+            _sample_label({"n": MIN_SAMPLE_SIZE - 1, "valid_n": MIN_SAMPLE_SIZE - 1})
+            == " ⚠ low sample"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +336,19 @@ class TestSectionSampleSizeWarnings:
     """Tests for section_sample_size_warnings."""
 
     def test_small_category_warned(self) -> None:
-        """Test small category triggers warning."""
+        """Small category triggers a warning that quotes the active gate.
+
+        The ``(< N)`` suffix documents the threshold inline so a reader
+        can see both the observed count and the gate it fell under
+        without consulting the code. Guards against the suffix being
+        dropped or hardcoded to a wrong value.
+        """
         s = _scores(by_category={"weather": {"brier": 0.3, "n": 4, "reliability": 1.0}})
         result = section_sample_size_warnings(s)
         assert "weather" in result
         assert "4 questions" in result
+        # SAMPLE_SIZE_WARNING = 20 in analyze.py.
+        assert "(< 20)" in result
 
     def test_large_category_not_warned(self) -> None:
         """Large category triggers the 'all categories sufficient' copy.
@@ -382,7 +410,12 @@ class TestSectionPeriod:
         return {"overall": {"brier": 0.25, "log_loss": 0.6}, "by_tool": {}}
 
     def test_tiny_tool_flagged_as_low_sample(self) -> None:
-        """Tool with n=1 in the period gets a low-sample marker."""
+        """Tool with n=1 in the period gets a low-sample marker.
+
+        Also asserts the ``(n=…)`` count still renders next to the
+        marker, so a regression that drops the count but keeps the
+        marker (or vice versa) is caught.
+        """
         period = self._period(
             {
                 "prediction-online-sme": {
@@ -395,6 +428,7 @@ class TestSectionPeriod:
         result = section_period(period, self._alltime(), "Since Last Report")
         assert "prediction-online-sme" in result
         assert "⚠ low sample" in result
+        assert "(n=1)" in result
 
     def test_sufficient_tool_not_flagged(self) -> None:
         """Tool with valid_n above the gate gets no marker."""

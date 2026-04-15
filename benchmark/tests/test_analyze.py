@@ -24,6 +24,7 @@ from benchmark.analyze import (
     ACTIVE_CATEGORIES,
     OMEN_CATEGORIES,
     POLYMARKET_ACTIVE_CATEGORIES,
+    SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
     _sample_label,
     generate_report,
@@ -111,7 +112,6 @@ class TestSectionOverall:
         rates like 0.00072 to '0%' even though the count shown next to
         it was clearly positive. Two decimals surface values in the
         0.01%-1% range where the no-signal rate typically lives.
-        See BENCHMARK_REPORT_FIXES.md §4.
         """
         s = _scores(brier=0.3, reliability=0.95)
         s["overall"]["no_signal_rate"] = 0.00072
@@ -134,20 +134,32 @@ class TestSampleLabel:
     Guards against the regression where tools with a large total n but
     zero valid parses were labelled 'low sample' (misleading: the real
     problem is that every row was malformed, not that the sample was
-    too small). See BENCHMARK_REPORT_FIXES.md §2.
+    too small).
     """
 
     def test_low_sample_below_gate(self) -> None:
-        """valid_n below MIN_SAMPLE_SIZE renders 'low sample'."""
-        assert _sample_label({"n": 5, "valid_n": 5}) == " ⚠ low sample"
+        """Stats with decision_worthy=False render 'low sample'."""
+        assert (
+            _sample_label({"n": 5, "valid_n": 5, "decision_worthy": False})
+            == " ⚠ low sample"
+        )
 
     def test_all_malformed_large_n(self) -> None:
-        """Large n with valid_n == 0 renders 'all malformed', not 'low sample'."""
-        assert _sample_label({"n": 55, "valid_n": 0}) == " ⚠ all malformed"
+        """Large n with valid_n == 0 renders 'all malformed', not 'low sample'.
+
+        The malformed branch short-circuits before ``decision_worthy``
+        is consulted because the scorer sets ``decision_worthy=False``
+        whenever valid_n is below the gate, which would otherwise hide
+        the more specific pipeline-failure signal.
+        """
+        assert (
+            _sample_label({"n": 55, "valid_n": 0, "decision_worthy": False})
+            == " ⚠ all malformed"
+        )
 
     def test_sufficient_returns_empty(self) -> None:
-        """valid_n at or above the gate renders no label."""
-        assert _sample_label({"n": 100, "valid_n": 80}) == ""
+        """decision_worthy=True renders no label."""
+        assert _sample_label({"n": 100, "valid_n": 80, "decision_worthy": True}) == ""
 
     def test_small_n_all_malformed_falls_through_to_low_sample(self) -> None:
         """Tiny n with valid_n==0 stays as 'low sample', not 'all malformed'.
@@ -156,26 +168,67 @@ class TestSampleLabel:
         volume to be confident the malformed-ness is systemic, not just
         a tiny tail. Below the reporting gate it stays 'low sample'.
         """
-        assert _sample_label({"n": 3, "valid_n": 0}) == " ⚠ low sample"
+        assert (
+            _sample_label({"n": 3, "valid_n": 0, "decision_worthy": False})
+            == " ⚠ low sample"
+        )
 
     def test_boundary_exact_min_sample_size(self) -> None:
         """Boundary cases at exactly MIN_SAMPLE_SIZE pin >= vs > choice.
 
-        Guards against a mutation from ``valid_n >= MIN_SAMPLE_SIZE`` to
-        ``valid_n > MIN_SAMPLE_SIZE`` (or the same for the ``n`` side)
-        going unnoticed. MIN_SAMPLE_SIZE is the reporting gate; exactly
-        hitting it is supposed to count as sufficient.
+        Guards against a mutation from ``n >= MIN_SAMPLE_SIZE`` to
+        ``n > MIN_SAMPLE_SIZE`` going unnoticed on the malformed branch,
+        and against the scorer's own ``valid_n >= MIN_SAMPLE_SIZE`` gate
+        drifting on the low-sample branch. MIN_SAMPLE_SIZE is the
+        reporting gate; exactly hitting it is supposed to count as
+        sufficient.
         """
-        # valid_n exactly at the gate → no label.
-        assert _sample_label({"n": MIN_SAMPLE_SIZE, "valid_n": MIN_SAMPLE_SIZE}) == ""
+        # decision_worthy True → no label.
+        assert (
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE,
+                    "valid_n": MIN_SAMPLE_SIZE,
+                    "decision_worthy": True,
+                }
+            )
+            == ""
+        )
         # n exactly at the gate with zero valid → 'all malformed'
         # (n >= gate, not n > gate).
-        assert _sample_label({"n": MIN_SAMPLE_SIZE, "valid_n": 0}) == " ⚠ all malformed"
+        assert (
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE,
+                    "valid_n": 0,
+                    "decision_worthy": False,
+                }
+            )
+            == " ⚠ all malformed"
+        )
         # One below the gate → 'low sample'.
         assert (
-            _sample_label({"n": MIN_SAMPLE_SIZE - 1, "valid_n": MIN_SAMPLE_SIZE - 1})
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE - 1,
+                    "valid_n": MIN_SAMPLE_SIZE - 1,
+                    "decision_worthy": False,
+                }
+            )
             == " ⚠ low sample"
         )
+
+    def test_missing_keys_returns_empty(self) -> None:
+        """Partial stats dict renders no label rather than a spurious one.
+
+        Preserves the old ``decision_worthy is False`` behaviour: a
+        dict missing the key produces ``""`` rather than silently
+        landing in either of the warning branches. Protects callers
+        that pass a projection of the full stats shape.
+        """
+        assert _sample_label({}) == ""
+        assert _sample_label({"n": 5}) == ""
+        assert _sample_label({"n": 100, "valid_n": 100}) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -348,8 +401,10 @@ class TestSectionSampleSizeWarnings:
         result = section_sample_size_warnings(s)
         assert "weather" in result
         assert "4 questions" in result
-        # SAMPLE_SIZE_WARNING = 20 in analyze.py.
-        assert "(< 20)" in result
+        # Couple the assertion to SAMPLE_SIZE_WARNING so moving the
+        # gate updates both the code and the test in lockstep and a
+        # drifted-copy bug surfaces explicitly.
+        assert f"(< {SAMPLE_SIZE_WARNING})" in result
 
     def test_large_category_not_warned(self) -> None:
         """Large category triggers the 'all categories sufficient' copy.
@@ -367,13 +422,17 @@ class TestSectionSampleSizeWarnings:
         assert "directional bias" in result
 
     def test_threshold_value_embedded_in_copy(self) -> None:
-        """The 'at least N' copy should quote the active threshold."""
+        """The 'at least N' copy should quote the active threshold.
+
+        Interpolates ``SAMPLE_SIZE_WARNING`` so the test fails loudly
+        when the constant moves but the user-facing copy silently
+        drifts out of sync (or vice versa).
+        """
         s = _scores(
             by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
         )
         result = section_sample_size_warnings(s)
-        # Threshold SAMPLE_SIZE_WARNING = 20 in analyze.py
-        assert "at least 20" in result
+        assert f"at least {SAMPLE_SIZE_WARNING}" in result
 
 
 # ---------------------------------------------------------------------------
@@ -387,12 +446,23 @@ class TestSectionPeriod:
     Guards against the regression where 'Since Last Report' rendered
     tools with n=1 or n=8 alongside tools with n>=30 without any
     low-sample marker, making it trivial to read noise as signal.
-    See BENCHMARK_REPORT_FIXES.md §3.
     """
 
     @staticmethod
     def _period(by_tool: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """Build a minimal period_scores dict for section_period."""
+        """Build a minimal period_scores dict for section_period.
+
+        Auto-populates ``decision_worthy`` on each tool stats dict the
+        same way the scorer does (``valid_n >= MIN_SAMPLE_SIZE``) so
+        the fixtures match production-shape stats without each caller
+        having to set it explicitly.
+
+        :param by_tool: per-tool stats dicts keyed by tool name.
+        :return: a minimal period_scores dict ready to pass to
+            ``section_period``.
+        """
+        for stats in by_tool.values():
+            stats.setdefault("decision_worthy", stats["valid_n"] >= MIN_SAMPLE_SIZE)
         total_n = sum(t["n"] for t in by_tool.values())
         total_valid = sum(t["valid_n"] for t in by_tool.values())
         return {

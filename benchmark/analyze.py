@@ -177,20 +177,25 @@ def _sample_label(stats: dict[str, Any]) -> str:
     tools with many rows but zero valid parses are not mistaken for a
     small-sample problem:
 
-    - n >= MIN_SAMPLE_SIZE and valid_n == 0: all rows malformed, a
-      pipeline issue, not a sample size issue.
-    - valid_n < MIN_SAMPLE_SIZE: genuinely too few valid predictions
-      to draw conclusions.
+    - ``n >= MIN_SAMPLE_SIZE`` and ``valid_n == 0``: all rows malformed,
+      a pipeline issue, not a sample-size issue.
+    - ``decision_worthy is False``: too few valid rows to be decision
+      worthy (the scorer's own sample-size gate).
 
-    :param stats: group stats dict with ``n`` and ``valid_n`` keys.
+    ``decision_worthy`` is the primary signal because the scorer already
+    computes and ships it on every group. Using ``stats.get(...) is
+    False`` preserves the "missing key = empty label" safety property:
+    a caller that passes a partial dict gets no warning rather than a
+    spurious one.
+
+    :param stats: group stats dict; ``n``, ``valid_n`` and
+        ``decision_worthy`` are all consulted when present.
     :return: a leading-space string label, or empty when stats pass
-        the sample-size gate.
+        the sample-size gate or do not expose the required keys.
     """
-    n = stats.get("n", 0)
-    valid_n = stats.get("valid_n", 0)
-    if n >= MIN_SAMPLE_SIZE and valid_n == 0:
+    if stats.get("n", 0) >= MIN_SAMPLE_SIZE and stats.get("valid_n", None) == 0:
         return " ⚠ all malformed"
-    if valid_n < MIN_SAMPLE_SIZE:
+    if stats.get("decision_worthy") is False:
         return " ⚠ low sample"
     return ""
 

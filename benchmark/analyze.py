@@ -1293,9 +1293,19 @@ def section_version_deltas(
             )
         lines.append("")
 
-    lines.append(
-        f"⚠ Rows marked with ⚠ have min(n) <"
-        f" {VERSION_DELTA_LOW_SAMPLE_STRICT}; the delta is within noise."
+    lines.extend(
+        [
+            f"⚠ Rows marked with ⚠ have min(n) <"
+            f" {VERSION_DELTA_LOW_SAMPLE_STRICT}; the delta is within noise and"
+            " the flagged version wasn't in production long enough to produce a"
+            " load-bearing baseline.",
+            "",
+            "The **vs previous pooled** table shows each candidate against the"
+            " n-weighted pool of all earlier versions — the cumulative baseline."
+            " For tools with exactly 2 versions, pool(V_0) equals V_0, so the"
+            " pooled row matches the prior-version row; the two diverge once a"
+            " tool has 3+ versions in that mode.",
+        ]
     )
     return "\n".join(lines).rstrip()
 

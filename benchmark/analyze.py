@@ -41,6 +41,54 @@ CAL_SLOPE_OVERCONFIDENT = 0.7
 CAL_SLOPE_UNDERCONFIDENT = 1.3
 CAL_INTERCEPT_NOTABLE = 0.3
 
+# Categories currently emitted by the two upstream platforms.
+# Keep these in sync with:
+#   Omen:       valory-xyz/market-creator — DEFAULT_TOPICS in
+#               packages/valory/skills/market_creation_manager_abci/propose_questions.py
+#   Polymarket: valory-xyz/trader — POLYMARKET_CATEGORY_TAGS in
+#               packages/valory/connections/polymarket_client/connection.py
+# Historical labels not in either set (e.g. "travel", "crypto", "tech") are
+# treated as legacy and skipped by weak-spot reporting.
+OMEN_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "business",
+        "cryptocurrency",
+        "politics",
+        "science",
+        "technology",
+        "trending",
+        "social",
+        "health",
+        "sustainability",
+        "internet",
+        "food",
+        "pets",
+        "animals",
+        "curiosities",
+        "economy",
+        "arts",
+        "entertainment",
+        "weather",
+        "sports",
+        "finance",
+        "international",
+    }
+)
+POLYMARKET_ACTIVE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "business",
+        "politics",
+        "science",
+        "technology",
+        "health",
+        "entertainment",
+        "weather",
+        "finance",
+        "international",
+    }
+)
+ACTIVE_CATEGORIES: frozenset[str] = OMEN_CATEGORIES | POLYMARKET_ACTIVE_CATEGORIES
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -201,6 +249,7 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
     """Generate the weak spots section."""
     lines = ["## Weak Spots", ""]
     found = False
+    skipped_legacy: list[str] = []
 
     for section_name, section_key in [
         ("category", "by_category"),
@@ -208,6 +257,9 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
         ("tool", "by_tool"),
     ]:
         for name, stats in (scores.get(section_key) or {}).items():
+            if section_key == "by_category" and name not in ACTIVE_CATEGORIES:
+                skipped_legacy.append(name)
+                continue
             brier = stats.get("brier")
             bss = stats.get("brier_skill_score")
             if brier is not None and brier > BRIER_WEAK_THRESHOLD:
@@ -234,6 +286,14 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
 
     if not found:
         lines.append("No weak spots detected.")
+
+    if skipped_legacy:
+        lines.append("")
+        lines.append(
+            f"_Skipped {len(skipped_legacy)} legacy category label(s) not in the"
+            f" current Omen or Polymarket taxonomy: "
+            f"{', '.join(sorted(set(skipped_legacy)))}._"
+        )
 
     return "\n".join(lines)
 

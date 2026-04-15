@@ -117,7 +117,9 @@ class TestSectionWeakSpots:
 
     def test_weak_performance_label(self) -> None:
         """Brier between 0.4 and 0.5 should say 'weak performance'."""
-        s = _scores(by_category={"tech": {"brier": 0.45, "n": 100, "reliability": 0.9}})
+        s = _scores(
+            by_category={"technology": {"brier": 0.45, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "weak performance" in result
         assert "anti-predictive" not in result
@@ -125,7 +127,7 @@ class TestSectionWeakSpots:
     def test_no_weak_spots(self) -> None:
         """Test no weak spots detected."""
         s = _scores(
-            by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}}
+            by_category={"finance": {"brier": 0.2, "n": 100, "reliability": 0.9}}
         )
         result = section_weak_spots(s)
         assert "No weak spots" in result
@@ -135,6 +137,30 @@ class TestSectionWeakSpots:
         s = _scores(by_tool={"test": {"brier": 0.40, "n": 50, "reliability": 1.0}})
         result = section_weak_spots(s)
         assert "No weak spots" in result
+
+    def test_legacy_category_not_flagged(self) -> None:
+        """Categories no longer emitted by either platform are skipped."""
+        s = _scores(
+            by_category={"travel": {"brier": 0.80, "n": 100, "reliability": 0.9}}
+        )
+        result = section_weak_spots(s)
+        assert "travel" not in result.split("_Skipped")[0]
+        assert "No weak spots detected" in result
+
+    def test_legacy_category_footnote_listed(self) -> None:
+        """Skipped legacy categories are surfaced in a footnote."""
+        s = _scores(
+            by_category={
+                "travel": {"brier": 0.80, "n": 100, "reliability": 0.9},
+                "crypto": {"brier": 0.75, "n": 50, "reliability": 0.9},
+                "politics": {"brier": 0.45, "n": 100, "reliability": 0.9},
+            }
+        )
+        result = section_weak_spots(s)
+        assert "politics" in result
+        assert "Skipped 2 legacy category label(s)" in result
+        assert "crypto" in result
+        assert "travel" in result
 
 
 # ---------------------------------------------------------------------------

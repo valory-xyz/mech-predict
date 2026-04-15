@@ -39,7 +39,7 @@ dependencies:
   faiss-cpu:
     version: ==1.13.2
   openai:
-    version: ==1.30.2
+    version: ==1.93.0
   docstring-parser:
     version: ==0.17.0
   pypdf2:

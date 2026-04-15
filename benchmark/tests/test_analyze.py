@@ -1029,7 +1029,7 @@ class TestGenerateReport:
             ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(s, history)
+        report = generate_report(s, history, disabled_tools={})
 
         assert "# Benchmark Report" in report
         assert "## Overall" in report
@@ -1048,7 +1048,7 @@ class TestGenerateReport:
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
-        report = generate_report(s, [])
+        report = generate_report(s, [], disabled_tools={})
         assert "# Benchmark Report" in report
         assert "No predictions to score" in report
 
@@ -1259,7 +1259,7 @@ class TestGenerateReportTournamentToggle:
     def test_off_by_default_omits_tournament_sections(self) -> None:
         """Default behavior: no tournament sections in the rendered report."""
         s = self._scores_with_versions()
-        report = generate_report(s, [])
+        report = generate_report(s, [], disabled_tools={})
         assert "Tool × Version × Mode" not in report
         assert "Version Deltas" not in report
 
@@ -1269,7 +1269,7 @@ class TestGenerateReportTournamentToggle:
         Version Deltas is temporarily disabled pending rework.
         """
         s = self._scores_with_versions()
-        report = generate_report(s, [], include_tournament=True)
+        report = generate_report(s, [], include_tournament=True, disabled_tools={})
         assert "Tool × Version × Mode (All-Time)" in report
         assert "## Version Deltas" not in report
 
@@ -1286,7 +1286,9 @@ class TestGenerateReportTournamentToggle:
                 "brier_skill_score": 0.1,
             }
         }
-        report = generate_report(s, [], rolling_scores=rolling, include_tournament=True)
+        report = generate_report(
+            s, [], rolling_scores=rolling, include_tournament=True, disabled_tools={}
+        )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "Tool × Version × Mode (Last 7 Days)" in report
 

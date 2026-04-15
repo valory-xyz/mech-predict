@@ -27,6 +27,11 @@ from benchmark.scorer import (
     MIN_SAMPLE_SIZE,
     brier_sort_key,
 )
+from benchmark.tool_usage import (
+    failed_deployments,
+    fetch_disabled_tools,
+    iter_tools_with_disabled,
+)
 
 DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
@@ -205,12 +210,73 @@ def _sample_label(stats: dict[str, Any]) -> str:
     return ""
 
 
+def section_tool_deployment_status(
+    scores: dict[str, Any],
+    disabled: dict[str, list[str] | None] | None = None,
+) -> str:
+    """Render which benchmarked tools are disabled on each deployment.
+
+    Tools are listed only when they appear in ``scores.by_tool`` (i.e. were
+    actually invoked) AND are on at least one deployment's
+    ``IRRELEVANT_TOOLS`` list.  Deployments whose config fetch failed are
+    called out explicitly so a reader never confuses "unavailable" with
+    "nothing disabled".
+
+    :param scores: parsed ``scores.json`` dict.
+    :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
+        Pass ``None`` to fetch on the fly (the daily-report default).  Pass
+        an empty dict to skip the section entirely (tests use this to avoid
+        the live GitHub fetch).
+    :return: markdown section string, or ``""`` when the caller opted out.
+    """
+    if disabled is None:
+        disabled = fetch_disabled_tools()
+
+    # Explicit skip contract: an empty dict means "caller opted out" (used by
+    # unit tests).  Returning "" means the section heading is omitted so the
+    # report doesn't advertise a section that was never computed.
+    if not disabled:
+        return ""
+
+    tools = scores.get("by_tool", {})
+    # Preserve report-wide ordering (Brier ascending) so readers scan this
+    # section in the same order as Tool Ranking below.
+    ordered = [name for name, _ in sorted(tools.items(), key=brier_sort_key)]
+    entries = iter_tools_with_disabled(ordered, disabled)
+
+    lines = ["## Tool Deployment Status", ""]
+    failed = failed_deployments(disabled)
+    all_failed = len(failed) == len(disabled) and len(disabled) > 0
+    if failed:
+        lines.append(
+            "> ⚠️ Could not fetch deployment config for: "
+            f"{', '.join(failed)}. Status below may be incomplete."
+        )
+        lines.append("")
+
+    if not entries:
+        # If every fetch failed we already told the reader — don't also claim
+        # "nothing is disabled", which would be a false negative.
+        if all_failed:
+            return "\n".join(lines).rstrip()
+        lines.append(
+            "_No benchmarked tools are disabled on any deployment._"
+            if not failed
+            else "_No disabled tools reported from the deployments that were fetched._"
+        )
+        return "\n".join(lines)
+
+    for tool, deployments in entries:
+        lines.append(f"- `{tool}` — disabled on {', '.join(deployments)}")
+    return "\n".join(lines)
+
+
 def section_tool_ranking(scores: dict[str, Any]) -> str:
     """Generate the tool ranking section."""
     tools = scores.get("by_tool", {})
     ranked = sorted(
         tools.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=brier_sort_key,
     )
 
     lines = ["## Tool Ranking", ""]
@@ -252,7 +318,7 @@ def section_platform(scores: dict[str, Any]) -> str:
     lines = ["## Platform Comparison", ""]
     for platform, stats in sorted(
         platforms.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=brier_sort_key,
     ):
         baseline = stats.get("baseline_brier")
         bss = stats.get("brier_skill_score")
@@ -618,7 +684,7 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     ]
     for key, stats in sorted(
         data.items(),
-        key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+        key=brier_sort_key,
     ):
         parts = key.split(" | ")
         tool = parts[0] if parts else key
@@ -1143,7 +1209,7 @@ def section_period(
         at_tools = alltime_scores.get("by_tool", {})
         for tool, stats in sorted(
             by_tool.items(),
-            key=lambda x: x[1].get("brier") if x[1].get("brier") is not None else 999,
+            key=brier_sort_key,
         ):
             tb = stats.get("brier")
             if tb is None:
@@ -1407,6 +1473,7 @@ def generate_report(
     scores_tournament: dict[str, Any] | None = None,
     period_scores_tournament: dict[str, Any] | None = None,
     rolling_scores_tournament: dict[str, Any] | None = None,
+    disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a full benchmark report from scores and history.
 
@@ -1429,6 +1496,10 @@ def generate_report(
     :param scores_tournament: parsed ``scores_tournament.json`` dict.
     :param period_scores_tournament: tournament since last report.
     :param rolling_scores_tournament: tournament last 7 days.
+    :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
+        map used by the Tool Deployment Status section. Pass ``None``
+        (default) to fetch from GitHub at render time; pass an empty
+        dict in tests to skip the network call.
     :return: full markdown report string.
     """
     if history is None:
@@ -1481,6 +1552,9 @@ def generate_report(
 
     # Base Rates — production only
     sections.append(section_base_rates(scores))
+
+    # Tool Deployment Status — which tools are blocked on each consumer
+    sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))
 
     # Tool Ranking
     sections.append(section_tool_ranking(scores))

@@ -21,7 +21,7 @@ dependencies:
   openai:
     version: ==1.93.0
   tiktoken:
-    version: ==0.9.0
+    version: ==0.12.0
   pydantic:
     version: '>=2.0.0,<3.0.0'
   requests:

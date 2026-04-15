@@ -21,7 +21,12 @@ from typing import Any
 
 from benchmark.compare import compare_stats
 from benchmark.io import load_jsonl
-from benchmark.scorer import DISAGREE_THRESHOLD, LARGE_TRADE_THRESHOLD, MIN_SAMPLE_SIZE
+from benchmark.scorer import (
+    DISAGREE_THRESHOLD,
+    LARGE_TRADE_THRESHOLD,
+    MIN_SAMPLE_SIZE,
+    brier_sort_key,
+)
 from benchmark.tool_usage import (
     failed_deployments,
     fetch_disabled_tools,
@@ -45,6 +50,54 @@ TREND_WORSENING_THRESHOLD = 0.02
 CAL_SLOPE_OVERCONFIDENT = 0.7
 CAL_SLOPE_UNDERCONFIDENT = 1.3
 CAL_INTERCEPT_NOTABLE = 0.3
+
+# Categories currently emitted by the two upstream platforms.
+# Keep these in sync with:
+#   Omen:       valory-xyz/market-creator — DEFAULT_TOPICS in
+#               packages/valory/skills/market_creation_manager_abci/propose_questions.py
+#   Polymarket: valory-xyz/trader — POLYMARKET_CATEGORY_TAGS in
+#               packages/valory/connections/polymarket_client/connection.py
+# Historical labels not in either set (e.g. "travel", "crypto", "tech") are
+# treated as legacy and skipped by weak-spot reporting.
+OMEN_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "business",
+        "cryptocurrency",
+        "politics",
+        "science",
+        "technology",
+        "trending",
+        "social",
+        "health",
+        "sustainability",
+        "internet",
+        "food",
+        "pets",
+        "animals",
+        "curiosities",
+        "economy",
+        "arts",
+        "entertainment",
+        "weather",
+        "sports",
+        "finance",
+        "international",
+    }
+)
+POLYMARKET_ACTIVE_CATEGORIES: frozenset[str] = frozenset(
+    {
+        "business",
+        "politics",
+        "science",
+        "technology",
+        "health",
+        "entertainment",
+        "weather",
+        "finance",
+        "international",
+    }
+)
+ACTIVE_CATEGORIES: frozenset[str] = OMEN_CATEGORIES | POLYMARKET_ACTIVE_CATEGORIES
 
 
 # ---------------------------------------------------------------------------
@@ -134,20 +187,6 @@ def _sample_label(stats: dict[str, Any]) -> str:
     return ""
 
 
-def _brier_key(stats: dict[str, Any]) -> float:
-    """Return a sort key that places entries without a Brier last.
-
-    Every ranking in the report sorts by Brier ascending.  Missing scores
-    (``None``) need to sort last; ``float("inf")`` is the canonical way
-    to do that and is used instead of a magic ``999`` sentinel.
-
-    :param stats: stats dict for a tool, platform, or composite group.
-    :return: the Brier score, or ``float("inf")`` when it is missing.
-    """
-    brier = stats.get("brier")
-    return brier if brier is not None else float("inf")
-
-
 def section_tool_deployment_status(
     scores: dict[str, Any],
     disabled: dict[str, list[str] | None] | None = None,
@@ -179,7 +218,7 @@ def section_tool_deployment_status(
     tools = scores.get("by_tool", {})
     # Preserve report-wide ordering (Brier ascending) so readers scan this
     # section in the same order as Tool Ranking below.
-    ordered = sorted(tools.keys(), key=lambda t: _brier_key(tools[t]))
+    ordered = [name for name, _ in sorted(tools.items(), key=brier_sort_key)]
     entries = iter_tools_with_disabled(ordered, disabled)
 
     lines = ["## Tool Deployment Status", ""]
@@ -214,7 +253,7 @@ def section_tool_ranking(scores: dict[str, Any]) -> str:
     tools = scores.get("by_tool", {})
     ranked = sorted(
         tools.items(),
-        key=lambda x: _brier_key(x[1]),
+        key=brier_sort_key,
     )
 
     lines = ["## Tool Ranking", ""]
@@ -256,7 +295,7 @@ def section_platform(scores: dict[str, Any]) -> str:
     lines = ["## Platform Comparison", ""]
     for platform, stats in sorted(
         platforms.items(),
-        key=lambda x: _brier_key(x[1]),
+        key=brier_sort_key,
     ):
         baseline = stats.get("baseline_brier")
         bss = stats.get("brier_skill_score")
@@ -277,10 +316,130 @@ def section_platform(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def section_category(scores: dict[str, Any]) -> str:
+    """Fleet-level category performance — Brier/LogLoss/BSS/Edge per category."""
+    categories = scores.get("by_category") or {}
+    lines = ["## Category Performance", ""]
+    if not categories:
+        lines.append("No per-category data available.")
+        return "\n".join(lines)
+
+    for category, stats in sorted(categories.items(), key=brier_sort_key):
+        if stats["n"] < MIN_SAMPLE_SIZE:
+            # Include the (noisy) Brier so the ascending-Brier sort is
+            # traceable to the reader — otherwise a sparse category ranking
+            # above a sufficient one looks arbitrary.
+            noisy_brier = stats.get("brier")
+            brier_hint = (
+                f" noisy Brier: {noisy_brier}" if noisy_brier is not None else ""
+            )
+            lines.append(
+                f"- **{category}**: insufficient data"
+                f" (n={stats['n']}, need {MIN_SAMPLE_SIZE}){brier_hint}"
+            )
+            continue
+        baseline = stats.get("baseline_brier")
+        bss = stats.get("brier_skill_score")
+        ll = stats.get("log_loss")
+        yes_rate = stats.get("outcome_yes_rate")
+        edge = stats.get("edge")
+        edge_n = stats.get("edge_n", 0)
+        brier = stats.get("brier")
+        parts = [f"Brier: {brier}" if brier is not None else "Brier: N/A"]
+        if ll is not None:
+            parts.append(f"LogLoss: {ll:.4f}")
+        if baseline is not None:
+            parts.append(f"baseline: {baseline}")
+        if bss is not None:
+            parts.append(f"BSS: {bss:+.4f}")
+        if edge is not None:
+            parts.append(f"edge: {edge:+.4f} (n={edge_n})")
+        if yes_rate is not None:
+            parts.append(f"yes rate: {yes_rate:.0%}")
+        parts.append(f"n={stats['n']}")
+        # Flag homogeneous-outcome categories: a low Brier on a one-sided
+        # category reflects the base rate, not predictive skill. Mirrors
+        # the base-rate guard in notify_slack.py so human readers of the
+        # markdown get the same warning as the Slack LLM.
+        is_homogeneous = yes_rate is not None and yes_rate in (0.0, 1.0)
+        prefix = "⚠ " if is_homogeneous else ""
+        tail = (
+            " — one-sided outcomes; Brier not meaningful here" if is_homogeneous else ""
+        )
+        lines.append(f"- {prefix}**{category}**: {', '.join(parts)}{tail}")
+    return "\n".join(lines)
+
+
+def section_tool_category(scores: dict[str, Any]) -> str:
+    """Tool × category cross breakdown — gated by MIN_SAMPLE_SIZE."""
+    data = scores.get("by_tool_category") or {}
+    if not data:
+        return "## Tool × Category\n\nNo cross-breakdown data available."
+
+    ranked = sorted(data.items(), key=brier_sort_key)
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+    sparse = [(k, s) for k, s in ranked if s["n"] < MIN_SAMPLE_SIZE]
+
+    lines = [
+        "## Tool × Category",
+        "",
+        f"> Cells with n < {MIN_SAMPLE_SIZE} are moved to a separate list below"
+        " the ranking. This differs from Tool × Platform, which renders every"
+        " cell inline and marks small samples with ⚠.",
+        "",
+        "| Tool | Category | Brier | BSS | LogLoss | Edge | Edge n | DirAcc | Sharpness | n |",
+        "|------|----------|-------|-----|---------|------|--------|--------|-----------|---|",
+    ]
+    if not sufficient:
+        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | | | | | |")
+    for key, stats in sufficient:
+        parts = key.split(" | ")
+        tool = parts[0] if parts else key
+        category = parts[1] if len(parts) > 1 else "?"
+        brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        bss = stats.get("brier_skill_score")
+        bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        ll = stats.get("log_loss")
+        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+        edge = stats.get("edge")
+        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+        edge_n = stats.get("edge_n", 0)
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
+        sharp = (
+            f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
+        )
+        label = _sample_label(stats)
+        lines.append(
+            f"| {tool} | {category} | {brier} | {bss_str} | {ll_str} | {edge_str}"
+            f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
+        )
+
+    if sparse:
+        lines.append("")
+        lines.append(
+            f"_{len(sparse)} cell(s) below n={MIN_SAMPLE_SIZE} threshold omitted"
+            " from ranking. Examples:_"
+        )
+        for key, stats in sparse[:5]:
+            parts = key.split(" | ")
+            tool = parts[0] if parts else key
+            category = parts[1] if len(parts) > 1 else "?"
+            lines.append(
+                f"- **{tool} | {category}**: insufficient data (n={stats['n']})"
+            )
+
+    return "\n".join(lines)
+
+
 def section_weak_spots(scores: dict[str, Any]) -> str:
     """Generate the weak spots section."""
     lines = ["## Weak Spots", ""]
     found = False
+    skipped_legacy: list[str] = []
 
     for section_name, section_key in [
         ("category", "by_category"),
@@ -288,6 +447,9 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
         ("tool", "by_tool"),
     ]:
         for name, stats in (scores.get(section_key) or {}).items():
+            if section_key == "by_category" and name not in ACTIVE_CATEGORIES:
+                skipped_legacy.append(name)
+                continue
             brier = stats.get("brier")
             bss = stats.get("brier_skill_score")
             if brier is not None and brier > BRIER_WEAK_THRESHOLD:
@@ -314,6 +476,14 @@ def section_weak_spots(scores: dict[str, Any]) -> str:
 
     if not found:
         lines.append("No weak spots detected.")
+
+    if skipped_legacy:
+        lines.append("")
+        lines.append(
+            f"_Skipped {len(skipped_legacy)} legacy category label(s) not in the"
+            f" current Omen or Polymarket taxonomy: "
+            f"{', '.join(sorted(set(skipped_legacy)))}._"
+        )
 
     return "\n".join(lines)
 
@@ -474,7 +644,7 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
     ]
     for key, stats in sorted(
         data.items(),
-        key=lambda x: _brier_key(x[1]),
+        key=brier_sort_key,
     ):
         parts = key.split(" | ")
         tool = parts[0] if parts else key
@@ -999,7 +1169,7 @@ def section_period(
         at_tools = alltime_scores.get("by_tool", {})
         for tool, stats in sorted(
             by_tool.items(),
-            key=lambda x: _brier_key(x[1]),
+            key=brier_sort_key,
         ):
             tb = stats.get("brier")
             if tb is None:
@@ -1121,24 +1291,164 @@ def section_version_deltas(scores: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+CALLOUT_DELTA = 0.03
+CALLOUT_MIN_N = 30
+
+
+def _relabel_heading(section_md: str, suffix: str) -> str:
+    """Append *suffix* to the first ``## Heading`` line in *section_md*.
+
+    Used to dup-render production sections with a "— Tournament" label
+    without duplicating every section function.
+
+    :param section_md: rendered markdown for a single section.
+    :param suffix: string appended to the first ``## Heading`` line.
+    :return: the section markdown with the heading relabelled.
+    """
+    lines = section_md.split("\n")
+    if lines and lines[0].startswith("## "):
+        lines[0] = lines[0] + suffix
+    return "\n".join(lines)
+
+
+def _has_tournament_data(scores_tournament: dict[str, Any] | None) -> bool:
+    """Return True when a tournament scores dict has any rows to report."""
+    return bool(scores_tournament and scores_tournament.get("total_rows", 0) > 0)
+
+
+def _merged_tvm_scores(
+    scores_prod: dict[str, Any],
+    scores_tournament: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a scores-shaped dict whose ``by_tool_version_mode`` holds both modes.
+
+    Keys are already of the form ``tool | version | mode`` so there is no
+    risk of collision between the two files.
+
+    :param scores_prod: production scores dict.
+    :param scores_tournament: tournament scores dict, or None.
+    :return: minimal scores dict with merged ``by_tool_version_mode``.
+    """
+    merged: dict[str, Any] = {"by_tool_version_mode": {}}
+    merged["by_tool_version_mode"].update(scores_prod.get("by_tool_version_mode", {}))
+    if scores_tournament:
+        merged["by_tool_version_mode"].update(
+            scores_tournament.get("by_tool_version_mode", {})
+        )
+    return merged
+
+
+def section_tournament_callouts(
+    scores_prod: dict[str, Any],
+    scores_tournament: dict[str, Any] | None,
+) -> str:
+    """Flag tool versions whose tournament Brier diverges from prod.
+
+    A row qualifies when tournament sample size is at least
+    ``CALLOUT_MIN_N`` and the absolute Brier delta exceeds
+    ``CALLOUT_DELTA``. Negative deltas become promotion candidates
+    (tournament better); positive deltas become tournament regressions
+    (tournament worse — a warning before the version reaches production).
+
+    :param scores_prod: production scores dict (provides tool-level baselines).
+    :param scores_tournament: tournament scores dict (candidate cells), or None.
+    :return: markdown section, or empty string when no callouts qualify.
+    """
+    if not _has_tournament_data(scores_tournament):
+        return ""
+
+    prod_by_tool = scores_prod.get("by_tool", {}) if scores_prod else {}
+    assert scores_tournament is not None  # narrowed by _has_tournament_data
+    tournament_tvm = scores_tournament.get("by_tool_version_mode", {})
+
+    promotions: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+    regressions: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+
+    for key, t_stats in tournament_tvm.items():
+        tool, version, mode = _parse_tvm_key(key)
+        if mode != "tournament":
+            continue
+        if t_stats.get("n", 0) < CALLOUT_MIN_N:
+            continue
+        t_brier = t_stats.get("brier")
+        if t_brier is None:
+            continue
+
+        p_stats = prod_by_tool.get(tool)
+        if not p_stats:
+            continue
+        p_brier = p_stats.get("brier")
+        if p_brier is None:
+            continue
+
+        delta = t_brier - p_brier
+        if delta <= -CALLOUT_DELTA:
+            promotions.append((tool, version, t_stats, p_stats))
+        elif delta >= CALLOUT_DELTA:
+            regressions.append((tool, version, t_stats, p_stats))
+
+    if not promotions and not regressions:
+        return ""
+
+    lines = ["## Tournament Callouts", ""]
+    if promotions:
+        lines.append("**Promotion candidates:**")
+        lines.append("")
+        for tool, version, t_stats, p_stats in promotions:
+            delta = t_stats["brier"] - p_stats["brier"]
+            lines.append(
+                f"- `{tool}` version `{version}` — tournament Brier"
+                f" {t_stats['brier']:.4f} (n={t_stats['n']}) vs production Brier"
+                f" {p_stats['brier']:.4f} (n={p_stats['n']}). Δ {delta:+.4f}."
+            )
+        lines.append("")
+    if regressions:
+        lines.append("**Tournament regressions:**")
+        lines.append("")
+        for tool, version, t_stats, p_stats in regressions:
+            delta = t_stats["brier"] - p_stats["brier"]
+            lines.append(
+                f"- `{tool}` version `{version}` — tournament Brier"
+                f" {t_stats['brier']:.4f} (n={t_stats['n']}) vs production Brier"
+                f" {p_stats['brier']:.4f} (n={p_stats['n']}). Δ {delta:+.4f}."
+            )
+    return "\n".join(lines).rstrip()
+
+
 def generate_report(
     scores: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
     period_scores: dict[str, Any] | None = None,
     rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
+    scores_tournament: dict[str, Any] | None = None,
+    period_scores_tournament: dict[str, Any] | None = None,
+    rolling_scores_tournament: dict[str, Any] | None = None,
     disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a full benchmark report from scores and history.
 
-    :param scores: parsed ``scores.json`` dict (all-time).
+    Production-mode sections are rendered from ``scores`` /
+    ``period_scores`` / ``rolling_scores``. When tournament scores are
+    supplied and contain rows, a duplicate set of the mode-sensitive
+    sections (Since Last Report, Last 7 Days Rolling, Overall, Tool
+    Ranking) is rendered with a ``— Tournament`` suffix. The Tool ×
+    Version × Mode breakdown merges both modes. A final "Tournament
+    Callouts" section flags tool versions whose tournament Brier
+    diverges materially from the same tool's production baseline.
+
+    :param scores: parsed production ``scores.json`` dict (all-time).
     :param history: list of monthly snapshots from ``scores_history.jsonl``.
-    :param period_scores: scores from today's run (since last report).
-    :param rolling_scores: scores from the last 7 days.
-    :param include_tournament: when True, render the Tool × Version × Mode
-        (cumulative + 7d rolling) and Version Deltas sections.
+    :param period_scores: production scores since last report.
+    :param rolling_scores: production scores from the last 7 days.
+    :param include_tournament: master switch for rendering the Tool ×
+        Version × Mode breakdown. When False, tournament inputs are
+        ignored entirely.
+    :param scores_tournament: parsed ``scores_tournament.json`` dict.
+    :param period_scores_tournament: tournament since last report.
+    :param rolling_scores_tournament: tournament last 7 days.
     :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
-        map used by the Tool Deployment Status section.  Pass ``None``
+        map used by the Tool Deployment Status section. Pass ``None``
         (default) to fetch from GitHub at render time; pass an empty
         dict in tests to skip the network call.
     :return: full markdown report string.
@@ -1150,43 +1460,104 @@ def generate_report(
         "%Y-%m-%d"
     )
 
-    tournament_sections: list[str] = []
-    if include_tournament:
-        candidates = [
-            section_tool_version_breakdown(scores, "Tool × Version × Mode (All-Time)"),
-        ]
-        if rolling_scores is not None:
-            candidates.append(
-                section_tool_version_breakdown(
-                    rolling_scores, "Tool × Version × Mode (Last 7 Days)"
-                )
-            )
-        candidates.append(section_version_deltas(scores))
-        tournament_sections = [s for s in candidates if s]
+    render_tournament = include_tournament and _has_tournament_data(scores_tournament)
+    # Local non-optional alias for mypy once _has_tournament_data has narrowed.
+    tournament_scores: dict[str, Any] = scores_tournament or {}
 
-    sections = [
-        f"# Benchmark Report — {date}",
-        section_period(period_scores, scores, "Since Last Report"),
-        section_period(rolling_scores, scores, "Last 7 Days Rolling"),
-        section_overall(scores),
-        section_base_rates(scores),
-        section_tool_deployment_status(scores, disabled=disabled_tools),
-        section_tool_ranking(scores),
-        *tournament_sections,
-        section_platform(scores),
-        section_tool_platform(scores),
-        section_edge_analysis(scores),
-        section_diagnostic_metrics(scores),
-        section_calibration(scores),
-        section_weak_spots(scores),
-        section_reliability_issues(scores),
-        section_parse_breakdown(scores),
-        section_latency(scores),
-        section_worst_predictions(scores),
-        section_best_predictions(scores),
-        section_trend(history, scores),
-        section_sample_size_warnings(scores),
-    ]
+    sections: list[str] = [f"# Benchmark Report — {date}"]
+
+    # Since Last Report
+    sections.append(section_period(period_scores, scores, "Since Last Report"))
+    if render_tournament and _has_tournament_data(period_scores_tournament):
+        sections.append(
+            _relabel_heading(
+                section_period(
+                    period_scores_tournament,
+                    tournament_scores,
+                    "Since Last Report",
+                ),
+                " — Tournament",
+            )
+        )
+
+    # Last 7 Days Rolling
+    sections.append(section_period(rolling_scores, scores, "Last 7 Days Rolling"))
+    if render_tournament and _has_tournament_data(rolling_scores_tournament):
+        sections.append(
+            _relabel_heading(
+                section_period(
+                    rolling_scores_tournament,
+                    tournament_scores,
+                    "Last 7 Days Rolling",
+                ),
+                " — Tournament",
+            )
+        )
+
+    # Overall
+    sections.append(section_overall(scores))
+    if render_tournament:
+        sections.append(
+            _relabel_heading(section_overall(tournament_scores), " — Tournament")
+        )
+
+    # Base Rates — production only
+    sections.append(section_base_rates(scores))
+
+    # Tool Deployment Status — which tools are blocked on each consumer
+    sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))
+
+    # Tool Ranking
+    sections.append(section_tool_ranking(scores))
+    if render_tournament:
+        sections.append(
+            _relabel_heading(section_tool_ranking(tournament_scores), " — Tournament")
+        )
+
+    # Tool × Version × Mode — merged
+    if include_tournament:
+        merged = _merged_tvm_scores(scores, scores_tournament)
+        tvm_section = section_tool_version_breakdown(
+            merged, "Tool × Version × Mode (All-Time)"
+        )
+        if tvm_section:
+            sections.append(tvm_section)
+        if rolling_scores is not None:
+            merged_rolling = _merged_tvm_scores(
+                rolling_scores, rolling_scores_tournament
+            )
+            tvm_rolling = section_tool_version_breakdown(
+                merged_rolling, "Tool × Version × Mode (Last 7 Days)"
+            )
+            if tvm_rolling:
+                sections.append(tvm_rolling)
+
+    # Remaining production-only sections
+    sections.extend(
+        [
+            section_platform(scores),
+            section_category(scores),
+            section_tool_platform(scores),
+            section_tool_category(scores),
+            section_edge_analysis(scores),
+            section_diagnostic_metrics(scores),
+            section_calibration(scores),
+            section_weak_spots(scores),
+            section_reliability_issues(scores),
+            section_parse_breakdown(scores),
+            section_latency(scores),
+            section_worst_predictions(scores),
+            section_best_predictions(scores),
+            section_trend(history, scores),
+            section_sample_size_warnings(scores),
+        ]
+    )
+
+    # Tournament Callouts — cross-mode
+    if render_tournament:
+        callouts = section_tournament_callouts(scores, scores_tournament)
+        if callouts:
+            sections.append(callouts)
 
     return "\n\n".join(sections) + "\n"
 
@@ -1208,29 +1579,56 @@ def main() -> None:
         "--period",
         type=Path,
         default=None,
-        help="Period scores JSON (since last report)",
+        help="Period scores JSON (since last report, production)",
     )
     parser.add_argument(
         "--rolling",
         type=Path,
         default=None,
-        help="Rolling 7-day scores JSON",
+        help="Rolling 7-day scores JSON (production)",
+    )
+    parser.add_argument(
+        "--scores-tournament",
+        type=Path,
+        default=None,
+        help="Tournament scores JSON (all-time)",
+    )
+    parser.add_argument(
+        "--period-tournament",
+        type=Path,
+        default=None,
+        help="Tournament period scores JSON (since last report)",
+    )
+    parser.add_argument(
+        "--rolling-tournament",
+        type=Path,
+        default=None,
+        help="Tournament rolling 7-day scores JSON",
     )
     parser.add_argument(
         "--include-tournament",
         action="store_true",
-        help="Render tournament-mode sections (Tool × Version × Mode and Version Deltas)",
+        help=(
+            "Render tournament-mode sections (duplicated per-mode blocks, "
+            "merged Tool × Version × Mode, and Tournament Callouts)"
+        ),
     )
     args = parser.parse_args()
 
+    def _maybe_load(path: Path | None) -> dict[str, Any] | None:
+        return load_scores(path) if path and path.exists() else None
+
     scores = load_scores(args.scores)
     history = load_history(args.history)
-    period = load_scores(args.period) if args.period and args.period.exists() else None
-    rolling = (
-        load_scores(args.rolling) if args.rolling and args.rolling.exists() else None
-    )
+    period = _maybe_load(args.period)
+    rolling = _maybe_load(args.rolling)
+    scores_tournament = _maybe_load(args.scores_tournament)
+    period_tournament = _maybe_load(args.period_tournament)
+    rolling_tournament = _maybe_load(args.rolling_tournament)
+
     print(
-        f"Loaded scores ({scores.get('total_rows', 0)} rows), {len(history)} months of history"
+        f"Loaded scores ({scores.get('total_rows', 0)} rows), "
+        f"{len(history)} months of history"
     )
 
     report = generate_report(
@@ -1239,6 +1637,9 @@ def main() -> None:
         period_scores=period,
         rolling_scores=rolling,
         include_tournament=args.include_tournament,
+        scores_tournament=scores_tournament,
+        period_scores_tournament=period_tournament,
+        rolling_scores_tournament=rolling_tournament,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

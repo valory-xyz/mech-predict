@@ -21,19 +21,25 @@
 from typing import Any
 
 from benchmark.analyze import (
+    ACTIVE_CATEGORIES,
+    OMEN_CATEGORIES,
+    POLYMARKET_ACTIVE_CATEGORIES,
     _parse_tvm_key,
     generate_report,
     section_best_predictions,
+    section_category,
     section_latency,
     section_overall,
     section_parse_breakdown,
     section_sample_size_warnings,
+    section_tool_category,
     section_tool_version_breakdown,
     section_trend,
     section_version_deltas,
     section_weak_spots,
     section_worst_predictions,
 )
+from benchmark.scorer import MIN_SAMPLE_SIZE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -48,6 +54,7 @@ def _scores(
     by_tool: dict | None = None,
     by_platform: dict | None = None,
     by_category: dict | None = None,
+    by_tool_category: dict | None = None,
     worst_10: list | None = None,
     best_10: list | None = None,
     parse_breakdown: dict | None = None,
@@ -62,6 +69,7 @@ def _scores(
         "by_tool": by_tool or {},
         "by_platform": by_platform or {},
         "by_category": by_category or {},
+        "by_tool_category": by_tool_category or {},
         "by_horizon": {},
         "by_tool_platform": {},
         "calibration": [],
@@ -117,7 +125,9 @@ class TestSectionWeakSpots:
 
     def test_weak_performance_label(self) -> None:
         """Brier between 0.4 and 0.5 should say 'weak performance'."""
-        s = _scores(by_category={"tech": {"brier": 0.45, "n": 100, "reliability": 0.9}})
+        s = _scores(
+            by_category={"technology": {"brier": 0.45, "n": 100, "reliability": 0.9}}
+        )
         result = section_weak_spots(s)
         assert "weak performance" in result
         assert "anti-predictive" not in result
@@ -125,7 +135,7 @@ class TestSectionWeakSpots:
     def test_no_weak_spots(self) -> None:
         """Test no weak spots detected."""
         s = _scores(
-            by_category={"crypto": {"brier": 0.2, "n": 100, "reliability": 0.9}}
+            by_category={"finance": {"brier": 0.2, "n": 100, "reliability": 0.9}}
         )
         result = section_weak_spots(s)
         assert "No weak spots" in result
@@ -135,6 +145,68 @@ class TestSectionWeakSpots:
         s = _scores(by_tool={"test": {"brier": 0.40, "n": 50, "reliability": 1.0}})
         result = section_weak_spots(s)
         assert "No weak spots" in result
+
+    def test_legacy_category_not_flagged(self) -> None:
+        """Categories no longer emitted by either platform are skipped."""
+        s = _scores(
+            by_category={"travel": {"brier": 0.80, "n": 100, "reliability": 0.9}}
+        )
+        result = section_weak_spots(s)
+        assert "travel" not in result.split("_Skipped", maxsplit=1)[0]
+        assert "No weak spots detected" in result
+
+    def test_legacy_category_footnote_listed(self) -> None:
+        """Skipped legacy categories are surfaced in a footnote."""
+        s = _scores(
+            by_category={
+                "travel": {"brier": 0.80, "n": 100, "reliability": 0.9},
+                "crypto": {"brier": 0.75, "n": 50, "reliability": 0.9},
+                "politics": {"brier": 0.45, "n": 100, "reliability": 0.9},
+            }
+        )
+        result = section_weak_spots(s)
+        assert "politics" in result
+        assert "Skipped 2 legacy category label(s)" in result
+        assert "crypto" in result
+        assert "travel" in result
+
+
+class TestActiveCategoriesInvariants:
+    """Pin the contents of ACTIVE_CATEGORIES.
+
+    Guards against accidental edits that silently shrink the filter set.
+    The behavioural weak-spots tests would not catch the mutation "remove a
+    single label from OMEN_CATEGORIES or POLYMARKET_ACTIVE_CATEGORIES" on
+    their own.
+    """
+
+    def test_shared_categories_are_active(self) -> None:
+        """Categories emitted by both platforms must pass the filter."""
+        shared = {
+            "business",
+            "politics",
+            "science",
+            "technology",
+            "health",
+            "entertainment",
+            "weather",
+            "finance",
+            "international",
+        }
+        assert shared.issubset(ACTIVE_CATEGORIES)
+        assert shared.issubset(OMEN_CATEGORIES)
+        assert shared.issubset(POLYMARKET_ACTIVE_CATEGORIES)
+
+    def test_omen_only_categories_are_active(self) -> None:
+        """Categories emitted only by Omen's market creator must pass."""
+        omen_only = {"cryptocurrency", "sports", "sustainability", "pets"}
+        assert omen_only.issubset(ACTIVE_CATEGORIES)
+        assert omen_only.isdisjoint(POLYMARKET_ACTIVE_CATEGORIES)
+
+    def test_removed_labels_are_not_active(self) -> None:
+        """Labels removed from either upstream taxonomy must not be active."""
+        removed = {"travel", "crypto", "tech", "other", "economics", "fashion"}
+        assert removed.isdisjoint(ACTIVE_CATEGORIES)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +260,271 @@ class TestSectionTrend:
 # ---------------------------------------------------------------------------
 # section_sample_size_warnings
 # ---------------------------------------------------------------------------
+
+
+class TestSectionCategory:
+    """Tests for section_category (fleet-level category performance)."""
+
+    def test_header_present(self) -> None:
+        """Always emits the Category Performance header."""
+        result = section_category(_scores(by_category={}))
+        assert "## Category Performance" in result
+
+    def test_empty_says_no_data(self) -> None:
+        """Explicit 'no data' when dimension is empty — do not silently skip."""
+        result = section_category(_scores(by_category={}))
+        assert "No per-category data available" in result
+
+    def test_sufficient_category_rendered_with_metrics(self) -> None:
+        """Categories with n >= MIN_SAMPLE_SIZE render Brier/LogLoss/Edge/BSS."""
+        s = _scores(
+            by_category={
+                "politics": {
+                    "brier": 0.22,
+                    "log_loss": 0.64,
+                    "baseline_brier": 0.25,
+                    "brier_skill_score": 0.12,
+                    "edge": -0.04,
+                    "edge_n": 80,
+                    "outcome_yes_rate": 0.37,
+                    "n": 100,
+                }
+            }
+        )
+        result = section_category(s)
+        assert "**politics**" in result
+        assert "Brier: 0.22" in result
+        assert "LogLoss: 0.6400" in result
+        assert "BSS: +0.1200" in result
+        assert "edge: -0.0400 (n=80)" in result
+        assert "yes rate: 37%" in result
+        assert "n=100" in result
+
+    def test_insufficient_data_flagged_not_skipped(self) -> None:
+        """Render insufficient-data line for categories below MIN_SAMPLE_SIZE.
+
+        Do not silently omit — reader must see the dimension was considered.
+        """
+        s = _scores(by_category={"crypto": {"brier": 0.3, "n": 5, "reliability": 1.0}})
+        result = section_category(s)
+        assert "**crypto**" in result
+        assert "insufficient data" in result
+        assert f"need {MIN_SAMPLE_SIZE}" in result
+        # A missing `continue` in the insufficient branch would emit both
+        # the insufficient line AND the metric line — catch that.
+        assert result.count("**crypto**") == 1
+        # The sufficient-path metric line uses "Brier: X, n=..." with a
+        # comma; the insufficient line embeds Brier as "noisy Brier: X"
+        # without a comma. Assert the sufficient-path format does NOT appear.
+        assert "Brier: 0.3, " not in result
+        # But the noisy-Brier hint IS present so the sort is traceable.
+        assert "noisy Brier: 0.3" in result
+
+    def test_sorted_by_brier_ascending(self) -> None:
+        """Best (lowest Brier) category appears before worst."""
+        s = _scores(
+            by_category={
+                "bad": {"brier": 0.45, "n": 100},
+                "good": {"brier": 0.15, "n": 100},
+            }
+        )
+        result = section_category(s)
+        assert result.find("**good**") < result.find("**bad**")
+
+    def test_none_brier_sorts_last(self) -> None:
+        """Categories with Brier=None sort after populated rows."""
+        s = _scores(
+            by_category={
+                "none_brier": {"brier": None, "n": 100},
+                "good": {"brier": 0.15, "n": 100},
+            }
+        )
+        result = section_category(s)
+        assert result.find("**good**") < result.find("**none_brier**")
+
+    def test_omits_optional_fields_when_missing(self) -> None:
+        """Categories without BSS/edge/yes_rate still render a line with n."""
+        s = _scores(by_category={"weather": {"brier": 0.2, "n": 50}})
+        result = section_category(s)
+        assert "**weather**" in result
+        assert "Brier: 0.2" in result
+        assert "n=50" in result
+
+    def test_homogeneous_zero_yes_rate_flagged(self) -> None:
+        """Categories with yes rate 0% are flagged as one-sided.
+
+        Mirrors the base-rate guard in notify_slack.py so readers of the
+        raw markdown see the same warning the Slack LLM gets — a low
+        Brier on a homogeneous category reflects the base rate, not
+        predictive skill.
+        """
+        s = _scores(
+            by_category={
+                "tech": {"brier": 0.05, "n": 180, "outcome_yes_rate": 0.0},
+            }
+        )
+        result = section_category(s)
+        assert "⚠ **tech**" in result
+        assert "one-sided outcomes; Brier not meaningful here" in result
+
+    def test_homogeneous_full_yes_rate_flagged(self) -> None:
+        """Categories with yes rate 100% get the same one-sided flag."""
+        s = _scores(
+            by_category={
+                "health": {"brier": 0.05, "n": 88, "outcome_yes_rate": 1.0},
+            }
+        )
+        result = section_category(s)
+        assert "⚠ **health**" in result
+        assert "one-sided outcomes; Brier not meaningful here" in result
+
+    def test_mixed_outcomes_not_flagged(self) -> None:
+        """Non-homogeneous categories render without the ⚠ marker or tail.
+
+        Near-homogeneous values (0.01, 0.99) are NOT one-sided — there
+        are real mixed outcomes and Brier is still meaningful.
+        """
+        s = _scores(
+            by_category={
+                "business": {"brier": 0.15, "n": 986, "outcome_yes_rate": 0.10},
+                "edge_case": {"brier": 0.01, "n": 100, "outcome_yes_rate": 0.01},
+            }
+        )
+        result = section_category(s)
+        assert "⚠" not in result
+        assert "one-sided outcomes" not in result
+        assert "**business**" in result
+        assert "**edge_case**" in result
+
+    def test_missing_yes_rate_not_flagged(self) -> None:
+        """Categories without outcome_yes_rate are not flagged as homogeneous."""
+        s = _scores(by_category={"weather": {"brier": 0.2, "n": 50}})
+        result = section_category(s)
+        assert "⚠" not in result
+        assert "one-sided outcomes" not in result
+
+
+class TestSectionToolCategory:
+    """Tests for section_tool_category (fleet × category cross-breakdown)."""
+
+    def test_empty_returns_no_data(self) -> None:
+        """Empty dimension returns an explicit no-data message."""
+        result = section_tool_category(_scores(by_tool_category={}))
+        assert "## Tool × Category" in result
+        assert "No cross-breakdown data" in result
+
+    def test_sufficient_cell_rendered_in_table(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | politics": {
+                    "brier": 0.19,
+                    "brier_skill_score": 0.05,
+                    "log_loss": 0.60,
+                    "edge": -0.03,
+                    "edge_n": 40,
+                    "directional_accuracy": 0.76,
+                    "sharpness": 0.12,
+                    "n": 60,
+                    "decision_worthy": True,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        assert (
+            "| tool-a | politics | 0.1900 | +0.0500 | 0.6000 | -0.0300 | 40 | 76% | 0.1200 | 60 |"
+            in result
+        )
+
+    def test_sparse_cell_listed_in_sparse_section_not_table(self) -> None:
+        """Route sparse cells to the list-only path, never the ranking table.
+
+        A bug flipping the gate would flip which section a cell lands in,
+        so both assertions below together catch it.
+        """
+        s = _scores(
+            by_tool_category={
+                "tool-a | crypto": {
+                    "brier": 0.10,
+                    "n": 5,
+                    "decision_worthy": False,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        # Not in the ranking table body (between header and sparse marker)
+        pre_sparse, _, post_sparse = result.partition("below n=")
+        assert "| tool-a | crypto | 0.1000" not in pre_sparse
+        # But listed in the sparse section with insufficient-data marker
+        assert "insufficient data (n=5)" in post_sparse
+
+    def test_all_sparse_shows_placeholder_row(self) -> None:
+        """Show an explicit placeholder row when no cell meets the threshold.
+
+        Rendering an empty table instead would be confusing.
+        """
+        s = _scores(
+            by_tool_category={
+                "tool-a | x": {"brier": 0.1, "n": 2},
+                "tool-b | y": {"brier": 0.2, "n": 3},
+            }
+        )
+        result = section_tool_category(s)
+        assert f"no cells with n ≥ {MIN_SAMPLE_SIZE}" in result
+        assert "2 cell(s) below" in result
+
+    def test_threshold_boundary(self) -> None:
+        """A cell with exactly n = MIN_SAMPLE_SIZE is included (gate is >=)."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | politics": {
+                    "brier": 0.2,
+                    "n": MIN_SAMPLE_SIZE,
+                    "decision_worthy": True,
+                }
+            }
+        )
+        result = section_tool_category(s)
+        assert "| tool-a | politics | 0.2000" in result
+        assert "below n=" not in result  # no sparse section
+
+    def test_sparse_examples_capped_at_five(self) -> None:
+        """Cap rendered sparse examples at 5 while reporting the true total.
+
+        Keeps the table readable while still signaling how many cells were
+        considered.
+        """
+        sparse_cells = {
+            f"tool-{i} | cat-{i}": {"brier": 0.1 + i * 0.01, "n": 5} for i in range(7)
+        }
+        s = _scores(by_tool_category=sparse_cells)
+        result = section_tool_category(s)
+        assert "7 cell(s) below" in result  # true total
+        rendered = sum(
+            1
+            for line in result.splitlines()
+            if line.startswith("- **tool-") and "insufficient data" in line
+        )
+        assert rendered == 5
+
+    def test_table_ranked_by_brier_ascending(self) -> None:
+        """Best cell ranks above worst."""
+        s = _scores(
+            by_tool_category={
+                "tool-a | good": {
+                    "brier": 0.1,
+                    "n": 50,
+                    "decision_worthy": True,
+                },
+                "tool-b | bad": {
+                    "brier": 0.4,
+                    "n": 50,
+                    "decision_worthy": True,
+                },
+            }
+        )
+        result = section_tool_category(s)
+        assert result.find("tool-a | good") < result.find("tool-b | bad")
 
 
 class TestSectionSampleSizeWarnings:
@@ -365,6 +702,8 @@ class TestGenerateReport:
         assert "## Overall" in report
         assert "## Tool Ranking" in report
         assert "## Platform Comparison" in report
+        assert "## Category Performance" in report
+        assert "## Tool × Category" in report
         assert "## Weak Spots" in report
         assert "## Reliability Issues" in report
         assert "## Worst Predictions" in report
@@ -592,11 +931,14 @@ class TestGenerateReportTournamentToggle:
         assert "Version Deltas" not in report
 
     def test_on_renders_cumulative_breakdown_and_deltas(self) -> None:
-        """include_tournament=True renders the cumulative breakdown + deltas."""
+        """include_tournament=True renders the cumulative breakdown.
+
+        Version Deltas is temporarily disabled pending rework.
+        """
         s = self._scores_with_versions()
         report = generate_report(s, [], include_tournament=True, disabled_tools={})
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "## Version Deltas" in report
+        assert "## Version Deltas" not in report
 
     def test_rolling_scores_render_separate_section(self) -> None:
         """When rolling_scores has version cells, a 7d section appears too."""
@@ -616,3 +958,214 @@ class TestGenerateReportTournamentToggle:
         )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "Tool × Version × Mode (Last 7 Days)" in report
+
+
+# ---------------------------------------------------------------------------
+# Mode split: tournament sections and callouts (BENCHMARK_MODE_SPLIT_SPEC)
+# ---------------------------------------------------------------------------
+
+
+def _scores_with_tool(
+    tool: str,
+    brier: float,
+    n: int,
+    valid: int | None = None,
+    baseline: float = 0.25,
+) -> dict[str, Any]:
+    """Build a production scores dict with one by_tool entry."""
+    valid_n = n if valid is None else valid
+    return {
+        "generated_at": "2026-03-31T06:00:00Z",
+        "total_rows": n,
+        "valid_rows": valid_n,
+        "overall": {"brier": brier, "reliability": 0.95, "n": n},
+        "by_tool": {
+            tool: {
+                "brier": brier,
+                "baseline_brier": baseline,
+                "n": n,
+                "valid_n": valid_n,
+                "reliability": 0.95,
+                "directional_accuracy": 0.7,
+                "brier_skill_score": 0.0,
+            }
+        },
+        "by_platform": {},
+        "by_category": {},
+        "by_horizon": {},
+        "by_tool_platform": {},
+        "by_tool_version_mode": {},
+        "calibration": [],
+        "worst_10": [],
+        "best_10": [],
+        "parse_breakdown": {},
+        "latency_reservoir": {},
+    }
+
+
+def _tournament_scores_with_version(
+    tool: str,
+    version: str,
+    brier: float,
+    n: int,
+) -> dict[str, Any]:
+    """Build a tournament scores dict with one by_tool_version_mode cell."""
+    s = _scores_with_tool(tool, brier, n)
+    s["by_tool_version_mode"] = {
+        f"{tool} | {version} | tournament": {
+            "brier": brier,
+            "n": n,
+            "valid_n": n,
+            "directional_accuracy": 0.75,
+            "brier_skill_score": 0.1,
+        }
+    }
+    return s
+
+
+class TestTournamentCallouts:
+    """Tests for section_tournament_callouts."""
+
+    def test_empty_when_no_tournament_data(self) -> None:
+        """Missing tournament scores returns empty string."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        assert section_tournament_callouts(prod, None) == ""
+        assert section_tournament_callouts(prod, {"total_rows": 0}) == ""
+
+    def test_promotion_candidate_flagged(self) -> None:
+        """Tournament Brier meaningfully lower than production triggers a promotion bullet."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        result = section_tournament_callouts(prod, tourn)
+        assert "Promotion candidates:" in result
+        assert "tool-a" in result
+        assert "v2" in result
+        assert "Tournament regressions:" not in result
+
+    def test_tournament_regression_flagged(self) -> None:
+        """Tournament Brier meaningfully higher than production triggers a regression bullet."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 50)
+        result = section_tournament_callouts(prod, tourn)
+        assert "Tournament regressions:" in result
+        assert "Promotion candidates:" not in result
+
+    def test_suppressed_below_min_n(self) -> None:
+        """Tournament cells with n below CALLOUT_MIN_N are ignored."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        assert section_tournament_callouts(prod, tourn) == ""
+
+    def test_suppressed_within_delta_band(self) -> None:
+        """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
+        assert section_tournament_callouts(prod, tourn) == ""
+
+
+class TestGenerateReportWithTournamentFiles:
+    """Tests for generate_report dual-mode rendering."""
+
+    def test_tournament_sections_omitted_when_file_absent(self) -> None:
+        """No tournament inputs -> no '— Tournament' headings, no callouts."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(prod, [], include_tournament=True)
+        assert "— Tournament" not in report
+        assert "## Tournament Callouts" not in report
+
+    def test_tournament_sections_rendered_when_data_present(self) -> None:
+        """Tournament inputs with rows -> duplicated per-mode headings render."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Overall — Tournament" in report
+        assert "## Tool Ranking — Tournament" in report
+
+    def test_empty_period_tournament_does_not_render_section(self) -> None:
+        """Tournament period files with zero rows don't emit empty sections.
+
+        scorer.score_period_split writes tournament period files on every
+        run; days with zero tournament rows in the window must not add a
+        dangling '## Since Last Report — Tournament' header.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        empty_period_tourn = {"total_rows": 0, "overall": {}}
+        report = generate_report(
+            prod,
+            [],
+            period_scores=None,
+            rolling_scores=None,
+            include_tournament=True,
+            scores_tournament=all_time_tourn,
+            period_scores_tournament=empty_period_tourn,
+            rolling_scores_tournament=empty_period_tourn,
+        )
+        assert "## Since Last Report — Tournament" not in report
+        assert "## Last 7 Days Rolling — Tournament" not in report
+
+    def test_merged_tool_version_mode_includes_both_modes(self) -> None:
+        """Tool × Version × Mode table shows both production and tournament cells."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        prod["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 500,
+                "valid_n": 500,
+                "brier": 0.20,
+                "directional_accuracy": 0.7,
+                "brier_skill_score": 0.0,
+            }
+        }
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "v1" in report
+        assert "v2" in report
+
+    def test_callout_section_included_when_triggered(self) -> None:
+        """Promotion-worthy tournament data causes the callouts section to render."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Tournament Callouts" in report
+
+    def test_callout_section_omitted_when_empty(self) -> None:
+        """Tournament data present but within delta band -> no callout section."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Tournament Callouts" not in report

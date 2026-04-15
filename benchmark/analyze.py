@@ -243,7 +243,16 @@ def section_category(scores: dict[str, Any]) -> str:
         if yes_rate is not None:
             parts.append(f"yes rate: {yes_rate:.0%}")
         parts.append(f"n={stats['n']}")
-        lines.append(f"- **{category}**: {', '.join(parts)}")
+        # Flag homogeneous-outcome categories: a low Brier on a one-sided
+        # category reflects the base rate, not predictive skill. Mirrors
+        # the base-rate guard in notify_slack.py so human readers of the
+        # markdown get the same warning as the Slack LLM.
+        is_homogeneous = yes_rate is not None and yes_rate in (0.0, 1.0)
+        prefix = "⚠ " if is_homogeneous else ""
+        tail = (
+            " — one-sided outcomes; Brier not meaningful here" if is_homogeneous else ""
+        )
+        lines.append(f"- {prefix}**{category}**: {', '.join(parts)}{tail}")
     return "\n".join(lines)
 
 

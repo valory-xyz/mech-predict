@@ -283,6 +283,59 @@ class TestSectionCategory:
         assert "Brier: 0.2" in result
         assert "n=50" in result
 
+    def test_homogeneous_zero_yes_rate_flagged(self) -> None:
+        """Categories with yes rate 0% are flagged as one-sided.
+
+        Mirrors the base-rate guard in notify_slack.py so readers of the
+        raw markdown see the same warning the Slack LLM gets — a low
+        Brier on a homogeneous category reflects the base rate, not
+        predictive skill.
+        """
+        s = _scores(
+            by_category={
+                "tech": {"brier": 0.05, "n": 180, "outcome_yes_rate": 0.0},
+            }
+        )
+        result = section_category(s)
+        assert "⚠ **tech**" in result
+        assert "one-sided outcomes; Brier not meaningful here" in result
+
+    def test_homogeneous_full_yes_rate_flagged(self) -> None:
+        """Categories with yes rate 100% get the same one-sided flag."""
+        s = _scores(
+            by_category={
+                "health": {"brier": 0.05, "n": 88, "outcome_yes_rate": 1.0},
+            }
+        )
+        result = section_category(s)
+        assert "⚠ **health**" in result
+        assert "one-sided outcomes; Brier not meaningful here" in result
+
+    def test_mixed_outcomes_not_flagged(self) -> None:
+        """Non-homogeneous categories render without the ⚠ marker or tail.
+
+        Near-homogeneous values (0.01, 0.99) are NOT one-sided — there
+        are real mixed outcomes and Brier is still meaningful.
+        """
+        s = _scores(
+            by_category={
+                "business": {"brier": 0.15, "n": 986, "outcome_yes_rate": 0.10},
+                "edge_case": {"brier": 0.01, "n": 100, "outcome_yes_rate": 0.01},
+            }
+        )
+        result = section_category(s)
+        assert "⚠" not in result
+        assert "one-sided outcomes" not in result
+        assert "**business**" in result
+        assert "**edge_case**" in result
+
+    def test_missing_yes_rate_not_flagged(self) -> None:
+        """Categories without outcome_yes_rate are not flagged as homogeneous."""
+        s = _scores(by_category={"weather": {"brier": 0.2, "n": 50}})
+        result = section_category(s)
+        assert "⚠" not in result
+        assert "one-sided outcomes" not in result
+
 
 class TestSectionToolCategory:
     """Tests for section_tool_category (fleet × category cross-breakdown)."""

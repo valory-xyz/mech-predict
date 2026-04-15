@@ -802,6 +802,22 @@ def _compute_calibration_regression_from_bins(
 # ---------------------------------------------------------------------------
 
 
+def brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
+    """Sort key for ranking (name, stats) entries by Brier ascending.
+
+    Used by both the scorer CLI preview and the analyze.py report
+    sections so there is a single source of truth. Uses an explicit
+    ``is not None`` check; ``.get("brier") or 999`` collapses
+    ``brier=0.0`` (perfect score) to 999 via falsy-or and sorts best
+    cells to the end.
+
+    :param item: a (key, stats) pair from a ``by_*`` dim dict.
+    :return: the Brier value, or 999.0 when Brier is None.
+    """
+    brier = item[1].get("brier")
+    return brier if brier is not None else 999.0
+
+
 def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute all scores from production log rows."""
     total = len(rows)
@@ -861,6 +877,9 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Tool × platform cross breakdown
     by_tool_platform = group_by_composite(rows, ["tool_name", "platform"])
 
+    # Tool × category cross breakdown
+    by_tool_category = group_by_composite(rows, ["tool_name", "category"])
+
     # Tool × version (normalized: tool_version OR tool_ipfs_hash) cross breakdown
     tv_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     tvm_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -919,6 +938,7 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform_difficulty": by_platform_difficulty,
         "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
+        "by_tool_category": by_tool_category,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "by_tool_version": by_tool_version,
         "by_tool_version_mode": by_tool_version_mode,
@@ -980,6 +1000,7 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_category": {},
         "by_horizon": {},
         "by_tool_platform": {},
+        "by_tool_category": {},
         "by_tool_version": {},
         "by_tool_version_mode": {},
         "by_config": {},
@@ -1265,6 +1286,7 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_category"], category, row)
     _ensure_and_accumulate(scores["by_horizon"], horizon, row)
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
+    _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
     _ensure_and_accumulate(
         scores["by_tool_version_mode"],
@@ -1358,6 +1380,7 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1529,6 +1552,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1619,6 +1643,7 @@ def _accumulate_and_write(
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1811,6 +1836,7 @@ def _rebuild_single_mode(
         "by_category",
         "by_horizon",
         "by_tool_platform",
+        "by_tool_category",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -2166,7 +2192,7 @@ def main() -> None:
         )
 
     print("\nBy tool (decision-worthy):")
-    ranked = sorted(result["by_tool"].items(), key=lambda x: x[1].get("brier") or 999)
+    ranked = sorted(result["by_tool"].items(), key=brier_sort_key)
     for tool, stats in ranked:
         flags = []
         if stats["reliability"] is not None and stats["reliability"] < RELIABILITY_GATE:
@@ -2185,7 +2211,14 @@ def main() -> None:
     print("\nBy tool × platform:")
     for key, stats in sorted(
         result["by_tool_platform"].items(),
-        key=lambda x: x[1].get("brier") or 999,
+        key=brier_sort_key,
+    ):
+        print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
+
+    print("\nBy tool × category:")
+    for key, stats in sorted(
+        result["by_tool_category"].items(),
+        key=brier_sort_key,
     ):
         print(f"  {key}: Brier={stats['brier']}, n={stats['n']}")
 

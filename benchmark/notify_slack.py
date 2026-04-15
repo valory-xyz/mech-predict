@@ -41,7 +41,9 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
 
-*Weak categories:* list categories with Brier > 0.40 and brief note
+*Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the fleet-level answer to "where do our agents do well vs poorly" — always include when data is present. IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
+
+*Fleet × Category highlights:* from the "Tool × Category" section, pick 2–4 standout tool-category combinations (best performers, worst performers, or fleet-wide weaknesses). Only use rows above the sample-size threshold — never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("fleet struggles on X across tools"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
 
 *Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, full version hash in backticks, tournament Brier + n, production Brier + n, Brier delta. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
 

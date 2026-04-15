@@ -360,6 +360,21 @@ class TestScore:
         # By category
         assert result["by_category"]["crypto"]["n"] == 2
 
+        # By tool × category — fleet-per-category cross breakdown
+        assert "tool-a | crypto" in result["by_tool_category"]
+        assert "tool-a | politics" in result["by_tool_category"]
+        assert "tool-b | crypto" in result["by_tool_category"]
+        assert result["by_tool_category"]["tool-a | crypto"]["n"] == 1
+        assert result["by_tool_category"]["tool-b | crypto"]["n"] == 1
+        # Brier asserts confirm the RIGHT row landed in each cell — catches
+        # mutations that swap the composite key fields or mis-route rows.
+        # tool-a|crypto: p=0.9, outcome=True → (0.9-1)^2 = 0.01
+        # tool-b|crypto: p=0.5, outcome=True → (0.5-1)^2 = 0.25
+        # tool-a|politics: p=0.8, outcome=False → (0.8-0)^2 = 0.64
+        assert result["by_tool_category"]["tool-a | crypto"]["brier"] == 0.01
+        assert result["by_tool_category"]["tool-b | crypto"]["brier"] == 0.25
+        assert result["by_tool_category"]["tool-a | politics"]["brier"] == 0.64
+
     def test_empty_input(self) -> None:
         """Test scoring with empty input."""
         result = score([])

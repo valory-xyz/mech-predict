@@ -241,8 +241,11 @@ def sort_key(
     """
     is_untagged = tag_label.startswith(UNTAGGED_PREFIX)
     if is_untagged:
-        # (1, "", first_seen_or_empty) sorts after all tagged entries.
-        return (1, "", first_seen or "~")
+        # (1, "", first_seen_or_empty, tag_label) sorts after all tagged
+        # entries. tag_label is included as a deterministic tiebreak so
+        # multiple untagged labels with no first_seen still sort stably
+        # across runs (the label already encodes the CID's first 8 chars).
+        return (1, "", first_seen or "~", tag_label)
     try:
         index = tags_scanned.index(tag_label)
     except ValueError:

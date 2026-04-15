@@ -995,6 +995,7 @@ def section_period(
 
 VERSION_DELTA_LOW_SAMPLE = 30
 VERSION_DELTA_LOW_SAMPLE_STRICT = 300
+VERSION_DELTA_UNCHANGED_EPSILON = 0.001
 
 
 def _parse_tvm_key(key: str) -> tuple[str, str, str]:
@@ -1171,11 +1172,11 @@ def _delta_direction(delta: float | None) -> str:
     """Return a one-word direction label for a Brier delta."""
     if delta is None:
         return "—"
-    if delta < -0.001:
+    if delta < -VERSION_DELTA_UNCHANGED_EPSILON:
         return "improved"
-    if delta > 0.001:
+    if delta > VERSION_DELTA_UNCHANGED_EPSILON:
         return "regressed"
-    return "flat"
+    return "unchanged"
 
 
 def _format_delta_row(
@@ -1261,6 +1262,7 @@ def section_version_deltas(
         cells.sort(key=lambda c: release_map.sort_key(c[1], tags_scanned))
 
     lines = ["## Version Deltas", ""]
+    has_low_sample = False
     for (tool, mode), cells in sorted(multi.items()):
         lines.append(f"### {tool} ({mode})")
         lines.append("")
@@ -1272,6 +1274,11 @@ def section_version_deltas(
         for i in range(1, len(cells)):
             _, prior_label, prior_stats = cells[i - 1]
             _, cand_label, cand_stats = cells[i]
+            if (
+                min(prior_stats.get("n", 0) or 0, cand_stats.get("n", 0) or 0)
+                < VERSION_DELTA_LOW_SAMPLE_STRICT
+            ):
+                has_low_sample = True
             lines.append(
                 _format_delta_row(prior_label, cand_label, prior_stats, cand_stats)
             )
@@ -1286,26 +1293,38 @@ def section_version_deltas(
         for i in range(1, len(cells)):
             prior_cells = [c[2] for c in cells[:i]]
             pool_stats = _pool_cells(prior_cells)
-            pool_label = f"{cells[0][1]}..{cells[i - 1][1]}"
+            start_label = cells[0][1]
+            end_label = cells[i - 1][1]
+            pool_label = (
+                start_label
+                if start_label == end_label
+                else f"{start_label}..{end_label}"
+            )
             _, cand_label, cand_stats = cells[i]
+            if (
+                min(pool_stats.get("n", 0) or 0, cand_stats.get("n", 0) or 0)
+                < VERSION_DELTA_LOW_SAMPLE_STRICT
+            ):
+                has_low_sample = True
             lines.append(
                 _format_delta_row(pool_label, cand_label, pool_stats, cand_stats)
             )
         lines.append("")
 
-    lines.extend(
-        [
+    if has_low_sample:
+        lines.append(
             f"⚠ Rows marked with ⚠ have min(n) <"
             f" {VERSION_DELTA_LOW_SAMPLE_STRICT}; the delta is within noise and"
             " the flagged version wasn't in production long enough to produce a"
-            " load-bearing baseline.",
-            "",
-            "The **vs previous pooled** table shows each candidate against the"
-            " n-weighted pool of all earlier versions — the cumulative baseline."
-            " For tools with exactly 2 versions, pool(V_0) equals V_0, so the"
-            " pooled row matches the prior-version row; the two diverge once a"
-            " tool has 3+ versions in that mode.",
-        ]
+            " load-bearing baseline."
+        )
+        lines.append("")
+    lines.append(
+        "The **vs previous pooled** table shows each candidate against the"
+        " n-weighted pool of all earlier versions — the cumulative baseline."
+        " For tools with exactly 2 versions, pool(V_0) equals V_0, so the"
+        " pooled row matches the prior-version row; the two diverge once a"
+        " tool has 3+ versions in that mode."
     )
     return "\n".join(lines).rstrip()
 

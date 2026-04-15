@@ -53,7 +53,7 @@ Example (copy this style exactly):
 
 Rules:
 - The baseline and candidate labels come verbatim from the Baseline and Candidate columns of the report's "**vs prior version:**" sub-table (they look like `v0.17.0` or `untagged@bafybei1`). Never invent labels, never truncate, never summarize them as generic "v1/v2".
-- Prefer rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved". Skip rows marked ⚠ unless nothing else qualifies — and if you do include a ⚠ row, lead the bullet with "small sample:".
+- Only include rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
 - Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
 
 *Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.

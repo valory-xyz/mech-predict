@@ -728,9 +728,79 @@ class TestSectionVersionDeltas:
         )
         result = section_version_deltas(scores, rm)
         # Pooled baseline for v1.2.0 is (0.20*100 + 0.30*200)/300 = 0.2667,
-        # so the delta in the pooled table is +0.0000 (flat direction).
+        # so the delta in the pooled table is +0.0000 (unchanged direction).
         assert "v1.0.0..v1.1.0" in result
-        assert "flat" in result
+        assert "unchanged" in result
+        assert "flat" not in result  # renamed for repo-wide vocabulary consistency
+
+    def test_no_low_sample_footer_when_no_rows_flagged(self) -> None:
+        """The ⚠ legend is absent when every row's n clears the threshold."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        assert "Rows marked with ⚠" not in result
+
+    def test_low_sample_footer_when_rows_flagged(self) -> None:
+        """The ⚠ legend is present when at least one row carries the marker."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 1000,
+                    "valid_n": 1000,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 50,
+                    "valid_n": 50,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        assert "Rows marked with ⚠" in result
+
+    def test_pool_label_collapses_when_start_equals_end(self) -> None:
+        """With exactly 2 versions, pool baseline renders without a range."""
+        scores = {
+            "by_tool_version_mode": {
+                "tool-a | cidA | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.30,
+                    "directional_accuracy": 0.6,
+                },
+                "tool-a | cidB | production_replay": {
+                    "n": 500,
+                    "valid_n": 500,
+                    "brier": 0.20,
+                    "directional_accuracy": 0.7,
+                },
+            }
+        }
+        rm = _rm({"cidA": "v1.0.0", "cidB": "v1.1.0"}, ["v1.0.0", "v1.1.0"])
+        result = section_version_deltas(scores, rm)
+        # The pool row's baseline is V_0 alone; no "v1.0.0..v1.0.0" degenerate range.
+        assert "v1.0.0..v1.0.0" not in result
+        # And the collapsed label does appear in the pooled sub-table.
+        assert "| `v1.0.0` | `v1.1.0` |" in result
 
 
 # ---------------------------------------------------------------------------

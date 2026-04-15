@@ -24,13 +24,16 @@ from benchmark.analyze import (
     ACTIVE_CATEGORIES,
     OMEN_CATEGORIES,
     POLYMARKET_ACTIVE_CATEGORIES,
+    SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
+    _sample_label,
     generate_report,
     section_best_predictions,
     section_category,
     section_latency,
     section_overall,
     section_parse_breakdown,
+    section_period,
     section_sample_size_warnings,
     section_tool_category,
     section_tool_version_breakdown,
@@ -105,6 +108,131 @@ class TestSectionOverall:
         """Test all invalid predictions."""
         result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
         assert "N/A" in result  # Brier is N/A
+
+    def test_no_signal_rate_small_value_renders_two_decimals(self) -> None:
+        """No-signal rate formats with 2 decimal places.
+
+        Previously rendered as ':.0%' which rounded tiny-but-nonzero
+        rates like 0.00072 to '0%' even though the count shown next to
+        it was clearly positive. Two decimals surface values in the
+        0.01%-1% range where the no-signal rate typically lives.
+        """
+        s = _scores(brier=0.3, reliability=0.95)
+        s["overall"]["no_signal_rate"] = 0.00072
+        s["overall"]["no_signal_count"] = 142
+        result = section_overall(s)
+        assert "0.07%" in result
+        assert "142 predictions at exactly 0.5" in result
+        # Make sure the rendered value is not the stale '0%' form.
+        assert "No-signal rate: 0%" not in result
+
+
+# ---------------------------------------------------------------------------
+# _sample_label
+# ---------------------------------------------------------------------------
+
+
+class TestSampleLabel:
+    """Tests for _sample_label.
+
+    Guards against the regression where tools with a large total n but
+    zero valid parses were labelled 'low sample' (misleading: the real
+    problem is that every row was malformed, not that the sample was
+    too small).
+    """
+
+    def test_low_sample_below_gate(self) -> None:
+        """Stats with decision_worthy=False render 'low sample'."""
+        assert (
+            _sample_label({"n": 5, "valid_n": 5, "decision_worthy": False})
+            == " ⚠ low sample"
+        )
+
+    def test_all_malformed_large_n(self) -> None:
+        """Large n with valid_n == 0 renders 'all malformed', not 'low sample'.
+
+        The malformed branch short-circuits before ``decision_worthy``
+        is consulted because the scorer sets ``decision_worthy=False``
+        whenever valid_n is below the gate, which would otherwise hide
+        the more specific pipeline-failure signal.
+        """
+        assert (
+            _sample_label({"n": 55, "valid_n": 0, "decision_worthy": False})
+            == " ⚠ all malformed"
+        )
+
+    def test_sufficient_returns_empty(self) -> None:
+        """decision_worthy=True renders no label."""
+        assert _sample_label({"n": 100, "valid_n": 80, "decision_worthy": True}) == ""
+
+    def test_small_n_all_malformed_falls_through_to_low_sample(self) -> None:
+        """Tiny n with valid_n==0 stays as 'low sample', not 'all malformed'.
+
+        The 'all malformed' label only applies when there is enough
+        volume to be confident the malformed-ness is systemic, not just
+        a tiny tail. Below the reporting gate it stays 'low sample'.
+        """
+        assert (
+            _sample_label({"n": 3, "valid_n": 0, "decision_worthy": False})
+            == " ⚠ low sample"
+        )
+
+    def test_boundary_exact_min_sample_size(self) -> None:
+        """Boundary cases at exactly MIN_SAMPLE_SIZE pin >= vs > choice.
+
+        Guards against a mutation from ``n >= MIN_SAMPLE_SIZE`` to
+        ``n > MIN_SAMPLE_SIZE`` going unnoticed on the malformed branch,
+        and against the scorer's own ``valid_n >= MIN_SAMPLE_SIZE`` gate
+        drifting on the low-sample branch. MIN_SAMPLE_SIZE is the
+        reporting gate; exactly hitting it is supposed to count as
+        sufficient.
+        """
+        # decision_worthy True → no label.
+        assert (
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE,
+                    "valid_n": MIN_SAMPLE_SIZE,
+                    "decision_worthy": True,
+                }
+            )
+            == ""
+        )
+        # n exactly at the gate with zero valid → 'all malformed'
+        # (n >= gate, not n > gate).
+        assert (
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE,
+                    "valid_n": 0,
+                    "decision_worthy": False,
+                }
+            )
+            == " ⚠ all malformed"
+        )
+        # One below the gate → 'low sample'.
+        assert (
+            _sample_label(
+                {
+                    "n": MIN_SAMPLE_SIZE - 1,
+                    "valid_n": MIN_SAMPLE_SIZE - 1,
+                    "decision_worthy": False,
+                }
+            )
+            == " ⚠ low sample"
+        )
+
+    def test_missing_keys_returns_empty(self) -> None:
+        """Partial stats dict renders no label rather than a spurious one.
+
+        Preserves the old ``decision_worthy is False`` behaviour: a
+        dict missing the key produces ``""`` rather than silently
+        landing in either of the warning branches. Protects callers
+        that pass a projection of the full stats shape.
+        """
+        assert _sample_label({}) == ""
+        assert _sample_label({"n": 5}) == ""
+        assert _sample_label({"n": 100, "valid_n": 100}) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +335,62 @@ class TestActiveCategoriesInvariants:
         """Labels removed from either upstream taxonomy must not be active."""
         removed = {"travel", "crypto", "tech", "other", "economics", "fashion"}
         assert removed.isdisjoint(ACTIVE_CATEGORIES)
+
+    def test_omen_categories_exact_membership(self) -> None:
+        """Pin the exact OMEN_CATEGORIES set.
+
+        The subset / disjoint assertions elsewhere in this class cover
+        well-known groupings but let a single-label add or drop slip
+        through unnoticed. Asserting equality against the full expected
+        set fails immediately on any membership mutation.
+        """
+        expected = frozenset(
+            {
+                "business",
+                "cryptocurrency",
+                "politics",
+                "science",
+                "technology",
+                "trending",
+                "social",
+                "health",
+                "sustainability",
+                "internet",
+                "food",
+                "pets",
+                "animals",
+                "curiosities",
+                "economy",
+                "arts",
+                "entertainment",
+                "weather",
+                "sports",
+                "finance",
+                "international",
+            }
+        )
+        assert OMEN_CATEGORIES == expected
+
+    def test_polymarket_active_categories_exact_membership(self) -> None:
+        """Pin the exact POLYMARKET_ACTIVE_CATEGORIES set.
+
+        Same rationale as the Omen equality test above: catches single-
+        label mutations that subset/disjoint checks miss.
+        """
+        expected = frozenset(
+            {
+                "business",
+                "politics",
+                "science",
+                "technology",
+                "health",
+                "entertainment",
+                "weather",
+                "finance",
+                "international",
+            }
+        )
+        assert POLYMARKET_ACTIVE_CATEGORIES == expected
 
 
 # ---------------------------------------------------------------------------
@@ -531,19 +715,168 @@ class TestSectionSampleSizeWarnings:
     """Tests for section_sample_size_warnings."""
 
     def test_small_category_warned(self) -> None:
-        """Test small category triggers warning."""
+        """Small category triggers a warning that quotes the active gate.
+
+        The ``(< N)`` suffix documents the threshold inline so a reader
+        can see both the observed count and the gate it fell under
+        without consulting the code. Guards against the suffix being
+        dropped or hardcoded to a wrong value.
+        """
         s = _scores(by_category={"weather": {"brier": 0.3, "n": 4, "reliability": 1.0}})
         result = section_sample_size_warnings(s)
         assert "weather" in result
         assert "4 questions" in result
+        # Couple the assertion to SAMPLE_SIZE_WARNING so moving the
+        # gate updates both the code and the test in lockstep and a
+        # drifted-copy bug surfaces explicitly.
+        assert f"(< {SAMPLE_SIZE_WARNING})" in result
 
     def test_large_category_not_warned(self) -> None:
-        """Test large category produces no warning."""
+        """Large category triggers the 'all categories sufficient' copy.
+
+        The copy is deliberately explicit that the gate here is total
+        category rows, not the narrower denominators used by subsections
+        like directional bias; a reader should not treat this line as
+        contradicting a per-subsection 'insufficient data' note.
+        """
         s = _scores(
             by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
         )
         result = section_sample_size_warnings(s)
-        assert "sufficient sample size" in result
+        assert "category reporting gate" in result
+        assert "directional bias" in result
+
+    def test_threshold_value_embedded_in_copy(self) -> None:
+        """The 'at least N' copy should quote the active threshold.
+
+        Interpolates ``SAMPLE_SIZE_WARNING`` so the test fails loudly
+        when the constant moves but the user-facing copy silently
+        drifts out of sync (or vice versa).
+        """
+        s = _scores(
+            by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
+        )
+        result = section_sample_size_warnings(s)
+        assert f"at least {SAMPLE_SIZE_WARNING}" in result
+
+
+# ---------------------------------------------------------------------------
+# section_period
+# ---------------------------------------------------------------------------
+
+
+class TestSectionPeriod:
+    """Tests for section_period per-tool bullet rendering.
+
+    Guards against the regression where 'Since Last Report' rendered
+    tools with n=1 or n=8 alongside tools with n>=30 without any
+    low-sample marker, making it trivial to read noise as signal.
+    """
+
+    @staticmethod
+    def _period(by_tool: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Build a minimal period_scores dict for section_period.
+
+        Auto-populates ``decision_worthy`` on each tool stats dict the
+        same way the scorer does (``valid_n >= MIN_SAMPLE_SIZE``) so
+        the fixtures match production-shape stats without each caller
+        having to set it explicitly.
+
+        :param by_tool: per-tool stats dicts keyed by tool name.
+        :return: a minimal period_scores dict ready to pass to
+            ``section_period``.
+        """
+        for stats in by_tool.values():
+            stats.setdefault("decision_worthy", stats["valid_n"] >= MIN_SAMPLE_SIZE)
+        total_n = sum(t["n"] for t in by_tool.values())
+        total_valid = sum(t["valid_n"] for t in by_tool.values())
+        return {
+            "overall": {
+                "n": total_n,
+                "valid_n": total_valid,
+                "brier": 0.2,
+                "log_loss": 0.5,
+            },
+            "by_tool": by_tool,
+        }
+
+    @staticmethod
+    def _alltime() -> dict[str, Any]:
+        """Minimal all-time scores for delta comparison."""
+        return {"overall": {"brier": 0.25, "log_loss": 0.6}, "by_tool": {}}
+
+    def test_tiny_tool_flagged_as_low_sample(self) -> None:
+        """Tool with n=1 in the period gets a low-sample marker.
+
+        Also asserts the ``(n=…)`` count still renders next to the
+        marker, so a regression that drops the count but keeps the
+        marker (or vice versa) is caught.
+        """
+        period = self._period(
+            {
+                "prediction-online-sme": {
+                    "n": 1,
+                    "valid_n": 1,
+                    "brier": 0.1875,
+                },
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "prediction-online-sme" in result
+        assert "⚠ low sample" in result
+        assert "(n=1)" in result
+
+    def test_sufficient_tool_not_flagged(self) -> None:
+        """Tool with valid_n above the gate gets no marker."""
+        period = self._period(
+            {
+                "superforcaster": {
+                    "n": 95,
+                    "valid_n": 95,
+                    "brier": 0.22,
+                },
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "superforcaster" in result
+        assert "⚠" not in result
+
+    def test_mixed_population_flags_only_small_ones(self) -> None:
+        """Only tools below the gate should carry the marker."""
+        period = self._period(
+            {
+                "superforcaster": {"n": 95, "valid_n": 95, "brier": 0.22},
+                "prediction-online-sme": {"n": 1, "valid_n": 1, "brier": 0.19},
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        # Count markers: exactly one (on the small tool).
+        assert result.count("⚠") == 1
+        # The marker must be on the line that names the small tool,
+        # not the line that names superforcaster.
+        for line in result.splitlines():
+            if "⚠" in line:
+                assert "prediction-online-sme" in line
+                assert "superforcaster" not in line
+
+    def test_all_malformed_tool_gets_distinct_label(self) -> None:
+        """Tool with n above gate but valid_n == 0 is 'all malformed'.
+
+        Uses ``brier=None`` because that is what the scorer emits when
+        ``valid_n == 0`` (see scorer._derive_group). Any fixture that
+        passes a numeric brier alongside valid_n=0 would be scorer-
+        impossible and would let the test pass by traversing the
+        wrong branch in ``section_period``.
+        """
+        period = self._period(
+            {"resolve-market-jury-v1": {"n": 55, "valid_n": 0, "brier": None}}
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "resolve-market-jury-v1" in result
+        assert "⚠ all malformed" in result
+        assert "⚠ low sample" not in result
+        # Brier must render as N/A for a scorer-impossible-otherwise group.
+        assert "N/A" in result
 
 
 # ---------------------------------------------------------------------------

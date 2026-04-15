@@ -71,15 +71,21 @@ jobs:
         continue-on-error: true
 
       # force_rebuild semantics: wipe ALL derived scoring state as a set
-      # (scores.json, scores_history.jsonl, scored_row_ids.json) so the
-      # subsequent Score step rebuilds from raw logs without stale dedup
-      # state poisoning the result.
+      # (scores.json, scores_history.jsonl, scored_row_ids.json) AND the
+      # fetch cursor (.fetch_state.json) so the subsequent fetch pulls
+      # the full lookback window and the Score step rebuilds from raw
+      # logs without stale dedup or cursor state poisoning the result.
+      # Before the include-hidden-files fix .fetch_state.json was never
+      # persisted so deleting it here was a no-op; now that it rides in
+      # the artifact, force_rebuild must explicitly clear it or the
+      # rebuild runs against an empty log dir.
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true'
         run: |
           rm -f benchmark/results/scores.json \
                 benchmark/results/scores_history.jsonl \
-                benchmark/results/scored_row_ids.json
+                benchmark/results/scored_row_ids.json \
+                benchmark/datasets/.fetch_state.json
 
       # Fetch writes daily log file + calls scorer.update() inline (fast path).
       # On force_rebuild, --no-score disables the inline scoring so the
@@ -170,11 +176,16 @@ jobs:
             --rolling-tournament benchmark/results/rolling_scores_tournament.json \
             --include-tournament
 
-      # Upload state + scores (small, needed for next run)
+      # Upload state + scores (small, needed for next run).
+      # include-hidden-files: true is required so .fetch_state.json
+      # (leading dot = hidden under v4's default filter) actually ships
+      # in the artifact. Without it, the incremental fetch cursor is
+      # silently dropped every run and the scorer compounds double-counts.
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-data
+          include-hidden-files: true
           path: |
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json

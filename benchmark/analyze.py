@@ -135,7 +135,7 @@ def section_overall(scores: dict[str, Any]) -> str:
         else "N/A"
     )
     no_sig = o.get("no_signal_rate")
-    no_sig_str = f"{no_sig:.0%}" if no_sig is not None else "N/A"
+    no_sig_str = f"{no_sig:.2%}" if no_sig is not None else "N/A"
     ll = o.get("log_loss")
     ll_str = f"{ll:.4f}" if ll is not None else "N/A"
     sharp_str = f"{o['sharpness']:.4f}" if o.get("sharpness") is not None else "N/A"
@@ -176,7 +176,30 @@ def section_overall(scores: dict[str, Any]) -> str:
 
 
 def _sample_label(stats: dict[str, Any]) -> str:
-    """Return a sample-size label for ranking context."""
+    """Return a sample-size label for ranking context.
+
+    Splits the previously single "⚠ low sample" label into two cases so
+    tools with many rows but zero valid parses are not mistaken for a
+    small-sample problem:
+
+    - ``n >= MIN_SAMPLE_SIZE`` and ``valid_n == 0``: all rows malformed,
+      a pipeline issue, not a sample-size issue.
+    - ``decision_worthy is False``: too few valid rows to be decision
+      worthy (the scorer's own sample-size gate).
+
+    ``decision_worthy`` is the primary signal because the scorer already
+    computes and ships it on every group. Using ``stats.get(...) is
+    False`` preserves the "missing key = empty label" safety property:
+    a caller that passes a partial dict gets no warning rather than a
+    spurious one.
+
+    :param stats: group stats dict; ``n``, ``valid_n`` and
+        ``decision_worthy`` are all consulted when present.
+    :return: a leading-space string label, or empty when stats pass
+        the sample-size gate or do not expose the required keys.
+    """
+    if stats.get("n", 0) >= MIN_SAMPLE_SIZE and stats.get("valid_n", None) == 0:
+        return " ⚠ all malformed"
     if stats.get("decision_worthy") is False:
         return " ⚠ low sample"
     return ""
@@ -547,7 +570,17 @@ def section_trend(
 
 
 def section_sample_size_warnings(scores: dict[str, Any]) -> str:
-    """Generate the sample size warnings section."""
+    """Generate the sample size warnings section.
+
+    Gate: total rows per category < SAMPLE_SIZE_WARNING. Subsections
+    like directional bias apply stricter gates on narrower denominators
+    (e.g. n_losses within a category); the wording below makes that
+    explicit so the "all categories sufficient" line does not read as
+    contradicting a per-subsection "insufficient data" note.
+
+    :param scores: parsed scores dict with a ``by_category`` mapping.
+    :return: markdown section string.
+    """
     lines = ["## Sample Size Warnings", ""]
     found = False
 
@@ -555,11 +588,18 @@ def section_sample_size_warnings(scores: dict[str, Any]) -> str:
         if stats["n"] < SAMPLE_SIZE_WARNING:
             found = True
             lines.append(
-                f"- **{cat}**: only {stats['n']} questions — treat with caution"
+                f"- **{cat}**: only {stats['n']} questions"
+                f" (< {SAMPLE_SIZE_WARNING}) — treat with caution"
             )
 
     if not found:
-        lines.append("All categories have sufficient sample size.")
+        lines.append(
+            f"All categories have at least {SAMPLE_SIZE_WARNING} total"
+            " questions (the category reporting gate)."
+            " Subsections that use stricter gates on narrower"
+            " denominators (e.g. n_losses in directional bias) may"
+            " still flag specific categories as insufficient."
+        )
 
     return "\n".join(lines)
 
@@ -1107,12 +1147,21 @@ def section_period(
         ):
             tb = stats.get("brier")
             if tb is None:
+                # Skip empty groups but still surface pipeline failures
+                # (n > 0 with zero valid parses). Otherwise the scorer's
+                # brier=None-on-valid_n==0 rule silently hides the tools
+                # that _sample_label now labels 'all malformed'.
+                if stats.get("n", 0) == 0:
+                    continue
+                lines.append(
+                    f"  - **{tool}**: N/A" f" (n={stats['n']}){_sample_label(stats)}"
+                )
                 continue
             at_b = at_tools.get(tool, {}).get("brier")
             lines.append(
                 f"  - **{tool}**: {tb:.4f}"
                 f"{_delta_str(tb, at_b)}"
-                f" (n={stats['n']})"
+                f" (n={stats['n']}){_sample_label(stats)}"
             )
 
     return "\n".join(lines)

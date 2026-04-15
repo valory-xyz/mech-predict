@@ -41,7 +41,11 @@ jobs:
     if: always() && !cancelled()
 
     steps:
+      # fetch-depth: 0 so `git show <tag>:packages/packages.json` works for
+      # every historical release — required by benchmark/release_map.py.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

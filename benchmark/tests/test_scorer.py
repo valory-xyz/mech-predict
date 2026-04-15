@@ -19,6 +19,7 @@
 """Tests for benchmark/scorer.py."""
 
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2089,6 +2090,31 @@ class TestModeSplit:
         tourn_ids = {r["row_id"] for r in tourn}
         assert prod_ids == {"p1", "p2"}
         assert tourn_ids == {"t1", "t2"}
+
+    def test_unknown_mode_routes_to_production_with_warning(self, caplog: Any) -> None:
+        """Unknown modes route to production but log a warning (once per mode).
+
+        :param caplog: pytest log capture fixture.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark import scorer as _scorer_mod
+        from benchmark.scorer import _partition_rows_by_mode
+
+        _scorer_mod._WARNED_UNKNOWN_MODES.clear()  # pylint: disable=protected-access
+        rows = [
+            _row(mode="shadow", row_id="s1"),
+            _row(mode="shadow", row_id="s2"),
+            _row(mode="staging", row_id="g1"),
+        ]
+        with caplog.at_level(logging.WARNING, logger="benchmark.scorer"):
+            prod, tourn = _partition_rows_by_mode(rows)
+
+        assert {r["row_id"] for r in prod} == {"s1", "s2", "g1"}
+        assert not tourn
+        # One warning per distinct unknown mode, not per row
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        modes_warned = {w.args[0] for w in warnings if w.args}
+        assert modes_warned == {"shadow", "staging"}
 
     def test_derive_tournament_path(self) -> None:
         """_derive_tournament_path appends _tournament to the stem."""

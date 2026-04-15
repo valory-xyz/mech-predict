@@ -760,6 +760,29 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Overall — Tournament" in report
         assert "## Tool Ranking — Tournament" in report
 
+    def test_empty_period_tournament_does_not_render_section(self) -> None:
+        """Tournament period files with zero rows don't emit empty sections.
+
+        scorer.score_period_split writes tournament period files on every
+        run; days with zero tournament rows in the window must not add a
+        dangling '## Since Last Report — Tournament' header.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        empty_period_tourn = {"total_rows": 0, "overall": {}}
+        report = generate_report(
+            prod,
+            [],
+            period_scores=None,
+            rolling_scores=None,
+            include_tournament=True,
+            scores_tournament=all_time_tourn,
+            period_scores_tournament=empty_period_tourn,
+            rolling_scores_tournament=empty_period_tourn,
+        )
+        assert "## Since Last Report — Tournament" not in report
+        assert "## Last 7 Days Rolling — Tournament" not in report
+
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)

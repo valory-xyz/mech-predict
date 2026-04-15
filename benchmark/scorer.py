@@ -39,6 +39,10 @@ DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
 PRODUCTION_MODE = "production_replay"
 TOURNAMENT_MODE = "tournament"
+_KNOWN_MODES = frozenset({PRODUCTION_MODE, TOURNAMENT_MODE})
+# Modes we've already logged a warning for, so a bad-data jsonl with 10k
+# identical unknown-mode rows doesn't spam the log 10k times.
+_WARNED_UNKNOWN_MODES: set[str] = set()
 
 
 def _derive_tournament_path(scores_path: Path) -> Path:
@@ -68,6 +72,13 @@ def _partition_rows_by_mode(
     tourn: list[dict[str, Any]] = []
     for row in rows:
         mode = row.get("mode") or PRODUCTION_MODE
+        if mode not in _KNOWN_MODES and mode not in _WARNED_UNKNOWN_MODES:
+            _WARNED_UNKNOWN_MODES.add(mode)
+            logging.getLogger(__name__).warning(
+                "Unknown mode %r — routing to production. If this is a new"
+                " mode, add it to _KNOWN_MODES and route it explicitly.",
+                mode,
+            )
         if mode == TOURNAMENT_MODE:
             tourn.append(row)
         else:

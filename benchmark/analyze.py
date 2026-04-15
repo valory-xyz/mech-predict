@@ -1213,7 +1213,7 @@ def generate_report(
 
     # Since Last Report
     sections.append(section_period(period_scores, scores, "Since Last Report"))
-    if render_tournament and period_scores_tournament is not None:
+    if render_tournament and _has_tournament_data(period_scores_tournament):
         sections.append(
             _relabel_heading(
                 section_period(
@@ -1227,7 +1227,7 @@ def generate_report(
 
     # Last 7 Days Rolling
     sections.append(section_period(rolling_scores, scores, "Last 7 Days Rolling"))
-    if render_tournament and rolling_scores_tournament is not None:
+    if render_tournament and _has_tournament_data(rolling_scores_tournament):
         sections.append(
             _relabel_heading(
                 section_period(

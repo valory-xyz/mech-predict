@@ -21,6 +21,9 @@
 from typing import Any
 
 from benchmark.analyze import (
+    ACTIVE_CATEGORIES,
+    OMEN_CATEGORIES,
+    POLYMARKET_ACTIVE_CATEGORIES,
     _parse_tvm_key,
     generate_report,
     section_best_predictions,
@@ -161,6 +164,44 @@ class TestSectionWeakSpots:
         assert "Skipped 2 legacy category label(s)" in result
         assert "crypto" in result
         assert "travel" in result
+
+
+class TestActiveCategoriesInvariants:
+    """Pin the contents of ACTIVE_CATEGORIES so accidental edits don't silently
+    shrink the filter set.
+
+    These assertions guard against the mutation: "remove a single label from
+    OMEN_CATEGORIES or POLYMARKET_ACTIVE_CATEGORIES" which the behavioural
+    weak-spots tests would not catch on its own.
+    """
+
+    def test_shared_categories_are_active(self) -> None:
+        """Categories emitted by both platforms must pass the filter."""
+        shared = {
+            "business",
+            "politics",
+            "science",
+            "technology",
+            "health",
+            "entertainment",
+            "weather",
+            "finance",
+            "international",
+        }
+        assert shared.issubset(ACTIVE_CATEGORIES)
+        assert shared.issubset(OMEN_CATEGORIES)
+        assert shared.issubset(POLYMARKET_ACTIVE_CATEGORIES)
+
+    def test_omen_only_categories_are_active(self) -> None:
+        """Categories emitted only by Omen's market creator must pass."""
+        omen_only = {"cryptocurrency", "sports", "sustainability", "pets"}
+        assert omen_only.issubset(ACTIVE_CATEGORIES)
+        assert omen_only.isdisjoint(POLYMARKET_ACTIVE_CATEGORIES)
+
+    def test_removed_labels_are_not_active(self) -> None:
+        """Labels removed from either upstream taxonomy must not be active."""
+        removed = {"travel", "crypto", "tech", "other", "economics", "fashion"}
+        assert removed.isdisjoint(ACTIVE_CATEGORIES)
 
 
 # ---------------------------------------------------------------------------

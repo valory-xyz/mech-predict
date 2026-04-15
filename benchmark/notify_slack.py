@@ -43,7 +43,18 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
-*Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes. Use release-tag labels as shown in the report (e.g. "v0.17.0 → v0.17.2"), include the tool name, mode (production_replay vs tournament), Brier Δ, and both sample sizes. Prioritize rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved"; skip rows marked ⚠ unless nothing else qualifies. Skip this section entirely if no Version Deltas section is in the report.
+*Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes, one bullet per row.
+
+REQUIRED bullet format — reproduce exactly, with both versions wrapped in backticks:
+• `tool-name` (mode): `baseline-label` → `candidate-label` — Brier Δ X.XXXX direction (n_b=X, n_c=X)
+
+Example (copy this style exactly):
+• `prediction-request-reasoning` (production_replay): `v0.16.5` → `v0.17.0` — Brier Δ -0.0725 improved (n_b=433, n_c=4485)
+
+Rules:
+- The baseline and candidate labels come verbatim from the Baseline and Candidate columns of the report's "**vs prior version:**" sub-table (they look like `v0.17.0` or `untagged@bafybei1`). Never invent labels, never truncate, never summarize them as generic "v1/v2".
+- Prefer rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved". Skip rows marked ⚠ unless nothing else qualifies — and if you do include a ⚠ row, lead the bullet with "small sample:".
+- Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
 
 *Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
 

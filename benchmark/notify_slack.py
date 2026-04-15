@@ -43,7 +43,9 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
-*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, full version hash in backticks, tournament Brier + n, production Brier + n, Brier delta. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
+*Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes. Use release-tag labels as shown in the report (e.g. "v0.17.0 → v0.17.2"), include the tool name, mode (production_replay vs tournament), Brier Δ, and both sample sizes. Prioritize rows where min(n_b, n_c) ≥ 300 and direction is "regressed" or "improved"; skip rows marked ⚠ unless nothing else qualifies. Skip this section entirely if no Version Deltas section is in the report.
+
+*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
 
 *Diagnostics:*
 If the report includes "Diagnostic Edge Metrics", summarize:

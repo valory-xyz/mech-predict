@@ -43,6 +43,8 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 
 *Weak categories:* list categories with Brier > 0.40 and brief note
 
+*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, full version hash in backticks, tournament Brier + n, production Brier + n, Brier delta. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
+
 *Diagnostics:*
 If the report includes "Diagnostic Edge Metrics", summarize:
 • Conditional accuracy: X% tool-wins when disagreeing (n=X) — when the tool would trigger a trade, how often is it closer to truth than the market?

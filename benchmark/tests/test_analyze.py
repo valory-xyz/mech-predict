@@ -684,3 +684,214 @@ class TestGenerateReportTournamentToggle:
         report = generate_report(s, [], rolling_scores=rolling, include_tournament=True)
         assert "Tool × Version × Mode (All-Time)" in report
         assert "Tool × Version × Mode (Last 7 Days)" in report
+
+
+# ---------------------------------------------------------------------------
+# Mode split: tournament sections and callouts (BENCHMARK_MODE_SPLIT_SPEC)
+# ---------------------------------------------------------------------------
+
+
+def _scores_with_tool(
+    tool: str,
+    brier: float,
+    n: int,
+    valid: int | None = None,
+    baseline: float = 0.25,
+) -> dict[str, Any]:
+    """Build a production scores dict with one by_tool entry."""
+    valid_n = n if valid is None else valid
+    return {
+        "generated_at": "2026-03-31T06:00:00Z",
+        "total_rows": n,
+        "valid_rows": valid_n,
+        "overall": {"brier": brier, "reliability": 0.95, "n": n},
+        "by_tool": {
+            tool: {
+                "brier": brier,
+                "baseline_brier": baseline,
+                "n": n,
+                "valid_n": valid_n,
+                "reliability": 0.95,
+                "directional_accuracy": 0.7,
+                "brier_skill_score": 0.0,
+            }
+        },
+        "by_platform": {},
+        "by_category": {},
+        "by_horizon": {},
+        "by_tool_platform": {},
+        "by_tool_version_mode": {},
+        "calibration": [],
+        "worst_10": [],
+        "best_10": [],
+        "parse_breakdown": {},
+        "latency_reservoir": {},
+    }
+
+
+def _tournament_scores_with_version(
+    tool: str,
+    version: str,
+    brier: float,
+    n: int,
+) -> dict[str, Any]:
+    """Build a tournament scores dict with one by_tool_version_mode cell."""
+    s = _scores_with_tool(tool, brier, n)
+    s["by_tool_version_mode"] = {
+        f"{tool} | {version} | tournament": {
+            "brier": brier,
+            "n": n,
+            "valid_n": n,
+            "directional_accuracy": 0.75,
+            "brier_skill_score": 0.1,
+        }
+    }
+    return s
+
+
+class TestTournamentCallouts:
+    """Tests for section_tournament_callouts."""
+
+    def test_empty_when_no_tournament_data(self) -> None:
+        """Missing tournament scores returns empty string."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        assert section_tournament_callouts(prod, None) == ""
+        assert section_tournament_callouts(prod, {"total_rows": 0}) == ""
+
+    def test_promotion_candidate_flagged(self) -> None:
+        """Tournament Brier meaningfully lower than production triggers a promotion bullet."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        result = section_tournament_callouts(prod, tourn)
+        assert "Promotion candidates:" in result
+        assert "tool-a" in result
+        assert "v2" in result
+        assert "Tournament regressions:" not in result
+
+    def test_tournament_regression_flagged(self) -> None:
+        """Tournament Brier meaningfully higher than production triggers a regression bullet."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 50)
+        result = section_tournament_callouts(prod, tourn)
+        assert "Tournament regressions:" in result
+        assert "Promotion candidates:" not in result
+
+    def test_suppressed_below_min_n(self) -> None:
+        """Tournament cells with n below CALLOUT_MIN_N are ignored."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        assert section_tournament_callouts(prod, tourn) == ""
+
+    def test_suppressed_within_delta_band(self) -> None:
+        """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
+        assert section_tournament_callouts(prod, tourn) == ""
+
+
+class TestGenerateReportWithTournamentFiles:
+    """Tests for generate_report dual-mode rendering."""
+
+    def test_tournament_sections_omitted_when_file_absent(self) -> None:
+        """No tournament inputs -> no '— Tournament' headings, no callouts."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(prod, [], include_tournament=True)
+        assert "— Tournament" not in report
+        assert "## Tournament Callouts" not in report
+
+    def test_tournament_sections_rendered_when_data_present(self) -> None:
+        """Tournament inputs with rows -> duplicated per-mode headings render."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Overall — Tournament" in report
+        assert "## Tool Ranking — Tournament" in report
+
+    def test_empty_period_tournament_does_not_render_section(self) -> None:
+        """Tournament period files with zero rows don't emit empty sections.
+
+        scorer.score_period_split writes tournament period files on every
+        run; days with zero tournament rows in the window must not add a
+        dangling '## Since Last Report — Tournament' header.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        empty_period_tourn = {"total_rows": 0, "overall": {}}
+        report = generate_report(
+            prod,
+            [],
+            period_scores=None,
+            rolling_scores=None,
+            include_tournament=True,
+            scores_tournament=all_time_tourn,
+            period_scores_tournament=empty_period_tourn,
+            rolling_scores_tournament=empty_period_tourn,
+        )
+        assert "## Since Last Report — Tournament" not in report
+        assert "## Last 7 Days Rolling — Tournament" not in report
+
+    def test_merged_tool_version_mode_includes_both_modes(self) -> None:
+        """Tool × Version × Mode table shows both production and tournament cells."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        prod["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 500,
+                "valid_n": 500,
+                "brier": 0.20,
+                "directional_accuracy": 0.7,
+                "brier_skill_score": 0.0,
+            }
+        }
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "v1" in report
+        assert "v2" in report
+
+    def test_callout_section_included_when_triggered(self) -> None:
+        """Promotion-worthy tournament data causes the callouts section to render."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Tournament Callouts" in report
+
+    def test_callout_section_omitted_when_empty(self) -> None:
+        """Tournament data present but within delta band -> no callout section."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
+        report = generate_report(
+            prod,
+            [],
+            include_tournament=True,
+            scores_tournament=tourn,
+        )
+        assert "## Tournament Callouts" not in report

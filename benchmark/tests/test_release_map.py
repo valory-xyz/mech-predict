@@ -253,6 +253,58 @@ class TestRunGhReleaseList:
             run_list("owner/repo", limit=200)
         assert not any("truncated" in rec.message for rec in caplog.records)
 
+    def test_timeout_returns_empty_list(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Catches TimeoutExpired, logs it, and yields an empty list."""
+        import subprocess  # pylint: disable=import-outside-toplevel
+
+        run_list = release_map._run_gh_release_list  # pylint: disable=protected-access
+        with (
+            caplog.at_level("WARNING", logger=release_map.log.name),
+            patch.object(
+                subprocess,
+                "check_output",
+                side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=15),
+            ),
+        ):
+            result = run_list("owner/repo", limit=200)
+        assert result == []
+        assert any("gh release list failed" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _run_git_show_packages_json diagnostics
+# ---------------------------------------------------------------------------
+
+
+class TestRunGitShow:
+    """Tests for _run_git_show_packages_json() call shape and error paths."""
+
+    # pylint: disable=protected-access
+    git_show_fn = staticmethod(release_map._run_git_show_packages_json)
+
+    def test_uses_refs_tags_prefix(self) -> None:
+        """Prefixes the revision with refs/tags/ to disambiguate."""
+        import subprocess  # pylint: disable=import-outside-toplevel
+
+        with patch.object(
+            subprocess, "check_output", return_value='{"dev": {}}'
+        ) as mock_co:
+            self.git_show_fn("v1.2.3")
+        args = mock_co.call_args.args[0]
+        assert args[:2] == ["git", "show"]
+        assert args[2] == "refs/tags/v1.2.3:packages/packages.json"
+
+    def test_timeout_returns_none(self) -> None:
+        """Catches TimeoutExpired and yields None (tag skipped)."""
+        import subprocess  # pylint: disable=import-outside-toplevel
+
+        with patch.object(
+            subprocess,
+            "check_output",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5),
+        ):
+            assert self.git_show_fn("v1.2.3") is None
+
 
 # ---------------------------------------------------------------------------
 # Caching

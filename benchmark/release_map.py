@@ -67,8 +67,13 @@ def _run_gh_release_list(repo: str, limit: int) -> list[dict[str, str]]:
             ],
             text=True,
             stderr=subprocess.PIPE,
+            timeout=15,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as err:
         stderr = getattr(err, "stderr", "") or ""
         log.warning("gh release list failed: %s | stderr=%s", err, stderr.strip())
         return []
@@ -96,11 +101,16 @@ def _run_git_show_packages_json(tag: str) -> dict[str, Any] | None:
     """
     try:
         out = subprocess.check_output(
-            ["git", "show", f"{tag}:packages/packages.json"],
+            ["git", "show", f"refs/tags/{tag}:packages/packages.json"],
             text=True,
             stderr=subprocess.PIPE,
+            timeout=5,
         )
-    except (subprocess.CalledProcessError, FileNotFoundError) as err:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as err:
         # Tag missing packages.json, shallow clone, or git unavailable.
         # All treated as "skip this tag". Debug-level so early tags that
         # legitimately predate packages.json don't spam WARN every run.

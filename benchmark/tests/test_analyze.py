@@ -332,6 +332,62 @@ class TestActiveCategoriesInvariants:
         removed = {"travel", "crypto", "tech", "other", "economics", "fashion"}
         assert removed.isdisjoint(ACTIVE_CATEGORIES)
 
+    def test_omen_categories_exact_membership(self) -> None:
+        """Pin the exact OMEN_CATEGORIES set.
+
+        The subset / disjoint assertions elsewhere in this class cover
+        well-known groupings but let a single-label add or drop slip
+        through unnoticed. Asserting equality against the full expected
+        set fails immediately on any membership mutation.
+        """
+        expected = frozenset(
+            {
+                "business",
+                "cryptocurrency",
+                "politics",
+                "science",
+                "technology",
+                "trending",
+                "social",
+                "health",
+                "sustainability",
+                "internet",
+                "food",
+                "pets",
+                "animals",
+                "curiosities",
+                "economy",
+                "arts",
+                "entertainment",
+                "weather",
+                "sports",
+                "finance",
+                "international",
+            }
+        )
+        assert OMEN_CATEGORIES == expected
+
+    def test_polymarket_active_categories_exact_membership(self) -> None:
+        """Pin the exact POLYMARKET_ACTIVE_CATEGORIES set.
+
+        Same rationale as the Omen equality test above: catches single-
+        label mutations that subset/disjoint checks miss.
+        """
+        expected = frozenset(
+            {
+                "business",
+                "politics",
+                "science",
+                "technology",
+                "health",
+                "entertainment",
+                "weather",
+                "finance",
+                "international",
+            }
+        )
+        assert POLYMARKET_ACTIVE_CATEGORIES == expected
+
 
 # ---------------------------------------------------------------------------
 # section_trend
@@ -535,13 +591,23 @@ class TestSectionPeriod:
                 assert "superforcaster" not in line
 
     def test_all_malformed_tool_gets_distinct_label(self) -> None:
-        """Tool with n above gate but valid_n == 0 is 'all malformed'."""
+        """Tool with n above gate but valid_n == 0 is 'all malformed'.
+
+        Uses ``brier=None`` because that is what the scorer emits when
+        ``valid_n == 0`` (see scorer._derive_group). Any fixture that
+        passes a numeric brier alongside valid_n=0 would be scorer-
+        impossible and would let the test pass by traversing the
+        wrong branch in ``section_period``.
+        """
         period = self._period(
-            {"resolve-market-jury-v1": {"n": 55, "valid_n": 0, "brier": 0.42}}
+            {"resolve-market-jury-v1": {"n": 55, "valid_n": 0, "brier": None}}
         )
         result = section_period(period, self._alltime(), "Since Last Report")
+        assert "resolve-market-jury-v1" in result
         assert "⚠ all malformed" in result
         assert "⚠ low sample" not in result
+        # Brier must render as N/A for a scorer-impossible-otherwise group.
+        assert "N/A" in result
 
 
 # ---------------------------------------------------------------------------

@@ -1023,6 +1023,15 @@ def section_period(
         ):
             tb = stats.get("brier")
             if tb is None:
+                # Skip empty groups but still surface pipeline failures
+                # (n > 0 with zero valid parses). Otherwise the scorer's
+                # brier=None-on-valid_n==0 rule silently hides the tools
+                # that _sample_label now labels 'all malformed'.
+                if stats.get("n", 0) == 0:
+                    continue
+                lines.append(
+                    f"  - **{tool}**: N/A" f" (n={stats['n']}){_sample_label(stats)}"
+                )
                 continue
             at_b = at_tools.get(tool, {}).get("brier")
             lines.append(

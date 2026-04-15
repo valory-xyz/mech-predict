@@ -25,11 +25,13 @@ from benchmark.analyze import (
     OMEN_CATEGORIES,
     POLYMARKET_ACTIVE_CATEGORIES,
     _parse_tvm_key,
+    _sample_label,
     generate_report,
     section_best_predictions,
     section_latency,
     section_overall,
     section_parse_breakdown,
+    section_period,
     section_sample_size_warnings,
     section_tool_version_breakdown,
     section_trend,
@@ -100,6 +102,59 @@ class TestSectionOverall:
         """Test all invalid predictions."""
         result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
         assert "N/A" in result  # Brier is N/A
+
+    def test_no_signal_rate_small_value_renders_two_decimals(self) -> None:
+        """No-signal rate formats with 2 decimal places.
+
+        Previously rendered as ':.0%' which rounded tiny-but-nonzero
+        rates like 0.00072 to '0%' even though the count shown next to
+        it was clearly positive. Two decimals surface values in the
+        0.01%-1% range where the no-signal rate typically lives.
+        See BENCHMARK_REPORT_FIXES.md §4.
+        """
+        s = _scores(brier=0.3, reliability=0.95)
+        s["overall"]["no_signal_rate"] = 0.00072
+        s["overall"]["no_signal_count"] = 142
+        result = section_overall(s)
+        assert "0.07%" in result
+        assert "142 predictions at exactly 0.5" in result
+        # Make sure the rendered value is not the stale '0%' form.
+        assert "No-signal rate: 0%" not in result
+
+
+# ---------------------------------------------------------------------------
+# _sample_label
+# ---------------------------------------------------------------------------
+
+
+class TestSampleLabel:
+    """Tests for _sample_label.
+
+    Guards against the regression where tools with a large total n but
+    zero valid parses were labelled 'low sample' (misleading: the real
+    problem is that every row was malformed, not that the sample was
+    too small). See BENCHMARK_REPORT_FIXES.md §2.
+    """
+
+    def test_low_sample_below_gate(self) -> None:
+        """valid_n below MIN_SAMPLE_SIZE renders 'low sample'."""
+        assert _sample_label({"n": 5, "valid_n": 5}) == " ⚠ low sample"
+
+    def test_all_malformed_large_n(self) -> None:
+        """n large, valid_n == 0 renders 'all malformed', not 'low sample'."""
+        assert _sample_label({"n": 55, "valid_n": 0}) == " ⚠ all malformed"
+
+    def test_sufficient_returns_empty(self) -> None:
+        """valid_n at or above the gate renders no label."""
+        assert _sample_label({"n": 100, "valid_n": 80}) == ""
+
+    def test_small_n_all_malformed_falls_through_to_low_sample(self) -> None:
+        """n below gate with valid_n==0 stays as 'low sample'.
+
+        'all malformed' only applies when there is enough volume to be
+        confident the malformed-ness is systemic, not just a tiny tail.
+        """
+        assert _sample_label({"n": 3, "valid_n": 0}) == " ⚠ low sample"
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +323,120 @@ class TestSectionSampleSizeWarnings:
         assert "4 questions" in result
 
     def test_large_category_not_warned(self) -> None:
-        """Test large category produces no warning."""
+        """Large category triggers the 'all categories sufficient' copy.
+
+        The copy is deliberately explicit that the gate here is total
+        category rows, not the narrower denominators used by subsections
+        like directional bias; a reader should not treat this line as
+        contradicting a per-subsection 'insufficient data' note.
+        """
         s = _scores(
             by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
         )
         result = section_sample_size_warnings(s)
-        assert "sufficient sample size" in result
+        assert "category reporting gate" in result
+        assert "directional bias" in result
+
+    def test_threshold_value_embedded_in_copy(self) -> None:
+        """The 'at least N' copy should quote the active threshold."""
+        s = _scores(
+            by_category={"crypto": {"brier": 0.3, "n": 200, "reliability": 1.0}}
+        )
+        result = section_sample_size_warnings(s)
+        # Threshold SAMPLE_SIZE_WARNING = 20 in analyze.py
+        assert "at least 20" in result
+
+
+# ---------------------------------------------------------------------------
+# section_period
+# ---------------------------------------------------------------------------
+
+
+class TestSectionPeriod:
+    """Tests for section_period per-tool bullet rendering.
+
+    Guards against the regression where 'Since Last Report' rendered
+    tools with n=1 or n=8 alongside tools with n>=30 without any
+    low-sample marker, making it trivial to read noise as signal.
+    See BENCHMARK_REPORT_FIXES.md §3.
+    """
+
+    @staticmethod
+    def _period(by_tool: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Build a minimal period_scores dict for section_period."""
+        total_n = sum(t["n"] for t in by_tool.values())
+        total_valid = sum(t["valid_n"] for t in by_tool.values())
+        return {
+            "overall": {
+                "n": total_n,
+                "valid_n": total_valid,
+                "brier": 0.2,
+                "log_loss": 0.5,
+            },
+            "by_tool": by_tool,
+        }
+
+    @staticmethod
+    def _alltime() -> dict[str, Any]:
+        """Minimal all-time scores for delta comparison."""
+        return {"overall": {"brier": 0.25, "log_loss": 0.6}, "by_tool": {}}
+
+    def test_tiny_tool_flagged_as_low_sample(self) -> None:
+        """Tool with n=1 in the period gets a low-sample marker."""
+        period = self._period(
+            {
+                "prediction-online-sme": {
+                    "n": 1,
+                    "valid_n": 1,
+                    "brier": 0.1875,
+                },
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "prediction-online-sme" in result
+        assert "⚠ low sample" in result
+
+    def test_sufficient_tool_not_flagged(self) -> None:
+        """Tool with valid_n above the gate gets no marker."""
+        period = self._period(
+            {
+                "superforcaster": {
+                    "n": 95,
+                    "valid_n": 95,
+                    "brier": 0.22,
+                },
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "superforcaster" in result
+        assert "⚠" not in result
+
+    def test_mixed_population_flags_only_small_ones(self) -> None:
+        """Only tools below the gate should carry the marker."""
+        period = self._period(
+            {
+                "superforcaster": {"n": 95, "valid_n": 95, "brier": 0.22},
+                "prediction-online-sme": {"n": 1, "valid_n": 1, "brier": 0.19},
+            }
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        # Count markers: exactly one (on the small tool).
+        assert result.count("⚠") == 1
+        # The marker must be on the line that names the small tool,
+        # not the line that names superforcaster.
+        for line in result.splitlines():
+            if "⚠" in line:
+                assert "prediction-online-sme" in line
+                assert "superforcaster" not in line
+
+    def test_all_malformed_tool_gets_distinct_label(self) -> None:
+        """Tool with n above gate but valid_n == 0 is 'all malformed'."""
+        period = self._period(
+            {"resolve-market-jury-v1": {"n": 55, "valid_n": 0, "brier": 0.42}}
+        )
+        result = section_period(period, self._alltime(), "Since Last Report")
+        assert "⚠ all malformed" in result
+        assert "⚠ low sample" not in result
 
 
 # ---------------------------------------------------------------------------

@@ -4,109 +4,148 @@ Findings from Pi's review of the 2026-04-15 benchmark report
 (run `24440270163`, artifact `6445429063`) and follow-up proposal on
 report cadence.
 
-Verified by downloading the artifact and tracing each claim to the
-responsible code path.
+Each finding was verified by downloading the artifact and tracing the
+responsible code path. Fixes in this branch cover issues 1-4. Issue 5
+is a design change that needs Pi's buy-in before building.
 
 ---
 
-## 1. Artifact mismatch — inflated scores from lost dedup state (P1)
+## 1. `scores.json` inflated by dropped state files (P1)
 
-**Symptom**
+### Symptom
 
-- `scores.json` reports `total_rows = 197,334`, `valid_rows = 191,173`
-- `scored_row_ids.json` contains only `23,206` IDs
-- The 23,206 IDs overlap 100% with this run's input log
-  (`production_log_2026_04_15.jsonl`, covering 2026-04-08 to 2026-04-15)
+- `scores.json` reports `total_rows = 197,334`, `valid_rows = 191,173`.
+- `scored_row_ids.json` contains only `23,206` IDs.
+- Those 23,206 IDs overlap 100% with this run's input log
+  (`production_log_2026_04_15.jsonl`, covering 2026-04-08 to
+  2026-04-15, i.e. exactly the 7-day fetch lookback).
 
-**Root cause**
+### Root cause
 
-Not a force rebuild. Workflow log shows `FORCE_REBUILD:` empty. The
-actual cause: the **previous** `benchmark-data` artifact contained only
-`scores.json` and `report.md`. The "Extracting" step at 07:25:55 shows:
+Not a force rebuild. Workflow log shows `FORCE_REBUILD:` empty.
+Two latent bugs in the workflow, each harmless on its own, compounded:
+
+**Bug A: `.fetch_state.json` is a hidden file and `upload-artifact@v4`
+drops it by default.** The workflow lists it under `path:` but v4
+introduced `include-hidden-files: false` as the default. Files that
+start with a dot are silently filtered out of the uploaded zip. Every
+cron run starts with no fetch cursor, logs
+`Loaded 0 existing row IDs for deduplication (state_loss=True)`, and
+re-fetches the full 7-day lookback from the subgraph.
+
+**Bug B: `scored_row_ids.json` was not in the upload list.** Commit
+`7cd019ef` (2026-04-09 18:30 IST) split the dedup set out of
+`scores.json` into its own file but did not update the workflow's
+upload step. From Apr 9 through Apr 14, `scored_row_ids.json` was
+created on disk every run but never persisted across runs. Commit
+`5ba99629` (2026-04-14 19:16 IST) added it to the upload list. Apr 15
+06:39 UTC was the first cron that actually uploaded it (3 files in
+the artifact instead of 2).
+
+Alone, either bug is benign:
+
+- If `.fetch_state.json` survived but dedup did not, the fetch would
+  use the cursor and not fetch duplicates, so no double-count.
+- If dedup survived but `.fetch_state.json` did not, `update()` would
+  drop the duplicates the refetch dragged in.
+
+Combined, every run refetches the same ~21K rows and merges them onto
+the accumulators with no memory of what it already saw. Five days of
+that compounds into the observed 197,334.
+
+### Why the Apr 15 artifact "looks fixed"
+
+Apr 15 was the first run where `scored_row_ids.json` was uploaded, so
+the dedup file going forward will persist. But:
+
+- `scores.json` is still the same file that accumulated five days of
+  double-counts before Bug B was fixed. `total_rows` is still polluted.
+- `.fetch_state.json` is still a hidden file, so Bug A is still active.
+  The dedup now saves us from new double-counting, but every run
+  continues to refetch ~21K rows from the subgraph unnecessarily. If
+  dedup ever fails again (schema change, partial artifact, etc.) the
+  double-counting resumes immediately.
+
+### Fix (applied in this branch)
+
+1. `.github/workflows/benchmark_flywheel.yaml`: add
+   `include-hidden-files: true` to the `benchmark-data` upload step.
+   Unblocks `.fetch_state.json`.
+
+### Fix (manual, requires triggering CI)
+
+2. Once this branch is merged, trigger one `workflow_dispatch` run with
+   `force_rebuild=true`. That wipes `scores.json`,
+   `scores_history.jsonl`, and `scored_row_ids.json`, then rebuilds
+   from raw logs via `scorer.rebuild()`. After the run, `total_rows`
+   should equal `len(scored_row_ids.json)` (give or take rows without
+   `row_id`, which should be zero since `fetch_production._make_row_id`
+   guarantees one per row).
+
+### How to verify the workflow fix
+
+Next cron run's upload step log should say:
 
 ```
-inflating: benchmark/results/scores.json
-inflating: benchmark/results/report.md
-##[endgroup]
+With the provided path, there will be 4 files uploaded
 ```
 
-Missing from the downloaded artifact:
+(5 if the month rollover has created `scores_history.jsonl`.) Download
+the artifact and confirm `.fetch_state.json` is present. The next run
+after that should log `state_loss=False` and the "Loaded N existing
+row IDs" line should show N close to the cumulative count, not zero.
 
-- `benchmark/results/scored_row_ids.json`
-- `benchmark/results/scores_history.jsonl`
-- `benchmark/datasets/.fetch_state.json`
+### How to verify the recovery rebuild
 
-Consequences:
+After the `force_rebuild=true` run:
 
-1. `fetch_production` logged
-   `Loaded 0 existing row IDs for deduplication (state_loss=True)` and
-   re-fetched the full 7-day lookback.
-2. `scorer.update()` called `_load_dedup_ids()` on a missing file →
-   returned an empty set → every one of the 23,206 rows was merged onto
-   the existing ~174K accumulators in `scores.json` with **zero
-   deduplication**.
-3. Previous runs had the same problem, so `scores.json` has been
-   compounding double-counts from overlapping 7-day windows.
-4. `scores_history.jsonl` (monthly snapshots) is lost each time the
-   artifact is incomplete.
+```bash
+python3 -c "
+import json
+s = json.load(open('benchmark/results/scores.json'))
+ids = json.load(open('benchmark/results/scored_row_ids.json'))
+print('scores total :', s['total_rows'])
+print('dedup count  :', len(ids))
+print('match        :', s['total_rows'] == len(ids))
+"
+```
 
-`actions/upload-artifact@v4` silently skips missing files in its `path:`
-list, so once any of these files fails to exist at upload time, every
-subsequent run downloads a partial artifact, omits the same files on
-upload, and the corruption self-perpetuates.
+Expect the two numbers to match. A drift of more than ~10 means
+something still persists stale state.
 
-**Fix**
-
-1. In `.github/workflows/benchmark_flywheel.yaml`, make the upload step
-   fail (or loudly warn) when any of the tracked state files is missing.
-   Options:
-   - `actions/upload-artifact@v4` has `if-no-files-found: error` — set
-     it. But that applies to the whole path glob, not per-file. Need to
-     check explicit file existence with a pre-upload shell step.
-   - Add a step before upload that `test -f` each required file and
-     fails fast with a clear message when one is missing.
-2. Investigate the prior run(s) where the three files stopped being
-   uploaded. Find the root cause there (disk cleanup, a crashed step,
-   or a path change) and fix at source.
-3. One-shot recovery: trigger a `force_rebuild=true` run so
-   `scores.json`, `scores_history.jsonl`, and `scored_row_ids.json` are
-   regenerated from raw logs. Until this runs, all reported numbers
-   since the corruption began are unreliable.
-4. Add a self-check inside `scorer.update()`: if
-   `len(scored_row_ids) < scores["total_rows"]` by more than
-   `rows_without_row_id`, log a warning. Today the mismatch is silent.
-
-**Files**
+**Files touched:**
 
 - `.github/workflows/benchmark_flywheel.yaml`
-- `benchmark/scorer.py` (`update()` self-check, ~line 1555)
-- `benchmark/datasets/fetch_production.py` (optional: cross-check
-  `scored_row_ids` size vs scores total)
 
 ---
 
-## 2. Misclassified "low sample" warning (P1)
+## 2. "Low sample" label misapplied to tools with all-malformed output (P1)
 
-**Symptom**
+### Symptom
 
-Tools with a large `n` but zero valid parses render as
-`⚠ low sample`, same label as tools with e.g. `n=5`. Example from a
-prior run: `resolve-market-jury-v1 (n=55) ⚠ low sample` — the real
-issue is 100% malformed output.
+Tools with a large `n` but zero valid parses render as `⚠ low sample`,
+same label as tools with e.g. `n=5`. Example from a prior report:
 
-**Root cause**
+```
+14. resolve-market-jury-v1 — N/A (n=55) ⚠ low sample
+```
 
-`_sample_label()` in `benchmark/analyze.py:125-129` keys off
-`decision_worthy`, which `scorer.py:1058` defines as
-`valid_n >= MIN_SAMPLE_SIZE`. Any tool with `valid_n == 0` (all
-malformed) fails this check regardless of total `n`.
+The real issue here is 100% malformed output (a pipeline failure),
+not insufficient volume.
 
-**Fix**
+### Root cause
+
+`_sample_label()` in `benchmark/analyze.py` (before fix, line ~125)
+branched only on `decision_worthy`, which `scorer.py:1058` defines as
+`valid_n >= MIN_SAMPLE_SIZE`. Any tool with `valid_n == 0` flunks that
+check regardless of total `n`.
+
+### Fix (applied in this branch)
 
 Split the label into two cases:
 
 ```python
-def _sample_label(stats: dict[str, Any]) -> str:
+def _sample_label(stats):
     n = stats.get("n", 0)
     valid_n = stats.get("valid_n", 0)
     if n >= MIN_SAMPLE_SIZE and valid_n == 0:
@@ -116,163 +155,166 @@ def _sample_label(stats: dict[str, Any]) -> str:
     return ""
 ```
 
-Also consider a third case (`valid_n > 0` but `< MIN_SAMPLE_SIZE` while
-`n >= MIN_SAMPLE_SIZE`): that's "mostly malformed", different from both.
+### How to verify
 
-**Files**
+Unit tests added in `benchmark/tests/test_analyze.py::TestSampleLabel`:
 
-- `benchmark/analyze.py` (`_sample_label`, ~line 125)
+- `n=5, valid_n=5` renders ` ⚠ low sample`.
+- `n=55, valid_n=0` renders ` ⚠ all malformed`.
+- `n=100, valid_n=80` renders empty.
+- `n=3, valid_n=0` still renders ` ⚠ low sample` (not enough volume
+  to confidently call "all malformed").
+
+**Files touched:**
+
+- `benchmark/analyze.py`
+- `benchmark/tests/test_analyze.py`
 
 ---
 
 ## 3. Inconsistent sample-size messaging (P2)
 
-**Symptom**
+### Symptoms
 
-- "Since Last Report" section lists tools with `n=1`, `n=8` with no
-  low-sample flag.
-- The final sample-size-warnings line says "All categories have
-  sufficient sample size" while the directional-bias subsection above it
-  lists several categories as "insufficient data".
+**3a.** "Since Last Report" section lists tools with `n=1`, `n=8` with
+no low-sample flag, even though other sections flag similar cases.
 
-**Root cause**
+**3b.** The final sample-size-warnings line says "All categories have
+sufficient sample size" while the directional-bias subsection above
+lists several categories as "insufficient data". Reads as a
+contradiction.
 
-Two separate issues:
+### Root cause
 
-a. `section_period()` in `benchmark/analyze.py:916-932` renders per-tool
-   bullets as `**{tool}**: {brier} ... (n={stats['n']})` with no
-   sample-size gate. Tool ranking and version-breakdown sections both
-   flag low samples; this one doesn't.
+**3a.** `section_period()` in `benchmark/analyze.py` rendered per-tool
+bullets without calling `_sample_label`. Tool ranking and
+tool-version-breakdown sections both flag low samples; this one
+did not.
 
-b. The two messages use different thresholds and denominators but read
-   as contradictory. `section_sample_size_warnings()` uses
-   `SAMPLE_SIZE_WARNING = 20` on **total category `n`**. The directional
-   bias subsection uses `MIN_SAMPLE_SIZE = 30` on **`n_losses` within
-   that category**. Both are technically correct but the wording doesn't
-   make the distinction obvious.
+**3b.** The two messages use different thresholds and different
+denominators, both correct:
 
-**Fix**
+- `section_sample_size_warnings()` uses `SAMPLE_SIZE_WARNING = 20` on
+  **total category `n`** (the reporting gate for including a category
+  at all).
+- The directional-bias subsection uses `MIN_SAMPLE_SIZE = 30` on
+  **`n_losses` within that category** (a narrower denominator: rows
+  where the tool and market disagreed AND the market was closer to
+  truth).
 
-a. Add a low-sample flag to `section_period()` per-tool bullets. Use
-   the same `_sample_label` logic as the ranking section (after it's
-   fixed per issue #2). Alternatively, skip rendering tools below a
-   threshold entirely — preferable if paired with the rolling-window
-   digest proposal (section 5).
+Both checks answer different questions but the old wording treated
+the category-level gate as if it spoke for the whole report.
 
-b. Reword the final sample-size line to be explicit about what it
-   checks. For example:
+### Fix (applied in this branch)
 
-   ```
-   All categories have at least 20 scored predictions (sample size
-   gate for reporting). Categories may still appear as "insufficient
-   data" in subsections that use stricter thresholds on a narrower
-   denominator (e.g. n_losses in directional bias).
-   ```
+**3a.** Add `_sample_label(stats)` to the per-tool bullet format
+string in `section_period`. Same marker logic as everywhere else.
 
-   Or: consolidate both checks into a single table showing each
-   category's `n`, `n_valid`, `n_losses`, with a row-level flag when any
-   cell fails its gate.
+**3b.** Reword the default line to be explicit about which gate it
+checks and that stricter subsection gates exist:
 
-**Files**
+```
+All categories have at least 20 total questions (the category
+reporting gate). Subsections that use stricter gates on narrower
+denominators (e.g. n_losses in directional bias) may still flag
+specific categories as insufficient.
+```
 
-- `benchmark/analyze.py` (`section_period`, ~line 881;
-  `section_sample_size_warnings`, ~line 365;
-  `_render_directional_bias`, ~line 615)
+### How to verify
+
+Unit tests:
+
+- `TestSectionPeriod::test_tiny_tool_flagged_as_low_sample` — period
+  with a `n=1` tool renders `⚠ low sample`.
+- `TestSectionPeriod::test_sufficient_tool_not_flagged` — period with a
+  `n=95, valid_n=95` tool renders no marker.
+- `TestSectionPeriod::test_mixed_population_flags_only_small_ones` —
+  only the small tool's line carries the marker.
+- `TestSectionPeriod::test_all_malformed_tool_gets_distinct_label` —
+  `n=55, valid_n=0` renders `⚠ all malformed`.
+- `TestSectionSampleSizeWarnings::test_large_category_not_warned` —
+  updated to assert the new wording mentions the category reporting
+  gate and directional bias explicitly.
+- `TestSectionSampleSizeWarnings::test_threshold_value_embedded_in_copy`
+  — guards against the threshold drifting out of the user-facing copy.
+
+**Files touched:**
+
+- `benchmark/analyze.py`
+- `benchmark/tests/test_analyze.py`
 
 ---
 
-## 4. No-signal rate display rounds to 0% (P3)
+## 4. No-signal rate rendered as 0% (P3)
 
-**Symptom**
+### Symptom
 
-Report shows `No-signal rate: 0%` even when the underlying rate is
-0.0007 (about 0.07%) and `no_signal_count > 0`.
+Report shows `No-signal rate: 0%` while the count next to it shows
+positive entries (e.g. 142). Underlying rate is 0.00072 ≈ 0.07%.
 
-**Root cause**
+### Root cause
 
-`benchmark/analyze.py:85`:
+`benchmark/analyze.py` (before fix, line ~85):
 
 ```python
 no_sig_str = f"{no_sig:.0%}" if no_sig is not None else "N/A"
 ```
 
-`:.0%` rounds to whole percentage points.
+`:.0%` rounds to whole percentage points. No-signal rate typically
+lives in the 0.01%–1% range, so coarse formatting prints "0%".
 
-**Fix**
+### Fix (applied in this branch)
 
-Switch to `:.2%` (shows two decimals of percentage — 0.07%) or
-`:.1%` (one decimal — 0.1%). `:.2%` preserves granularity while keeping
-the label consistent with other percentage fields.
+Switch to `:.2%`. Two decimals cover the expected range while leaving
+the count visible next to it for precise values.
 
-Matching fields elsewhere in the file use `:.0%` deliberately for
-coarse rates like `reliability` and `directional_accuracy`. No-signal
-rate is usually near zero, so it needs finer resolution.
+### How to verify
 
-**Files**
+Unit test
+`TestSectionOverall::test_no_signal_rate_small_value_renders_two_decimals`:
+feed `no_signal_rate=0.00072, no_signal_count=142`, assert the rendered
+section contains the literal `0.07%` and does not contain
+`No-signal rate: 0%`.
 
-- `benchmark/analyze.py` (~line 85)
+**Files touched:**
+
+- `benchmark/analyze.py`
+- `benchmark/tests/test_analyze.py`
 
 ---
 
-## 5. Report cadence — Pi's proposal (P2, design change)
+## 5. Report cadence (not fixed in this branch)
 
-**Pi's suggestion**
+Pi proposed: daily report shows only tools with "significant new data";
+full report weekly on Mondays.
 
-Daily report shows only tools with "significant new data" since last
-report. Full per-tool × per-platform report on Mondays.
+Direction is right (daily deltas on tools with `n=1`/`n=8` are pure
+noise), but "tools with new data" alone isn't the right filter:
+superforcaster's 95 new rows barely move a 22K-row aggregate, and a
+tool that drops to zero deliveries would disappear silently.
 
-**Why it's in the right direction**
+Counter-proposal for discussion with Pi:
 
-Today's "Since Last Report" section is mostly noise. Only superforcaster
-had meaningful new volume (95 rows); the others had 1, 8, 1. Deltas on
-`n=1` or `n=8` carry no statistical signal.
-
-**Where "new volume" alone isn't enough**
-
-- Superforcaster's 95 new rows is meaningful by volume but barely moves
-  its 22K-row all-time aggregate. Volume filter still lets in noise.
-- A tool that silently drops to 0 deliveries would disappear from the
-  daily view. That's an incident signal we'd want to catch.
-- Weekly rollup doesn't fix the `n=1/n=8` problem either — over 7 days
-  those tools might have 7/56 rows, still below the statistical gate.
-
-**Counter-proposal**
-
-1. Drop "Since Last Report" from the daily Slack digest. Replace it
-   with the 7-day rolling window already computed as `rolling_scores`.
-   Daily deltas are too noisy; 7-day gives a stable baseline.
-2. In the Slack digest, only surface tools that pass **both** gates:
-   - `n_new >= 30` in the rolling window
-   - `|brier_rolling - brier_alltime| > material_threshold`
-     (tune empirically, e.g. 0.02)
-
-   Everything else collapses into one line: "5 tools unchanged within
-   noise". Nothing disappears silently — tools with zero new data get
-   flagged as "no new deliveries" explicitly.
+1. Drop "Since Last Report" from the daily Slack digest. Use the
+   existing `rolling_scores` (last 7 days) as the baseline.
+2. In the digest, only surface tools that pass both
+   `n_new >= 30 in the rolling window` AND
+   `|brier_rolling - brier_alltime| > material_threshold`. Everything
+   else collapses to one line ("5 tools unchanged within noise"), so
+   nothing disappears silently.
 3. On Mondays, add a "vs last Monday" block on top of the same rolling
-   view. No second pipeline — just an extra section that only renders
-   when `today.weekday() == Monday`.
-4. Keep `report.md` generated daily with all tools, no filtering.
-   Anyone wanting the full breakdown opens the artifact. The Slack
-   digest is the only surface that filters.
+   view. No second pipeline.
+4. Keep `report.md` unfiltered daily. The digest is the only surface
+   that filters.
 
-**Files**
-
-- `benchmark/notify_slack.py` (filtering logic for the digest)
-- `benchmark/analyze.py` (`section_period` — either drop or keep for
-  the full `report.md` but not the Slack digest)
-- `.github/workflows/benchmark_flywheel.yaml` (no change to cadence,
-  the Monday block is driven in-code)
+Wait on Pi's buy-in before building.
 
 ---
 
 ## Priority order
 
-1. Issue #1 — actively corrupting `scores.json`. Fix the workflow
-   artifact upload first, then trigger a force rebuild.
-2. Issue #2 — wrong label on visible output, one-line fix.
-3. Issue #3a — missing low-sample flag in `section_period`, one-line
-   fix. #3b (wording) can wait.
-4. Issue #4 — formatter fix, one-line.
-5. Issue #5 — design change, needs Pi's buy-in on the counter-proposal
-   before building.
+1. Issue #1 — workflow fix is in this branch. The manual
+   `force_rebuild=true` run needs to happen after merge so the
+   existing polluted `scores.json` is reset.
+2. Issues #2-4 — in this branch with tests.
+3. Issue #5 — pending design discussion.

@@ -167,11 +167,16 @@ jobs:
             --rolling benchmark/results/rolling_scores.json \
             --include-tournament
 
-      # Upload state + scores (small, needed for next run)
+      # Upload state + scores (small, needed for next run).
+      # include-hidden-files: true is required so .fetch_state.json
+      # (leading dot = hidden under v4's default filter) actually ships
+      # in the artifact. Without it, the incremental fetch cursor is
+      # silently dropped every run and the scorer compounds double-counts.
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-data
+          include-hidden-files: true
           path: |
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json

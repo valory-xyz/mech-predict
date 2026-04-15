@@ -130,7 +130,7 @@ def section_overall(scores: dict[str, Any]) -> str:
         else "N/A"
     )
     no_sig = o.get("no_signal_rate")
-    no_sig_str = f"{no_sig:.0%}" if no_sig is not None else "N/A"
+    no_sig_str = f"{no_sig:.2%}" if no_sig is not None else "N/A"
     ll = o.get("log_loss")
     ll_str = f"{ll:.4f}" if ll is not None else "N/A"
     sharp_str = f"{o['sharpness']:.4f}" if o.get("sharpness") is not None else "N/A"
@@ -171,8 +171,22 @@ def section_overall(scores: dict[str, Any]) -> str:
 
 
 def _sample_label(stats: dict[str, Any]) -> str:
-    """Return a sample-size label for ranking context."""
-    if stats.get("decision_worthy") is False:
+    """Return a sample-size label for ranking context.
+
+    Splits the previously single "⚠ low sample" label into two cases so
+    tools with many rows but zero valid parses are not mistaken for a
+    small-sample problem:
+
+    - n >= MIN_SAMPLE_SIZE and valid_n == 0: all rows malformed, a
+      pipeline issue, not a sample size issue.
+    - valid_n < MIN_SAMPLE_SIZE: genuinely too few valid predictions
+      to draw conclusions.
+    """
+    n = stats.get("n", 0)
+    valid_n = stats.get("valid_n", 0)
+    if n >= MIN_SAMPLE_SIZE and valid_n == 0:
+        return " ⚠ all malformed"
+    if valid_n < MIN_SAMPLE_SIZE:
         return " ⚠ low sample"
     return ""
 
@@ -423,7 +437,14 @@ def section_trend(
 
 
 def section_sample_size_warnings(scores: dict[str, Any]) -> str:
-    """Generate the sample size warnings section."""
+    """Generate the sample size warnings section.
+
+    Gate: total rows per category < SAMPLE_SIZE_WARNING. Subsections
+    like directional bias apply stricter gates on narrower denominators
+    (e.g. n_losses within a category); the wording below makes that
+    explicit so the "all categories sufficient" line does not read as
+    contradicting a per-subsection "insufficient data" note.
+    """
     lines = ["## Sample Size Warnings", ""]
     found = False
 
@@ -431,11 +452,18 @@ def section_sample_size_warnings(scores: dict[str, Any]) -> str:
         if stats["n"] < SAMPLE_SIZE_WARNING:
             found = True
             lines.append(
-                f"- **{cat}**: only {stats['n']} questions — treat with caution"
+                f"- **{cat}**: only {stats['n']} questions"
+                f" (< {SAMPLE_SIZE_WARNING}) — treat with caution"
             )
 
     if not found:
-        lines.append("All categories have sufficient sample size.")
+        lines.append(
+            f"All categories have at least {SAMPLE_SIZE_WARNING} total"
+            " questions (the category reporting gate)."
+            " Subsections that use stricter gates on narrower"
+            " denominators (e.g. n_losses in directional bias) may"
+            " still flag specific categories as insufficient."
+        )
 
     return "\n".join(lines)
 
@@ -988,7 +1016,7 @@ def section_period(
             lines.append(
                 f"  - **{tool}**: {tb:.4f}"
                 f"{_delta_str(tb, at_b)}"
-                f" (n={stats['n']})"
+                f" (n={stats['n']}){_sample_label(stats)}"
             )
 
     return "\n".join(lines)

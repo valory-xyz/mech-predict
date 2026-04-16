@@ -29,12 +29,49 @@ from typing import Any
 
 from benchmark.io import load_jsonl
 
+# Status buckets emitted by parse_response. Listed in a fixed order so the PR
+# comment breakdown is diffable across runs.
+PARSE_STATUS_BUCKETS = ("valid", "missing_fields", "malformed", "error")
+
+# Upper bound on failure bodies to inline in the PR comment. Keeps the comment
+# within GitHub's 65k-character limit even when every market fails, and keeps
+# CI log output readable.
+MAX_FAILURE_BODIES_IN_COMMENT = 5
+MAX_FAILURE_BODY_CHARS = 600
+
+
+def _compute_parse_reliability(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarise parse reliability from ``prediction_parse_status`` values.
+
+    The on-chain mech protocol only delivers the four-field JSON; a row that
+    fails to parse is still an on-chain deliver + payment (see issue #221).
+    Reliability is therefore a first-class metric, not a subset of Brier.
+
+    :param rows: list of prediction rows with 'prediction_parse_status'.
+    :return: dict with total, valid, parse_rate, breakdown.
+    """
+    total = len(rows)
+    breakdown = {b: 0 for b in PARSE_STATUS_BUCKETS}
+    for r in rows:
+        status = r.get("prediction_parse_status") or "error"
+        if status not in breakdown:
+            status = "error"
+        breakdown[status] += 1
+    valid = breakdown["valid"]
+    return {
+        "total": total,
+        "valid": valid,
+        "parse_rate": (valid / total) if total else None,
+        "breakdown": breakdown,
+    }
+
 
 def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute Brier score, accuracy, and overconfident-wrong count.
 
     :param rows: list of prediction rows with p_yes, final_outcome.
-    :return: dict with brier, accuracy, overconf_wrong, n, and by_platform.
+    :return: dict with brier, accuracy, overconf_wrong, n, parse_reliability,
+        and by_platform.
     """
     by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -86,6 +123,7 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     overall = _metrics(rows)
+    overall["parse_reliability"] = _compute_parse_reliability(rows)
     overall["by_platform"] = {
         p: _metrics(prows) for p, prows in sorted(by_platform.items())
     }
@@ -171,26 +209,98 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_reliability_section(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    failure_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Render the parse-reliability block + optional failure bodies.
+
+    :param baseline: metrics dict including ``parse_reliability``.
+    :param candidate: metrics dict including ``parse_reliability``.
+    :param failure_rows: rows from ``candidate_failures.jsonl`` (may be empty).
+    :return: markdown lines.
+    """
+    b_rel = baseline["parse_reliability"]
+    c_rel = candidate["parse_reliability"]
+    b_rate = b_rel["parse_rate"] or 0.0
+    c_rate = c_rel["parse_rate"] or 0.0
+    delta_pct = (c_rate - b_rate) * 100
+
+    # #221 is specifically "candidate delivers that don't parse" — so only a
+    # drop vs baseline is flagged, a rise is just ✅.
+    if delta_pct < -1e-9:
+        verdict = f"⚠️ {delta_pct:+.1f}% vs baseline"
+    elif delta_pct > 1e-9:
+        verdict = f"✅ {delta_pct:+.1f}% vs baseline"
+    else:
+        verdict = "✅ same as baseline"
+
+    bd = c_rel["breakdown"]
+    breakdown_str = ", ".join(f"{k}={bd[k]}" for k in PARSE_STATUS_BUCKETS)
+
+    lines = [
+        "**Parse reliability**",
+        "",
+        f"- Baseline: {b_rel['valid']}/{b_rel['total']} "
+        f"({b_rate * 100:.1f}%) [valid-only by filter]",
+        f"- Candidate: {c_rel['valid']}/{c_rel['total']} "
+        f"({c_rate * 100:.1f}%) — {verdict}",
+        f"- Candidate breakdown: {breakdown_str}",
+        "",
+    ]
+
+    if failure_rows:
+        n_shown = min(len(failure_rows), MAX_FAILURE_BODIES_IN_COMMENT)
+        lines.append(
+            f"<details><summary>Candidate parse failures "
+            f"({len(failure_rows)} total; first {n_shown} shown)</summary>"
+        )
+        lines.append("")
+        for fr in failure_rows[:n_shown]:
+            body = (fr.get("raw_response") or "").replace("```", "ʼʼʼ")
+            if len(body) > MAX_FAILURE_BODY_CHARS:
+                body = body[:MAX_FAILURE_BODY_CHARS] + "…"
+            lines.append(f"**{fr.get('prediction_parse_status', 'error')}** — "
+                         f"{fr.get('question_text', '')[:120]}")
+            lines.append("")
+            lines.append("```")
+            lines.append(body)
+            lines.append("```")
+            lines.append("")
+        lines.append("</details>")
+        lines.append("")
+
+    return lines
+
+
 def format_report(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
     meta: dict[str, str],
+    failure_rows: list[dict[str, Any]] | None = None,
 ) -> str:
     """Format the full benchmark report as markdown.
 
     :param baseline: metrics dict from compute_metrics.
     :param candidate: metrics dict from compute_metrics.
     :param meta: dict with tool, phase, sample, seed, triggered_by.
+    :param failure_rows: optional parse-failure rows loaded from
+        candidate_failures.jsonl. When non-empty, bodies are inlined in a
+        collapsed <details> block.
     :return: markdown string.
     """
     tool = meta.get("tool", "unknown")
-    parts = [
+    parts: list[str] = [
         f"<!-- benchmark-result:{tool} -->",
         f"## Benchmark: {tool}",
         "",
+    ]
+    parts.extend(_format_reliability_section(baseline, candidate, failure_rows or []))
+    parts.extend([
         _metrics_table(baseline, candidate),
         "",
-    ]
+    ])
 
     # Per-platform breakdown
     b_platforms = baseline.get("by_platform", {})
@@ -312,6 +422,11 @@ def main() -> None:
         print("ERROR: No baseline rows found", file=sys.stderr)
         sys.exit(1)
 
+    # prompt_replay writes candidate_failures.jsonl next to candidate.jsonl
+    # whenever any candidate failed to parse. Missing file = zero failures.
+    failures_path = args.candidate.parent / "candidate_failures.jsonl"
+    failure_rows = load_jsonl(failures_path) if failures_path.exists() else []
+
     baseline_metrics = compute_metrics(baseline_rows)
     candidate_metrics = compute_metrics(candidate_rows)
 
@@ -323,7 +438,9 @@ def main() -> None:
         "triggered_by": args.triggered_by,
     }
 
-    report = format_report(baseline_metrics, candidate_metrics, meta)
+    report = format_report(
+        baseline_metrics, candidate_metrics, meta, failure_rows=failure_rows
+    )
 
     # Always print to stdout
     print(report)

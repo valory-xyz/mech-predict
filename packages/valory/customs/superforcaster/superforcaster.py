@@ -59,30 +59,30 @@ class PredictionResult(BaseModel):
     facts: str = Field(
         ...,
         description=(
-            "Step 1 — Core factual points compiled from the sources and "
-            "relevant background. Specific, relevant, no conclusions about "
-            "how a fact influences the forecast."
+            "Core factual points compiled from the sources and relevant "
+            "background. Specific, relevant, no conclusions about how a "
+            "fact influences the forecast."
         ),
     )
     reasons_no: str = Field(
         ...,
         description=(
-            "Step 2 — Reasons why the answer might be NO. Rate the strength "
-            "of each reason on a scale of 1-10."
+            "Reasons why the answer might be NO. Rate the strength of each "
+            "reason on a scale of 1-10."
         ),
     )
     reasons_yes: str = Field(
         ...,
         description=(
-            "Step 3 — Reasons why the answer might be YES. Rate the strength "
-            "of each reason on a scale of 1-10."
+            "Reasons why the answer might be YES. Rate the strength of each "
+            "reason on a scale of 1-10."
         ),
     )
     aggregation: str = Field(
         ...,
         description=(
-            "Step 4 — Aggregate considerations. Weigh competing factors, apply "
-            "the CALIBRATION block (state a base rate and justify, adjust using "
+            "Aggregate considerations. Weigh competing factors, apply the "
+            "CALIBRATION block (state a base rate and justify, adjust using "
             "specific evidence, treat missing expected evidence as a NO signal), "
             "adjust for news negativity / sensationalism bias. End by stating a "
             "tentative probability in [0,1]."
@@ -91,7 +91,7 @@ class PredictionResult(BaseModel):
     reflection: str = Field(
         ...,
         description=(
-            "Step 6 — Sanity checks and finalisation. Apply the three checks: "
+            "Sanity checks and finalisation. Apply the three checks: "
             "EVIDENCE BAR, CONFIDENCE COUPLING, NUMERIC QUESTIONS. Check for "
             "over/underconfidence and forecasting biases. Highlight the key "
             "factors informing the final forecast."

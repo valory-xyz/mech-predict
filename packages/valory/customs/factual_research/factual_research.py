@@ -234,7 +234,16 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
-                return str(e), "", None, None, None, api_keys
+                error_json = json.dumps(
+                    {
+                        "p_yes": None,
+                        "p_no": None,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                        "error": str(e),
+                    }
+                )
+                return error_json, "", None, None, None, api_keys
 
         return execute()
 
@@ -380,14 +389,16 @@ ESTIMATE_SYSTEM = """You are an expert probability estimator. You receive a fact
 Your performance is evaluated by the Brier score.
 
 Calibration rules:
-• Absence of expected evidence is a NO signal, not neutral.
+• Absence of expected evidence is a NO signal ONLY when that evidence would normally exist by now given the event's timeline. For future-dated events where the deadline is still weeks or months out, absence of recent news is neutral, not negative — the normal state of the world is "nothing has happened yet".
 • High info_utility does NOT imply high probability.
 • Multi-step processes involving institutions, politics, or coordination rarely justify extreme probabilities.
+• You cannot compensate for low confidence by pushing probabilities to the extremes. Uncertainty must be expressed in the probability itself, near the base rate.
 
-Tail discipline:
-• Probabilities above 90% require evidence that major failure modes are effectively eliminated.
-• Probabilities above 80% require strong historical precedents under similar conditions.
+Tail discipline (SYMMETRIC — applies equally to YES and NO extremes):
+• Probabilities above 90% or below 10% require evidence that the opposing outcome is effectively eliminated (e.g. explicit disqualification, deadline already missed, confirmed announcement).
+• Probabilities above 80% or below 20% require strong historical precedents under similar conditions.
 • When confidence is low, extreme probabilities are rarely justified.
+• If you find yourself tempted to output p_yes < 0.05 or p_yes > 0.95 on a future event with any remaining path to the other outcome, step back toward the base rate.
 """
 
 ESTIMATE_USER = """Relying exclusively on the factual briefing provided below, assess the probability that the event in the original question will occur.
@@ -418,15 +429,21 @@ c. Weigh signal strength relative to the base rate.
    - Weak, procedural, or intention-based evidence should cause only small updates.
 
 STEP 3 — Synthesis
-a. Update from the base rate to a final probability.
-b. If evidence is mixed or thin, remain close to the base rate.
-c. Do NOT default away from uncertainty without justification.
+a. Update from the base rate IN PROPORTION to the strength of your evidence.
+   - Weak, procedural, or intention-based signals: update by at most ±0.10 from the base rate.
+   - One strong signal: update by at most ±0.20.
+   - Multiple independent strong signals pointing the same way: update further, but see Step 4.
+b. If evidence is mixed or thin, stay close to the base rate.
+c. "No recent news about a future event" is NOT itself strong evidence against it.
+d. Do NOT collapse to extreme tails (<0.1 or >0.9) without MULTIPLE INDEPENDENT STRONG signals.
+e. Do NOT default away from uncertainty without justification.
 
 STEP 4 — Output constraints
 • p_yes + p_no must equal 1.
+• Tail caps are SYMMETRIC: treat p_yes < 0.10 with the same burden of proof as p_yes > 0.90.
 • If confidence < 0.5, probabilities above 70% or below 30% require strong justification.
 • If confidence < 0.3, probabilities should remain within [0.2, 0.8].
-• It is valid for info_utility to be high while p_yes is low.
+• It is valid for info_utility to be high while p_yes is extreme in EITHER direction — but extreme + high-confidence requires multiple independent strong signals.
 
 OUTPUT:
 1. Provide detailed reasoning (2-4 paragraphs).
@@ -922,7 +939,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             messages=synthesis_messages,
             response_format=FactualBriefing,
             temperature=temperature,
-            max_tokens=1500,
+            max_tokens=4096,
             counter_callback=counter_callback,
         )
 
@@ -955,7 +972,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             messages=estimate_messages,
             response_format=PredictionResult,
             temperature=temperature,
-            max_tokens=1500,
+            max_tokens=4096,
             counter_callback=counter_callback,
         )
 

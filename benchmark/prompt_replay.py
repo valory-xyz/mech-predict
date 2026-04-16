@@ -41,7 +41,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import openai
 import requests
@@ -704,6 +704,93 @@ def _call_openai(
         client.close()
 
 
+def _call_openai_structured(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    api_key: str,
+    response_format: type,
+    temperature: float = 0,
+    max_tokens: int = 4096,
+) -> Optional[str]:
+    """Call OpenAI Structured Outputs with a caller-supplied Pydantic schema.
+
+    The schema must expose ``p_yes``, ``p_no``, ``confidence`` and
+    ``info_utility`` attributes. Returns a JSON string of only those four
+    on-chain fields so the existing ``parse_response`` keeps working
+    unchanged regardless of how rich the schema is.
+
+    :param model: OpenAI model identifier.
+    :param system_prompt: system message content.
+    :param user_prompt: user message content.
+    :param api_key: OpenAI API key.
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature.
+    :param max_tokens: maximum tokens to generate.
+    :return: JSON string of {p_yes, p_no, confidence, info_utility}, or None on failure.
+    """
+    client = openai.OpenAI(api_key=api_key)
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=150,
+        )
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            log.warning(
+                "Structured output parse failed: %s",
+                response.choices[0].message.refusal,
+            )
+            return None
+        return json.dumps(
+            {
+                "p_yes": parsed.p_yes,
+                "p_no": parsed.p_no,
+                "confidence": parsed.confidence,
+                "info_utility": parsed.info_utility,
+            }
+        )
+    except Exception as e:
+        log.warning("Structured LLM call failed: %s", e)
+        return None
+    finally:
+        client.close()
+
+
+# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
+# Map: tool_name → (tool_module_import_path, schema_class_name).
+_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
+    "superforcaster": (
+        "packages.valory.customs.superforcaster.superforcaster",
+        "PredictionResult",
+    ),
+    "factual_research": (
+        "packages.valory.customs.factual_research.factual_research",
+        "PredictionResult",
+    ),
+}
+
+
+def _get_structured_output_schema(tool_name: str) -> Optional[type]:
+    """Return the Pydantic schema class for a structured-output tool, or None."""
+    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
+    if entry is None:
+        return None
+    module_path, class_name = entry
+    # pylint: disable=import-outside-toplevel
+    from importlib import import_module
+
+    module = import_module(module_path)
+    return getattr(module, class_name)
+
+
 def _call_anthropic(
     model: str,
     system_prompt: str,
@@ -1146,12 +1233,26 @@ def replay(  # pylint: disable=too-many-statements
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
-                response_text = call_llm(
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=formatted_prompt,
-                    api_key=api_key,
+                structured_schema = (
+                    _get_structured_output_schema(tool_name)
+                    if "claude" not in model
+                    else None
                 )
+                if structured_schema is not None:
+                    response_text = _call_openai_structured(
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=formatted_prompt,
+                        api_key=api_key,
+                        response_format=structured_schema,
+                    )
+                else:
+                    response_text = call_llm(
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=formatted_prompt,
+                        api_key=api_key,
+                    )
 
             # Cache fresh reasoning for later prediction-only iteration
             if fresh_reasoning is not None:

@@ -52,7 +52,7 @@ class TestLoadAndFilterRows:
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(tool="other"), _row(tool="another")])
         rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
-        assert rows == []
+        assert not rows
         assert rejected["wrong_tool"] == 2
         assert rejected["not_valid_parse"] == 0
 
@@ -77,7 +77,7 @@ class TestLoadAndFilterRows:
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(outcome=None)])
         rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
-        assert rows == []
+        assert not rows
         assert rejected["no_outcome"] == 1
         assert rejected["not_valid_parse"] == 0
 
@@ -86,7 +86,7 @@ class TestLoadAndFilterRows:
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(deliver_id="")])
         rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
-        assert rows == []
+        assert not rows
         assert rejected["no_deliver_id"] == 1
 
     def test_filter_order_gives_first_failing_reason(self, tmp_path: Path) -> None:
@@ -95,6 +95,8 @@ class TestLoadAndFilterRows:
         Order: wrong_tool → no_deliver_id → not_valid_parse → no_outcome → cutoff.
         A row with wrong tool AND bad parse AND no outcome increments wrong_tool
         only — so the total rejection count matches row count exactly.
+
+        :param tmp_path: pytest tmp_path fixture.
         """
         path = tmp_path / "log.jsonl"
         _write_jsonl(
@@ -102,7 +104,7 @@ class TestLoadAndFilterRows:
             [_row(tool="other", status="malformed", outcome=None)],
         )
         rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
-        assert rows == []
+        assert not rows
         assert rejected["wrong_tool"] == 1
         assert sum(rejected.values()) == 1
 

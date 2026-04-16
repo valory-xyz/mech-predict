@@ -210,47 +210,6 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_prefilter_section(filter_stats: dict[str, Any]) -> list[str]:
-    """Render the pre-filter stats block.
-
-    This block exists to make the upstream "drop non-valid parses" invariant
-    visible. Parse reliability reports baseline as 100% *by construction* —
-    only because the enrich step drops non-valid rows. Without this block, a
-    silent regression in that filter would re-create exactly the observability
-    gap that issue #221 fell through.
-
-    :param filter_stats: dict with ``accepted`` and ``rejected`` keys from the
-        ``filter_stats.json`` sidecar written by ``prompt_replay enrich``.
-    :return: markdown lines.
-    """
-    r = filter_stats.get("rejected", {}) or {}
-    accepted = filter_stats.get("accepted", 0)
-    total_rej = sum(r.values())
-    not_valid = r.get("not_valid_parse", 0)
-
-    # not_valid_parse is the load-bearing one: flag it loudly if nonzero.
-    if not_valid > 0:
-        valid_verdict = f"⚠️ {not_valid} row(s) rejected for not_valid_parse"
-    else:
-        valid_verdict = "✅ 0 rejected for not_valid_parse"
-
-    scoping_parts = [
-        f"wrong_tool={r.get('wrong_tool', 0)}",
-        f"no_deliver_id={r.get('no_deliver_id', 0)}",
-        f"no_outcome={r.get('no_outcome', 0)}",
-        f"older_than_cutoff={r.get('older_than_cutoff', 0)}",
-    ]
-
-    return [
-        "**Pre-filter (from enrich)**",
-        "",
-        f"- Accepted: {accepted}",
-        f"- Rejected: {total_rej} total — {valid_verdict}",
-        f"- Scoping rejections: {', '.join(scoping_parts)}",
-        "",
-    ]
-
-
 def _load_filter_stats(candidate_path: Path) -> Optional[dict[str, Any]]:
     """Load ``filter_stats.json`` written alongside candidate.jsonl, if present.
 
@@ -266,46 +225,71 @@ def _load_filter_stats(candidate_path: Path) -> Optional[dict[str, Any]]:
         return None
 
 
-def _format_reliability_section(
-    baseline: dict[str, Any],
+def _format_reliability_block(
     candidate: dict[str, Any],
     failure_rows: list[dict[str, Any]],
+    filter_stats: Optional[dict[str, Any]] = None,
 ) -> list[str]:
-    """Render the parse-reliability block + optional failure bodies.
+    """Render the Reliability section: candidate parse rate + pre-filter stats.
 
-    :param baseline: metrics dict including ``parse_reliability``.
+    Baseline parse rate is 100% by construction (the enrich step drops
+    non-valid rows), so it is not reported as part of a baseline-vs-candidate
+    comparison. The two observations here are one-sided:
+
+    - candidate parse rate: did the PR's code produce parseable responses?
+    - pre-filter: did the upstream enrich filter's "drop non-valid" invariant
+      hold? (non-zero ``not_valid_parse`` rejects = silent regression of the
+      invariant that made baseline 100% trustworthy in the first place)
+
     :param candidate: metrics dict including ``parse_reliability``.
     :param failure_rows: rows from ``candidate_failures.jsonl`` (may be empty).
+    :param filter_stats: optional dict from the filter_stats.json sidecar.
     :return: markdown lines.
     """
-    b_rel = baseline["parse_reliability"]
     c_rel = candidate["parse_reliability"]
-    b_rate = b_rel["parse_rate"] or 0.0
+    c_total = c_rel["total"]
+    c_valid = c_rel["valid"]
     c_rate = c_rel["parse_rate"] or 0.0
-    delta_pct = (c_rate - b_rate) * 100
+    c_marker = "✅" if c_valid == c_total else "⚠️"
 
-    # #221 is specifically "candidate delivers that don't parse" — so only a
-    # drop vs baseline is flagged, a rise is just ✅.
-    if delta_pct < -1e-9:
-        verdict = f"⚠️ {delta_pct:+.1f}% vs baseline"
-    elif delta_pct > 1e-9:
-        verdict = f"✅ {delta_pct:+.1f}% vs baseline"
-    else:
-        verdict = "✅ same as baseline"
-
-    bd = c_rel["breakdown"]
-    breakdown_str = ", ".join(f"{k}={bd[k]}" for k in PARSE_STATUS_BUCKETS)
-
-    lines = [
-        "**Parse reliability**",
+    lines: list[str] = [
+        "**Reliability**",
         "",
-        f"- Baseline: {b_rel['valid']}/{b_rel['total']} "
-        f"({b_rate * 100:.1f}%) [valid-only by filter]",
-        f"- Candidate: {c_rel['valid']}/{c_rel['total']} "
-        f"({c_rate * 100:.1f}%) — {verdict}",
-        f"- Candidate breakdown: {breakdown_str}",
-        "",
+        f"- Candidate parse rate: {c_valid}/{c_total} "
+        f"({c_rate * 100:.1f}%) {c_marker}",
     ]
+
+    # Breakdown only surfaces when candidate drifted — keeps the happy-path
+    # line count short.
+    if c_valid < c_total:
+        bd = c_rel["breakdown"]
+        breakdown_str = ", ".join(f"{k}={bd[k]}" for k in PARSE_STATUS_BUCKETS)
+        lines.append(f"  - Breakdown: {breakdown_str}")
+
+    if filter_stats is not None:
+        r = filter_stats.get("rejected", {}) or {}
+        accepted = filter_stats.get("accepted", 0)
+        total_rej = sum(r.values())
+        not_valid = r.get("not_valid_parse", 0)
+        pf_marker = "✅" if not_valid == 0 else "⚠️"
+        lines.append(
+            f"- Pre-filter (enrich): {accepted} accepted, {total_rej} rejected, "
+            f"not_valid_parse={not_valid} {pf_marker}"
+        )
+        # Scoping breakdown only when any rows were rejected — otherwise four
+        # zeroes just add noise to the happy path.
+        if total_rej > 0:
+            scoping = ", ".join(
+                [
+                    f"wrong_tool={r.get('wrong_tool', 0)}",
+                    f"no_deliver_id={r.get('no_deliver_id', 0)}",
+                    f"no_outcome={r.get('no_outcome', 0)}",
+                    f"older_than_cutoff={r.get('older_than_cutoff', 0)}",
+                ]
+            )
+            lines.append(f"  - Scoping: {scoping}")
+
+    lines.append("")
 
     if failure_rows:
         n_shown = min(len(failure_rows), MAX_FAILURE_BODIES_IN_COMMENT)
@@ -358,16 +342,10 @@ def format_report(
         f"<!-- benchmark-result:{tool} -->",
         f"## Benchmark: {tool}",
         "",
+        _metrics_table(baseline, candidate),
+        "",
     ]
-    if filter_stats is not None:
-        parts.extend(_format_prefilter_section(filter_stats))
-    parts.extend(_format_reliability_section(baseline, candidate, failure_rows or []))
-    parts.extend(
-        [
-            _metrics_table(baseline, candidate),
-            "",
-        ]
-    )
+    parts.extend(_format_reliability_block(candidate, failure_rows or [], filter_stats))
 
     # Per-platform breakdown
     b_platforms = baseline.get("by_platform", {})

@@ -21,11 +21,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from benchmark.io import load_jsonl
 
@@ -209,6 +210,62 @@ def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_prefilter_section(filter_stats: dict[str, Any]) -> list[str]:
+    """Render the pre-filter stats block.
+
+    This block exists to make the upstream "drop non-valid parses" invariant
+    visible. Parse reliability reports baseline as 100% *by construction* —
+    only because the enrich step drops non-valid rows. Without this block, a
+    silent regression in that filter would re-create exactly the observability
+    gap that issue #221 fell through.
+
+    :param filter_stats: dict with ``accepted`` and ``rejected`` keys from the
+        ``filter_stats.json`` sidecar written by ``prompt_replay enrich``.
+    :return: markdown lines.
+    """
+    r = filter_stats.get("rejected", {}) or {}
+    accepted = filter_stats.get("accepted", 0)
+    total_rej = sum(r.values())
+    not_valid = r.get("not_valid_parse", 0)
+
+    # not_valid_parse is the load-bearing one: flag it loudly if nonzero.
+    if not_valid > 0:
+        valid_verdict = f"⚠️ {not_valid} row(s) rejected for not_valid_parse"
+    else:
+        valid_verdict = "✅ 0 rejected for not_valid_parse"
+
+    scoping_parts = [
+        f"wrong_tool={r.get('wrong_tool', 0)}",
+        f"no_deliver_id={r.get('no_deliver_id', 0)}",
+        f"no_outcome={r.get('no_outcome', 0)}",
+        f"older_than_cutoff={r.get('older_than_cutoff', 0)}",
+    ]
+
+    return [
+        "**Pre-filter (from enrich)**",
+        "",
+        f"- Accepted: {accepted}",
+        f"- Rejected: {total_rej} total — {valid_verdict}",
+        f"- Scoping rejections: {', '.join(scoping_parts)}",
+        "",
+    ]
+
+
+def _load_filter_stats(candidate_path: Path) -> Optional[dict[str, Any]]:
+    """Load ``filter_stats.json`` written alongside candidate.jsonl, if present.
+
+    :param candidate_path: path to candidate.jsonl.
+    :return: parsed stats dict, or None if absent / unreadable.
+    """
+    stats_path = candidate_path.parent / "filter_stats.json"
+    if not stats_path.exists():
+        return None
+    try:
+        return json.loads(stats_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def _format_reliability_section(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
@@ -281,6 +338,7 @@ def format_report(
     candidate: dict[str, Any],
     meta: dict[str, str],
     failure_rows: list[dict[str, Any]] | None = None,
+    filter_stats: Optional[dict[str, Any]] = None,
 ) -> str:
     """Format the full benchmark report as markdown.
 
@@ -290,6 +348,9 @@ def format_report(
     :param failure_rows: optional parse-failure rows loaded from
         candidate_failures.jsonl. When non-empty, bodies are inlined in a
         collapsed <details> block.
+    :param filter_stats: optional ``{accepted, rejected}`` dict from
+        filter_stats.json sidecar. When present, a Pre-filter block is
+        rendered so an upstream filter regression would be visible.
     :return: markdown string.
     """
     tool = meta.get("tool", "unknown")
@@ -298,6 +359,8 @@ def format_report(
         f"## Benchmark: {tool}",
         "",
     ]
+    if filter_stats is not None:
+        parts.extend(_format_prefilter_section(filter_stats))
     parts.extend(_format_reliability_section(baseline, candidate, failure_rows or []))
     parts.extend(
         [
@@ -431,6 +494,10 @@ def main() -> None:
     failures_path = args.candidate.parent / "candidate_failures.jsonl"
     failure_rows = load_jsonl(failures_path) if failures_path.exists() else []
 
+    # prompt_replay copies filter_stats.json into output_dir when the sidecar
+    # was present at enrich time. Missing file = no stats (older pipelines).
+    filter_stats = _load_filter_stats(args.candidate)
+
     baseline_metrics = compute_metrics(baseline_rows)
     candidate_metrics = compute_metrics(candidate_rows)
 
@@ -443,7 +510,11 @@ def main() -> None:
     }
 
     report = format_report(
-        baseline_metrics, candidate_metrics, meta, failure_rows=failure_rows
+        baseline_metrics,
+        candidate_metrics,
+        meta,
+        failure_rows=failure_rows,
+        filter_stats=filter_stats,
     )
 
     # Always print to stdout

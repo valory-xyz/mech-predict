@@ -5,10 +5,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 from benchmark.ci_replay import (
     PARSE_STATUS_BUCKETS,
     _compute_parse_reliability,
+    _format_prefilter_section,
     _format_reliability_section,
+    _load_filter_stats,
     compute_metrics,
     format_report,
 )
@@ -164,3 +168,139 @@ class TestFormatReportLoadsFailuresFromDisk:
         )
         assert "Boom." in report
         assert "⚠️" in report
+
+
+class TestPrefilterSection:
+    """Markdown rendering of the Pre-filter block (filter_stats sidecar)."""
+
+    def _stats(
+        self,
+        *,
+        accepted: int = 100,
+        not_valid_parse: int = 0,
+        wrong_tool: int = 0,
+        no_deliver_id: int = 0,
+        no_outcome: int = 0,
+        older_than_cutoff: int = 0,
+    ) -> dict:
+        return {
+            "accepted": accepted,
+            "rejected": {
+                "wrong_tool": wrong_tool,
+                "no_deliver_id": no_deliver_id,
+                "not_valid_parse": not_valid_parse,
+                "no_outcome": no_outcome,
+                "older_than_cutoff": older_than_cutoff,
+            },
+        }
+
+    def test_zero_not_valid_parse_renders_green(self) -> None:
+        """With the filter invariant held, the block is informational only."""
+        text = "\n".join(_format_prefilter_section(self._stats()))
+        assert "✅ 0 rejected for not_valid_parse" in text
+        assert "⚠️" not in text
+
+    def test_nonzero_not_valid_parse_flagged(self) -> None:
+        """A single leaked non-valid row is flagged so it can't hide."""
+        text = "\n".join(_format_prefilter_section(self._stats(not_valid_parse=3)))
+        assert "⚠️" in text
+        assert "3 row(s) rejected for not_valid_parse" in text
+
+    def test_scoping_rejections_listed_separately(self) -> None:
+        """Wrong-tool / no-outcome / cutoff rejections are shown but not flagged."""
+        text = "\n".join(
+            _format_prefilter_section(
+                self._stats(wrong_tool=12, no_outcome=4, older_than_cutoff=7)
+            )
+        )
+        assert "wrong_tool=12" in text
+        assert "no_outcome=4" in text
+        assert "older_than_cutoff=7" in text
+        # Scoping rejections must not escalate the invariant marker.
+        assert "⚠️" not in text
+
+
+class TestLoadFilterStats:
+    """Sidecar loading alongside candidate.jsonl."""
+
+    def test_returns_none_when_absent(self, tmp_path: Path) -> None:
+        """Older pipelines without the sidecar return cleanly."""
+        candidate = tmp_path / "candidate.jsonl"
+        candidate.write_text("", encoding="utf-8")
+        assert _load_filter_stats(candidate) is None
+
+    def test_parses_sidecar_when_present(self, tmp_path: Path) -> None:
+        """filter_stats.json in the same dir as candidate.jsonl is loaded."""
+        candidate = tmp_path / "candidate.jsonl"
+        candidate.write_text("", encoding="utf-8")
+        stats = {"accepted": 5, "rejected": {"not_valid_parse": 1}}
+        (tmp_path / "filter_stats.json").write_text(
+            json.dumps(stats), encoding="utf-8"
+        )
+        assert _load_filter_stats(candidate) == stats
+
+    def test_returns_none_on_malformed_json(self, tmp_path: Path) -> None:
+        """A corrupt sidecar must not crash the whole report."""
+        candidate = tmp_path / "candidate.jsonl"
+        candidate.write_text("", encoding="utf-8")
+        (tmp_path / "filter_stats.json").write_text("{not json", encoding="utf-8")
+        assert _load_filter_stats(candidate) is None
+
+
+class TestFormatReportWithFilterStats:
+    """End-to-end: format_report wiring for the filter_stats arg."""
+
+    def test_omits_prefilter_block_when_stats_missing(self) -> None:
+        """Older datasets (no sidecar) render the original report unchanged."""
+        baseline = compute_metrics([_row("valid")] * 3)
+        candidate = compute_metrics([_row("valid")] * 3)
+        report = format_report(baseline, candidate, {"tool": "superforcaster"})
+        assert "Pre-filter" not in report
+
+    def test_renders_prefilter_block_when_stats_present(self) -> None:
+        """A provided filter_stats dict drops a Pre-filter section above reliability."""
+        baseline = compute_metrics([_row("valid")] * 3)
+        candidate = compute_metrics([_row("valid")] * 3)
+        stats = {
+            "accepted": 3,
+            "rejected": {
+                "wrong_tool": 10,
+                "no_deliver_id": 0,
+                "not_valid_parse": 0,
+                "no_outcome": 2,
+                "older_than_cutoff": 0,
+            },
+        }
+        report = format_report(
+            baseline,
+            candidate,
+            {"tool": "superforcaster"},
+            filter_stats=stats,
+        )
+        assert "Pre-filter" in report
+        # Ordering: Pre-filter block must precede Parse reliability block so a
+        # filter regression is the first thing a reviewer sees.
+        assert report.index("Pre-filter") < report.index("Parse reliability")
+
+    def test_prefilter_regression_surfaces_in_full_report(self) -> None:
+        """A not_valid_parse>0 count propagates the ⚠️ marker into the final report."""
+        baseline = compute_metrics([_row("valid")] * 3)
+        candidate = compute_metrics([_row("valid")] * 3)
+        stats = {
+            "accepted": 3,
+            "rejected": {
+                "wrong_tool": 0,
+                "no_deliver_id": 0,
+                "not_valid_parse": 2,
+                "no_outcome": 0,
+                "older_than_cutoff": 0,
+            },
+        }
+        report = format_report(
+            baseline,
+            candidate,
+            {"tool": "superforcaster"},
+            filter_stats=stats,
+        )
+        assert "⚠️" in report
+        assert "2 row(s) rejected for not_valid_parse" in report

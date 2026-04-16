@@ -398,17 +398,30 @@ def _load_and_filter_rows(
     production_log: Path,
     tool_filter: str,
     last_days: Optional[int],
-) -> list[dict[str, Any]]:
+) -> Tuple[list[dict[str, Any]], Dict[str, int]]:
     """Load production log and filter for valid rows.
 
     :param production_log: path to production_log.jsonl.
     :param tool_filter: tool name to filter for.
     :param last_days: only include rows from the last N days.
-    :return: filtered list of row dicts.
+    :return: (filtered rows, rejection counts per reason).
     """
     cutoff = None
     if last_days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=last_days)
+
+    # Scoping rejections (wrong tool / no deliver_id / no outcome / too old) are
+    # expected sample narrowing. The "not_valid_parse" bucket is load-bearing:
+    # it is the invariant downstream Parse-reliability reporting depends on
+    # (baseline is 100% valid by construction *because* these rows are dropped
+    # here). If that invariant regresses, we want this count to make it loud.
+    rejected: Dict[str, int] = {
+        "wrong_tool": 0,
+        "no_deliver_id": 0,
+        "not_valid_parse": 0,
+        "no_outcome": 0,
+        "older_than_cutoff": 0,
+    }
 
     rows: list[dict[str, Any]] = []
     with open(production_log, encoding="utf-8") as f:
@@ -418,21 +431,26 @@ def _load_and_filter_rows(
                 continue
             row = json.loads(line)
             if row.get("tool_name") != tool_filter:
+                rejected["wrong_tool"] += 1
                 continue
             if not row.get("deliver_id"):
+                rejected["no_deliver_id"] += 1
                 continue
             if row.get("prediction_parse_status") != "valid":
+                rejected["not_valid_parse"] += 1
                 continue
             if row.get("final_outcome") is None:
+                rejected["no_outcome"] += 1
                 continue
             if cutoff is not None:
                 predicted = row.get("predicted_at")
                 if predicted:
                     dt = datetime.fromisoformat(predicted.replace("Z", "+00:00"))
                     if dt < cutoff:
+                        rejected["older_than_cutoff"] += 1
                         continue
             rows.append(row)
-    return rows
+    return rows, rejected
 
 
 # ---------------------------------------------------------------------------
@@ -460,12 +478,35 @@ def enrich(
     :param sample_per_platform: stratified sample N per platform before IPFS fetch.
     :param seed: random seed for sampling.
     """
-    rows = _load_and_filter_rows(production_log, tool_filter, last_days)
+    rows, rejected = _load_and_filter_rows(production_log, tool_filter, last_days)
     log.info(
         "Loaded %d %s rows with deliver_id + valid predictions + known outcome",
         len(rows),
         tool_filter,
     )
+    log.info(
+        "Pre-filter rejections: wrong_tool=%d no_deliver_id=%d "
+        "not_valid_parse=%d no_outcome=%d older_than_cutoff=%d",
+        rejected["wrong_tool"],
+        rejected["no_deliver_id"],
+        rejected["not_valid_parse"],
+        rejected["no_outcome"],
+        rejected["older_than_cutoff"],
+    )
+
+    # Sidecar JSON carries the rejection counts into the replay + PR-comment
+    # stages, where "baseline is 100% valid by construction" would otherwise be
+    # an invisible assumption.
+    stats_path = output.with_name(output.name + ".filter_stats.json")
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.write_text(
+        json.dumps(
+            {"accepted": len(rows), "rejected": rejected},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    log.info("Wrote filter stats: %s", stats_path)
 
     if not rows:
         log.warning("No rows to enrich")
@@ -934,6 +975,7 @@ def _log_replay_summary(
     n_scored: int,
     baseline_path: Path,
     status_counts: Dict[str, int],
+    filter_stats: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Compute accuracy and log the replay summary.
 
@@ -945,6 +987,9 @@ def _log_replay_summary(
     :param n_scored: number of candidate predictions scored.
     :param baseline_path: path to the baseline JSONL file.
     :param status_counts: candidate ``prediction_parse_status`` bucket counts.
+    :param filter_stats: optional ``{accepted, rejected}`` dict from the enrich
+        sidecar. When present, a Pre-filter block is rendered so a regression
+        in the "drop non-valid parses" upstream invariant is visible.
     """
     avg_baseline = baseline_brier_sum / total if total else 0
     avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
@@ -1001,6 +1046,22 @@ def _log_replay_summary(
         status_counts["error"],
     )
     log.info("    Parse delta: %+.1f%% — %s", parse_delta_pct, parse_verdict)
+
+    if filter_stats is not None:
+        r = filter_stats.get("rejected", {})
+        total_rej = sum(r.values()) if r else 0
+        log.info("  Pre-filter (from enrich):")
+        log.info(
+            "    Accepted: %d   Rejected: %d (wrong_tool=%d, no_deliver_id=%d, "
+            "not_valid_parse=%d, no_outcome=%d, older_than_cutoff=%d)",
+            filter_stats.get("accepted", 0),
+            total_rej,
+            r.get("wrong_tool", 0),
+            r.get("no_deliver_id", 0),
+            r.get("not_valid_parse", 0),
+            r.get("no_outcome", 0),
+            r.get("older_than_cutoff", 0),
+        )
 
     log.info(
         "  Baseline avg Brier:  %.4f  Accuracy: %.1f%%",
@@ -1133,6 +1194,16 @@ def replay(  # pylint: disable=too-many-statements
     if not sampled:
         log.warning("No rows in dataset")
         return
+
+    # Optional sidecar: {dataset}.filter_stats.json written by enrich.
+    filter_stats: Optional[Dict[str, Any]] = None
+    stats_path = dataset.with_name(dataset.name + ".filter_stats.json")
+    if stats_path.exists():
+        try:
+            filter_stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            log.info("Loaded filter stats: %s", stats_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Could not load filter stats from %s: %s", stats_path, exc)
 
     tool_name = sampled[0]["tool_name"]
     is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
@@ -1381,7 +1452,15 @@ def replay(  # pylint: disable=too-many-statements
         n_scored,
         baseline_path,
         status_counts,
+        filter_stats=filter_stats,
     )
+
+    # Make the filter stats discoverable next to the candidate/baseline outputs
+    # so ci_replay.py can render them into the PR comment.
+    if filter_stats is not None:
+        (output_dir / "filter_stats.json").write_text(
+            json.dumps(filter_stats, indent=2), encoding="utf-8"
+        )
 
     # Write updated enriched JSONL with fresh reasoning for next iteration
     has_fresh = any(r.get("_fresh_reasoning") for r in sampled)

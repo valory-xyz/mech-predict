@@ -261,9 +261,9 @@ def _format_reliability_section(
             body = (fr.get("raw_response") or "").replace("```", "ʼʼʼ")
             if len(body) > MAX_FAILURE_BODY_CHARS:
                 body = body[:MAX_FAILURE_BODY_CHARS] + "…"
+            question = (fr.get("question_text", "")[:120]).replace("`", "ʼ")
             lines.append(
-                f"**{fr.get('prediction_parse_status', 'error')}** — "
-                f"{fr.get('question_text', '')[:120]}"
+                f"**{fr.get('prediction_parse_status', 'error')}** — `{question}`"
             )
             lines.append("")
             lines.append("```")

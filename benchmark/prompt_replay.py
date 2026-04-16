@@ -933,6 +933,7 @@ def _log_replay_summary(
     total: int,
     n_scored: int,
     baseline_path: Path,
+    status_counts: Dict[str, int],
 ) -> None:
     """Compute accuracy and log the replay summary.
 
@@ -943,6 +944,7 @@ def _log_replay_summary(
     :param total: total number of markets.
     :param n_scored: number of candidate predictions scored.
     :param baseline_path: path to the baseline JSONL file.
+    :param status_counts: candidate ``prediction_parse_status`` bucket counts.
     """
     avg_baseline = baseline_brier_sum / total if total else 0
     avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
@@ -967,6 +969,43 @@ def _log_replay_summary(
 
     log.info("=" * 60)
     log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
+
+    # Parse reliability — baseline is always 100% (valid-only by enrich filter),
+    # so this surfaces candidate drift only.
+    baseline_parse_rate = 1.0
+    candidate_parse_rate = status_counts["valid"] / total if total else 0
+    parse_delta_pct = (
+        (candidate_parse_rate - baseline_parse_rate) * 100 if total else 0
+    )
+    parse_verdict = (
+        "SAME"
+        if abs(parse_delta_pct) < 1e-9
+        else "IMPROVED"
+        if parse_delta_pct > 0
+        else "REGRESSED"
+    )
+    log.info("  Parse reliability:")
+    log.info(
+        "    Baseline:  %d/%d (%.1f%%)  [valid-only by filter]",
+        total,
+        total,
+        baseline_parse_rate * 100,
+    )
+    log.info(
+        "    Candidate: %d/%d (%.1f%%)",
+        status_counts["valid"],
+        total,
+        candidate_parse_rate * 100,
+    )
+    log.info(
+        "    Breakdown: valid=%d, missing_fields=%d, malformed=%d, error=%d",
+        status_counts["valid"],
+        status_counts["missing_fields"],
+        status_counts["malformed"],
+        status_counts["error"],
+    )
+    log.info("    Parse delta: %+.1f%% — %s", parse_delta_pct, parse_verdict)
+
     log.info(
         "  Baseline avg Brier:  %.4f  Accuracy: %.1f%%",
         avg_baseline,
@@ -1166,6 +1205,16 @@ def replay(  # pylint: disable=too-many-statements
     candidate_brier_sum = 0.0
     n_scored = 0
 
+    # Parse-reliability tracking (issue #221 — delivered, paid-for, but
+    # malformed responses that silently break downstream consumers).
+    status_counts: Dict[str, int] = {
+        "valid": 0,
+        "missing_fields": 0,
+        "malformed": 0,
+        "error": 0,
+    }
+    failure_rows: list[dict[str, Any]] = []
+
     with (
         open(baseline_path, "w", encoding="utf-8") as bf,
         open(candidate_path, "w", encoding="utf-8") as cf,
@@ -1285,6 +1334,10 @@ def replay(  # pylint: disable=too-many-statements
             b_brier = (row["p_yes"] - outcome_val) ** 2
             baseline_brier_sum += b_brier
 
+            status = parsed["prediction_parse_status"]
+            # Unknown statuses land in "error" so the breakdown never loses a row.
+            status_counts[status if status in status_counts else "error"] += 1
+
             if parsed["p_yes"] is not None:
                 c_brier = (parsed["p_yes"] - outcome_val) ** 2
                 candidate_brier_sum += c_brier
@@ -1302,9 +1355,23 @@ def replay(  # pylint: disable=too-many-statements
                     ),
                 )
             else:
-                log.warning(
-                    "  candidate parse failed: %s", parsed["prediction_parse_status"]
+                log.warning("  candidate parse failed: %s", status)
+                failure_rows.append(
+                    {
+                        "row_id": candidate_row["row_id"],
+                        "question_text": question,
+                        "prediction_parse_status": status,
+                        "raw_response": response_text,
+                    }
                 )
+
+    # Persist parse failures for forensic inspection.
+    failures_path = output_dir / "candidate_failures.jsonl"
+    if failure_rows:
+        with open(failures_path, "w", encoding="utf-8") as ff:
+            for fr in failure_rows:
+                ff.write(json.dumps(fr) + "\n")
+        log.info("Wrote %d parse failure(s) to %s", len(failure_rows), failures_path)
 
     # Summary
     total = len(sampled)
@@ -1317,6 +1384,7 @@ def replay(  # pylint: disable=too-many-statements
         total,
         n_scored,
         baseline_path,
+        status_counts,
     )
 
     # Write updated enriched JSONL with fresh reasoning for next iteration

@@ -2,7 +2,7 @@ name: benchmark-flywheel
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # daily at 6am UTC
+    - cron: '30 2 * * *'  # daily at 02:30 UTC (aims for Slack post before 11:00 IST)
   workflow_dispatch:
     inputs:
       lookback_days:

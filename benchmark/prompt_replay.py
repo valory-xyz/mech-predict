@@ -974,15 +974,11 @@ def _log_replay_summary(
     # so this surfaces candidate drift only.
     baseline_parse_rate = 1.0
     candidate_parse_rate = status_counts["valid"] / total if total else 0
-    parse_delta_pct = (
-        (candidate_parse_rate - baseline_parse_rate) * 100 if total else 0
-    )
+    parse_delta_pct = (candidate_parse_rate - baseline_parse_rate) * 100 if total else 0
     parse_verdict = (
         "SAME"
         if abs(parse_delta_pct) < 1e-9
-        else "IMPROVED"
-        if parse_delta_pct > 0
-        else "REGRESSED"
+        else "IMPROVED" if parse_delta_pct > 0 else "REGRESSED"
     )
     log.info("  Parse reliability:")
     log.info(

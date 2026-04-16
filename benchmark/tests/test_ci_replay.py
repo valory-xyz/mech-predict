@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from benchmark.ci_replay import (
@@ -27,13 +26,15 @@ def _row(status: str = "valid", p_yes: float | None = 0.6) -> dict:
 
 
 class TestParseReliability:
+    """Bucket counts and rates from ``prediction_parse_status`` values."""
+
     def test_breakdown_keys_are_always_present(self) -> None:
         """All four buckets are present even when only 'valid' has entries."""
         rel = _compute_parse_reliability([_row("valid")])
         assert set(rel["breakdown"]) == set(PARSE_STATUS_BUCKETS)
 
     def test_mixed_statuses_counted(self) -> None:
-        """valid + malformed + missing_fields all land in the right buckets."""
+        """Mixed statuses (valid, malformed, missing_fields) land in the right buckets."""
         rows = [
             _row("valid"),
             _row("valid"),
@@ -67,6 +68,8 @@ class TestParseReliability:
 
 
 class TestReliabilitySection:
+    """Markdown rendering of the reliability block + failure-body <details>."""
+
     def _metrics(self, rows: list[dict]) -> dict:
         return compute_metrics(rows)
 
@@ -119,7 +122,7 @@ class TestReliabilitySection:
                 "row_id": "c1",
                 "question_text": "Q",
                 "prediction_parse_status": "malformed",
-                "raw_response": "some ```json{\"p_yes\":0.5}``` leak",
+                "raw_response": 'some ```json{"p_yes":0.5}``` leak',
             }
         ]
         lines = _format_reliability_section(baseline, candidate, failures)
@@ -129,6 +132,8 @@ class TestReliabilitySection:
 
 
 class TestFormatReportLoadsFailuresFromDisk:
+    """End-to-end ``format_report`` wiring, with and without failure bodies."""
+
     def test_report_includes_reliability_even_with_no_failures(
         self, tmp_path: Path
     ) -> None:

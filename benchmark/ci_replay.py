@@ -261,8 +261,10 @@ def _format_reliability_section(
             body = (fr.get("raw_response") or "").replace("```", "ʼʼʼ")
             if len(body) > MAX_FAILURE_BODY_CHARS:
                 body = body[:MAX_FAILURE_BODY_CHARS] + "…"
-            lines.append(f"**{fr.get('prediction_parse_status', 'error')}** — "
-                         f"{fr.get('question_text', '')[:120]}")
+            lines.append(
+                f"**{fr.get('prediction_parse_status', 'error')}** — "
+                f"{fr.get('question_text', '')[:120]}"
+            )
             lines.append("")
             lines.append("```")
             lines.append(body)
@@ -297,10 +299,12 @@ def format_report(
         "",
     ]
     parts.extend(_format_reliability_section(baseline, candidate, failure_rows or []))
-    parts.extend([
-        _metrics_table(baseline, candidate),
-        "",
-    ])
+    parts.extend(
+        [
+            _metrics_table(baseline, candidate),
+            "",
+        ]
+    )
 
     # Per-platform breakdown
     b_platforms = baseline.get("by_platform", {})

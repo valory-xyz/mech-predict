@@ -328,6 +328,18 @@ def _parse_completion(
     ``client.beta.chat.completions.parse()`` guarantees the response conforms
     to the supplied Pydantic schema — no prompt-side JSON format instructions
     or regex extraction required.
+
+    :param client: an initialised OpenAI client.
+    :param model: OpenAI model identifier.
+    :param messages: chat messages list (role + content dicts).
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature (0 = deterministic).
+    :param max_tokens: maximum tokens to generate.
+    :param retries: number of retry attempts on transient / validation failure.
+    :param delay: delay in seconds between retries.
+    :param counter_callback: optional callback tracking token usage.
+    :return: tuple of (parsed model instance, counter_callback).
+    :raises RuntimeError: if all retries exhausted without a successful parse.
     """
     attempt = 0
     while attempt < retries:

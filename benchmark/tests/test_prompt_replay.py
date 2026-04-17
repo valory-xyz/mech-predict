@@ -230,11 +230,7 @@ class TestPrepareOutputDir:
         assert not stale.exists()
 
     def test_prep_preserves_unrelated_artifacts(self, tmp_path: Path) -> None:
-        """Prep must only purge known-stale sidecars, not other contents.
-
-        Users may chain runs or inspect artifacts like
-        ``enriched_with_new_reasoning.jsonl``; prep must leave those alone.
-        """
+        """Prep must only purge the two sidecars, not e.g. chained enriched output."""
         output_dir = tmp_path / "out"
         output_dir.mkdir()
         keep = output_dir / "enriched_with_new_reasoning.jsonl"

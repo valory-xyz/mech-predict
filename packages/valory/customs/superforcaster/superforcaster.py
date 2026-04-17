@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 import requests
+from openai import OpenAI
+from pydantic import BaseModel, Field, model_validator
 from tiktoken import encoding_for_model
 
 MechResponseWithKeys = Tuple[
@@ -41,6 +43,99 @@ N_MODEL_CALLS = 1
 DEFAULT_DELIVERY_RATE = 100
 
 
+# ---------------------------------------------------------------------------
+# Pydantic schema for OpenAI Structured Outputs
+# ---------------------------------------------------------------------------
+
+
+class PredictionResult(BaseModel):
+    """Superforecaster structured output.
+
+    The text fields carry the 7-step reasoning chain (facts → pros/cons →
+    aggregation + tentative → reflection → final). Only the four numeric
+    fields at the bottom are returned on-chain per the mech protocol.
+    """
+
+    facts: str = Field(
+        ...,
+        description=(
+            "Core factual points compiled from the sources and relevant "
+            "background. Specific, relevant, no conclusions about how a "
+            "fact influences the forecast."
+        ),
+    )
+    reasons_no: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be NO. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    reasons_yes: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be YES. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    aggregation: str = Field(
+        ...,
+        description=(
+            "Aggregate considerations. Weigh competing factors, apply the "
+            "CALIBRATION block (state a base rate and justify, adjust using "
+            "specific evidence, treat missing expected evidence as a NO signal), "
+            "adjust for news negativity / sensationalism bias. End by stating a "
+            "tentative probability in [0,1]."
+        ),
+    )
+    reflection: str = Field(
+        ...,
+        description=(
+            "Sanity checks and finalisation. Apply the three checks: "
+            "EVIDENCE BAR, CONFIDENCE COUPLING, NUMERIC QUESTIONS. Check for "
+            "over/underconfidence and forecasting biases. Highlight the key "
+            "factors informing the final forecast."
+        ),
+    )
+    p_yes: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event in the Question occurs.",
+    )
+    p_no: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event does NOT occur.",
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the prediction (0 = lowest, 1 = highest).",
+    )
+    info_utility: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Utility of the information in the sources to inform the prediction "
+            "(0 = lowest, 1 = highest)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_p_yes_p_no_sum(self) -> "PredictionResult":
+        """Validate that p_yes + p_no ≈ 1."""
+        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
+            raise ValueError(
+                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
+                f"{self.p_yes + self.p_no})"
+            )
+        return self
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -51,16 +146,22 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without appending
+                # api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 # try with a new key again
@@ -81,86 +182,33 @@ def with_key_rotation(func: Callable) -> Callable:
 
 
 class OpenAIClientManager:
-    """Client context manager for OpenAI."""
+    """Context manager that creates and closes a local OpenAI client."""
 
     def __init__(self, api_key: str):
-        """Initializes with API keys"""
+        """Initializes with API key."""
         self.api_key = api_key
-        self._client: Optional["OpenAIClient"] = None
+        self._client: Optional[OpenAI] = None
 
-    def __enter__(self) -> "OpenAIClient":
-        """Initializes and returns LLM client."""
-        self._client = OpenAIClient(api_key=self.api_key)
+    def __enter__(self) -> OpenAI:
+        """Initializes and returns the OpenAI client."""
+        self._client = OpenAI(api_key=self.api_key)
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        """Closes the LLM client"""
+        """Closes the OpenAI client."""
         if self._client is not None:
-            self._client.client.close()
+            self._client.close()
             self._client = None
-
-
-class Usage:
-    """Usage class."""
-
-    def __init__(
-        self,
-        prompt_tokens: Optional[Any] = None,
-        completion_tokens: Optional[Any] = None,
-    ):
-        """Initializes with prompt tokens and completion tokens."""
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-
-
-class OpenAIResponse:
-    """Response class."""
-
-    def __init__(self, content: Optional[str] = None, usage: Optional[Usage] = None):
-        """Initializes with content and usage class."""
-        self.content = content
-        self.usage = Usage()
-
-
-class OpenAIClient:
-    """OpenAI Client"""
-
-    def __init__(self, api_key: str):
-        """Initializes with API keys and client."""
-        self.api_key = api_key
-        self.client = openai.OpenAI(api_key=self.api_key)
-
-    def completions(
-        self,
-        model: str,
-        messages: List = [],  # noqa: B006
-        timeout: Optional[Union[float, int]] = None,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        n: Optional[int] = None,
-        stop: Any = None,
-        max_tokens: Optional[float] = None,
-    ) -> Optional[OpenAIResponse]:
-        """Generate a completion from the specified LLM provider using the given model and messages."""
-        response_provider = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            n=1,
-            timeout=150,
-            stop=None,
-        )
-        response = OpenAIResponse()
-        response.content = response_provider.choices[0].message.content
-        response.usage.prompt_tokens = response_provider.usage.prompt_tokens
-        response.usage.completion_tokens = response_provider.usage.completion_tokens
-        return response
 
 
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
-    enc = encoding_for_model(model)
+    try:
+        enc = encoding_for_model(model)
+    except KeyError:
+        from tiktoken import get_encoding
+
+        enc = get_encoding("o200k_base")
     return len(enc.encode(text))
 
 
@@ -176,6 +224,8 @@ MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
 
+
+SYSTEM_PROMPT = "You are a helpful assistant."
 
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
@@ -195,20 +245,21 @@ We have retrieved the following information for this question:
 Recall the question you are forecasting:
 {question}
 
-Instructions:
-1. Compress key factual information from the sources, as well as useful background information
+Return a structured PredictionResult whose fields capture the following reasoning chain:
+
+1. `facts` — Compress key factual information from the sources, as well as useful background information
 which may not be in the sources, into a list of core factual points to reference. Aim for
 information which is specific, relevant, and covers the core considerations you'll use to make
 your forecast. For this step, do not draw any conclusions about how a fact will influence your
-answer or forecast. Place this section of your response in <facts></facts> tags.
+answer or forecast.
 
-2. Provide a few reasons why the answer might be no. Rate the strength of each reason on a
-scale of 1-10. Use <no></no> tags.
+2. `reasons_no` — Provide a few reasons why the answer might be no. Rate the strength of each reason on a
+scale of 1-10.
 
-3. Provide a few reasons why the answer might be yes. Rate the strength of each reason on a
-scale of 1-10. Use <yes></yes> tags.
+3. `reasons_yes` — Provide a few reasons why the answer might be yes. Rate the strength of each reason on a
+scale of 1-10.
 
-4. Aggregate your considerations. Do not summarize or repeat previous points; instead,
+4. `aggregation` — Aggregate your considerations. Do not summarize or repeat previous points; instead,
 investigate how the competing factors and mechanisms interact and weigh against each other.
 Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it would be
 beneficial to your reasoning. We have detected that you overestimate world conflict, drama,
@@ -216,18 +267,17 @@ violence, and crises due to news' negativity bias, which doesn't necessarily rep
 trends or base rates. Similarly, we also have detected you overestimate dramatic, shocking,
 or emotionally charged news due to news' sensationalism bias. Therefore adjust for news'
 negativity bias and sensationalism bias by considering reasons to why your provided sources
-might be biased or exaggerated. Think like a superforecaster. Use <thinking></thinking> tags
-for this section of your response.
+might be biased or exaggerated. Think like a superforecaster.
 
 CALIBRATION (mandatory before any probability):
 - State a base-rate probability for this event category and justify it.
 - Adjust from the base rate using specific evidence only.
 - Missing expected evidence (no announcement found, no confirmation) is a NO signal.
 
-5. Output an initial probability (prediction) as a single number between 0 and 1 given steps 1-4.
-Use <tentative></tentative> tags.
+End the `aggregation` field by stating an initial tentative probability (a single number between 0 and 1)
+given steps 1-4.
 
-6. Reflect on your answer, performing sanity checks and mentioning any additional knowledge
+5. `reflection` — Reflect on your tentative answer, performing sanity checks and mentioning any additional knowledge
 or background information which may be relevant. Check for over/underconfidence, improper
 treatment of conjunctive or disjunctive conditions (only if applicable), and other forecasting
 biases when reviewing your reasoning. Consider priors/base rates, and the extent to which
@@ -235,7 +285,7 @@ case-specific information justifies the deviation between your tentative forecas
 Recall that your performance will be evaluated according to the Brier score. Be precise with tail
 probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
 or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors
-that inform your final forecast. Use <thinking></thinking> tags for this portion of your response.
+that inform your final forecast.
 
 BEFORE FINAL ANSWER — apply all three checks:
 
@@ -250,57 +300,68 @@ BEFORE FINAL ANSWER — apply all three checks:
 3. NUMERIC QUESTIONS: For price/temperature/count thresholds, find the current
    value and compare to the threshold. A large gap overrides sentiment or forecasts.
 
-7. Output your final prediction (a number between 0 and 1 with an asterisk at the beginning and
-end of the decimal) in <answer></answer> tags.
-
-
-OUTPUT_FORMAT
-* Your output response must be only a single JSON object to be parsed by Python's "json.loads()".
-* The JSON must contain four fields: "p_yes", "p_no", "confidence", and "info_utility".
-* Each item in the JSON must have a value between 0 and 1.
+6. `p_yes`, `p_no`, `confidence`, `info_utility` — the four numeric fields:
    - "p_yes": Estimated probability that the event in the "Question" occurs.
    - "p_no": Estimated probability that the event in the "Question" does not occur.
    - "confidence": A value between 0 and 1 indicating the confidence in the prediction. 0 indicates lowest
      confidence value; 1 maximum confidence value.
    - "info_utility": Utility of the information provided in "sources" to help you make the prediction.
      0 indicates lowest utility; 1 maximum utility.
-* The sum of "p_yes" and "p_no" must equal 1.
-* Output only the JSON object. Do not include any other contents in your response.
-* This is incorrect:"```json{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}```"
-* This is incorrect:```json"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"```
-* This is correct:"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"
+   - Each value must be between 0 and 1.
+   - The sum of "p_yes" and "p_no" must equal 1.
 """
 
 
-def generate_prediction_with_retry(
-    client: "OpenAIClient",
+def _parse_completion(
+    client: OpenAI,
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float,
-    max_tokens: int,
+    response_format: Any,
+    temperature: float = 0,
+    max_tokens: int = 4096,
     retries: int = COMPLETION_RETRIES,
     delay: int = COMPLETION_DELAY,
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[Any, Optional[Callable]]:
-    """Attempt to generate a prediction with retries on failure."""
+    """Call OpenAI Structured Outputs and parse into a Pydantic model.
+
+    ``client.beta.chat.completions.parse()`` guarantees the response conforms
+    to the supplied Pydantic schema — no prompt-side JSON format instructions
+    or regex extraction required.
+
+    :param client: an initialised OpenAI client.
+    :param model: OpenAI model identifier.
+    :param messages: chat messages list (role + content dicts).
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature (0 = deterministic).
+    :param max_tokens: maximum tokens to generate.
+    :param retries: number of retry attempts on transient / validation failure.
+    :param delay: delay in seconds between retries.
+    :param counter_callback: optional callback tracking token usage.
+    :return: tuple of (parsed model instance, counter_callback).
+    :raises RuntimeError: if all retries exhausted without a successful parse.
+    """
     attempt = 0
     while attempt < retries:
         try:
-            response = client.completions(
+            response = client.beta.chat.completions.parse(
                 model=model,
                 messages=messages,
+                response_format=response_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                n=1,
-                timeout=90,
-                stop=None,
+                timeout=150,
             )
 
-            if (
-                response
-                and response.content is not None
-                and counter_callback is not None
-            ):
+            parsed = response.choices[0].message.parsed
+
+            if parsed is None:
+                refusal = response.choices[0].message.refusal
+                raise ValueError(
+                    f"Model refused or returned unparseable output: {refusal}"
+                )
+
+            if counter_callback is not None:
                 counter_callback(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
@@ -308,13 +369,23 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            content = response.content if response else None
-            return content, counter_callback
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed with error: {e}")
+            return parsed, counter_callback
+        except (
+            openai.APIConnectionError,
+            openai.RateLimitError,
+            openai.InternalServerError,
+            ValueError,
+        ) as e:
+            # Retry only transient failures and model-side issues:
+            #   - APIConnectionError (includes APITimeoutError) — network blips
+            #   - RateLimitError / InternalServerError — OpenAI-side retryable
+            #   - ValueError — covers pydantic ValidationError (e.g. p_yes+p_no
+            #     sum check) and the inline "Model refused…" raise above
+            print(f"[superforcaster] Attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+
+    raise RuntimeError("Failed to get structured LLM completion after retries")
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:
@@ -453,26 +524,47 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         print(f"\n{prediction_prompt=}\n")
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting prompt response...")
-        extracted_block, counter_callback = generate_prediction_with_retry(
+        prediction: PredictionResult
+        prediction, counter_callback = _parse_completion(
             client=llm_client,
             model=model,
             messages=messages,
+            response_format=PredictionResult,
             temperature=temperature,
             max_tokens=max_tokens,
-            retries=COMPLETION_RETRIES,
-            delay=COMPLETION_DELAY,
             counter_callback=counter_callback,
         )
 
-        used_params = {
+        print(f"[superforcaster] === FACTS ===\n{prediction.facts}")
+        print(f"[superforcaster] === REASONS_NO ===\n{prediction.reasons_no}")
+        print(f"[superforcaster] === REASONS_YES ===\n{prediction.reasons_yes}")
+        print(f"[superforcaster] === AGGREGATION ===\n{prediction.aggregation}")
+        print(f"[superforcaster] === REFLECTION ===\n{prediction.reflection}")
+        print(
+            f"[superforcaster] Result: p_yes={prediction.p_yes}, "
+            f"p_no={prediction.p_no}, confidence={prediction.confidence}, "
+            f"info_utility={prediction.info_utility}"
+        )
+
+        # On-chain result — only the four standard mech fields.
+        result = json.dumps(
+            {
+                "p_yes": prediction.p_yes,
+                "p_no": prediction.p_no,
+                "confidence": prediction.confidence,
+                "info_utility": prediction.info_utility,
+            }
+        )
+
+        used_params: Dict[str, Any] = {
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if return_source_content:
             used_params["source_content"] = captured_source_content
-        return extracted_block, prediction_prompt, None, counter_callback, used_params
+        return result, prediction_prompt, None, counter_callback, used_params

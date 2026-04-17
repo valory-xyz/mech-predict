@@ -7,7 +7,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from benchmark.prompt_replay import _load_and_filter_rows, _log_replay_summary
+from benchmark.prompt_replay import (
+    _load_and_filter_rows,
+    _log_replay_summary,
+    _prepare_output_dir,
+)
 
 
 def _row(
@@ -183,3 +187,65 @@ class TestLogReplaySummaryFilterStats:
                 },
             )
         assert "Pre-filter" not in caplog.text
+
+
+class TestPrepareOutputDir:
+    """`_prepare_output_dir` must isolate runs that share an output_dir.
+
+    Regression coverage for stale-sidecar leak (see PR #231 review): both
+    `candidate_failures.jsonl` and `filter_stats.json` are written
+    conditionally (only when failures / stats exist), so a clean run in a
+    reused directory would otherwise inherit the previous run's sidecars
+    and silently mislead ci_replay.
+    """
+
+    def test_stale_candidate_failures_purged_before_fresh_run(
+        self, tmp_path: Path
+    ) -> None:
+        """A prior run's candidate_failures.jsonl must not survive prep."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        stale = output_dir / "candidate_failures.jsonl"
+        stale.write_text(
+            json.dumps({"row_id": "stale", "raw_response": "from prior run"}) + "\n",
+            encoding="utf-8",
+        )
+
+        _prepare_output_dir(output_dir)
+
+        assert not stale.exists()
+
+    def test_stale_filter_stats_purged_before_fresh_run(self, tmp_path: Path) -> None:
+        """A prior run's filter_stats.json must not survive prep."""
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        stale = output_dir / "filter_stats.json"
+        stale.write_text(
+            json.dumps({"accepted": 999, "rejected": {"not_valid_parse": 42}}),
+            encoding="utf-8",
+        )
+
+        _prepare_output_dir(output_dir)
+
+        assert not stale.exists()
+
+    def test_prep_preserves_unrelated_artifacts(self, tmp_path: Path) -> None:
+        """Prep must only purge known-stale sidecars, not other contents.
+
+        Users may chain runs or inspect artifacts like
+        ``enriched_with_new_reasoning.jsonl``; prep must leave those alone.
+        """
+        output_dir = tmp_path / "out"
+        output_dir.mkdir()
+        keep = output_dir / "enriched_with_new_reasoning.jsonl"
+        keep.write_text("keep me\n", encoding="utf-8")
+
+        _prepare_output_dir(output_dir)
+
+        assert keep.read_text(encoding="utf-8") == "keep me\n"
+
+    def test_prep_is_noop_when_sidecars_absent(self, tmp_path: Path) -> None:
+        """Fresh output_dir: prep must not error when there's nothing to purge."""
+        output_dir = tmp_path / "out"
+        _prepare_output_dir(output_dir)
+        assert output_dir.is_dir()

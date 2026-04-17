@@ -458,6 +458,23 @@ def _load_and_filter_rows(
 # ---------------------------------------------------------------------------
 
 
+def _prepare_output_dir(output_dir: Path) -> None:
+    """Ensure ``output_dir`` exists and purge stale conditional sidecars.
+
+    ``candidate_failures.jsonl`` and ``filter_stats.json`` are written
+    conditionally by the replay step (only when failures / stats exist). When
+    a reused ``output_dir`` already contains one of these from a prior run, a
+    clean current run would leave the stale file in place and ci_replay would
+    surface it as if it were current. Purging on prep keeps the invariant
+    "files in output_dir correspond to this run only".
+
+    :param output_dir: directory that will hold baseline/candidate artifacts.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in ("candidate_failures.jsonl", "filter_stats.json"):
+        (output_dir / stale).unlink(missing_ok=True)
+
+
 def enrich(
     production_log: Path,
     tool_filter: str,
@@ -1261,7 +1278,7 @@ def replay(  # pylint: disable=too-many-statements
     )
 
     # Prepare output
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_output_dir(output_dir)
     baseline_path = output_dir / "baseline.jsonl"
     candidate_path = output_dir / "candidate.jsonl"
 

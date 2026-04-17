@@ -182,6 +182,23 @@ class TestReliabilityBlock:
         text = "\n".join(_format_reliability_block(candidate, [], None))
         assert "Baseline pre-filter parse rate" not in text
 
+    def test_scoping_stays_nested_under_prefilter_not_parse_rate(self) -> None:
+        """Scoping (breakdown of rejections) must remain adjacent to Pre-filter.
+
+        Scoping renders as an indented sub-bullet; markdown nests it under
+        the preceding top-level bullet. If Baseline pre-filter parse rate is
+        inserted between Pre-filter and Scoping, the sub-bullet visually
+        becomes a child of the wrong parent.
+        """
+        candidate = self._metrics([_row("valid")] * 50)
+        lines = _format_reliability_block(
+            candidate,
+            [],
+            _stats(accepted=50, wrong_tool=3, no_outcome=1),
+        )
+        text = "\n".join(lines)
+        assert text.index("Scoping:") < text.index("Baseline pre-filter parse rate:")
+
     def test_prefilter_omitted_when_stats_none(self) -> None:
         """Older pipelines (no sidecar) render without the Pre-filter line."""
         candidate = self._metrics([_row("valid")] * 3)

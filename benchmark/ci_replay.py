@@ -276,17 +276,10 @@ def _format_reliability_block(
             f"- Pre-filter (enrich): {accepted} accepted, {total_rej} rejected, "
             f"not_valid_parse={not_valid} {pf_marker}"
         )
-        # Post-filter baseline is 100% by construction (enrich drops non-valid
-        # rows), so surface the *pre-filter* ratio to tell reviewers how noisy
-        # production actually was — per PR #231 review.
-        denom = accepted + not_valid
-        if denom > 0:
-            lines.append(
-                f"- Baseline pre-filter parse rate: {accepted}/{denom} "
-                f"({accepted / denom * 100:.1f}%)"
-            )
         # Scoping breakdown only when any rows were rejected — otherwise four
-        # zeroes just add noise to the happy path.
+        # zeroes just add noise to the happy path. Must stay adjacent to the
+        # Pre-filter bullet above: markdown nests the indented sub-bullet
+        # under the most recent top-level bullet.
         if total_rej > 0:
             scoping = ", ".join(
                 [
@@ -297,6 +290,16 @@ def _format_reliability_block(
                 ]
             )
             lines.append(f"  - Scoping: {scoping}")
+        # Post-filter baseline is 100% by construction (enrich drops non-valid
+        # rows), so surface the *pre-filter* ratio to tell reviewers how noisy
+        # production actually was — per PR #231 review. Rendered last so the
+        # Scoping sub-bullet above stays nested under Pre-filter, not here.
+        denom = accepted + not_valid
+        if denom > 0:
+            lines.append(
+                f"- Baseline pre-filter parse rate: {accepted}/{denom} "
+                f"({accepted / denom * 100:.1f}%)"
+            )
 
     lines.append("")
 

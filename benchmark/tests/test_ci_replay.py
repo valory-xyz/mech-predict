@@ -144,6 +144,44 @@ class TestReliabilityBlock:
         # Scoping alone must not raise the invariant marker.
         assert "⚠️" not in text
 
+    def test_baseline_prefilter_parse_rate_rendered_with_rejections(self) -> None:
+        """Rejections > 0: render ``accepted/(accepted+not_valid_parse)`` as a percentage.
+
+        Direct response to PR #231 review — post-filter baseline=100% is a
+        tautology because enrich drops non-valid rows. The ratio before the
+        filter is what tells reviewers how noisy production actually was.
+        """
+        candidate = self._metrics([_row("valid")] * 100)
+        lines = _format_reliability_block(
+            candidate, [], _stats(accepted=100, not_valid_parse=35)
+        )
+        text = "\n".join(lines)
+        assert "Baseline pre-filter parse rate: 100/135 (74.1%)" in text
+
+    def test_baseline_prefilter_parse_rate_at_100_when_no_parse_rejections(
+        self,
+    ) -> None:
+        """Zero not_valid_parse rejections: rate is 100%, but still rendered.
+
+        Keeping it rendered on the happy path surfaces the *fact* that this
+        is now a reported metric, so a later regression (non-zero
+        ``not_valid_parse``) isn't a surprise line appearing out of nowhere.
+        """
+        candidate = self._metrics([_row("valid")] * 50)
+        lines = _format_reliability_block(
+            candidate,
+            [],
+            _stats(accepted=50, wrong_tool=3, no_outcome=1),
+        )
+        text = "\n".join(lines)
+        assert "Baseline pre-filter parse rate: 50/50 (100.0%)" in text
+
+    def test_baseline_prefilter_parse_rate_omitted_when_no_sidecar(self) -> None:
+        """Older pipelines (no filter_stats) don't render the baseline rate line."""
+        candidate = self._metrics([_row("valid")] * 5)
+        text = "\n".join(_format_reliability_block(candidate, [], None))
+        assert "Baseline pre-filter parse rate" not in text
+
     def test_prefilter_omitted_when_stats_none(self) -> None:
         """Older pipelines (no sidecar) render without the Pre-filter line."""
         candidate = self._metrics([_row("valid")] * 3)
@@ -274,3 +312,63 @@ class TestFormatReportEndToEnd:
         )
         assert "⚠️" in report
         assert "not_valid_parse=2 ⚠️" in report
+
+
+class TestFormatReportFooter:
+    """Footer must make multi-seed runs distinguishable and auditable.
+
+    Reviewers will trigger ``/benchmark`` repeatedly with different seeds;
+    without seed + trigger-comment attribution in the footer, the resulting
+    PR comments are visually indistinguishable and the parameters that
+    produced each one are invisible. Per PR #231 review (#233).
+    """
+
+    def _report(self, **meta: str) -> str:
+        baseline = compute_metrics([_row("valid")] * 3)
+        candidate = compute_metrics([_row("valid")] * 3)
+        full_meta: dict[str, str] = {"tool": "superforcaster", **meta}
+        return format_report(baseline, candidate, full_meta)
+
+    def test_footer_includes_seed_when_provided(self) -> None:
+        """`meta["seed"]` must appear as `seed <N>` in the footer."""
+        report = self._report(seed="1337")
+        assert "seed 1337" in report.splitlines()[-1]
+
+    def test_footer_omits_seed_when_absent(self) -> None:
+        """Without a seed, no seed label — otherwise older callers emit 'seed None'."""
+        report = self._report()
+        assert "seed" not in report.splitlines()[-1]
+
+    def test_footer_links_triggered_by_when_comment_url_provided(self) -> None:
+        """trigger_comment_url turns the `@user` mention into a markdown link.
+
+        Reviewers need to jump from a benchmark comment to the exact
+        ``/benchmark`` request that produced it (params, author, time).
+        """
+        report = self._report(
+            triggered_by="LOCKhart07",
+            trigger_comment_url="https://github.com/valory-xyz/mech-predict/pull/231#issuecomment-4263150118",
+        )
+        expected = (
+            "triggered by [@LOCKhart07]"
+            "(https://github.com/valory-xyz/mech-predict/pull/231#issuecomment-4263150118)"
+        )
+        assert expected in report.splitlines()[-1]
+
+    def test_footer_plain_triggered_by_without_comment_url(self) -> None:
+        """No URL → plain `@user` mention (backwards compatible)."""
+        report = self._report(triggered_by="LOCKhart07")
+        footer = report.splitlines()[-1]
+        assert "@LOCKhart07" in footer
+        assert "[@LOCKhart07]" not in footer
+
+    def test_footer_order_markets_seed_triggered_by(self) -> None:
+        """Footer parts stay in the existing order: markets → seed → triggered-by."""
+        report = self._report(
+            seed="1337",
+            triggered_by="LOCKhart07",
+            trigger_comment_url="https://example.com/c",
+        )
+        footer = report.splitlines()[-1]
+        assert footer.index("markets") < footer.index("seed 1337")
+        assert footer.index("seed 1337") < footer.index("LOCKhart07")

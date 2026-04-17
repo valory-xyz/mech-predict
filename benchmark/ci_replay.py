@@ -276,6 +276,15 @@ def _format_reliability_block(
             f"- Pre-filter (enrich): {accepted} accepted, {total_rej} rejected, "
             f"not_valid_parse={not_valid} {pf_marker}"
         )
+        # Post-filter baseline is 100% by construction (enrich drops non-valid
+        # rows), so surface the *pre-filter* ratio to tell reviewers how noisy
+        # production actually was — per PR #231 review.
+        denom = accepted + not_valid
+        if denom > 0:
+            lines.append(
+                f"- Baseline pre-filter parse rate: {accepted}/{denom} "
+                f"({accepted / denom * 100:.1f}%)"
+            )
         # Scoping breakdown only when any rows were rejected — otherwise four
         # zeroes just add noise to the happy path.
         if total_rej > 0:
@@ -391,8 +400,16 @@ def format_report(
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):
         footer_parts.append(f"phase: {meta['phase']}")
-    if meta.get("triggered_by"):
-        footer_parts.append(f"triggered by @{meta['triggered_by']}")
+    triggered_by = meta.get("triggered_by")
+    if triggered_by:
+        # Link the mention back to the triggering `/benchmark` comment when
+        # its URL is available, so a reviewer scanning N seed runs can jump
+        # to the exact request (params, author, time) that produced each.
+        trigger_url = meta.get("trigger_comment_url")
+        if trigger_url:
+            footer_parts.append(f"triggered by [@{triggered_by}]({trigger_url})")
+        else:
+            footer_parts.append(f"triggered by @{triggered_by}")
     parts.append(f"*{' | '.join(footer_parts)}*")
 
     return "\n".join(parts)
@@ -457,6 +474,21 @@ def main() -> None:
         default=None,
         help="GitHub username who triggered the benchmark",
     )
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default=None,
+        help="Random seed used for stratified sampling (rendered in footer)",
+    )
+    parser.add_argument(
+        "--trigger-comment-url",
+        type=str,
+        default=None,
+        help=(
+            "URL of the /benchmark comment that triggered this run; "
+            "rendered as a markdown link in the footer's triggered-by mention"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -485,6 +517,8 @@ def main() -> None:
     meta = {
         "tool": tool,
         "triggered_by": args.triggered_by,
+        "seed": args.seed,
+        "trigger_comment_url": args.trigger_comment_url,
     }
 
     report = format_report(

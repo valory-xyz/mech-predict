@@ -5,7 +5,7 @@
 <h1 align="center" style="margin-bottom: 0;">
     Autonolas AI Mechs
     <br><a href="https://github.com/valory-xyz/mech/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/github/license/valory-xyz/mech"></a>
-    <a href="https://pypi.org/project/open-autonomy/0.21.16/"><img alt="Framework: Open Autonomy 0.21.16" src="https://img.shields.io/badge/framework-Open%20Autonomy%200.21.16-blueviolet"></a>
+    <a href="https://pypi.org/project/open-autonomy/0.21.18/"><img alt="Framework: Open Autonomy 0.21.18" src="https://img.shields.io/badge/framework-Open%20Autonomy%200.21.18-blueviolet"></a>
     <!-- <a href="https://github.com/valory-xyz/mech/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/valory-xyz/mech"> -->
     </a>
@@ -135,7 +135,7 @@ Now, you have two options to run the worker: as a standalone agent or as a servi
 To create a release, use the `aea-helpers` CLI:
 
 ```bash
-pip install aea-helpers
+pip install open-aea-helpers
 aea-helpers make-release --version <VERSION> --env <ENV> --description "<DESCRIPTION>"
 ```
 

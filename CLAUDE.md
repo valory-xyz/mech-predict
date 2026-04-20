@@ -64,8 +64,9 @@ def run(**kwargs) -> Tuple[str, Optional[str], Optional[Dict[str, Any]], Any]:
 ### Setup and Installation
 
 ```bash
-# Install dependencies with Poetry
-poetry install && poetry shell
+# Install dependencies
+uv sync
+source .venv/bin/activate
 
 # Sync packages from Open Autonomy registry
 autonomy packages sync --update-packages
@@ -255,7 +256,7 @@ The `KeyChain` class (in `packages/valory/skills/task_execution/utils/apis.py`) 
 ## Dependencies
 
 - Python >=3.10, <3.15
-- Poetry for dependency management
+- uv for dependency management
 - Docker and Docker Compose for service deployment
 - Tendermint 0.34.19 for consensus
 - Open Autonomy framework (all packages in `packages/` directory)

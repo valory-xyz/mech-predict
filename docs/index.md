@@ -48,7 +48,8 @@ In order to run a local demo service based on the MechKit:
 
     ```bash
     git clone https://github.com/valory-xyz/mech && cd mech
-    poetry install && poetry shell
+    uv sync
+    source .venv/bin/activate
 
     autonomy init --remote --ipfs --reset --author=your_name
     autonomy packages sync --update-packages

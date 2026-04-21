@@ -115,3 +115,25 @@ class TestPromptRejectsUnformattedPlaceholder:
         """Empty label is rejected — would render "for the ** deployment"."""
         with pytest.raises(ValueError, match="platform_label"):
             _build_system_prompt("")
+
+    def test_build_raises_on_unknown_label(self) -> None:
+        """A label outside PLATFORM_LABELS is rejected before reaching the LLM.
+
+        Guards against a workflow-level typo like ``--platform-label Omenstrap``
+        silently producing a deployment-mislabeled summary.
+        """
+        with pytest.raises(ValueError, match="must be one of"):
+            _build_system_prompt("Omenstrap")
+
+    def test_labels_tracked_from_analyze(self) -> None:
+        """notify_slack reuses ``benchmark.analyze.PLATFORM_LABELS``.
+
+        Asserting on the accepted set via the same import surface means a
+        rename in analyze.py (e.g. Omenstrat -> Omen Strat) doesn't drift
+        the two modules out of sync.
+        """
+        from benchmark.analyze import PLATFORM_LABELS  # local, explicit
+
+        for label in PLATFORM_LABELS.values():
+            # Doesn't raise — every analyze.py label is accepted.
+            _build_system_prompt(label)

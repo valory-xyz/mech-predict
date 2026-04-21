@@ -1851,3 +1851,25 @@ class TestSectionEdgeAnalysisPlatformGate:
         assert "### By Platform" in rendered
         assert "### By Platform \u00d7 Difficulty" in rendered
         assert "### By Platform \u00d7 Liquidity" in rendered
+
+
+class TestTrendSectionPlatformAnnotation:
+    """section_trend warns when rendered inside a per-platform report.
+
+    scores_history.jsonl is only populated by the combined prod accumulator,
+    so the same monthly numbers appear in every per-platform report. The
+    annotation prevents a reader from mistaking the data for platform-scoped.
+    """
+
+    def _history(self) -> list[dict[str, Any]]:
+        return [{"month": "2026-03", "overall": {"brier": 0.2, "n": 100}}]
+
+    def test_fleet_wide_note_renders_with_platform(self) -> None:
+        """Platform-scoped render inserts the fleet-wide disclaimer."""
+        rendered = section_trend(self._history(), None, platform="omen")
+        assert "Fleet-wide monthly trend" in rendered
+
+    def test_no_note_without_platform(self) -> None:
+        """Fleet-wide render (no platform arg) stays quiet — it's correct there."""
+        rendered = section_trend(self._history(), None)
+        assert "Fleet-wide monthly trend" not in rendered

@@ -17,7 +17,8 @@ import json
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from benchmark import release_map
 from benchmark.io import load_jsonl
@@ -37,11 +38,14 @@ DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
 DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
 
 # Maps the scorer's platform keys to the deployment names used in report
-# headers and Slack summaries.
-PLATFORM_LABELS: dict[str, str] = {
-    "omen": "Omenstrat",
-    "polymarket": "Polystrat",
-}
+# headers and Slack summaries. Exposed read-only so downstream modules
+# (notify_slack) can reuse the mapping without drifting.
+PLATFORM_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        "omen": "Omenstrat",
+        "polymarket": "Polystrat",
+    }
+)
 
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
@@ -596,11 +600,16 @@ def section_best_predictions(scores: dict[str, Any], n: int = 10) -> str:
 def section_trend(
     history: list[dict[str, Any]],
     scores: dict[str, Any] | None = None,
+    platform: str | None = None,
 ) -> str:
     """Generate the trend section from monthly history + current month.
 
     :param history: list of monthly snapshot dicts from scores_history.jsonl.
     :param scores: current scores.json dict (appended as in-progress month).
+    :param platform: when set, an annotation warns the reader that the
+        monthly history is fleet-wide and not scoped to that platform.
+        ``scores_history.jsonl`` is only written for the combined prod
+        accumulator, so the same numbers render in every per-platform report.
     :return: markdown section string.
     """
     # Build full trend: completed months + current month
@@ -614,6 +623,11 @@ def section_trend(
         )
 
     lines = ["## Trend", ""]
+    if platform is not None:
+        lines.append(
+            "_Fleet-wide monthly trend — not scoped to this platform._"
+        )
+        lines.append("")
 
     if not trend:
         lines.append("No trend data available.")
@@ -1880,7 +1894,7 @@ def generate_report(
             section_latency(scores),
             section_worst_predictions(scores),
             section_best_predictions(scores),
-            section_trend(history, scores),
+            section_trend(history, scores, platform=platform),
             section_sample_size_warnings(scores),
         ]
     )

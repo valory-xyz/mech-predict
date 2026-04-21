@@ -33,8 +33,10 @@ from benchmark.scorer import (
     PLATFORMS,
     WORST_BEST_SIZE,
     _accumulate_group,
+    _cli_legacy_full_recompute,
     _derive_group,
     _derive_platform_path,
+    _derive_tournament_path,
     _empty_group,
     _is_edge_eligible,
     _partition_rows_by_platform,
@@ -2575,6 +2577,46 @@ class TestPerPlatformUpdate:
         omen = json.loads((tmp_path / "scores_omen.json").read_text())
         poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
         assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 1
+
+
+class TestPerPlatformLegacyRecompute:
+    """Legacy ``--input`` full-recompute path writes per-platform files too.
+
+    This CLI mode isn't used by the daily workflow but must stay at parity
+    with rebuild/update/period so local dev runs produce the same artifacts.
+    """
+
+    def test_legacy_full_recompute_emits_per_platform_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Mixed-platform input jsonl -> combined + per-platform scores files."""
+        import argparse
+
+        input_path = tmp_path / "input.jsonl"
+        input_path.write_text(
+            "\n".join(
+                json.dumps(r)
+                for r in [
+                    _row(platform="omen", row_id="o1"),
+                    _row(platform="omen", row_id="o2"),
+                    _row(platform="polymarket", row_id="p1"),
+                ]
+            )
+            + "\n"
+        )
+        output_path = tmp_path / "scores.json"
+        tournament_path = _derive_tournament_path(output_path)
+
+        args = argparse.Namespace(input=input_path, output=output_path)
+        _cli_legacy_full_recompute(args, tournament_path)
+
+        combined = json.loads(output_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 3
+        assert omen["overall"]["n"] == 2
         assert poly["overall"]["n"] == 1
 
 

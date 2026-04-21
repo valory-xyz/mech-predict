@@ -16,9 +16,11 @@ import logging
 import os
 import sys
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 from urllib.request import Request, urlopen
 
-from benchmark.analyze import VERSION_DELTA_LOW_SAMPLE_STRICT
+from benchmark.analyze import PLATFORM_LABELS, VERSION_DELTA_LOW_SAMPLE_STRICT
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -78,17 +80,27 @@ Rules:
 - Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
 
 
+_VALID_PLATFORM_LABELS: frozenset[str] = frozenset(PLATFORM_LABELS.values())
+
+
 def _build_system_prompt(platform_label: str) -> str:
     """Fill in the platform label on the system prompt template.
 
-    :param platform_label: deployment name (e.g. ``Omenstrat`` or ``Polystrat``)
-        to reference throughout the summary. Must be non-empty — an empty
-        label renders as "for the ** deployment" which reads wrong.
+    :param platform_label: deployment name to reference throughout the
+        summary. Must match one of the labels defined in
+        ``benchmark.analyze.PLATFORM_LABELS`` so a typo at the workflow
+        level (e.g. ``--platform-label Omenstrap``) surfaces loudly instead
+        of reaching the LLM.
     :return: fully formatted system prompt string.
-    :raises ValueError: when ``platform_label`` is empty.
+    :raises ValueError: when ``platform_label`` is empty or unknown.
     """
     if not platform_label:
         raise ValueError("platform_label must be non-empty")
+    if platform_label not in _VALID_PLATFORM_LABELS:
+        raise ValueError(
+            f"platform_label must be one of {sorted(_VALID_PLATFORM_LABELS)},"
+            f" got {platform_label!r}"
+        )
     return SUMMARY_SYSTEM_PROMPT_TEMPLATE.format(platform_label=platform_label)
 
 
@@ -192,17 +204,17 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
         resp.read()
 
 
-_PLATFORM_LABEL_BY_STEM: dict[str, str] = {
-    "report_omen": "Omenstrat",
-    "report_polymarket": "Polystrat",
-}
+_PLATFORM_LABEL_BY_STEM: Mapping[str, str] = MappingProxyType(
+    {f"report_{key}": label for key, label in PLATFORM_LABELS.items()}
+)
 
 
 def _infer_platform_label(report_path: Path) -> str | None:
     """Derive the deployment label from the report filename.
 
-    The scorer writes ``report_omen.md`` and ``report_polymarket.md``; an
-    explicit ``--platform-label`` CLI arg overrides this inference.
+    ``analyze.py`` writes ``report_<platform>.md`` per key in
+    ``PLATFORM_LABELS``; an explicit ``--platform-label`` CLI arg
+    overrides this inference.
 
     :param report_path: path to the report markdown file.
     :return: deployment label, or None if the filename doesn't match.

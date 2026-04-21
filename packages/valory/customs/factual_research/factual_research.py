@@ -225,7 +225,14 @@ def with_key_rotation(func: Callable) -> Callable:
                 if isinstance(result, float):
                     return result
                 return result + (api_keys,)
-            except openai.RateLimitError as e:
+            except (
+                openai.RateLimitError,
+                openai.AuthenticationError,
+                openai.PermissionDeniedError,
+            ) as e:
+                # Rotate on rate limits AND on auth/permission failures: a revoked
+                # key is as unusable as a throttled one, and rotating it out is
+                # the decorator's whole job.
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
                     raise e
                 retries_left["openai"] -= 1

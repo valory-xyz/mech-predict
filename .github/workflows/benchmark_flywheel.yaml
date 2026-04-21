@@ -169,22 +169,19 @@ jobs:
             $TOURNAMENT_FLAG
         continue-on-error: true
 
-      # Analyze reads scores.json + tournament scores + history + period scores
-      - name: Analyze
-        run: |
-          python -m benchmark.analyze \
-            --period benchmark/results/period_scores.json \
-            --rolling benchmark/results/rolling_scores.json \
-            --scores-tournament benchmark/results/scores_tournament.json \
-            --period-tournament benchmark/results/period_scores_tournament.json \
-            --rolling-tournament benchmark/results/rolling_scores_tournament.json \
-            --include-tournament
+      - name: Analyze (Omenstrat)
+        run: python -m benchmark.analyze --platform omen --include-tournament
+
+      - name: Analyze (Polystrat)
+        run: python -m benchmark.analyze --platform polymarket --include-tournament
 
       # Upload state + scores (small, needed for next run).
       # include-hidden-files: true is required so .fetch_state.json
       # (leading dot = hidden under v4's default filter) actually ships
       # in the artifact. Without it, the incremental fetch cursor is
       # silently dropped every run and the scorer compounds double-counts.
+      # Per-platform scores files each carry their own incremental-resume
+      # state; dropping any of them resets that platform's accumulator.
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
@@ -193,10 +190,15 @@ jobs:
           path: |
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json
+            benchmark/results/scores_omen.json
+            benchmark/results/scores_polymarket.json
             benchmark/results/scores_tournament.json
+            benchmark/results/scores_tournament_omen.json
+            benchmark/results/scores_tournament_polymarket.json
             benchmark/results/scores_history.jsonl
             benchmark/results/scored_row_ids.json
-            benchmark/results/report.md
+            benchmark/results/report_omen.md
+            benchmark/results/report_polymarket.md
           retention-days: 90
 
       - name: Resolve report artifact URL
@@ -210,13 +212,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Post summary to Slack
+      - name: Post Omenstrat summary to Slack
         if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-        run: python -m benchmark.notify_slack --report benchmark/results/report.md
+        run: python -m benchmark.notify_slack --report benchmark/results/report_omen.md
+
+      - name: Post Polystrat summary to Slack
+        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+          REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
+        run: python -m benchmark.notify_slack --report benchmark/results/report_polymarket.md
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

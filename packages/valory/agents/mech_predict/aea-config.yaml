@@ -52,12 +52,12 @@ skills:
 customs:
 - valory/resolve_market:0.1.0:bafybeigxgcjsvi2zovoxgz5ra7x7sqz5qfx3p5kxmhgftrr7fxonjmhspi
 - valory/resolve_market_jury:0.1.0:bafybeiciwntuzeqnal5b3wwixquq4efv443eu4m4z3ujoy6olmulktfl3q
-- valory/prediction_request:0.1.0:bafybeidxjrzfgbabr47xtczjbdipy7blfzehpddp4cdrizeczrp5uuxhpu
+- valory/prediction_request:0.1.0:bafybeigbcls6rcqjtjrq3duo3obzpxu2ayj7vsjofixn7qvljhdmc75pky
 - napthaai/resolve_market_reasoning:0.1.0:bafybeihk5wteioppm33pojdvdk32nnlryhkvowuvpn22c4a6prwkknzq34
-- napthaai/prediction_request_rag:0.1.0:bafybeigwx7uvoxrp6rqvhxz63z5upf37dwp63c7m3r5657uh5oiwgsi4jy
-- napthaai/prediction_request_reasoning:0.1.0:bafybeicnug2oervqkotamtajugddn55l6x3aywwgbk5xt2lsmgnz6ynh6a
+- napthaai/prediction_request_rag:0.1.0:bafybeiasyiowjgwaadzmqp5hekg77bfpj22vv4abjwho2vrobhvlutfs4e
+- napthaai/prediction_request_reasoning:0.1.0:bafybeied5ljgwnpkmigy3duc3fltkwfdwyykkdo6a7l2kcx77aceka44em
 - valory/prepare_tx:0.1.0:bafybeida74hcfsfgh644o27qlq2lmue5aj7kvjfsbjermwv42euyf525ya
-- napthaai/prediction_url_cot:0.1.0:bafybeigqfqjo767gttx5td7fqah5xija6tk5752ygdsbaib35yavzawinq
+- napthaai/prediction_url_cot:0.1.0:bafybeifxd5c3khhjrvhjmfspqiuxbm2arvnl6kyjclbyw67fb36gyh6b6u
 - valory/prediction_langchain:0.1.0:bafybeifuxvvldtt7o5zmrgdscbqofnkgtmemv5yv5gxzeptnxsiymwvs6a
 - victorpolisetty/gemini_request:0.1.0:bafybeiamjk5mfycjqkstkzymggako2jt7yjros2zx4l54zyuei2xkj4gqu
 - victorpolisetty/dalle_request:0.1.0:bafybeiadatvfc6opcsmhpxxzmsqpwgbckblciqypx2iwe5uwove6nmki3e

@@ -33,9 +33,15 @@ from benchmark.tool_usage import (
     iter_tools_with_disabled,
 )
 
-DEFAULT_SCORES = Path(__file__).parent / "results" / "scores.json"
-DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
-DEFAULT_OUTPUT = Path(__file__).parent / "results" / "report.md"
+DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
+DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
+
+# Maps the scorer's platform keys to the deployment names used in report
+# headers and Slack summaries.
+PLATFORM_LABELS: dict[str, str] = {
+    "omen": "Omenstrat",
+    "polymarket": "Polystrat",
+}
 
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
@@ -717,8 +723,15 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
 _EDGE_SECTION_HEADER = "## Edge Over Market (System Diagnostic)"
 
 
-def section_edge_analysis(scores: dict[str, Any]) -> str:
-    """Edge-over-market analysis — per platform, difficulty, and liquidity."""
+def section_edge_analysis(
+    scores: dict[str, Any], platform: str | None = None
+) -> str:
+    """Edge-over-market analysis — per platform, difficulty, and liquidity.
+
+    When ``platform`` is set, the scores input is already partitioned to
+    one platform, so the per-platform / platform × difficulty / platform
+    × liquidity sub-blocks are degenerate (one row each) and skipped.
+    """
     elig = scores.get("edge_eligibility", {})
     n_eligible = elig.get("n_eligible", 0)
     n_total = elig.get("n_total", 0)
@@ -738,6 +751,11 @@ def section_edge_analysis(scores: dict[str, Any]) -> str:
         f"Edge-eligible rows: {n_eligible} / {n_total}{pct}",
         "",
     ]
+
+    # Sub-blocks below compare platforms; skip them when the input is
+    # already platform-scoped.
+    if platform is not None:
+        return "\n".join(lines).rstrip()
 
     # Per-platform edge
     by_plat = scores.get("by_platform", {})
@@ -1718,6 +1736,8 @@ def section_tournament_callouts(
 def generate_report(
     scores: dict[str, Any],
     history: list[dict[str, Any]] | None = None,
+    *,
+    platform: str,
     period_scores: dict[str, Any] | None = None,
     rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
@@ -1726,33 +1746,42 @@ def generate_report(
     rolling_scores_tournament: dict[str, Any] | None = None,
     disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
-    """Generate a full benchmark report from scores and history.
+    """Generate a platform-scoped benchmark report from scores and history.
+
+    Every section is driven by scores already partitioned to ``platform``
+    by the scorer, so the fleet-wide comparison sections (``section_platform``,
+    ``section_tool_platform``, Platform × Difficulty, Platform × Liquidity)
+    are dropped — they'd render a single-row view that adds noise without
+    signal. The report header names the deployment this report covers.
 
     Production-mode sections are rendered from ``scores`` /
     ``period_scores`` / ``rolling_scores``. When tournament scores are
     supplied and contain rows, a duplicate set of the mode-sensitive
-    sections (Since Last Report, Last 7 Days Rolling, Overall, Tool
-    Ranking) is rendered with a ``— Tournament`` suffix. The Tool ×
-    Version × Mode breakdown merges both modes. A final "Tournament
-    Callouts" section flags tool versions whose tournament Brier
-    diverges materially from the same tool's production baseline.
+    sections is rendered with a ``— Tournament`` suffix.
 
-    :param scores: parsed production ``scores.json`` dict (all-time).
+    :param scores: parsed platform-scoped ``scores_<platform>.json`` dict.
     :param history: list of monthly snapshots from ``scores_history.jsonl``.
+    :param platform: one of ``PLATFORM_LABELS`` keys (``"omen"`` or
+        ``"polymarket"``). Drives the report header and gates platform-
+        comparison sections.
     :param period_scores: production scores since last report.
     :param rolling_scores: production scores from the last 7 days.
     :param include_tournament: master switch for rendering the Tool ×
         Version × Mode breakdown. When False, tournament inputs are
         ignored entirely.
-    :param scores_tournament: parsed ``scores_tournament.json`` dict.
+    :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
     :param period_scores_tournament: tournament since last report.
     :param rolling_scores_tournament: tournament last 7 days.
     :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
-        map used by the Tool Deployment Status section. Pass ``None``
-        (default) to fetch from GitHub at render time; pass an empty
-        dict in tests to skip the network call.
+        map used by the Tool Deployment Status section.
     :return: full markdown report string.
     """
+    if platform not in PLATFORM_LABELS:
+        raise ValueError(
+            f"platform must be one of {sorted(PLATFORM_LABELS)}, got {platform!r}"
+        )
+    platform_label = PLATFORM_LABELS[platform]
+
     if history is None:
         history = []
 
@@ -1764,7 +1793,7 @@ def generate_report(
     # Local non-optional alias for mypy once _has_tournament_data has narrowed.
     tournament_scores: dict[str, Any] = scores_tournament or {}
 
-    sections: list[str] = [f"# Benchmark Report — {date}"]
+    sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
 
     # Since Last Report
     sections.append(section_period(period_scores, scores, "Since Last Report"))
@@ -1836,14 +1865,13 @@ def generate_report(
         if deltas:
             sections.append(deltas)
 
-    # Remaining production-only sections
+    # section_platform / section_tool_platform are intentionally dropped:
+    # they're fleet-wide comparisons and the input is platform-scoped.
     sections.extend(
         [
-            section_platform(scores),
             section_category(scores),
-            section_tool_platform(scores),
             section_tool_category(scores),
-            section_edge_analysis(scores),
+            section_edge_analysis(scores, platform=platform),
             section_diagnostic_metrics(scores),
             section_calibration(scores),
             section_weak_spots(scores),
@@ -1876,38 +1904,69 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate benchmark report from scores.",
     )
-    parser.add_argument("--scores", type=Path, default=DEFAULT_SCORES)
+    parser.add_argument(
+        "--platform",
+        required=True,
+        choices=sorted(PLATFORM_LABELS),
+        help="Platform to scope the report to (drives default paths + header).",
+    )
+    parser.add_argument(
+        "--scores",
+        type=Path,
+        default=None,
+        help="Override for scores file. Default: results/scores_<platform>.json.",
+    )
     parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Report output path. Default: results/report_<platform>.md.",
+    )
     parser.add_argument(
         "--period",
         type=Path,
         default=None,
-        help="Period scores JSON (since last report, production)",
+        help=(
+            "Period scores JSON (since last report). "
+            "Default: results/period_scores_<platform>.json."
+        ),
     )
     parser.add_argument(
         "--rolling",
         type=Path,
         default=None,
-        help="Rolling 7-day scores JSON (production)",
+        help=(
+            "Rolling scores JSON. "
+            "Default: results/rolling_scores_<platform>.json."
+        ),
     )
     parser.add_argument(
         "--scores-tournament",
         type=Path,
         default=None,
-        help="Tournament scores JSON (all-time)",
+        help=(
+            "Tournament scores JSON. "
+            "Default: results/scores_tournament_<platform>.json."
+        ),
     )
     parser.add_argument(
         "--period-tournament",
         type=Path,
         default=None,
-        help="Tournament period scores JSON (since last report)",
+        help=(
+            "Tournament period scores JSON. "
+            "Default: results/period_scores_tournament_<platform>.json."
+        ),
     )
     parser.add_argument(
         "--rolling-tournament",
         type=Path,
         default=None,
-        help="Tournament rolling 7-day scores JSON",
+        help=(
+            "Tournament rolling scores JSON. "
+            "Default: results/rolling_scores_tournament_<platform>.json."
+        ),
     )
     parser.add_argument(
         "--include-tournament",
@@ -1919,25 +1978,45 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    platform = args.platform
+    results_dir = DEFAULT_RESULTS_DIR
+    scores_path = args.scores or results_dir / f"scores_{platform}.json"
+    output_path = args.output or results_dir / f"report_{platform}.md"
+    period_path = args.period or results_dir / f"period_scores_{platform}.json"
+    rolling_path = args.rolling or results_dir / f"rolling_scores_{platform}.json"
+    scores_tournament_path = (
+        args.scores_tournament
+        or results_dir / f"scores_tournament_{platform}.json"
+    )
+    period_tournament_path = (
+        args.period_tournament
+        or results_dir / f"period_scores_tournament_{platform}.json"
+    )
+    rolling_tournament_path = (
+        args.rolling_tournament
+        or results_dir / f"rolling_scores_tournament_{platform}.json"
+    )
+
     def _maybe_load(path: Path | None) -> dict[str, Any] | None:
         return load_scores(path) if path and path.exists() else None
 
-    scores = load_scores(args.scores)
+    scores = load_scores(scores_path)
     history = load_history(args.history)
-    period = _maybe_load(args.period)
-    rolling = _maybe_load(args.rolling)
-    scores_tournament = _maybe_load(args.scores_tournament)
-    period_tournament = _maybe_load(args.period_tournament)
-    rolling_tournament = _maybe_load(args.rolling_tournament)
+    period = _maybe_load(period_path)
+    rolling = _maybe_load(rolling_path)
+    scores_tournament = _maybe_load(scores_tournament_path)
+    period_tournament = _maybe_load(period_tournament_path)
+    rolling_tournament = _maybe_load(rolling_tournament_path)
 
     print(
-        f"Loaded scores ({scores.get('total_rows', 0)} rows), "
-        f"{len(history)} months of history"
+        f"Loaded scores ({scores.get('total_rows', 0)} rows) for "
+        f"{PLATFORM_LABELS[platform]}, {len(history)} months of history"
     )
 
     report = generate_report(
         scores,
         history,
+        platform=platform,
         period_scores=period,
         rolling_scores=rolling,
         include_tournament=args.include_tournament,
@@ -1946,9 +2025,9 @@ def main() -> None:
         rolling_scores_tournament=rolling_tournament,
     )
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(report)
-    print(f"Report written to {args.output}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report)
+    print(f"Report written to {output_path}")
     print(f"\n{report}")
 
 

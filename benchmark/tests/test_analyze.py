@@ -25,6 +25,7 @@ import pytest
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
     OMEN_CATEGORIES,
+    PLATFORM_LABELS,
     POLYMARKET_ACTIVE_CATEGORIES,
     SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
@@ -32,6 +33,7 @@ from benchmark.analyze import (
     generate_report,
     section_best_predictions,
     section_category,
+    section_edge_analysis,
     section_latency,
     section_overall,
     section_parse_breakdown,
@@ -1056,14 +1058,17 @@ class TestGenerateReport:
             ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(s, history, disabled_tools={})
+        report = generate_report(s, history, platform="omen", disabled_tools={})
 
-        assert "# Benchmark Report" in report
+        assert "# Benchmark Report (Omenstrat) — " in report
         assert "## Overall" in report
         assert "## Tool Ranking" in report
-        assert "## Platform Comparison" in report
+        # Per-platform reports drop Platform Comparison / Tool × Platform —
+        # they'd be single-row tables with no signal.
+        assert "## Platform Comparison" not in report
+        assert "## Tool \u00d7 Platform" not in report
         assert "## Category Performance" in report
-        assert "## Tool × Category" in report
+        assert "## Tool \u00d7 Category" in report
         assert "## Weak Spots" in report
         assert "## Reliability Issues" in report
         assert "## Worst Predictions" in report
@@ -1075,8 +1080,8 @@ class TestGenerateReport:
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
-        report = generate_report(s, [], disabled_tools={})
-        assert "# Benchmark Report" in report
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "# Benchmark Report (Omenstrat) — " in report
         assert "No predictions to score" in report
 
 
@@ -1454,7 +1459,7 @@ class TestGenerateReportTournamentToggle:
     def test_off_by_default_omits_tournament_sections(self) -> None:
         """Default behavior: no tournament sections in the rendered report."""
         s = self._scores_with_versions()
-        report = generate_report(s, [], disabled_tools={})
+        report = generate_report(s, [], platform="omen", disabled_tools={})
         assert "Tool × Version × Mode" not in report
         assert "Version Deltas" not in report
 
@@ -1464,7 +1469,9 @@ class TestGenerateReportTournamentToggle:
         Version Deltas emerges only when a tool has 2+ versions in one mode.
         """
         s = self._scores_with_versions()
-        report = generate_report(s, [], include_tournament=True, disabled_tools={})
+        report = generate_report(
+            s, [], platform="omen", include_tournament=True, disabled_tools={}
+        )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "## Version Deltas" in report
 
@@ -1482,7 +1489,12 @@ class TestGenerateReportTournamentToggle:
             }
         }
         report = generate_report(
-            s, [], rolling_scores=rolling, include_tournament=True, disabled_tools={}
+            s,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            include_tournament=True,
+            disabled_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "Tool × Version × Mode (Last 7 Days)" in report
@@ -1642,7 +1654,7 @@ class TestGenerateReportWithTournamentFiles:
     def test_tournament_sections_omitted_when_file_absent(self) -> None:
         """No tournament inputs -> no '— Tournament' headings, no callouts."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
-        report = generate_report(prod, [], include_tournament=True)
+        report = generate_report(prod, [], platform="omen", include_tournament=True)
         assert "— Tournament" not in report
         assert "## Tournament Callouts" not in report
 
@@ -1653,6 +1665,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
@@ -1672,6 +1685,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             period_scores=None,
             rolling_scores=None,
             include_tournament=True,
@@ -1698,6 +1712,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
@@ -1711,6 +1726,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
@@ -1723,7 +1739,115 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
         assert "## Tournament Callouts" not in report
+
+
+# ---------------------------------------------------------------------------
+# Per-platform rendering — generate_report gates fleet-wide comparison
+# sections when the scores are already partitioned to one platform.
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateReportPerPlatform:
+    """generate_report(platform=...) scopes the report to one deployment."""
+
+    def test_header_uses_deployment_label_for_omen(self) -> None:
+        """Omen scores render with 'Omenstrat' in the header."""
+        s = _scores()
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "# Benchmark Report (Omenstrat) — " in report
+
+    def test_header_uses_deployment_label_for_polymarket(self) -> None:
+        """Polymarket scores render with 'Polystrat' in the header."""
+        s = _scores()
+        report = generate_report(s, [], platform="polymarket", disabled_tools={})
+        assert "# Benchmark Report (Polystrat) — " in report
+
+    def test_platform_comparison_absent(self) -> None:
+        """Platform Comparison section never renders in per-platform mode."""
+        s = _scores()
+        # Give by_platform some content so the fleet-wide path would render
+        # the section in the old code path.
+        s["by_platform"] = {
+            "omen": {"brier": 0.2, "n": 100, "edge": 0.04, "edge_n": 80},
+        }
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "## Platform Comparison" not in report
+
+    def test_tool_platform_section_absent(self) -> None:
+        """Tool × Platform section never renders in per-platform mode."""
+        s = _scores()
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "## Tool \u00d7 Platform" not in report
+
+    def test_rejects_unknown_platform(self) -> None:
+        """Unknown platform raises ValueError with a helpful message."""
+        s = _scores()
+        with pytest.raises(ValueError, match="platform must be one of"):
+            generate_report(s, [], platform="gnosis", disabled_tools={})
+
+    def test_platform_labels_are_deployment_names(self) -> None:
+        """Label map pairs scorer keys with the team's deployment names."""
+        # Guards against a silent relabel — the Slack ask explicitly said
+        # Omenstrat / Polystrat, so a rename to e.g. "Omen" would read wrong.
+        assert PLATFORM_LABELS == {
+            "omen": "Omenstrat",
+            "polymarket": "Polystrat",
+        }
+
+
+class TestSectionEdgeAnalysisPlatformGate:
+    """section_edge_analysis drops platform sub-blocks when platform is set."""
+
+    def _scores_with_edge(self) -> dict[str, Any]:
+        """Minimal scores dict with edge data on every platform breakdown."""
+        return {
+            "edge_eligibility": {"n_eligible": 100, "n_total": 100},
+            "by_platform": {
+                "omen": {
+                    "edge": 0.05,
+                    "edge_n": 80,
+                    "edge_positive_rate": 0.6,
+                },
+            },
+            "by_platform_difficulty": {
+                "omen | hard": {
+                    "edge": 0.03,
+                    "edge_n": 40,
+                    "edge_positive_rate": 0.55,
+                    "brier": 0.24,
+                    "n": 50,
+                },
+            },
+            "by_platform_liquidity": {
+                "omen | high": {
+                    "edge": 0.04,
+                    "edge_n": 30,
+                    "edge_positive_rate": 0.6,
+                    "brier": 0.22,
+                    "n": 40,
+                },
+            },
+        }
+
+    def test_platform_sub_blocks_dropped_when_platform_set(self) -> None:
+        """Single-platform scores: sub-blocks degenerate to one row, drop them."""
+        s = self._scores_with_edge()
+        rendered = section_edge_analysis(s, platform="omen")
+        assert "### By Platform" not in rendered
+        assert "### By Platform \u00d7 Difficulty" not in rendered
+        assert "### By Platform \u00d7 Liquidity" not in rendered
+        # Section header and eligibility summary still render.
+        assert "Edge-eligible rows: 100 / 100" in rendered
+
+    def test_platform_sub_blocks_present_when_platform_not_set(self) -> None:
+        """Fleet-wide render keeps sub-blocks (backwards-compat for callers)."""
+        s = self._scores_with_edge()
+        rendered = section_edge_analysis(s)
+        assert "### By Platform" in rendered
+        assert "### By Platform \u00d7 Difficulty" in rendered
+        assert "### By Platform \u00d7 Liquidity" in rendered

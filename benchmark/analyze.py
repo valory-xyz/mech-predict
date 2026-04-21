@@ -624,9 +624,7 @@ def section_trend(
 
     lines = ["## Trend", ""]
     if platform is not None:
-        lines.append(
-            "_Fleet-wide monthly trend — not scoped to this platform._"
-        )
+        lines.append("_Fleet-wide monthly trend — not scoped to this platform._")
         lines.append("")
 
     if not trend:
@@ -737,14 +735,16 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
 _EDGE_SECTION_HEADER = "## Edge Over Market (System Diagnostic)"
 
 
-def section_edge_analysis(
-    scores: dict[str, Any], platform: str | None = None
-) -> str:
+def section_edge_analysis(scores: dict[str, Any], platform: str | None = None) -> str:
     """Edge-over-market analysis — per platform, difficulty, and liquidity.
 
     When ``platform`` is set, the scores input is already partitioned to
     one platform, so the per-platform / platform × difficulty / platform
     × liquidity sub-blocks are degenerate (one row each) and skipped.
+
+    :param scores: parsed scores dict.
+    :param platform: when set, suppresses the platform-comparison sub-blocks.
+    :return: markdown section string.
     """
     elig = scores.get("edge_eligibility", {})
     n_eligible = elig.get("n_eligible", 0)
@@ -1951,8 +1951,7 @@ def main() -> None:
         type=Path,
         default=None,
         help=(
-            "Rolling scores JSON. "
-            "Default: results/rolling_scores_<platform>.json."
+            "Rolling scores JSON. " "Default: results/rolling_scores_<platform>.json."
         ),
     )
     parser.add_argument(
@@ -1999,8 +1998,7 @@ def main() -> None:
     period_path = args.period or results_dir / f"period_scores_{platform}.json"
     rolling_path = args.rolling or results_dir / f"rolling_scores_{platform}.json"
     scores_tournament_path = (
-        args.scores_tournament
-        or results_dir / f"scores_tournament_{platform}.json"
+        args.scores_tournament or results_dir / f"scores_tournament_{platform}.json"
     )
     period_tournament_path = (
         args.period_tournament

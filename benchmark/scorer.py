@@ -2094,6 +2094,10 @@ def _load_period_rows(
     Extracted so ``score_period_split`` and ``score_period_split_by_platform``
     share a single loader and can't drift.
 
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N calendar days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
     :return: ``(production_rows, tournament_rows)`` both filtered to the
         period window.
     """

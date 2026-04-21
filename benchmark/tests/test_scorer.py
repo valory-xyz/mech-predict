@@ -18,6 +18,7 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/scorer.py."""
 
+import argparse
 import json
 import logging
 import uuid
@@ -2139,9 +2140,6 @@ class TestModeSplit:
 
     def test_derive_tournament_path(self) -> None:
         """_derive_tournament_path appends _tournament to the stem."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.scorer import _derive_tournament_path
-
         assert _derive_tournament_path(Path("/tmp/results/scores.json")) == Path(
             "/tmp/results/scores_tournament.json"
         )
@@ -2334,9 +2332,7 @@ class TestDerivePlatformPath:
 
     def test_period_stem(self) -> None:
         """Works for period / rolling stems too."""
-        p = _derive_platform_path(
-            Path("/tmp/results/rolling_scores.json"), "omen"
-        )
+        p = _derive_platform_path(Path("/tmp/results/rolling_scores.json"), "omen")
         assert p == Path("/tmp/results/rolling_scores_omen.json")
 
 
@@ -2385,8 +2381,7 @@ class TestPerPlatformRebuild:
 
         log_file = logs_dir / "production_log_2026_04_01.jsonl"
         rows = [
-            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z")
-            for _ in range(4)
+            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z") for _ in range(4)
         ] + [
             _row(platform="polymarket", predicted_at="2026-04-01T10:00:00Z")
             for _ in range(2)
@@ -2587,23 +2582,23 @@ class TestPerPlatformLegacyRecompute:
     with rebuild/update/period so local dev runs produce the same artifacts.
     """
 
+    @staticmethod
+    def _write_input(input_path: Path, rows: list[dict[str, Any]]) -> None:
+        """Serialize ``rows`` to a jsonl file."""
+        input_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
     def test_legacy_full_recompute_emits_per_platform_files(
         self, tmp_path: Path
     ) -> None:
         """Mixed-platform input jsonl -> combined + per-platform scores files."""
-        import argparse
-
         input_path = tmp_path / "input.jsonl"
-        input_path.write_text(
-            "\n".join(
-                json.dumps(r)
-                for r in [
-                    _row(platform="omen", row_id="o1"),
-                    _row(platform="omen", row_id="o2"),
-                    _row(platform="polymarket", row_id="p1"),
-                ]
-            )
-            + "\n"
+        self._write_input(
+            input_path,
+            [
+                _row(platform="omen", row_id="o1"),
+                _row(platform="omen", row_id="o2"),
+                _row(platform="polymarket", row_id="p1"),
+            ],
         )
         output_path = tmp_path / "scores.json"
         tournament_path = _derive_tournament_path(output_path)
@@ -2619,33 +2614,57 @@ class TestPerPlatformLegacyRecompute:
         assert omen["overall"]["n"] == 2
         assert poly["overall"]["n"] == 1
 
+    def test_legacy_full_recompute_unknown_platform_in_combined_only(
+        self, tmp_path: Path
+    ) -> None:
+        """Rows on an unrecognised platform stay out of per-platform outputs."""
+        input_path = tmp_path / "input.jsonl"
+        self._write_input(
+            input_path,
+            [
+                _row(platform="omen", row_id="o1"),
+                _row(platform="weird_chain", row_id="x1"),
+            ],
+        )
+        output_path = tmp_path / "scores.json"
+        tournament_path = _derive_tournament_path(output_path)
+
+        args = argparse.Namespace(input=input_path, output=output_path)
+        _cli_legacy_full_recompute(args, tournament_path)
+
+        combined = json.loads(output_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 2
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 0
+
 
 class TestPerPlatformPeriod:
     """score_period_split_by_platform returns {all, omen, polymarket}."""
 
+    @staticmethod
+    def _populate_logs(logs_dir: Path, rows: list[dict[str, Any]]) -> str:
+        """Write ``rows`` into a production_log file named for today."""
+        logs_dir.mkdir(exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+        log_file = logs_dir / f"production_log_{stamp}.jsonl"
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return stamp
+
     def test_period_by_platform_shape(self, tmp_path: Path) -> None:
         """Return dict keys cover combined + every PLATFORMS entry."""
         logs_dir = tmp_path / "logs"
-        logs_dir.mkdir()
-        cutoff_date = (
-            datetime.now(timezone.utc) - timedelta(hours=1)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
-        log_file = (
-            logs_dir / f"production_log_{cutoff_date[:10].replace('-', '_')}.jsonl"
+        cutoff_date = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
         )
-        log_file.write_text(
-            "\n".join(
-                json.dumps(r)
-                for r in [
-                    _row(platform="omen", predicted_at=cutoff_date, row_id="o1"),
-                    _row(
-                        platform="polymarket",
-                        predicted_at=cutoff_date,
-                        row_id="p1",
-                    ),
-                ]
-            )
-            + "\n"
+        self._populate_logs(
+            logs_dir,
+            [
+                _row(platform="omen", predicted_at=cutoff_date, row_id="o1"),
+                _row(platform="polymarket", predicted_at=cutoff_date, row_id="p1"),
+            ],
         )
 
         result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
@@ -2657,3 +2676,20 @@ class TestPerPlatformPeriod:
         assert prod_all["overall"]["n"] == 2
         assert prod_omen["overall"]["n"] == 1
         assert prod_poly["overall"]["n"] == 1
+
+    def test_period_by_platform_empty_window(self, tmp_path: Path) -> None:
+        """Rows older than the window produce zero-count per-platform results."""
+        logs_dir = tmp_path / "logs"
+        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=old_date, row_id="o_old")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+
+        for scope in ("all", *PLATFORMS):
+            prod, _ = result[scope]
+            assert prod["overall"]["n"] == 0

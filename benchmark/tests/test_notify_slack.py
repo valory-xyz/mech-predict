@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmark.analyze import PLATFORM_LABELS
 from benchmark.notify_slack import (
     SUMMARY_SYSTEM_PROMPT_TEMPLATE,
     _build_system_prompt,
@@ -92,9 +93,7 @@ class TestInferPlatformLabel:
 
     def test_polymarket_report(self) -> None:
         """report_polymarket.md -> Polystrat."""
-        assert (
-            _infer_platform_label(Path("/tmp/report_polymarket.md")) == "Polystrat"
-        )
+        assert _infer_platform_label(Path("/tmp/report_polymarket.md")) == "Polystrat"
 
     def test_unknown_stem_returns_none(self) -> None:
         """Unrecognised filenames get None so the caller can error explicitly."""
@@ -126,14 +125,11 @@ class TestPromptRejectsUnformattedPlaceholder:
             _build_system_prompt("Omenstrap")
 
     def test_labels_tracked_from_analyze(self) -> None:
-        """notify_slack reuses ``benchmark.analyze.PLATFORM_LABELS``.
+        """Every ``benchmark.analyze.PLATFORM_LABELS`` value is accepted.
 
-        Asserting on the accepted set via the same import surface means a
-        rename in analyze.py (e.g. Omenstrat -> Omen Strat) doesn't drift
-        the two modules out of sync.
+        Reusing the same import surface means a rename in analyze.py
+        (e.g. Omenstrat -> Omen Strat) doesn't drift the two modules out
+        of sync.
         """
-        from benchmark.analyze import PLATFORM_LABELS  # local, explicit
-
         for label in PLATFORM_LABELS.values():
-            # Doesn't raise — every analyze.py label is accepted.
             _build_system_prompt(label)

@@ -127,9 +127,7 @@ def _tool_ownership_context(report_text: str) -> str:
     return f"Third-party tools (ignore these): {', '.join(theirs)}"
 
 
-def summarize_report(
-    report_text: str, api_key: str, platform_label: str
-) -> str:
+def summarize_report(report_text: str, api_key: str, platform_label: str) -> str:
     """Call OpenAI to produce a short Slack-formatted summary.
 
     :param report_text: full markdown report for a single platform.

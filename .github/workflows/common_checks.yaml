@@ -182,6 +182,26 @@ jobs:
         name: Unit tests windows-2025
         run: tox -e py${{ matrix.python-version }}-win
 
+  all_checks_passed:
+    name: All checks passed
+    runs-on: ubuntu-22.04
+    if: always()
+    needs:
+      - lock_check
+      - copyright_and_dependencies_check
+      - linter_checks
+      - scan
+      - unit_tests
+    steps:
+      - name: Verify all required checks succeeded
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+            echo "One or more required checks failed, were cancelled, or were skipped."
+            echo "Results: ${{ toJSON(needs) }}"
+            exit 1
+          fi
+          echo "All required checks passed."
+
   integration_tests:
     continue-on-error: True
     needs:

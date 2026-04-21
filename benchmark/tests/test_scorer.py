@@ -30,11 +30,14 @@ from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
     LATENCY_RESERVOIR_SIZE,
+    PLATFORMS,
     WORST_BEST_SIZE,
     _accumulate_group,
     _derive_group,
+    _derive_platform_path,
     _empty_group,
     _is_edge_eligible,
+    _partition_rows_by_platform,
     brier_score,
     classify_difficulty,
     classify_disagreement,
@@ -53,6 +56,7 @@ from benchmark.scorer import (
     rebuild,
     score,
     score_period,
+    score_period_split_by_platform,
     update,
 )
 
@@ -2302,3 +2306,312 @@ class TestModeSplit:
         # Verify the snapshot reflects production (n=1, not n=2 from pooled modes).
         assert len(history_lines) == 1
         assert history_lines[0]["overall"]["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-platform partitioning — scorer emits scores_omen.json and
+# scores_polymarket.json alongside the combined file so the daily report can
+# render a platform-scoped view.
+# ---------------------------------------------------------------------------
+
+
+class TestDerivePlatformPath:
+    """Tests for _derive_platform_path."""
+
+    def test_basic(self) -> None:
+        """scores.json -> scores_omen.json in the same directory."""
+        p = _derive_platform_path(Path("/tmp/results/scores.json"), "omen")
+        assert p == Path("/tmp/results/scores_omen.json")
+
+    def test_tournament_stem(self) -> None:
+        """Composes with tournament suffix: scores_tournament_omen.json."""
+        p = _derive_platform_path(
+            Path("/tmp/results/scores_tournament.json"), "polymarket"
+        )
+        assert p == Path("/tmp/results/scores_tournament_polymarket.json")
+
+    def test_period_stem(self) -> None:
+        """Works for period / rolling stems too."""
+        p = _derive_platform_path(
+            Path("/tmp/results/rolling_scores.json"), "omen"
+        )
+        assert p == Path("/tmp/results/rolling_scores_omen.json")
+
+
+class TestPartitionRowsByPlatform:
+    """Tests for _partition_rows_by_platform."""
+
+    def test_splits_by_platform(self) -> None:
+        """Rows routed to omen/polymarket buckets by row['platform']."""
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="polymarket", row_id="p1"),
+            _row(platform="omen", row_id="o2"),
+        ]
+        buckets = _partition_rows_by_platform(rows)
+        assert set(buckets.keys()) == set(PLATFORMS)
+        assert [r["row_id"] for r in buckets["omen"]] == ["o1", "o2"]
+        assert [r["row_id"] for r in buckets["polymarket"]] == ["p1"]
+
+    def test_unknown_platform_dropped(self) -> None:
+        """Rows with unknown/missing platform stay out of per-platform buckets."""
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="unknown_chain", row_id="x1"),
+            {"row_id": "n1"},  # no platform key at all
+        ]
+        buckets = _partition_rows_by_platform(rows)
+        assert [r["row_id"] for r in buckets["omen"]] == ["o1"]
+        assert buckets["polymarket"] == []
+
+    def test_empty_input_still_returns_all_platform_keys(self) -> None:
+        """Every PLATFORMS key must be present so callers can emit files."""
+        buckets = _partition_rows_by_platform([])
+        assert set(buckets.keys()) == set(PLATFORMS)
+        assert all(v == [] for v in buckets.values())
+
+
+class TestPerPlatformRebuild:
+    """Rebuild emits per-platform scores files alongside the combined file."""
+
+    def test_rebuild_emits_per_platform_files(self, tmp_path: Path) -> None:
+        """Mixed omen + polymarket rows produce three independent scores files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z")
+            for _ in range(4)
+        ] + [
+            _row(platform="polymarket", predicted_at="2026-04-01T10:00:00Z")
+            for _ in range(2)
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 6
+        assert omen["overall"]["n"] == 4
+        assert poly["overall"]["n"] == 2
+
+    def test_rebuild_per_platform_tournament_files(self, tmp_path: Path) -> None:
+        """Tournament partition writes scores_tournament_<platform>.json."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(
+                platform="omen",
+                mode="tournament",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="t_omen",
+            ),
+            _row(
+                platform="polymarket",
+                mode="tournament",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="t_poly",
+            ),
+            _row(
+                platform="omen",
+                mode="production_replay",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="p_omen",
+            ),
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        t_omen = json.loads((tmp_path / "scores_tournament_omen.json").read_text())
+        t_poly = json.loads(
+            (tmp_path / "scores_tournament_polymarket.json").read_text()
+        )
+        prod_omen = json.loads((tmp_path / "scores_omen.json").read_text())
+
+        assert t_omen["overall"]["n"] == 1
+        assert t_poly["overall"]["n"] == 1
+        # Mode partition holds: tournament rows do not leak into prod file.
+        assert prod_omen["overall"]["n"] == 1
+
+    def test_rebuild_unknown_platform_in_combined_only(self, tmp_path: Path) -> None:
+        """Unknown-platform rows stay in combined; drop from per-platform files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z"),
+            _row(platform="weird_chain", predicted_at="2026-04-01T10:00:00Z"),
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 2
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 0
+
+    def test_rebuild_empty_logs_emits_empty_per_platform_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty log dir produces empty-but-valid per-platform files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        for platform in PLATFORMS:
+            plat_path = tmp_path / f"scores_{platform}.json"
+            assert plat_path.exists()
+            assert json.loads(plat_path.read_text())["overall"]["n"] == 0
+            t_plat_path = tmp_path / f"scores_tournament_{platform}.json"
+            assert t_plat_path.exists()
+            assert json.loads(t_plat_path.read_text())["overall"]["n"] == 0
+
+    def test_rebuild_empty_platform_partition_still_emits_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Only-omen rows produce a valid but-empty polymarket file."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        log_file.write_text(
+            json.dumps(_row(platform="omen", predicted_at="2026-04-01T10:00:00Z"))
+            + "\n"
+        )
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        assert poly["overall"]["n"] == 0
+        assert poly["overall"]["brier"] is None
+
+
+class TestPerPlatformUpdate:
+    """update() emits per-platform accumulator files + incremental merge."""
+
+    def test_update_emits_per_platform_files(self, tmp_path: Path) -> None:
+        """Mixed rows via update() write three independent accumulator files."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="omen", row_id="o2"),
+            _row(platform="polymarket", row_id="p1"),
+        ]
+        update(rows, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 3
+        assert omen["overall"]["n"] == 2
+        assert poly["overall"]["n"] == 1
+
+    def test_update_incremental_merge_per_platform(self, tmp_path: Path) -> None:
+        """Two sequential update() batches merge into per-platform accumulators."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        update(
+            [_row(platform="omen", row_id="o1")],
+            scores_path,
+            history_path,
+        )
+        update(
+            [
+                _row(platform="omen", row_id="o2"),
+                _row(platform="polymarket", row_id="p1"),
+            ],
+            scores_path,
+            history_path,
+        )
+
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        combined = json.loads(scores_path.read_text())
+
+        assert omen["overall"]["n"] == 2
+        assert poly["overall"]["n"] == 1
+        assert combined["overall"]["n"] == 3
+
+    def test_update_dedup_applies_to_per_platform(self, tmp_path: Path) -> None:
+        """Re-feeding the same rows is a no-op on per-platform accumulators too."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "ids.json"
+
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="polymarket", row_id="p1"),
+        ]
+        update(rows, scores_path, history_path, dedup_path=dedup_path)
+        update(rows, scores_path, history_path, dedup_path=dedup_path)
+
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 1
+
+
+class TestPerPlatformPeriod:
+    """score_period_split_by_platform returns {all, omen, polymarket}."""
+
+    def test_period_by_platform_shape(self, tmp_path: Path) -> None:
+        """Return dict keys cover combined + every PLATFORMS entry."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        cutoff_date = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        log_file = (
+            logs_dir / f"production_log_{cutoff_date[:10].replace('-', '_')}.jsonl"
+        )
+        log_file.write_text(
+            "\n".join(
+                json.dumps(r)
+                for r in [
+                    _row(platform="omen", predicted_at=cutoff_date, row_id="o1"),
+                    _row(
+                        platform="polymarket",
+                        predicted_at=cutoff_date,
+                        row_id="p1",
+                    ),
+                ]
+            )
+            + "\n"
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+
+        assert set(result.keys()) == {"all", *PLATFORMS}
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        prod_poly, _ = result["polymarket"]
+        assert prod_all["overall"]["n"] == 2
+        assert prod_omen["overall"]["n"] == 1
+        assert prod_poly["overall"]["n"] == 1

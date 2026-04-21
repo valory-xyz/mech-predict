@@ -86,6 +86,48 @@ def _partition_rows_by_mode(
     return prod, tourn
 
 
+# Platforms the scorer emits a dedicated scores file for. A file is written
+# for every entry even when the partition is empty, so consumers can assume
+# the path exists.
+PLATFORMS: tuple[str, ...] = ("omen", "polymarket")
+
+
+def _derive_platform_path(base_path: Path, platform: str) -> Path:
+    """Return the per-platform sibling of ``base_path``.
+
+    Convention: ``<stem>.json`` -> ``<stem>_<platform>.json`` in the same
+    directory. Composed with ``_derive_tournament_path`` this yields
+    ``scores_tournament_omen.json`` etc.
+
+    :param base_path: base scores path (combined output).
+    :param platform: one of ``PLATFORMS``.
+    :return: sibling path scoped to ``platform``.
+    """
+    return base_path.with_name(f"{base_path.stem}_{platform}{base_path.suffix}")
+
+
+def _partition_rows_by_platform(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group rows by ``row['platform']`` for the platforms we report on.
+
+    Rows with unknown/missing platforms stay in the combined output but are
+    excluded from per-platform partitions — the daily report only needs
+    omen and polymarket.
+
+    :param rows: input rows (any platform).
+    :return: ``{platform: [rows]}`` with one entry per ``PLATFORMS`` value.
+        Empty lists are returned for platforms with no rows (so callers can
+        still emit an empty-but-valid output file).
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {plat: [] for plat in PLATFORMS}
+    for row in rows:
+        plat = row.get("platform")
+        if plat in buckets:
+            buckets[plat].append(row)
+    return buckets
+
+
 LATENCY_RESERVOIR_SIZE = 200
 CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
 _RESERVOIR_RNG = random.Random(42)
@@ -1742,6 +1784,24 @@ def update(
     )
     _accumulate_and_write(tourn_rows, tournament_scores_path, None, emit_history=False)
 
+    # Per-platform accumulators each track their own _ACCUM_KEYS state so
+    # future update() calls merge correctly. Dedup is shared via the
+    # caller-level scored_row_ids.json, so a row can never double-count.
+    for platform, plat_prod in _partition_rows_by_platform(prod_rows).items():
+        _accumulate_and_write(
+            plat_prod,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+        )
+    for platform, plat_tourn in _partition_rows_by_platform(tourn_rows).items():
+        _accumulate_and_write(
+            plat_tourn,
+            _derive_platform_path(tournament_scores_path, platform),
+            None,
+            emit_history=False,
+        )
+
     return prod_result
 
 
@@ -1903,6 +1963,14 @@ def rebuild(
         scores_path.write_text(json.dumps(finalized, indent=2))
         tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
         tournament_scores_path.write_text(json.dumps(finalized, indent=2))
+        # Empty per-platform files so the paths always exist.
+        for platform in PLATFORMS:
+            _derive_platform_path(scores_path, platform).write_text(
+                json.dumps(finalized, indent=2)
+            )
+            _derive_platform_path(tournament_scores_path, platform).write_text(
+                json.dumps(finalized, indent=2)
+            )
         _save_dedup_ids(dedup_path, set())
         return finalized
 
@@ -1914,6 +1982,23 @@ def rebuild(
     _, tourn_ids = _rebuild_single_mode(
         tourn_rows, tournament_scores_path, None, emit_history=False
     )
+
+    # History is emitted for the combined accumulator only; per-platform
+    # rebuilds skip the monthly snapshot step.
+    for platform, plat_prod in _partition_rows_by_platform(prod_rows).items():
+        _rebuild_single_mode(
+            plat_prod,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+        )
+    for platform, plat_tourn in _partition_rows_by_platform(tourn_rows).items():
+        _rebuild_single_mode(
+            plat_tourn,
+            _derive_platform_path(tournament_scores_path, platform),
+            None,
+            emit_history=False,
+        )
 
     _save_dedup_ids(dedup_path, prod_ids | tourn_ids)
 
@@ -1959,6 +2044,59 @@ def score_period_split(
         whose rows are filtered to the same window and merged.
     :return: tuple of (production_scores, tournament_scores).
     """
+    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+    return score(prod_rows), score(tourn_rows)
+
+
+def score_period_split_by_platform(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+    tournament_input: Path | None = None,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score the last *days* days, returning combined + per-platform results.
+
+    Single-pass multi-aggregation: rows are loaded once, partitioned by
+    mode, then per-platform partitions are scored alongside the combined
+    result. This powers the per-platform daily reports.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N calendar days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
+        matches the shape of ``score_period_split``. Per-platform entries
+        use the combined result for unknown-platform rows' sake: unknown
+        rows stay in ``"all"`` only.
+    """
+    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+
+    result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+        "all": (score(prod_rows), score(tourn_rows)),
+    }
+    prod_by_plat = _partition_rows_by_platform(prod_rows)
+    tourn_by_plat = _partition_rows_by_platform(tourn_rows)
+    for platform in PLATFORMS:
+        result[platform] = (
+            score(prod_by_plat[platform]),
+            score(tourn_by_plat[platform]),
+        )
+    return result
+
+
+def _load_period_rows(
+    logs_dir: Path,
+    days: int,
+    tournament_input: Path | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load + filter + mode-partition period rows.
+
+    Extracted so ``score_period_split`` and ``score_period_split_by_platform``
+    share a single loader and can't drift.
+
+    :return: ``(production_rows, tournament_rows)`` both filtered to the
+        period window.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
@@ -1983,8 +2121,7 @@ def score_period_split(
             if predicted_at >= cutoff:
                 rows.append(row)
 
-    prod_rows, tourn_rows = _partition_rows_by_mode(rows)
-    return score(prod_rows), score(tourn_rows)
+    return _partition_rows_by_mode(rows)
 
 
 def score_period(
@@ -2095,15 +2232,27 @@ def _cli_update(args: argparse.Namespace, output_tournament: Path) -> None:
 
 def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
     """Handle the ``--period-days`` CLI mode."""
-    prod_result, tourn_result = score_period_split(
+    results = score_period_split_by_platform(
         logs_dir=args.logs_dir,
         days=args.period_days,
         tournament_input=args.tournament_input,
     )
+    prod_result, tourn_result = results["all"]
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(prod_result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
+
+    for platform in PLATFORMS:
+        plat_prod, plat_tourn = results[platform]
+        _derive_platform_path(args.output, platform).write_text(
+            json.dumps(plat_prod, indent=2)
+        )
+        _derive_platform_path(output_tournament, platform).write_text(
+            json.dumps(plat_tourn, indent=2)
+        )
+
     overall = prod_result["overall"]
     t_overall = tourn_result["overall"]
     print(
@@ -2149,6 +2298,17 @@ def _cli_legacy_full_recompute(
     args.output.write_text(json.dumps(result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
+
+    prod_by_plat = _partition_rows_by_platform(prod_rows)
+    tourn_by_plat = _partition_rows_by_platform(tourn_rows)
+    for platform in PLATFORMS:
+        _derive_platform_path(args.output, platform).write_text(
+            json.dumps(score(prod_by_plat[platform]), indent=2)
+        )
+        _derive_platform_path(output_tournament, platform).write_text(
+            json.dumps(score(tourn_by_plat[platform]), indent=2)
+        )
+
     print(
         f"Scores written to {args.output} (production, n={result['overall']['n']}) "
         f"and {output_tournament} (tournament, n={tourn_result['overall']['n']})"

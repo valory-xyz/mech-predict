@@ -23,10 +23,10 @@ from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
-SUMMARY_SYSTEM_PROMPT = f"""\
-Summarize this Olas Predict benchmark report using EXACTLY this structure (output will be posted to Slack).
+SUMMARY_SYSTEM_PROMPT_TEMPLATE = f"""\
+Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). Every number in this report is already scoped to {{platform_label}} — do NOT compare platforms or reference the other deployment.
 
-*Summary:* 2-3 sentence high-level takeaway — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
+*Summary:* 2-3 sentence high-level takeaway for {{platform_label}} — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
 
 *Top tools:*
 • `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
@@ -36,17 +36,11 @@ Summarize this Olas Predict benchmark report using EXACTLY this structure (outpu
 • `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
-*Platform performance:*
-• `platform` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), BSS `±X.XX`, n=X
-(list all platforms. Edge = how much tool beats market consensus; positive = profitable signal)
-
-*Edge by difficulty:* if the report has "Platform × Difficulty" data, summarize which difficulty level has the best/worst edge per platform (1 line per platform)
-
 *Deployment status:* if the report has a "Tool Deployment Status" section, one line per deployment listing its disabled tools (skip deployments with none, skip the block if all empty). Note any fetch-failure banner briefly.
 
-*Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the fleet-level answer to "where do our agents do well vs poorly" — always include when data is present. IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
+*Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the answer to "where do our agents do well vs poorly" for {{platform_label}} — always include when data is present. IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
 
-*Fleet × Category highlights:* from the "Tool × Category" section, pick 2–4 standout tool-category combinations (best performers, worst performers, or fleet-wide weaknesses). Only use rows above the sample-size threshold — never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("fleet struggles on X across tools"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
+*Tool × Category highlights:* from the "Tool × Category" section, pick 2–4 standout tool-category combinations (best performers, worst performers, or weaknesses). Only use rows above the sample-size threshold — never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("tools struggle on X across the board"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
 
 *Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes, one bullet per row.
 
@@ -70,7 +64,7 @@ If the report includes "Diagnostic Edge Metrics", summarize:
 • Directional bias: ±X.XX — positive = tool overestimates, negative = underestimates, near 0 = no systematic bias
 Only include this section if the report has diagnostic metric data. Skip if insufficient data.
 
-*Recommended actions:* 2-3 concrete next steps based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
+*Recommended actions:* 2-3 concrete next steps for {{platform_label}} based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
 
 Rules:
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
@@ -82,6 +76,21 @@ Rules:
 - Log Loss: like Brier but punishes confidently-wrong predictions harder. Include alongside Brier.
 - ECE (Expected Calibration Error): how well calibrated predictions are. Include if present.
 - Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
+
+
+def _build_system_prompt(platform_label: str) -> str:
+    """Fill in the platform label on the system prompt template.
+
+    :param platform_label: deployment name (e.g. ``Omenstrat`` or ``Polystrat``)
+        to reference throughout the summary. Must be non-empty — an empty
+        label renders as "for the ** deployment" which reads wrong.
+    :return: fully formatted system prompt string.
+    :raises ValueError: when ``platform_label`` is empty.
+    """
+    if not platform_label:
+        raise ValueError("platform_label must be non-empty")
+    return SUMMARY_SYSTEM_PROMPT_TEMPLATE.format(platform_label=platform_label)
+
 
 MODEL = "gpt-4.1-mini"
 
@@ -106,8 +115,18 @@ def _tool_ownership_context(report_text: str) -> str:
     return f"Third-party tools (ignore these): {', '.join(theirs)}"
 
 
-def summarize_report(report_text: str, api_key: str) -> str:
-    """Call OpenAI to produce a short Slack-formatted summary."""
+def summarize_report(
+    report_text: str, api_key: str, platform_label: str
+) -> str:
+    """Call OpenAI to produce a short Slack-formatted summary.
+
+    :param report_text: full markdown report for a single platform.
+    :param api_key: OpenAI API key.
+    :param platform_label: deployment name (e.g. ``Omenstrat``) threaded into
+        the system prompt so the LLM frames the summary correctly and never
+        mixes platforms.
+    :return: Slack-formatted summary string.
+    """
     ownership = _tool_ownership_context(report_text)
     user_content = report_text
     if ownership:
@@ -116,7 +135,10 @@ def summarize_report(report_text: str, api_key: str) -> str:
         {
             "model": MODEL,
             "messages": [
-                {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": _build_system_prompt(platform_label),
+                },
                 {"role": "user", "content": user_content},
             ],
             "max_tokens": 1200,
@@ -170,10 +192,36 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
         resp.read()
 
 
+_PLATFORM_LABEL_BY_STEM: dict[str, str] = {
+    "report_omen": "Omenstrat",
+    "report_polymarket": "Polystrat",
+}
+
+
+def _infer_platform_label(report_path: Path) -> str | None:
+    """Derive the deployment label from the report filename.
+
+    The scorer writes ``report_omen.md`` and ``report_polymarket.md``; an
+    explicit ``--platform-label`` CLI arg overrides this inference.
+
+    :param report_path: path to the report markdown file.
+    :return: deployment label, or None if the filename doesn't match.
+    """
+    return _PLATFORM_LABEL_BY_STEM.get(report_path.stem)
+
+
 def main() -> None:
     """Read report, summarize, post. Skip gracefully if keys missing."""
     parser = argparse.ArgumentParser(description="Post benchmark summary to Slack")
     parser.add_argument("--report", type=Path, required=True, help="Path to report.md")
+    parser.add_argument(
+        "--platform-label",
+        default=None,
+        help=(
+            "Deployment name (e.g. 'Omenstrat', 'Polystrat') threaded into the "
+            "LLM summary prompt. Inferred from the report filename when omitted."
+        ),
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print summary without posting to Slack"
     )
@@ -199,14 +247,23 @@ def main() -> None:
         log.warning("Report is empty: %s", args.report)
         return
 
-    # Extract heading from report (e.g. "# Benchmark Report — 2026-04-03")
+    platform_label = args.platform_label or _infer_platform_label(args.report)
+    if platform_label is None:
+        log.error(
+            "Cannot determine platform label for %s. Pass --platform-label "
+            "or name the report file report_<platform>.md.",
+            args.report,
+        )
+        sys.exit(1)
+
+    # Extract heading from report (e.g. "# Benchmark Report (Omenstrat) — 2026-04-03")
     heading = "*Benchmark Report*"
     first_line = report_text.split("\n", 1)[0]
     if first_line.startswith("# "):
         heading = f"*{first_line.lstrip('# ').strip()}*"
 
-    log.info("Summarizing report with %s...", MODEL)
-    summary = f"{heading}\n\n{summarize_report(report_text, api_key)}"
+    log.info("Summarizing %s report with %s...", platform_label, MODEL)
+    summary = f"{heading}\n\n{summarize_report(report_text, api_key, platform_label)}"
 
     # Append link to full report if running in GitHub Actions
     report_url = _build_report_url()

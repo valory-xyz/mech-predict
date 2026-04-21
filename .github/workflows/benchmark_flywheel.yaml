@@ -218,7 +218,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-        run: python -m benchmark.notify_slack --report benchmark/results/report_omen.md
+        run: |
+          python -m benchmark.notify_slack \
+            --report benchmark/results/report_omen.md \
+            --platform-label Omenstrat
 
       - name: Post Polystrat summary to Slack
         if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
@@ -226,7 +229,10 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-        run: python -m benchmark.notify_slack --report benchmark/results/report_polymarket.md
+        run: |
+          python -m benchmark.notify_slack \
+            --report benchmark/results/report_polymarket.md \
+            --platform-label Polystrat
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

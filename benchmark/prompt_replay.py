@@ -41,7 +41,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import openai
 import requests
@@ -398,17 +398,30 @@ def _load_and_filter_rows(
     production_log: Path,
     tool_filter: str,
     last_days: Optional[int],
-) -> list[dict[str, Any]]:
+) -> Tuple[list[dict[str, Any]], Dict[str, int]]:
     """Load production log and filter for valid rows.
 
     :param production_log: path to production_log.jsonl.
     :param tool_filter: tool name to filter for.
     :param last_days: only include rows from the last N days.
-    :return: filtered list of row dicts.
+    :return: (filtered rows, rejection counts per reason).
     """
     cutoff = None
     if last_days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=last_days)
+
+    # Scoping rejections (wrong tool / no deliver_id / no outcome / too old) are
+    # expected sample narrowing. The "not_valid_parse" bucket is load-bearing:
+    # it is the invariant downstream Parse-reliability reporting depends on
+    # (baseline is 100% valid by construction *because* these rows are dropped
+    # here). If that invariant regresses, we want this count to make it loud.
+    rejected: Dict[str, int] = {
+        "wrong_tool": 0,
+        "no_deliver_id": 0,
+        "not_valid_parse": 0,
+        "no_outcome": 0,
+        "older_than_cutoff": 0,
+    }
 
     rows: list[dict[str, Any]] = []
     with open(production_log, encoding="utf-8") as f:
@@ -418,26 +431,48 @@ def _load_and_filter_rows(
                 continue
             row = json.loads(line)
             if row.get("tool_name") != tool_filter:
+                rejected["wrong_tool"] += 1
                 continue
             if not row.get("deliver_id"):
+                rejected["no_deliver_id"] += 1
                 continue
             if row.get("prediction_parse_status") != "valid":
+                rejected["not_valid_parse"] += 1
                 continue
             if row.get("final_outcome") is None:
+                rejected["no_outcome"] += 1
                 continue
             if cutoff is not None:
                 predicted = row.get("predicted_at")
                 if predicted:
                     dt = datetime.fromisoformat(predicted.replace("Z", "+00:00"))
                     if dt < cutoff:
+                        rejected["older_than_cutoff"] += 1
                         continue
             rows.append(row)
-    return rows
+    return rows, rejected
 
 
 # ---------------------------------------------------------------------------
 # Enrich subcommand
 # ---------------------------------------------------------------------------
+
+
+def _prepare_output_dir(output_dir: Path) -> None:
+    """Ensure ``output_dir`` exists and purge stale conditional sidecars.
+
+    ``candidate_failures.jsonl`` and ``filter_stats.json`` are written
+    conditionally by the replay step (only when failures / stats exist). When
+    a reused ``output_dir`` already contains one of these from a prior run, a
+    clean current run would leave the stale file in place and ci_replay would
+    surface it as if it were current. Purging on prep keeps the invariant
+    "files in output_dir correspond to this run only".
+
+    :param output_dir: directory that will hold baseline/candidate artifacts.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for stale in ("candidate_failures.jsonl", "filter_stats.json"):
+        (output_dir / stale).unlink(missing_ok=True)
 
 
 def enrich(
@@ -460,12 +495,35 @@ def enrich(
     :param sample_per_platform: stratified sample N per platform before IPFS fetch.
     :param seed: random seed for sampling.
     """
-    rows = _load_and_filter_rows(production_log, tool_filter, last_days)
+    rows, rejected = _load_and_filter_rows(production_log, tool_filter, last_days)
     log.info(
         "Loaded %d %s rows with deliver_id + valid predictions + known outcome",
         len(rows),
         tool_filter,
     )
+    log.info(
+        "Pre-filter rejections: wrong_tool=%d no_deliver_id=%d "
+        "not_valid_parse=%d no_outcome=%d older_than_cutoff=%d",
+        rejected["wrong_tool"],
+        rejected["no_deliver_id"],
+        rejected["not_valid_parse"],
+        rejected["no_outcome"],
+        rejected["older_than_cutoff"],
+    )
+
+    # Sidecar JSON carries the rejection counts into the replay + PR-comment
+    # stages, where "baseline is 100% valid by construction" would otherwise be
+    # an invisible assumption.
+    stats_path = output.with_name(output.name + ".filter_stats.json")
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.write_text(
+        json.dumps(
+            {"accepted": len(rows), "rejected": rejected},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    log.info("Wrote filter stats: %s", stats_path)
 
     if not rows:
         log.warning("No rows to enrich")
@@ -704,6 +762,93 @@ def _call_openai(
         client.close()
 
 
+def _call_openai_structured(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    api_key: str,
+    response_format: type,
+    temperature: float = 0,
+    max_tokens: int = 4096,
+) -> Optional[str]:
+    """Call OpenAI Structured Outputs with a caller-supplied Pydantic schema.
+
+    The schema must expose ``p_yes``, ``p_no``, ``confidence`` and
+    ``info_utility`` attributes. Returns a JSON string of only those four
+    on-chain fields so the existing ``parse_response`` keeps working
+    unchanged regardless of how rich the schema is.
+
+    :param model: OpenAI model identifier.
+    :param system_prompt: system message content.
+    :param user_prompt: user message content.
+    :param api_key: OpenAI API key.
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature.
+    :param max_tokens: maximum tokens to generate.
+    :return: JSON string of {p_yes, p_no, confidence, info_utility}, or None on failure.
+    """
+    client = openai.OpenAI(api_key=api_key)
+    try:
+        response = client.beta.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format=response_format,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=150,
+        )
+        parsed = response.choices[0].message.parsed
+        if parsed is None:
+            log.warning(
+                "Structured output parse failed: %s",
+                response.choices[0].message.refusal,
+            )
+            return None
+        return json.dumps(
+            {
+                "p_yes": parsed.p_yes,
+                "p_no": parsed.p_no,
+                "confidence": parsed.confidence,
+                "info_utility": parsed.info_utility,
+            }
+        )
+    except Exception as e:
+        log.warning("Structured LLM call failed: %s", e)
+        return None
+    finally:
+        client.close()
+
+
+# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
+# Map: tool_name → (tool_module_import_path, schema_class_name).
+_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
+    "superforcaster": (
+        "packages.valory.customs.superforcaster.superforcaster",
+        "PredictionResult",
+    ),
+    "factual_research": (
+        "packages.valory.customs.factual_research.factual_research",
+        "PredictionResult",
+    ),
+}
+
+
+def _get_structured_output_schema(tool_name: str) -> Optional[type]:
+    """Return the Pydantic schema class for a structured-output tool, or None."""
+    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
+    if entry is None:
+        return None
+    module_path, class_name = entry
+    # pylint: disable=import-outside-toplevel
+    from importlib import import_module
+
+    module = import_module(module_path)
+    return getattr(module, class_name)
+
+
 def _call_anthropic(
     model: str,
     system_prompt: str,
@@ -846,6 +991,8 @@ def _log_replay_summary(
     total: int,
     n_scored: int,
     baseline_path: Path,
+    status_counts: Dict[str, int],
+    filter_stats: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Compute accuracy and log the replay summary.
 
@@ -856,6 +1003,10 @@ def _log_replay_summary(
     :param total: total number of markets.
     :param n_scored: number of candidate predictions scored.
     :param baseline_path: path to the baseline JSONL file.
+    :param status_counts: candidate ``prediction_parse_status`` bucket counts.
+    :param filter_stats: optional ``{accepted, rejected}`` dict from the enrich
+        sidecar. When present, a Pre-filter block is rendered so a regression
+        in the "drop non-valid parses" upstream invariant is visible.
     """
     avg_baseline = baseline_brier_sum / total if total else 0
     avg_candidate = candidate_brier_sum / n_scored if n_scored else 0
@@ -880,6 +1031,55 @@ def _log_replay_summary(
 
     log.info("=" * 60)
     log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
+
+    # Parse reliability — baseline is always 100% (valid-only by enrich filter),
+    # so this surfaces candidate drift only.
+    baseline_parse_rate = 1.0
+    candidate_parse_rate = status_counts["valid"] / total if total else 0
+    parse_delta_pct = (candidate_parse_rate - baseline_parse_rate) * 100 if total else 0
+    parse_verdict = (
+        "SAME"
+        if abs(parse_delta_pct) < 1e-9
+        else "IMPROVED" if parse_delta_pct > 0 else "REGRESSED"
+    )
+    log.info("  Parse reliability:")
+    log.info(
+        "    Baseline:  %d/%d (%.1f%%)  [valid-only by filter]",
+        total,
+        total,
+        baseline_parse_rate * 100,
+    )
+    log.info(
+        "    Candidate: %d/%d (%.1f%%)",
+        status_counts["valid"],
+        total,
+        candidate_parse_rate * 100,
+    )
+    log.info(
+        "    Breakdown: valid=%d, missing_fields=%d, malformed=%d, error=%d",
+        status_counts["valid"],
+        status_counts["missing_fields"],
+        status_counts["malformed"],
+        status_counts["error"],
+    )
+    log.info("    Parse delta: %+.1f%% — %s", parse_delta_pct, parse_verdict)
+
+    if filter_stats is not None:
+        r = filter_stats.get("rejected", {})
+        total_rej = sum(r.values()) if r else 0
+        log.info("  Pre-filter (from enrich):")
+        log.info(
+            "    Accepted: %d   Rejected: %d (wrong_tool=%d, no_deliver_id=%d, "
+            "not_valid_parse=%d, no_outcome=%d, older_than_cutoff=%d)",
+            filter_stats.get("accepted", 0),
+            total_rej,
+            r.get("wrong_tool", 0),
+            r.get("no_deliver_id", 0),
+            r.get("not_valid_parse", 0),
+            r.get("no_outcome", 0),
+            r.get("older_than_cutoff", 0),
+        )
+
     log.info(
         "  Baseline avg Brier:  %.4f  Accuracy: %.1f%%",
         avg_baseline,
@@ -1012,6 +1212,16 @@ def replay(  # pylint: disable=too-many-statements
         log.warning("No rows in dataset")
         return
 
+    # Optional sidecar: {dataset}.filter_stats.json written by enrich.
+    filter_stats: Optional[Dict[str, Any]] = None
+    stats_path = dataset.with_name(dataset.name + ".filter_stats.json")
+    if stats_path.exists():
+        try:
+            filter_stats = json.loads(stats_path.read_text(encoding="utf-8"))
+            log.info("Loaded filter stats: %s", stats_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            log.warning("Could not load filter stats from %s: %s", stats_path, exc)
+
     tool_name = sampled[0]["tool_name"]
     is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
     is_rag_tool = tool_name.startswith("prediction-request-rag")
@@ -1068,7 +1278,7 @@ def replay(  # pylint: disable=too-many-statements
     )
 
     # Prepare output
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_output_dir(output_dir)
     baseline_path = output_dir / "baseline.jsonl"
     candidate_path = output_dir / "candidate.jsonl"
 
@@ -1078,6 +1288,16 @@ def replay(  # pylint: disable=too-many-statements
     baseline_brier_sum = 0.0
     candidate_brier_sum = 0.0
     n_scored = 0
+
+    # Parse-reliability tracking (issue #221 — delivered, paid-for, but
+    # malformed responses that silently break downstream consumers).
+    status_counts: Dict[str, int] = {
+        "valid": 0,
+        "missing_fields": 0,
+        "malformed": 0,
+        "error": 0,
+    }
+    failure_rows: list[dict[str, Any]] = []
 
     with (
         open(baseline_path, "w", encoding="utf-8") as bf,
@@ -1146,12 +1366,26 @@ def replay(  # pylint: disable=too-many-statements
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
-                response_text = call_llm(
-                    model=model,
-                    system_prompt=system_prompt,
-                    user_prompt=formatted_prompt,
-                    api_key=api_key,
+                structured_schema = (
+                    _get_structured_output_schema(tool_name)
+                    if "claude" not in model
+                    else None
                 )
+                if structured_schema is not None:
+                    response_text = _call_openai_structured(
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=formatted_prompt,
+                        api_key=api_key,
+                        response_format=structured_schema,
+                    )
+                else:
+                    response_text = call_llm(
+                        model=model,
+                        system_prompt=system_prompt,
+                        user_prompt=formatted_prompt,
+                        api_key=api_key,
+                    )
 
             # Cache fresh reasoning for later prediction-only iteration
             if fresh_reasoning is not None:
@@ -1184,6 +1418,10 @@ def replay(  # pylint: disable=too-many-statements
             b_brier = (row["p_yes"] - outcome_val) ** 2
             baseline_brier_sum += b_brier
 
+            status = parsed["prediction_parse_status"]
+            # Unknown statuses land in "error" so the breakdown never loses a row.
+            status_counts[status if status in status_counts else "error"] += 1
+
             if parsed["p_yes"] is not None:
                 c_brier = (parsed["p_yes"] - outcome_val) ** 2
                 candidate_brier_sum += c_brier
@@ -1201,9 +1439,23 @@ def replay(  # pylint: disable=too-many-statements
                     ),
                 )
             else:
-                log.warning(
-                    "  candidate parse failed: %s", parsed["prediction_parse_status"]
+                log.warning("  candidate parse failed: %s", status)
+                failure_rows.append(
+                    {
+                        "row_id": candidate_row["row_id"],
+                        "question_text": question,
+                        "prediction_parse_status": status,
+                        "raw_response": response_text,
+                    }
                 )
+
+    # Persist parse failures for forensic inspection.
+    failures_path = output_dir / "candidate_failures.jsonl"
+    if failure_rows:
+        with open(failures_path, "w", encoding="utf-8") as ff:
+            for fr in failure_rows:
+                ff.write(json.dumps(fr) + "\n")
+        log.info("Wrote %d parse failure(s) to %s", len(failure_rows), failures_path)
 
     # Summary
     total = len(sampled)
@@ -1216,7 +1468,16 @@ def replay(  # pylint: disable=too-many-statements
         total,
         n_scored,
         baseline_path,
+        status_counts,
+        filter_stats=filter_stats,
     )
+
+    # Make the filter stats discoverable next to the candidate/baseline outputs
+    # so ci_replay.py can render them into the PR comment.
+    if filter_stats is not None:
+        (output_dir / "filter_stats.json").write_text(
+            json.dumps(filter_stats, indent=2), encoding="utf-8"
+        )
 
     # Write updated enriched JSONL with fresh reasoning for next iteration
     has_fresh = any(r.get("_fresh_reasoning") for r in sampled)

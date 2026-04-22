@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.prompt_replay import (
+    _extract_factual_research_prompt_components,
     _load_and_filter_rows,
     _log_replay_summary,
     _prepare_output_dir,
+    extract_prompt_components,
 )
 
 
@@ -245,3 +247,83 @@ class TestPrepareOutputDir:
         output_dir = tmp_path / "out"
         _prepare_output_dir(output_dir)
         assert output_dir.is_dir()
+
+
+def _fr_prompt(
+    *,
+    question: str = "Will X happen by 2026-12-31?",
+    today: str = "2026-04-22",
+    briefing: str = "Key facts:\n- Fact one.\n- Fact two.",
+    include_briefing: bool = True,
+    reframe_body: str | None = None,
+) -> str:
+    # Mirrors full_prompt_used in factual_research.py.
+    if reframe_body is None:
+        reframe_messages = [
+            {"role": "system", "content": "REFRAME_SYSTEM"},
+            {
+                "role": "user",
+                "content": (
+                    "INPUT QUESTION:\n"
+                    f'"""{question}"""\n\n'
+                    f"Today's date: {today}\n"
+                ),
+            },
+        ]
+        reframe_body = json.dumps(reframe_messages, indent=2)
+
+    parts = [
+        f"--- REFRAME ---\n{reframe_body}\n",
+        "--- SUB-QUESTIONS ---\n{}\n",
+        "--- EVIDENCE ---\n[1] snippet\n",
+        "--- SYNTHESIS ---\n[]\n",
+    ]
+    if include_briefing:
+        parts.append(f"--- BRIEFING ---\n{briefing}\n")
+    parts.append("--- ESTIMATE ---\n[]\n")
+    parts.append("--- REASONING ---\nblah")
+    return "\n".join(parts)
+
+
+class TestExtractFactualResearchPromptComponents:
+    """Extraction for `factual_research` multi-section audit dumps."""
+
+    def test_happy_path_returns_question_briefing_today(self) -> None:
+        """Well-formed dump yields question, briefing, and today, stripped."""
+        prompt = _fr_prompt(
+            question="  Will Artemis II launch by 2026-12-31?  ",
+            today="2026-04-22",
+            briefing="  Factual summary line 1.\nLine 2.  ",
+        )
+        out = _extract_factual_research_prompt_components(prompt)
+        assert out is not None
+        assert out["user_prompt"] == "Will Artemis II launch by 2026-12-31?"
+        assert out["today"] == "2026-04-22"
+        assert out["additional_information"] == "Factual summary line 1.\nLine 2."
+
+    def test_missing_briefing_returns_none(self) -> None:
+        """No BRIEFING section → None (don't mis-route to default regexes)."""
+        prompt = _fr_prompt(include_briefing=False)
+        assert _extract_factual_research_prompt_components(prompt) is None
+
+    def test_malformed_reframe_json_returns_none(self) -> None:
+        """Invalid JSON in REFRAME block → None (no raise)."""
+        prompt = _fr_prompt(reframe_body="{this is not json")
+        assert _extract_factual_research_prompt_components(prompt) is None
+
+    def test_reframe_missing_user_message_returns_none(self) -> None:
+        """REFRAME JSON without a user message → None."""
+        reframe_body = json.dumps(
+            [{"role": "system", "content": "only system"}], indent=2
+        )
+        prompt = _fr_prompt(reframe_body=reframe_body)
+        assert _extract_factual_research_prompt_components(prompt) is None
+
+    def test_dispatch_via_extract_prompt_components(self) -> None:
+        """`extract_prompt_components` routes `factual_research` to the helper."""
+        prompt = _fr_prompt(question="Q?", today="2026-04-22", briefing="B")
+        out = extract_prompt_components(prompt, tool_name="factual_research")
+        assert out is not None
+        assert out["user_prompt"] == "Q?"
+        assert out["today"] == "2026-04-22"
+        assert out["additional_information"] == "B"

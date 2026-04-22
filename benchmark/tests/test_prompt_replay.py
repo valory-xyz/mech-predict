@@ -15,6 +15,8 @@ from benchmark.prompt_replay import (
     extract_prompt_components,
 )
 
+from packages.valory.customs.factual_research.factual_research import REFRAME_USER
+
 
 def _row(
     *,
@@ -257,17 +259,15 @@ def _fr_prompt(
     include_briefing: bool = True,
     reframe_body: str | None = None,
 ) -> str:
-    # Mirrors full_prompt_used in factual_research.py.
+    # Mirrors full_prompt_used in factual_research.py. We format the user
+    # content via the real REFRAME_USER template so a reword there breaks
+    # these tests (which is what would break prod extraction).
     if reframe_body is None:
         reframe_messages = [
             {"role": "system", "content": "REFRAME_SYSTEM"},
             {
                 "role": "user",
-                "content": (
-                    "INPUT QUESTION:\n"
-                    f'"""{question}"""\n\n'
-                    f"Today's date: {today}\n"
-                ),
+                "content": REFRAME_USER.format(question=question, today=today),
             },
         ]
         reframe_body = json.dumps(reframe_messages, indent=2)

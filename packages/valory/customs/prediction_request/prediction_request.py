@@ -448,11 +448,6 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-3-haiku-20240307": {
-        "default_max_tokens": 1000,
-        "limit_max_tokens": 200_000,
-        "temperature": 0,
-    },
     "claude-4-sonnet-20250514": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,

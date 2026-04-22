@@ -86,9 +86,9 @@ jobs:
             TRIGGERED_BY="$COMMENT_USER"
           fi
 
-          # Whitelist: tool name must be lowercase alphanumeric + hyphens only
-          if ! echo "$TOOL" | grep -qP '^[a-z0-9-]+$'; then
-            echo "::error::Invalid tool name: '$TOOL'. Must match [a-z0-9-]+"
+          # Whitelist: tool name must be lowercase alphanumeric + hyphens/underscores
+          if ! echo "$TOOL" | grep -qP '^[a-z0-9_-]+$'; then
+            echo "::error::Invalid tool name: '$TOOL'. Must match [a-z0-9_-]+"
             exit 1
           fi
 

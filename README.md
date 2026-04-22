@@ -5,7 +5,7 @@
 <h1 align="center" style="margin-bottom: 0;">
     Autonolas AI Mechs
     <br><a href="https://github.com/valory-xyz/mech/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/github/license/valory-xyz/mech"></a>
-    <a href="https://pypi.org/project/open-autonomy/0.21.16/"><img alt="Framework: Open Autonomy 0.21.16" src="https://img.shields.io/badge/framework-Open%20Autonomy%200.21.16-blueviolet"></a>
+    <a href="https://pypi.org/project/open-autonomy/0.21.19/"><img alt="Framework: Open Autonomy 0.21.19" src="https://img.shields.io/badge/framework-Open%20Autonomy%200.21.19-blueviolet"></a>
     <!-- <a href="https://github.com/valory-xyz/mech/releases/latest">
     <img alt="Latest release" src="https://img.shields.io/github/v/release/valory-xyz/mech"> -->
     </a>
@@ -18,7 +18,7 @@ This repository contains an AI Mech for the [Predict Agent Economy](https://olas
 You need the following requirements installed in your system:
 
 - [Python](https://www.python.org/) (recommended `3.10`)
-- [Poetry](https://python-poetry.org/docs/)
+- [uv](https://docs.astral.sh/uv/)
 - [Docker Engine](https://docs.docker.com/engine/install/)
 - [Docker Compose](https://docs.docker.com/compose/install/)
 - [Tendermint](https://docs.tendermint.com/v0.34/introduction/install.html) `==0.34.19`
@@ -34,10 +34,11 @@ Only continue reading this README if you know what you are doing and you are spe
 
 Follow these instructions to have your local environment prepared to run the demo below, as well as to build your own AI Mech.
 
-1. Create a Poetry virtual environment and install the dependencies:
+1. Create a virtual environment and install the dependencies:
 
     ```bash
-    poetry install && poetry shell
+    uv sync
+    source .venv/bin/activate
     ```
 
 2. Fetch the software packages using the [Open Autonomy](https://stack.olas.network/open-autonomy/) CLI:
@@ -135,7 +136,7 @@ Now, you have two options to run the worker: as a standalone agent or as a servi
 To create a release, use the `aea-helpers` CLI:
 
 ```bash
-pip install aea-helpers
+pip install open-aea-helpers
 aea-helpers make-release --version <VERSION> --env <ENV> --description "<DESCRIPTION>"
 ```
 

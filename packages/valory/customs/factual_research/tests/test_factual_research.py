@@ -646,32 +646,51 @@ class TestNoGlobalClient:
 class TestRunEdgeCases:
     """Edge case validation for run().
 
-    Note: run() is wrapped by @with_key_rotation which catches exceptions
-    and returns an error tuple (error_str, "", None, None, None, api_keys)
-    instead of raising.
+    Note: run() is wrapped by @with_key_rotation which catches unhandled
+    exceptions and returns an error tuple (error_json, "", None, None, None,
+    api_keys), where error_json is a JSON string of the form
+    {"p_yes": null, "p_no": null, "confidence": 0.0, "info_utility": 0.0,
+     "error": "<message>"}.
     """
 
+    @staticmethod
+    def _assert_error_envelope(result_first: str, expected_substring: str) -> None:
+        """Assert the error envelope contract.
+
+        The first tuple element must be a JSON envelope with null predictions,
+        zeroed scores, and the exception message under `error`.
+
+        :param result_first: first element of the run() return tuple.
+        :param expected_substring: substring that must appear in the `error` field.
+        """
+        parsed = json.loads(result_first)
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert expected_substring in parsed["error"]
+
     def test_rejects_unknown_tool(self) -> None:
-        """Unknown tool returns error tuple with 'not supported'."""
+        """Unknown tool returns error JSON with 'not supported'."""
         result = run(
             tool="bogus_tool",
             model="gpt-4o",
             prompt="test",
             api_keys=_make_mock_api_keys(),
         )
-        assert "not supported" in result[0]
+        self._assert_error_envelope(result[0], "not supported")
 
     def test_rejects_missing_model(self) -> None:
-        """Missing model returns error tuple with 'Model not supplied'."""
+        """Missing model returns error JSON with 'Model not supplied'."""
         result = run(
             tool="factual_research",
             prompt="test",
             api_keys=_make_mock_api_keys(),
         )
-        assert "Model not supplied" in result[0]
+        self._assert_error_envelope(result[0], "Model not supplied")
 
     def test_invalid_source_content_mode(self) -> None:
-        """Invalid source_content_mode returns error tuple."""
+        """Invalid source_content_mode returns error JSON."""
         result = run(
             tool="factual_research",
             model="gpt-4o",
@@ -679,7 +698,7 @@ class TestRunEdgeCases:
             api_keys=_make_mock_api_keys(source_content_mode="bogus"),
             delivery_rate=100,
         )
-        assert "Invalid source_content_mode" in result[0]
+        self._assert_error_envelope(result[0], "Invalid source_content_mode")
 
     def test_delivery_rate_zero_returns_max_cost(self) -> None:
         """delivery_rate=0 calls counter_callback with max_cost=True."""
@@ -699,3 +718,145 @@ class TestRunEdgeCases:
             models_calls=("gpt-4.1-2025-04-14",) * 3,
         )
         assert result == 42.0
+
+
+# ---------------------------------------------------------------------------
+# Group 6: with_key_rotation decorator
+# ---------------------------------------------------------------------------
+
+
+def _make_openai_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an openai APIStatusError-family exception for tests.
+
+    Skips the real constructor (which requires a live httpx.Response) and
+    sets up just the attributes the decorator under test touches.
+
+    :param cls: the openai exception subclass to instantiate.
+    :param message: the `str(exc)` payload.
+    :return: an instance of `cls` usable as a raise target in tests.
+    """
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+class TestWithKeyRotation:
+    """Direct tests for the @with_key_rotation decorator contract.
+
+    These pin behaviors that are easy to regress:
+    - success path returns a 6-tuple ending in api_keys
+    - max-cost float pass-through (no api_keys appended — tuple concat would fail)
+    - RateLimitError / AuthenticationError / PermissionDeniedError rotate the key
+    - unhandled exceptions are wrapped in the prediction-shaped error JSON
+    """
+
+    def test_success_appends_api_keys(self) -> None:
+        """Success tuple gets api_keys appended as last element."""
+        keys = _make_mock_api_keys()
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            return "ok", "prompt", None, None, None
+
+        result = fake(api_keys=keys)
+        assert result == ("ok", "prompt", None, None, None, keys)
+
+    def test_max_cost_float_passthrough(self) -> None:
+        """Float return (max-cost path) skips the api_keys append."""
+        keys = _make_mock_api_keys()
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> float:  # pylint: disable=unused-argument
+            return 42.0
+
+        assert fake(api_keys=keys) == 42.0
+
+    @pytest.mark.parametrize(
+        "exc_cls",
+        [
+            module.openai.RateLimitError,
+            module.openai.AuthenticationError,
+            module.openai.PermissionDeniedError,
+        ],
+    )
+    def test_rotates_on_recoverable_error(self, exc_cls: type) -> None:
+        """Rate-limit, auth, and permission errors all rotate the key and retry."""
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {"openai": 1, "openrouter": 1}
+        keys.rotate = MagicMock()
+        call_count = {"n": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _make_openai_error(exc_cls, "simulated")
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert call_count["n"] == 2  # one failure + one success
+        assert keys.rotate.call_count == 2  # rotated both openai and openrouter
+        assert result[-1] is keys
+
+    def test_rotation_exhausted_raises(self) -> None:
+        """Recoverable exception is re-raised when retries are exhausted.
+
+        When both openai and openrouter retries are exhausted, the decorator
+        re-raises instead of wrapping into the error JSON — the framework
+        needs the raw exception to know the key pool is burned.
+        """
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {"openai": 0, "openrouter": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            raise _make_openai_error(module.openai.RateLimitError, "burned out")
+
+        with pytest.raises(module.openai.RateLimitError, match="burned out"):
+            fake(api_keys=keys)
+
+    def test_unhandled_exception_returns_parseable_error_json(self) -> None:
+        """Unhandled exceptions wrap into a prediction-shaped error JSON.
+
+        Non-openai exceptions (including `LengthFinishReasonError`, shaped
+        here as a `RuntimeError`) are wrapped into the prediction-shaped
+        error JSON. This is the contract the decorator added in PR 232 —
+        regressing it would resurface raw framework strings to on-chain
+        consumers.
+        """
+        keys = _make_mock_api_keys()
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            raise RuntimeError("simulated truncation")
+
+        result = fake(api_keys=keys)
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert "simulated truncation" in parsed["error"]
+        assert result[1:] == ("", None, None, None, keys)
+
+    def test_run_wrapped_unhandled_exception_returns_error_json(self) -> None:
+        """End-to-end regression for the LengthFinishReasonError path.
+
+        When the pipeline raises inside `_parse_completion` (simulating the
+        `LengthFinishReasonError` path), the decorator wraps the error
+        cleanly. This is the exact failure shape that caused the 24.4% prod
+        error rate before `max_tokens` was raised.
+        """
+        with patch(f"{FR_MODULE}._parse_completion") as mock_parse:
+            mock_parse.side_effect = RuntimeError("simulated truncation")
+            result = run(
+                tool="factual_research",
+                model="gpt-4.1-2025-04-14",
+                prompt=PREDICTION_PROMPT,
+                api_keys=_make_mock_api_keys(),
+            )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["confidence"] == 0.0
+        assert "simulated truncation" in parsed["error"]

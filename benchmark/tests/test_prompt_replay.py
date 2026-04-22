@@ -319,6 +319,16 @@ class TestExtractFactualResearchPromptComponents:
         prompt = _fr_prompt(reframe_body=reframe_body)
         assert _extract_factual_research_prompt_components(prompt) is None
 
+    def test_reframe_non_list_json_returns_none(self) -> None:
+        """REFRAME JSON that parses but isn't a list → None (don't raise)."""
+        prompt = _fr_prompt(reframe_body=json.dumps({"role": "user"}))
+        assert _extract_factual_research_prompt_components(prompt) is None
+
+    def test_reframe_list_of_non_dicts_returns_none(self) -> None:
+        """REFRAME JSON list with non-dict elements → None (don't raise)."""
+        prompt = _fr_prompt(reframe_body=json.dumps(["just a string"]))
+        assert _extract_factual_research_prompt_components(prompt) is None
+
     def test_dispatch_via_extract_prompt_components(self) -> None:
         """`extract_prompt_components` routes `factual_research` to the helper."""
         prompt = _fr_prompt(question="Q?", today="2026-04-22", briefing="B")

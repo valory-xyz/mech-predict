@@ -315,9 +315,15 @@ def _extract_factual_research_prompt_components(
         messages = json.loads(reframe_match.group(1))
     except json.JSONDecodeError:
         return None
+    if not isinstance(messages, list):
+        return None
 
     user_content = next(
-        (m.get("content", "") for m in messages if m.get("role") == "user"),
+        (
+            m.get("content", "")
+            for m in messages
+            if isinstance(m, dict) and m.get("role") == "user"
+        ),
         "",
     )
     q_match = FR_QUESTION_TODAY_RE.search(user_content)

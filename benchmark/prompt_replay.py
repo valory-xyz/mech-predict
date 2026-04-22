@@ -120,6 +120,19 @@ SF_QUESTION_RE = re.compile(r"Question:\n(.*?)\n\nToday's date:", re.DOTALL)
 SF_TODAY_RE = re.compile(r"Today's date:\s*(.*)")
 SF_SOURCES_RE = re.compile(r"<background>(.*?)</background>", re.DOTALL)
 
+# Extraction from factual_research audit-dump prompts. The prod tool writes a
+# multi-section trail (see factual_research.py `full_prompt_used`); we recover
+# the original question + today from the REFRAME chat-messages JSON, and the
+# factual briefing verbatim from the BRIEFING section.
+FR_BRIEFING_RE = re.compile(r"--- BRIEFING ---\n(.*?)\n\n--- ESTIMATE ---", re.DOTALL)
+FR_REFRAME_RE = re.compile(
+    r"--- REFRAME ---\n(.*?)\n\n--- SUB-QUESTIONS ---", re.DOTALL
+)
+FR_QUESTION_TODAY_RE = re.compile(
+    r'INPUT QUESTION:\s*"""(.*?)"""\s*\n\s*Today\'s date:\s*(.*?)(?:\n|$)',
+    re.DOTALL,
+)
+
 
 # ---------------------------------------------------------------------------
 # IPFS helpers (adapted from sweep.py / fetch_production.py)
@@ -279,6 +292,51 @@ def _extract_superforcaster_prompt_components(
     return result
 
 
+def _extract_factual_research_prompt_components(
+    formatted_prompt: str,
+) -> Optional[dict[str, str]]:
+    """Extract (question, briefing, today) from a factual_research IPFS dump.
+
+    The prod tool stores a multi-section audit trail (factual_research.py
+    `full_prompt_used`). Replay only re-runs the ESTIMATE step, so we need the
+    original question + today (embedded in the REFRAME chat-messages JSON via
+    REFRAME_USER) and the factual briefing body from the BRIEFING section.
+
+    :param formatted_prompt: the full IPFS prompt string.
+    :return: dict with user_prompt/additional_information/today, or None if
+        any required section is missing or malformed.
+    """
+    reframe_match = FR_REFRAME_RE.search(formatted_prompt)
+    briefing_match = FR_BRIEFING_RE.search(formatted_prompt)
+    if not reframe_match or not briefing_match:
+        return None
+
+    try:
+        messages = json.loads(reframe_match.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(messages, list):
+        return None
+
+    user_content = next(
+        (
+            m.get("content", "")
+            for m in messages
+            if isinstance(m, dict) and m.get("role") == "user"
+        ),
+        "",
+    )
+    q_match = FR_QUESTION_TODAY_RE.search(user_content)
+    if not q_match:
+        return None
+
+    return {
+        "user_prompt": q_match.group(1).strip(),
+        "additional_information": briefing_match.group(1).strip(),
+        "today": q_match.group(2).strip(),
+    }
+
+
 def extract_prompt_components(
     formatted_prompt: str,
     tool_name: str = "prediction-online",
@@ -297,6 +355,9 @@ def extract_prompt_components(
 
     if tool_name == "superforcaster":
         return _extract_superforcaster_prompt_components(formatted_prompt)
+
+    if tool_name == "factual_research":
+        return _extract_factual_research_prompt_components(formatted_prompt)
 
     # Default: prediction-online format
     up_match = USER_PROMPT_RE.search(formatted_prompt)
@@ -1226,6 +1287,7 @@ def replay(  # pylint: disable=too-many-statements
     is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
     is_rag_tool = tool_name.startswith("prediction-request-rag")
     is_superforcaster = tool_name == "superforcaster"
+    is_factual_research = tool_name == "factual_research"
 
     # Import prompt templates from the appropriate tool module
     if is_reasoning_tool:
@@ -1250,6 +1312,16 @@ def replay(  # pylint: disable=too-many-statements
         )
 
         system_prompt = "You are a helpful assistant."
+    elif is_factual_research:
+        # Replay only the ESTIMATE step; REFRAME + SYNTHESIS are upstream and
+        # use cached evidence. ESTIMATE_USER takes (question, today, briefing).
+        from packages.valory.customs.factual_research.factual_research import (  # pylint: disable=import-outside-toplevel
+            ESTIMATE_SYSTEM,
+            ESTIMATE_USER,
+        )
+
+        PREDICTION_PROMPT = ESTIMATE_USER
+        system_prompt = ESTIMATE_SYSTEM
     else:
         from packages.valory.customs.prediction_request.prediction_request import (  # pylint: disable=import-outside-toplevel
             PREDICTION_PROMPT,
@@ -1349,7 +1421,8 @@ def replay(  # pylint: disable=too-many-statements
                     parser_reasoning_response=parser_reasoning_response,
                 )
             else:
-                # Single-stage tool (prediction-online, superforcaster, RAG)
+                # Single-stage tool (prediction-online, superforcaster, RAG,
+                # factual_research ESTIMATE)
                 if is_rag_tool:
                     formatted_prompt = PREDICTION_PROMPT.format(
                         USER_PROMPT=row["extracted_user_prompt"],
@@ -1360,6 +1433,12 @@ def replay(  # pylint: disable=too-many-statements
                         question=row["extracted_user_prompt"],
                         today=row.get("extracted_today", ""),
                         sources=row["extracted_additional_information"],
+                    )
+                elif is_factual_research:
+                    formatted_prompt = PREDICTION_PROMPT.format(
+                        question=row["extracted_user_prompt"],
+                        today=row.get("extracted_today", ""),
+                        briefing=row["extracted_additional_information"],
                     )
                 else:
                     formatted_prompt = PREDICTION_PROMPT.format(

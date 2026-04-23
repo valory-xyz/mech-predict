@@ -157,6 +157,9 @@ jobs:
             $TOURNAMENT_FLAG
         continue-on-error: true
 
+      # Keep the "3" in the step name and --period-days flag in sync with
+      # ROLLING_WINDOW_DAYS in benchmark/analyze.py. YAML can't import the
+      # Python constant; a bump to ROLLING_WINDOW_DAYS must be mirrored here.
       - name: Score last 3 days
         run: |
           TOURNAMENT_FLAG=""

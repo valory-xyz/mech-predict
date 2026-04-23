@@ -40,7 +40,7 @@ class TestBuildSystemPrompt:
         # Spot-check the sentences that should carry the label so a future
         # template refactor doesn't silently drop deployment scoping.
         assert "for the *Omenstrat* deployment" in prompt
-        assert "scoped to Omenstrat" in prompt
+        assert "for Omenstrat" in prompt
 
     def test_polystrat_label_appears_in_prompt(self) -> None:
         """Polystrat label renders symmetrically to Omenstrat."""
@@ -85,9 +85,28 @@ class TestBuildSystemPrompt:
 
     def test_prompt_references_rolling_window_days_constant(self) -> None:
         """Prompt cites the current ROLLING_WINDOW_DAYS value in its summary bullet."""
-        assert (
-            f"in the last {ROLLING_WINDOW_DAYS} days" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert f"last {ROLLING_WINDOW_DAYS} days" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_prompt_drops_alltime_scope_instructions(self) -> None:
+        """Prompt no longer tells the LLM to cite all-time or cumulative figures.
+
+        Phase 2 drops the all-time point-in-time sections from the report, so
+        the summary must not instruct the LLM to reference them.
+        """
+        assert "Only mention all-time numbers for context" not in (
+            SUMMARY_SYSTEM_PROMPT_TEMPLATE
         )
+        assert "deltas vs all-time" not in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_prompt_anchors_sections_to_rolling_heading_names(self) -> None:
+        """Prompt points the LLM at the Last-N-Days section headings by name."""
+        for heading in (
+            f"Tool Ranking (Last {ROLLING_WINDOW_DAYS} Days)",
+            f"Category Performance (Last {ROLLING_WINDOW_DAYS} Days)",
+            f"Tool × Category (Last {ROLLING_WINDOW_DAYS} Days)",
+            f"Diagnostic Edge Metrics (Last {ROLLING_WINDOW_DAYS} Days)",
+        ):
+            assert heading in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
     def test_deployment_status_scoped_to_platform(self) -> None:
         """Deployment status bullet filters the fleet-wide section per platform.

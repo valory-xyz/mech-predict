@@ -2048,29 +2048,18 @@ def score_period_split(
     return score(prod_rows), score(tourn_rows)
 
 
-def score_period_split_by_platform(
-    logs_dir: Path = DEFAULT_LOGS_DIR,
-    days: int = 1,
-    tournament_input: Path | None = None,
+def _score_rows_by_platform(
+    prod_rows: list[dict[str, Any]],
+    tourn_rows: list[dict[str, Any]],
 ) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
-    """Score the last *days* days, returning combined + per-platform results.
+    """Score combined + per-platform partitions of pre-loaded rows in one pass.
 
-    Single-pass multi-aggregation: rows are loaded once, partitioned by
-    mode, then per-platform partitions are scored alongside the combined
-    result. This powers the per-platform daily reports.
-
-    :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
-    :param tournament_input: optional path to ``tournament_scored.jsonl``
-        whose rows are filtered to the same window and merged.
+    :param prod_rows: production-mode rows (any platform).
+    :param tourn_rows: tournament-mode rows (any platform).
     :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
-        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
-        matches the shape of ``score_period_split``. Per-platform entries
-        use the combined result for unknown-platform rows' sake: unknown
-        rows stay in ``"all"`` only.
+        "polymarket": (prod, tourn)}``. Unknown-platform rows stay in
+        ``"all"`` only.
     """
-    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
-
     result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         "all": (score(prod_rows), score(tourn_rows)),
     }
@@ -2082,6 +2071,26 @@ def score_period_split_by_platform(
             score(tourn_by_plat[platform]),
         )
     return result
+
+
+def score_period_split_by_platform(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+    tournament_input: Path | None = None,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score the last *days* days, returning combined + per-platform results.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N calendar days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
+        matches the shape of ``score_period_split``. Unknown-platform
+        rows stay in ``"all"`` only.
+    """
+    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+    return _score_rows_by_platform(prod_rows, tourn_rows)
 
 
 def _load_period_rows(
@@ -2295,22 +2304,21 @@ def _cli_legacy_full_recompute(
     print(f"Loaded {len(rows)} rows from {args.input}")
 
     prod_rows, tourn_rows = _partition_rows_by_mode(rows)
-    result = score(prod_rows)
-    tourn_result = score(tourn_rows)
+    results = _score_rows_by_platform(prod_rows, tourn_rows)
+    result, tourn_result = results["all"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
 
-    prod_by_plat = _partition_rows_by_platform(prod_rows)
-    tourn_by_plat = _partition_rows_by_platform(tourn_rows)
     for platform in PLATFORMS:
+        plat_prod, plat_tourn = results[platform]
         _derive_platform_path(args.output, platform).write_text(
-            json.dumps(score(prod_by_plat[platform]), indent=2)
+            json.dumps(plat_prod, indent=2)
         )
         _derive_platform_path(output_tournament, platform).write_text(
-            json.dumps(score(tourn_by_plat[platform]), indent=2)
+            json.dumps(plat_tourn, indent=2)
         )
 
     print(

@@ -1891,12 +1891,6 @@ def generate_report(
     sections.append(section_base_rates(scores))
     sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))
 
-    rolling_for_sections = rolling_scores if rolling_scores is not None else scores
-    rolling_tournament_for_sections = (
-        rolling_scores_tournament
-        if rolling_scores_tournament is not None
-        else tournament_scores
-    )
     rolling_suffix = f" (Last {ROLLING_WINDOW_DAYS} Days)"
     rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
 
@@ -1906,14 +1900,24 @@ def generate_report(
             _relabel_heading(section_md, heading_suffix), rolling_window_note
         )
 
-    sections.append(_rolling(section_tool_ranking(rolling_for_sections)))
-    if render_tournament:
+    if rolling_scores is None:
         sections.append(
-            _rolling(
-                section_tool_ranking(rolling_tournament_for_sections),
-                f"{rolling_suffix} — Tournament",
-            )
+            f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)\n\n"
+            f"Rolling scores for the last {ROLLING_WINDOW_DAYS} days are "
+            "unavailable — the scoring step did not produce "
+            f"`rolling_scores_{platform}.json` for this run. Tool Ranking, "
+            "Category Performance, Tool × Category, Diagnostic Edge Metrics, "
+            "and Weak Spots sections are omitted."
         )
+    else:
+        sections.append(_rolling(section_tool_ranking(rolling_scores)))
+        if render_tournament and rolling_scores_tournament is not None:
+            sections.append(
+                _rolling(
+                    section_tool_ranking(rolling_scores_tournament),
+                    f"{rolling_suffix} — Tournament",
+                )
+            )
 
     if include_tournament:
         merged = _merged_tvm_scores(scores, scores_tournament)
@@ -1931,17 +1935,23 @@ def generate_report(
                 f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)",
             )
             if tvm_rolling:
-                sections.append(tvm_rolling)
+                sections.append(_annotate_with_window(tvm_rolling, rolling_window_note))
         deltas = section_version_deltas(merged)
         if deltas:
             sections.append(deltas)
 
+    if rolling_scores is not None:
+        sections.extend(
+            [
+                _rolling(section_category(rolling_scores)),
+                _rolling(section_tool_category(rolling_scores)),
+                _rolling(section_diagnostic_metrics(rolling_scores)),
+                _rolling(section_weak_spots(rolling_scores)),
+            ]
+        )
+
     sections.extend(
         [
-            _rolling(section_category(rolling_for_sections)),
-            _rolling(section_tool_category(rolling_for_sections)),
-            _rolling(section_diagnostic_metrics(rolling_for_sections)),
-            _rolling(section_weak_spots(rolling_for_sections)),
             section_reliability_issues(scores),
             section_parse_breakdown(scores),
             section_trend(history, None, platform=platform),

@@ -1061,7 +1061,9 @@ class TestGenerateReport:
             ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(s, history, platform="omen", disabled_tools={})
+        report = generate_report(
+            s, history, platform="omen", rolling_scores=s, disabled_tools={}
+        )
 
         assert "# Benchmark Report (Omenstrat) — " in report
         assert "## Metric References" in report
@@ -1676,6 +1678,8 @@ class TestGenerateReportWithTournamentFiles:
             platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
+            rolling_scores=prod,
+            rolling_scores_tournament=tourn,
         )
         # Overall is dropped in Phase 2; Tool Ranking carries the rolling suffix.
         assert "## Overall" not in report
@@ -1954,16 +1958,71 @@ class TestGenerateReportRollingWindowAnnotations:
     def test_rolling_sections_carry_window_note(self) -> None:
         """Tool Ranking / Category / Tool × Category / Diagnostics / Weak Spots."""
         scores = _scores_with_tool("tool-a", 0.20, 1000)
-        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        report = generate_report(
+            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+        )
         note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
         # At least the five rolling point-in-time sections carry it.
         assert report.count(note) >= 5
+
+    def test_tool_version_mode_rolling_section_carries_window_note(self) -> None:
+        """Tool × Version × Mode (Last N Days) gets the n= qualifier like siblings."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        scores["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 1000,
+                "valid_n": 1000,
+                "brier": 0.2,
+            }
+        }
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            include_tournament=True,
+            disabled_tools={},
+        )
+        heading_idx = report.index(
+            f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
+        )
+        next_heading = report.find("##", heading_idx + 1)
+        body = report[heading_idx : next_heading if next_heading > -1 else len(report)]
+        assert (
+            f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._" in body
+        )
+
+    def test_rolling_sections_absent_when_rolling_scores_missing(self) -> None:
+        """No rolling_scores -> rolling point-in-time sections omitted.
+
+        Falling back to all-time ``scores`` under a "(Last N Days)" heading
+        would mislabel the window. Instead, a single banner explains the gap
+        and the five rolling sections are skipped entirely.
+        """
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        assert f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)" in report
+        assert "Rolling scores for the last 3 days are unavailable" in report
+        for heading in (
+            "## Tool Ranking (Last 3 Days)",
+            "## Category Performance (Last 3 Days)",
+            "## Tool \u00d7 Category (Last 3 Days)",
+            "## Diagnostic Edge Metrics (Last 3 Days)",
+            "## Weak Spots (Last 3 Days)",
+        ):
+            assert heading not in report
 
     def test_non_rolling_sections_do_not_carry_window_note(self) -> None:
         """Trend, Base Rates, Tool Deployment Status never claim rolling scope."""
         scores = _scores_with_tool("tool-a", 0.20, 1000)
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(scores, history, platform="omen", disabled_tools={})
+        report = generate_report(
+            scores,
+            history,
+            platform="omen",
+            rolling_scores=scores,
+            disabled_tools={},
+        )
         note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
         # Split on the Trend header and assert the note is absent between it and
         # the next section heading.

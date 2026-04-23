@@ -2693,3 +2693,40 @@ class TestPerPlatformPeriod:
         for scope in ("all", *PLATFORMS):
             prod, _ = result[scope]
             assert prod["overall"]["n"] == 0
+
+    def test_period_keeps_rows_with_fractional_seconds(self, tmp_path: Path) -> None:
+        """Fractional-second timestamps inside the window aren't dropped.
+
+        Lex-compare against a ``%H:%M:%SZ`` cutoff would treat
+        ``"...:05.123Z" < "...:05Z"`` (``.`` < ``Z``) and silently exclude
+        rows whose predicted_at carries sub-second precision.
+        """
+        logs_dir = tmp_path / "logs"
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S.123Z"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=recent, row_id="o_frac")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        assert prod_all["overall"]["n"] == 1
+        assert prod_omen["overall"]["n"] == 1
+
+    def test_period_skips_unparseable_predicted_at(self, tmp_path: Path) -> None:
+        """Rows whose predicted_at is missing or malformed are excluded."""
+        logs_dir = tmp_path / "logs"
+        self._populate_logs(
+            logs_dir,
+            [
+                _row(platform="omen", predicted_at="", row_id="o_empty"),
+                _row(platform="omen", predicted_at="not-a-date", row_id="o_bad"),
+            ],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        assert prod_all["overall"]["n"] == 0

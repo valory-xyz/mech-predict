@@ -2093,15 +2093,26 @@ def score_period_split_by_platform(
     return _score_rows_by_platform(prod_rows, tourn_rows)
 
 
+def _parse_predicted_at(value: Any) -> datetime | None:
+    """Parse a row's ``predicted_at`` field into a UTC ``datetime``.
+
+    :param value: raw ``predicted_at`` value from the row dict.
+    :return: parsed ``datetime``, or ``None`` when missing or unparseable.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _load_period_rows(
     logs_dir: Path,
     days: int,
     tournament_input: Path | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Load + filter + mode-partition period rows.
-
-    Extracted so ``score_period_split`` and ``score_period_split_by_platform``
-    share a single loader and can't drift.
 
     :param logs_dir: directory containing daily log files.
     :param days: score rows from the last N calendar days.
@@ -2110,9 +2121,7 @@ def _load_period_rows(
     :return: ``(production_rows, tournament_rows)`` both filtered to the
         period window.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
@@ -2124,14 +2133,14 @@ def _load_period_rows(
     rows: list[dict[str, Any]] = []
     for filepath in all_files:
         for row in load_rows(Path(filepath)):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            predicted_at = _parse_predicted_at(row.get("predicted_at"))
+            if predicted_at is not None and predicted_at >= cutoff:
                 rows.append(row)
 
     if tournament_input is not None and tournament_input.exists():
         for row in load_rows(tournament_input):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            predicted_at = _parse_predicted_at(row.get("predicted_at"))
+            if predicted_at is not None and predicted_at >= cutoff:
                 rows.append(row)
 
     return _partition_rows_by_mode(rows)

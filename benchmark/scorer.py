@@ -861,7 +861,7 @@ def brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
 
 
 def _score_latency_reservoir(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
-    """Return up to ``LATENCY_RESERVOIR_SIZE`` most recent latencies per tool.
+    """Return the last ``LATENCY_RESERVOIR_SIZE`` latencies per tool in insertion order.
 
     :param rows: input rows.
     :return: ``{tool_name: [latencies]}``. Tools with no ``latency_s``
@@ -903,7 +903,9 @@ def _score_extreme_predictions(
         outcome = row.get("final_outcome")
         if p_yes is None or outcome is None:
             continue
-        question = row.get("question_text", "")
+        question = row.get("question_text")
+        if not question:
+            continue
         entry = {
             "question_text": question,
             "tool_name": row.get("tool_name") or "unknown",

@@ -53,7 +53,7 @@ python -m benchmark.scorer --period-days 7 --logs-dir benchmark/datasets/logs/ -
 python -m benchmark.scorer --period-days 30 --logs-dir benchmark/datasets/logs/ --output results/last_month.json
 
 # Pass period scores to analyze for delta-vs-alltime reporting.
-# The report will lead with "Since Last Report" and "Last 7 Days Rolling"
+# The report will lead with "Since Last Report" and "Last 3 Days Rolling"
 # sections showing how recent performance compares to all-time.
 python -m benchmark.analyze --period results/last_day.json --rolling results/last_week.json
 ```

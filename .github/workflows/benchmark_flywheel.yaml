@@ -157,13 +157,13 @@ jobs:
             $TOURNAMENT_FLAG
         continue-on-error: true
 
-      - name: Score last 7 days
+      - name: Score last 3 days
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          python -m benchmark.scorer --period-days 7 \
+          python -m benchmark.scorer --period-days 3 \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
             $TOURNAMENT_FLAG

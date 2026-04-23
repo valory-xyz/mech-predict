@@ -20,7 +20,11 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.request import Request, urlopen
 
-from benchmark.analyze import PLATFORM_LABELS, VERSION_DELTA_LOW_SAMPLE_STRICT
+from benchmark.analyze import (
+    PLATFORM_LABELS,
+    ROLLING_WINDOW_DAYS,
+    VERSION_DELTA_LOW_SAMPLE_STRICT,
+)
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -28,7 +32,7 @@ log = logging.getLogger(__name__)
 SUMMARY_SYSTEM_PROMPT_TEMPLATE = f"""\
 Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). Every number in this report is already scoped to {{platform_label}} — do NOT compare platforms or reference the other deployment.
 
-*Summary:* 2-3 sentence high-level takeaway for {{platform_label}} — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
+*Summary:* 2-3 sentence high-level takeaway for {{platform_label}} — lead with what changed since last report and in the last {ROLLING_WINDOW_DAYS} days. Only mention all-time numbers for context. Include deltas vs all-time where available.
 
 *Top tools:*
 • `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why

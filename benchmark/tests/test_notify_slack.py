@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmark.analyze import PLATFORM_LABELS
+from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     SUMMARY_SYSTEM_PROMPT_TEMPLATE,
     _build_system_prompt,
@@ -82,6 +82,12 @@ class TestBuildSystemPrompt:
         assert "*Tournament callouts:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Diagnostics:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Recommended actions:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_prompt_references_rolling_window_days_constant(self) -> None:
+        """Prompt cites the current ROLLING_WINDOW_DAYS value in its summary bullet."""
+        assert (
+            f"in the last {ROLLING_WINDOW_DAYS} days" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        )
 
     def test_deployment_status_scoped_to_platform(self) -> None:
         """Deployment status bullet filters the fleet-wide section per platform.

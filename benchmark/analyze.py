@@ -47,6 +47,8 @@ PLATFORM_LABELS: Mapping[str, str] = MappingProxyType(
     }
 )
 
+ROLLING_WINDOW_DAYS = 3
+
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
 BSS_HARMFUL_THRESHOLD = 0.0
@@ -1205,7 +1207,7 @@ def section_period(
     alltime_scores: dict[str, Any],
     label: str = "Since last report",
 ) -> str:
-    """Generate a period comparison section (since-last-report or rolling 7d).
+    """Generate a period comparison section.
 
     :param period_scores: scores from the recent period.
     :param alltime_scores: all-time scores for delta comparison.
@@ -1779,13 +1781,13 @@ def generate_report(
         ``"polymarket"``). Drives the report header and gates platform-
         comparison sections.
     :param period_scores: production scores since last report.
-    :param rolling_scores: production scores from the last 7 days.
+    :param rolling_scores: production scores from the rolling window.
     :param include_tournament: master switch for rendering the Tool ×
         Version × Mode breakdown. When False, tournament inputs are
         ignored entirely.
     :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
     :param period_scores_tournament: tournament since last report.
-    :param rolling_scores_tournament: tournament last 7 days.
+    :param rolling_scores_tournament: tournament rolling window scores.
     :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
         map used by the Tool Deployment Status section.
     :return: full markdown report string.
@@ -1823,15 +1825,15 @@ def generate_report(
             )
         )
 
-    # Last 7 Days Rolling
-    sections.append(section_period(rolling_scores, scores, "Last 7 Days Rolling"))
+    rolling_heading = f"Last {ROLLING_WINDOW_DAYS} Days Rolling"
+    sections.append(section_period(rolling_scores, scores, rolling_heading))
     if render_tournament and _has_tournament_data(rolling_scores_tournament):
         sections.append(
             _relabel_heading(
                 section_period(
                     rolling_scores_tournament,
                     tournament_scores,
-                    "Last 7 Days Rolling",
+                    rolling_heading,
                 ),
                 " — Tournament",
             )
@@ -1870,7 +1872,8 @@ def generate_report(
                 rolling_scores, rolling_scores_tournament
             )
             tvm_rolling = section_tool_version_breakdown(
-                merged_rolling, "Tool × Version × Mode (Last 7 Days)"
+                merged_rolling,
+                f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)",
             )
             if tvm_rolling:
                 sections.append(tvm_rolling)

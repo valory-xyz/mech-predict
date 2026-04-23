@@ -1497,7 +1497,7 @@ class TestGenerateReportTournamentToggle:
             disabled_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "Tool × Version × Mode (Last 7 Days)" in report
+        assert "Tool × Version × Mode (Last 3 Days)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1694,7 +1694,7 @@ class TestGenerateReportWithTournamentFiles:
             rolling_scores_tournament=empty_period_tourn,
         )
         assert "## Since Last Report — Tournament" not in report
-        assert "## Last 7 Days Rolling — Tournament" not in report
+        assert "## Last 3 Days Rolling — Tournament" not in report
 
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""

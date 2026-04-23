@@ -1033,6 +1033,11 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
 
+    # Schema parity with _accumulate_and_write: both score() and the
+    # incremental path write the same finalized dict shape to
+    # scores_<platform>.json. Kept even when generate_report does not
+    # render Latency / Worst / Best so consumers reading the JSON
+    # directly see the same keys regardless of which path produced it.
     latency_reservoir = _score_latency_reservoir(rows)
     worst_10, best_10 = _score_extreme_predictions(rows)
 
@@ -1450,10 +1455,11 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
             reservoir.pop(0)
 
     # Worst / best 10 (deduplicated by question_text)
-    if is_valid:
+    question_text = row.get("question_text")
+    if is_valid and question_text:
         row_brier = brier_score(row["p_yes"], row["final_outcome"])
         entry = {
-            "question_text": row.get("question_text", ""),
+            "question_text": question_text,
             "tool_name": tool,
             "p_yes": row["p_yes"],
             "final_outcome": row["final_outcome"],

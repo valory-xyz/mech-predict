@@ -83,6 +83,24 @@ class TestBuildSystemPrompt:
         assert "*Diagnostics:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Recommended actions:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
+    def test_deployment_status_scoped_to_platform(self) -> None:
+        """Deployment status bullet filters the fleet-wide section per platform.
+
+        The "Tool Deployment Status" section in the report is still fleet-wide
+        (lists disabled tools across omenstrat and polystrat deployments);
+        Phase 3 will partition it in analyze.py. Until then, the prompt must
+        instruct the LLM to include only deployments belonging to the current
+        platform so a Polystrat summary never cites an omenstrat-only
+        deployment and vice versa.
+        """
+        # Instruction must filter by deployment-name prefix matching the
+        # platform label, and must forbid mentions of other platforms'
+        # deployments even though they appear in the source section.
+        assert "starts with the lowercase" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "deployments belonging to other platforms" in (
+            SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        )
+
 
 class TestInferPlatformLabel:
     """_infer_platform_label recovers the deployment label from the filename."""

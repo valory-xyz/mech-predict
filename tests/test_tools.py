@@ -85,11 +85,9 @@ PREDICTION_PROMPT = (
     "what are the respective probabilities of `p_yes` and `p_no` occurring?"
 )
 PREDICTION_RAG_PROMPT = (
-    'With the given question "Will FIFA publicly announce, on or before March 17, 2026, '
-    "the official withdrawal or disqualification of Iran's men's national soccer team "
-    "from the 2026 World Cup, as confirmed by an official FIFA statement or major news "
-    'outlet?" and the `yes` option represented by `Yes` and the `no` option represented '
-    "by `No`, what are the respective probabilities of `p_yes` and `p_no` occurring?"
+    'With the given question "Will NASA\'s Artemis II mission launch by December 31, 2026?" '
+    "and the `yes` option represented by `Yes` and the `no` option represented by `No`, "
+    "what are the respective probabilities of `p_yes` and `p_no` occurring?"
 )
 DALLE_PROMPT = "Generate an image of a futuristic cityscape."
 

@@ -1894,7 +1894,7 @@ def generate_report(
             section_latency(scores),
             section_worst_predictions(scores),
             section_best_predictions(scores),
-            section_trend(history, scores, platform=platform),
+            section_trend(history, None, platform=platform),
             section_sample_size_warnings(scores),
         ]
     )

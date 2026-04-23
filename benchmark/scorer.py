@@ -2119,29 +2119,18 @@ def score_period_split(
     return score(prod_rows), score(tourn_rows)
 
 
-def score_period_split_by_platform(
-    logs_dir: Path = DEFAULT_LOGS_DIR,
-    days: int = 1,
-    tournament_input: Path | None = None,
+def _score_rows_by_platform(
+    prod_rows: list[dict[str, Any]],
+    tourn_rows: list[dict[str, Any]],
 ) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
-    """Score the last *days* days, returning combined + per-platform results.
+    """Score combined + per-platform partitions of pre-loaded rows in one pass.
 
-    Single-pass multi-aggregation: rows are loaded once, partitioned by
-    mode, then per-platform partitions are scored alongside the combined
-    result. This powers the per-platform daily reports.
-
-    :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
-    :param tournament_input: optional path to ``tournament_scored.jsonl``
-        whose rows are filtered to the same window and merged.
+    :param prod_rows: production-mode rows (any platform).
+    :param tourn_rows: tournament-mode rows (any platform).
     :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
-        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
-        matches the shape of ``score_period_split``. Per-platform entries
-        use the combined result for unknown-platform rows' sake: unknown
-        rows stay in ``"all"`` only.
+        "polymarket": (prod, tourn)}``. Unknown-platform rows stay in
+        ``"all"`` only.
     """
-    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
-
     result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
         "all": (score(prod_rows), score(tourn_rows)),
     }
@@ -2155,15 +2144,46 @@ def score_period_split_by_platform(
     return result
 
 
+def score_period_split_by_platform(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+    tournament_input: Path | None = None,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score the last *days* days, returning combined + per-platform results.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from the last N calendar days.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
+        matches the shape of ``score_period_split``. Unknown-platform
+        rows stay in ``"all"`` only.
+    """
+    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+    return _score_rows_by_platform(prod_rows, tourn_rows)
+
+
+def _parse_predicted_at(value: Any) -> datetime | None:
+    """Parse a row's ``predicted_at`` field into a UTC ``datetime``.
+
+    :param value: raw ``predicted_at`` value from the row dict.
+    :return: parsed ``datetime``, or ``None`` when missing or unparseable.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _load_period_rows(
     logs_dir: Path,
     days: int,
     tournament_input: Path | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Load + filter + mode-partition period rows.
-
-    Extracted so ``score_period_split`` and ``score_period_split_by_platform``
-    share a single loader and can't drift.
 
     :param logs_dir: directory containing daily log files.
     :param days: score rows from the last N calendar days.
@@ -2172,9 +2192,7 @@ def _load_period_rows(
     :return: ``(production_rows, tournament_rows)`` both filtered to the
         period window.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
@@ -2186,14 +2204,14 @@ def _load_period_rows(
     rows: list[dict[str, Any]] = []
     for filepath in all_files:
         for row in load_rows(Path(filepath)):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            predicted_at = _parse_predicted_at(row.get("predicted_at"))
+            if predicted_at is not None and predicted_at >= cutoff:
                 rows.append(row)
 
     if tournament_input is not None and tournament_input.exists():
         for row in load_rows(tournament_input):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            predicted_at = _parse_predicted_at(row.get("predicted_at"))
+            if predicted_at is not None and predicted_at >= cutoff:
                 rows.append(row)
 
     return _partition_rows_by_mode(rows)
@@ -2366,22 +2384,21 @@ def _cli_legacy_full_recompute(
     print(f"Loaded {len(rows)} rows from {args.input}")
 
     prod_rows, tourn_rows = _partition_rows_by_mode(rows)
-    result = score(prod_rows)
-    tourn_result = score(tourn_rows)
+    results = _score_rows_by_platform(prod_rows, tourn_rows)
+    result, tourn_result = results["all"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
 
-    prod_by_plat = _partition_rows_by_platform(prod_rows)
-    tourn_by_plat = _partition_rows_by_platform(tourn_rows)
     for platform in PLATFORMS:
+        plat_prod, plat_tourn = results[platform]
         _derive_platform_path(args.output, platform).write_text(
-            json.dumps(score(prod_by_plat[platform]), indent=2)
+            json.dumps(plat_prod, indent=2)
         )
         _derive_platform_path(output_tournament, platform).write_text(
-            json.dumps(score(tourn_by_plat[platform]), indent=2)
+            json.dumps(plat_tourn, indent=2)
         )
 
     print(

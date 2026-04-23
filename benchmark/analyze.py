@@ -1944,7 +1944,7 @@ def generate_report(
             _rolling(section_weak_spots(rolling_for_sections)),
             section_reliability_issues(scores),
             section_parse_breakdown(scores),
-            section_trend(history, scores, platform=platform),
+            section_trend(history, None, platform=platform),
             section_sample_size_warnings(scores),
         ]
     )

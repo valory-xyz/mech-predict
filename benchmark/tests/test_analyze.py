@@ -1883,6 +1883,21 @@ class TestTrendSectionPlatformAnnotation:
         rendered = section_trend(self._history(), None)
         assert "Fleet-wide monthly trend" not in rendered
 
+    def test_per_platform_report_omits_in_progress_row(self) -> None:
+        """generate_report does not append a current-month row in per-platform mode.
+
+        The per-platform scores dict is all-time cumulative (history is never
+        emitted for per-platform accumulators), so appending it beside
+        fleet-wide per-month history would mix two different quantities. A
+        platform-scoped report renders only the fleet-wide completed months.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        prod["current_month"] = "2026-04"
+        history = [{"month": "2026-03", "overall": {"brier": 0.2, "n": 100}}]
+        report = generate_report(prod, history, platform="omen", disabled_tools={})
+        assert "*(in progress)*" not in report
+        assert "2026-04" not in report
+
 
 class TestSectionMetricReference:
     """Tests for section_metric_reference."""

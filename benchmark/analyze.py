@@ -1872,27 +1872,28 @@ def generate_report(
             )
         )
 
-    # Overall
-    sections.append(section_overall(scores))
-    if render_tournament:
-        sections.append(
-            _relabel_heading(section_overall(tournament_scores), " — Tournament")
-        )
-
-    # Base Rates — production only
     sections.append(section_base_rates(scores))
-
-    # Tool Deployment Status — which tools are blocked on each consumer
     sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))
 
-    # Tool Ranking
-    sections.append(section_tool_ranking(scores))
+    rolling_for_sections = rolling_scores if rolling_scores is not None else scores
+    rolling_tournament_for_sections = (
+        rolling_scores_tournament
+        if rolling_scores_tournament is not None
+        else tournament_scores
+    )
+    rolling_suffix = f" (Last {ROLLING_WINDOW_DAYS} Days)"
+
+    sections.append(
+        _relabel_heading(section_tool_ranking(rolling_for_sections), rolling_suffix)
+    )
     if render_tournament:
         sections.append(
-            _relabel_heading(section_tool_ranking(tournament_scores), " — Tournament")
+            _relabel_heading(
+                section_tool_ranking(rolling_tournament_for_sections),
+                f"{rolling_suffix} — Tournament",
+            )
         )
 
-    # Tool × Version × Mode — merged
     if include_tournament:
         merged = _merged_tvm_scores(scores, scores_tournament)
         tvm_section = section_tool_version_breakdown(
@@ -1910,32 +1911,27 @@ def generate_report(
             )
             if tvm_rolling:
                 sections.append(tvm_rolling)
-        # Version Deltas — temporal ordering, within-mode only, per tool.
         deltas = section_version_deltas(merged)
         if deltas:
             sections.append(deltas)
 
-    # section_platform / section_tool_platform are intentionally dropped:
-    # they're fleet-wide comparisons and the input is platform-scoped.
     sections.extend(
         [
-            section_category(scores),
-            section_tool_category(scores),
-            section_edge_analysis(scores, platform=platform),
-            section_diagnostic_metrics(scores),
-            section_calibration(scores),
-            section_weak_spots(scores),
+            _relabel_heading(section_category(rolling_for_sections), rolling_suffix),
+            _relabel_heading(
+                section_tool_category(rolling_for_sections), rolling_suffix
+            ),
+            _relabel_heading(
+                section_diagnostic_metrics(rolling_for_sections), rolling_suffix
+            ),
+            _relabel_heading(section_weak_spots(rolling_for_sections), rolling_suffix),
             section_reliability_issues(scores),
             section_parse_breakdown(scores),
-            section_latency(scores),
-            section_worst_predictions(scores),
-            section_best_predictions(scores),
             section_trend(history, scores, platform=platform),
             section_sample_size_warnings(scores),
         ]
     )
 
-    # Tournament Callouts — cross-mode
     if render_tournament:
         callouts = section_tournament_callouts(scores, scores_tournament)
         if callouts:

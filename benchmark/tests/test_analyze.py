@@ -1064,28 +1064,33 @@ class TestGenerateReport:
         report = generate_report(s, history, platform="omen", disabled_tools={})
 
         assert "# Benchmark Report (Omenstrat) — " in report
-        assert "## Overall" in report
-        assert "## Tool Ranking" in report
+        assert "## Metric References" in report
+        assert "## Tool Ranking (Last 3 Days)" in report
         # Per-platform reports drop Platform Comparison / Tool × Platform —
         # they'd be single-row tables with no signal.
         assert "## Platform Comparison" not in report
         assert "## Tool \u00d7 Platform" not in report
-        assert "## Category Performance" in report
-        assert "## Tool \u00d7 Category" in report
-        assert "## Weak Spots" in report
+        assert "## Category Performance (Last 3 Days)" in report
+        assert "## Tool \u00d7 Category (Last 3 Days)" in report
+        assert "## Weak Spots (Last 3 Days)" in report
         assert "## Reliability Issues" in report
-        assert "## Worst Predictions" in report
-        assert "## Best Predictions" in report
         assert "## Trend" in report
         assert "## Sample Size Warnings" in report
-        assert "## Diagnostic Edge Metrics" in report
+        assert "## Diagnostic Edge Metrics (Last 3 Days)" in report
+        # Dropped in the Phase 2 single-window collapse.
+        assert "## Overall" not in report
+        assert "## Worst Predictions" not in report
+        assert "## Best Predictions" not in report
+        assert "## Edge Over Market" not in report
+        assert "## Calibration" not in report
+        assert "## Latency" not in report
 
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
         report = generate_report(s, [], platform="omen", disabled_tools={})
         assert "# Benchmark Report (Omenstrat) — " in report
-        assert "No predictions to score" in report
+        assert "No period data available." in report
 
 
 # ---------------------------------------------------------------------------
@@ -1672,8 +1677,9 @@ class TestGenerateReportWithTournamentFiles:
             include_tournament=True,
             scores_tournament=tourn,
         )
-        assert "## Overall — Tournament" in report
-        assert "## Tool Ranking — Tournament" in report
+        # Overall is dropped in Phase 2; Tool Ranking carries the rolling suffix.
+        assert "## Overall" not in report
+        assert "## Tool Ranking (Last 3 Days) — Tournament" in report
 
     def test_empty_period_tournament_does_not_render_section(self) -> None:
         """Tournament period files with zero rows don't emit empty sections.

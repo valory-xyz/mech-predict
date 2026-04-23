@@ -2695,12 +2695,7 @@ class TestPerPlatformPeriod:
             assert prod["overall"]["n"] == 0
 
     def test_period_keeps_rows_with_fractional_seconds(self, tmp_path: Path) -> None:
-        """Fractional-second timestamps inside the window aren't dropped.
-
-        Lex-compare against a ``%H:%M:%SZ`` cutoff would treat
-        ``"...:05.123Z" < "...:05Z"`` (``.`` < ``Z``) and silently exclude
-        rows whose predicted_at carries sub-second precision.
-        """
+        """Fractional-second timestamps inside the window aren't dropped."""
         logs_dir = tmp_path / "logs"
         recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
             "%Y-%m-%dT%H:%M:%S.123Z"

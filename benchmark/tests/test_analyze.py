@@ -1931,3 +1931,35 @@ class TestGenerateReportLegendPlacement:
             disabled_tools={},
         )
         assert report.count("## Metric References") == 1
+
+
+class TestGenerateReportRollingWindowAnnotations:
+    """Rolling sections carry the '_n= over last N days._' note; others do not."""
+
+    def test_rolling_sections_carry_window_note(self) -> None:
+        """Tool Ranking / Category / Tool × Category / Diagnostics / Weak Spots."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
+        # At least the five rolling point-in-time sections carry it.
+        assert report.count(note) >= 5
+
+    def test_non_rolling_sections_do_not_carry_window_note(self) -> None:
+        """Trend, Base Rates, Tool Deployment Status never claim rolling scope."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
+        report = generate_report(scores, history, platform="omen", disabled_tools={})
+        note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
+        # Split on the Trend header and assert the note is absent between it and
+        # the next section heading.
+        trend_idx = report.index("## Trend")
+        next_section = report.find("##", trend_idx + 1)
+        trend_body = report[
+            trend_idx : next_section if next_section > -1 else len(report)
+        ]
+        assert note not in trend_body
+
+        base_rates_idx = report.index("## Base Rates")
+        next_section = report.find("##", base_rates_idx + 1)
+        base_body = report[base_rates_idx:next_section]
+        assert note not in base_body

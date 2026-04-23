@@ -1647,6 +1647,22 @@ def _relabel_heading(section_md: str, suffix: str) -> str:
     return "\n".join(lines)
 
 
+def _annotate_with_window(section_md: str, window_label: str) -> str:
+    """Insert an italicized window qualifier under the first ``## Heading``.
+
+    :param section_md: rendered markdown for a single section.
+    :param window_label: phrase describing the window (e.g. ``"last 3 days"``).
+    :return: the section markdown with the qualifier line inserted.
+    """
+    lines = section_md.split("\n")
+    if not lines or not lines[0].startswith("## "):
+        return section_md
+    note = f"_n= values below are over the {window_label}._"
+    if len(lines) >= 2 and lines[1] == "":
+        return "\n".join([lines[0], "", note, ""] + lines[2:])
+    return "\n".join([lines[0], "", note, ""] + lines[1:])
+
+
 def _has_tournament_data(scores_tournament: dict[str, Any] | None) -> bool:
     """Return True when a tournament scores dict has any rows to report."""
     return bool(scores_tournament and scores_tournament.get("total_rows", 0) > 0)
@@ -1882,13 +1898,18 @@ def generate_report(
         else tournament_scores
     )
     rolling_suffix = f" (Last {ROLLING_WINDOW_DAYS} Days)"
+    rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
 
-    sections.append(
-        _relabel_heading(section_tool_ranking(rolling_for_sections), rolling_suffix)
-    )
+    def _rolling(section_md: str, heading_suffix: str = rolling_suffix) -> str:
+        """Add the rolling-window heading suffix and n= qualifier note."""
+        return _annotate_with_window(
+            _relabel_heading(section_md, heading_suffix), rolling_window_note
+        )
+
+    sections.append(_rolling(section_tool_ranking(rolling_for_sections)))
     if render_tournament:
         sections.append(
-            _relabel_heading(
+            _rolling(
                 section_tool_ranking(rolling_tournament_for_sections),
                 f"{rolling_suffix} — Tournament",
             )
@@ -1917,14 +1938,10 @@ def generate_report(
 
     sections.extend(
         [
-            _relabel_heading(section_category(rolling_for_sections), rolling_suffix),
-            _relabel_heading(
-                section_tool_category(rolling_for_sections), rolling_suffix
-            ),
-            _relabel_heading(
-                section_diagnostic_metrics(rolling_for_sections), rolling_suffix
-            ),
-            _relabel_heading(section_weak_spots(rolling_for_sections), rolling_suffix),
+            _rolling(section_category(rolling_for_sections)),
+            _rolling(section_tool_category(rolling_for_sections)),
+            _rolling(section_diagnostic_metrics(rolling_for_sections)),
+            _rolling(section_weak_spots(rolling_for_sections)),
             section_reliability_issues(scores),
             section_parse_breakdown(scores),
             section_trend(history, scores, platform=platform),

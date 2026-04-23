@@ -2575,7 +2575,6 @@ dependencies = [
     { name = "grpcio" },
     { name = "httpx" },
     { name = "hypothesis" },
-    { name = "jsonschema" },
     { name = "langchain" },
     { name = "langchain-core" },
     { name = "langchain-tavily" },
@@ -2600,8 +2599,6 @@ dependencies = [
     { name = "pip" },
     { name = "prometheus-client" },
     { name = "py-ecc" },
-    { name = "py-multibase" },
-    { name = "py-multicodec" },
     { name = "pypdf2" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2644,7 +2641,6 @@ requires-dist = [
     { name = "grpcio", specifier = "==1.78.0" },
     { name = "httpx", specifier = "==0.25.2" },
     { name = "hypothesis", specifier = "==6.21.6" },
-    { name = "jsonschema", specifier = ">=4.20.0,<4.24.0" },
     { name = "langchain", specifier = "==1.2.10" },
     { name = "langchain-core", specifier = "==1.2.17" },
     { name = "langchain-tavily", specifier = "==0.2.17" },
@@ -2668,8 +2664,6 @@ requires-dist = [
     { name = "pip", specifier = ">=24.0" },
     { name = "prometheus-client", specifier = ">=0.23.1,<0.24" },
     { name = "py-ecc", specifier = ">=8,<10" },
-    { name = "py-multibase", specifier = "==1.0.3" },
-    { name = "py-multicodec", specifier = "==0.2.1" },
     { name = "pypdf2", specifier = ">=3.0.1,<4" },
     { name = "pytest", specifier = ">=8.2,<10" },
     { name = "pytest-asyncio", specifier = "==1.3.0" },
@@ -2701,14 +2695,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ea/5d/38b681d3fce7a266dd9ab73c66959406d565b3e85f21d5e66e1181d93721/more_itertools-10.8.0.tar.gz", hash = "sha256:f638ddf8a1a0d134181275fb5d58b086ead7c6a72429ad725c67503f13ba30bd", size = 137431, upload-time = "2025-09-02T15:23:11.018Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl", hash = "sha256:52d4362373dcf7c52546bc4af9a86ee7c4579df9a8dc268be0a2f949d376cc9b", size = 69667, upload-time = "2025-09-02T15:23:09.635Z" },
-]
-
-[[package]]
-name = "morphys"
-version = "1.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/4f/cb781d0ac5d079adabc77dc4f0bc99fc81c390029bd33c6e70552139e762/morphys-1.0-py2.py3-none-any.whl", hash = "sha256:76d6dbaa4d65f597e59d332c81da786d83e4669387b9b2a750cfec74e7beec20", size = 5618, upload-time = "2017-01-10T20:08:56.872Z" },
 ]
 
 [[package]]
@@ -3831,34 +3817,6 @@ wheels = [
 ]
 
 [[package]]
-name = "py-multibase"
-version = "1.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "morphys" },
-    { name = "python-baseconv" },
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/58/9c/8b1b78e900f5e94b1d48359efffcaa1ba9ddd0448e6aac94d4d27dbd67b7/py-multibase-1.0.3.tar.gz", hash = "sha256:d28a20efcbb61eec28f55827a0bf329c7cea80fffd933aecaea6ae8431267fe4", size = 23376, upload-time = "2020-10-26T13:55:23.399Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/21/7b6b3bba9c702daf6991f2bd89c92db6fa899a444fab24ba5b99f1f486f7/py_multibase-1.0.3-py2.py3-none-any.whl", hash = "sha256:2677c1fafcc0ae15ddb9c7f444c5becc2530b3889124fd4fa2959ddfefb8c15b", size = 6378, upload-time = "2020-10-26T13:55:26.5Z" },
-]
-
-[[package]]
-name = "py-multicodec"
-version = "0.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "morphys" },
-    { name = "six" },
-    { name = "varint" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/77/33/ff388b34002239c367f6544678667efff079d29aabf7e3c4a3ec392310be/py-multicodec-0.2.1.tar.gz", hash = "sha256:83021ffe8c0e272d19b5b86bc5b39efa67c8e9f4735ce6cafdbc1ace767ec647", size = 22542, upload-time = "2019-08-04T07:09:26.258Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/96/3ffb721c2fe100f6613a0d2db3b4b3229c6de52b279fd41aab0e84ea0725/py_multicodec-0.2.1-py2.py3-none-any.whl", hash = "sha256:55b6bb53088a63e56c434cb11b29795e8805652bac43d50a8f2a9bcf5ca84e1f", size = 8536, upload-time = "2019-08-04T07:09:32.504Z" },
-]
-
-[[package]]
 name = "pyasn1"
 version = "0.6.3"
 source = { registry = "https://pypi.org/simple" }
@@ -4202,12 +4160,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/de/04/71e9520551fc8fe2c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/77/54/60eabb34445e3db3d3d874dc1dfa72751bfec3265bd611cb13c8b290adea/pytest_rerunfailures-16.1-py3-none-any.whl", hash = "sha256:5d11b12c0ca9a1665b5054052fcc1084f8deadd9328962745ef6b04e26382e86", size = 14093, upload-time = "2025-10-10T07:06:00.019Z" },
 ]
-
-[[package]]
-name = "python-baseconv"
-version = "1.2.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/33/d0/9297d7d8dd74767b4d5560d834b30b2fff17d39987c23ed8656f476e0d9b/python-baseconv-1.2.2.tar.gz", hash = "sha256:0539f8bd0464013b05ad62e0a1673f0ac9086c76b43ebf9f833053527cd9931b", size = 4929, upload-time = "2019-04-04T19:28:57.17Z" }
 
 [[package]]
 name = "python-dateutil"
@@ -5266,12 +5218,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/77/a1/0857f64d53a90321e6a46a3d4cc394f50e1366132dcd2ae147f9326ca98b/uuid_utils-0.14.1-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c1dbe718765f70f5b7f9b7f66b6a937802941b1cc56bcf642ce0274169741e01", size = 338902, upload-time = "2026-02-20T22:50:33.927Z" },
     { url = "https://files.pythonhosted.org/packages/ed/d0/5bf7cbf1ac138c92b9ac21066d18faf4d7e7f651047b700eb192ca4b9fdb/uuid_utils-0.14.1-pp311-pypy311_pp73-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:258186964039a8e36db10810c1ece879d229b01331e09e9030bc5dcabe231bd2", size = 364700, upload-time = "2026-02-20T22:50:21.732Z" },
 ]
-
-[[package]]
-name = "varint"
-version = "1.0.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a8/fe/1ea0ba0896dfa47186692655b86db3214c4b7c9e0e76c7b1dc257d101ab1/varint-1.0.2.tar.gz", hash = "sha256:a6ecc02377ac5ee9d65a6a8ad45c9ff1dac8ccee19400a5950fb51d594214ca5", size = 1886, upload-time = "2016-02-24T20:42:38.5Z" }
 
 [[package]]
 name = "virtualenv"

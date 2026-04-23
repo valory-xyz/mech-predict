@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -55,13 +54,6 @@ BSS_HARMFUL_THRESHOLD = 0.0
 RELIABILITY_ISSUE_THRESHOLD = 0.90
 SAMPLE_SIZE_WARNING = 20
 TREND_WORSENING_THRESHOLD = 0.02
-
-# Calibration interpretation thresholds (logit-scale Platt scaling).
-# On the logit scale, deviations from 1.0/0.0 are larger than on the
-# probability scale. These are initial values; validate against real data.
-CAL_SLOPE_OVERCONFIDENT = 0.7
-CAL_SLOPE_UNDERCONFIDENT = 1.3
-CAL_INTERCEPT_NOTABLE = 0.3
 
 # Categories currently emitted by the two upstream platforms.
 # Keep these in sync with:
@@ -165,60 +157,6 @@ def section_metric_reference() -> str:
             "- **Edge over market** — ideal > 0; positive = tool beats market "
             "consensus. System diagnostic, not a tool ranking signal."
         ),
-    ]
-    return "\n".join(lines)
-
-
-def section_overall(scores: dict[str, Any]) -> str:
-    """Generate the overall summary section."""
-    o = scores["overall"]
-    if scores["total_rows"] == 0:
-        return "## Overall\n\nNo predictions to score."
-
-    rel_str = f"{o['reliability']:.0%}" if o["reliability"] is not None else "N/A"
-    brier_str = str(o["brier"]) if o["brier"] is not None else "N/A"
-    acc_str = (
-        f"{o['directional_accuracy']:.0%}"
-        if o.get("directional_accuracy") is not None
-        else "N/A"
-    )
-    no_sig = o.get("no_signal_rate")
-    no_sig_str = f"{no_sig:.2%}" if no_sig is not None else "N/A"
-    ll = o.get("log_loss")
-    ll_str = f"{ll:.4f}" if ll is not None else "N/A"
-    sharp_str = f"{o['sharpness']:.4f}" if o.get("sharpness") is not None else "N/A"
-    bss = o.get("brier_skill_score")
-    bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
-    baseline_str = str(o.get("baseline_brier", "N/A"))
-    # Edge over market
-    edge = o.get("edge")
-    edge_n = o.get("edge_n", 0)
-    edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
-    epr = o.get("edge_positive_rate")
-    epr_str = f"{epr:.0%}" if epr is not None else "N/A"
-
-    lines = [
-        "## Overall",
-        "",
-        f"- Predictions scored: {scores['valid_rows']} / {scores['total_rows']}"
-        f" ({rel_str} reliability)",
-        f"- Overall Brier: {brier_str}",
-        f"- Baseline Brier: {baseline_str}"
-        " (naive predictor using observed base rate)",
-        f"- Brier Skill Score: {bss_str}",
-        "  - BSS > 0 = better than base rate, BSS = 0 = no skill,"
-        " BSS < 0 = worse than base rate",
-        f"- Edge over market: {edge_str} (n={edge_n})",
-        "  - Positive = tool beats market consensus, negative = market wins",
-        f"  - Edge positive rate: {epr_str}"
-        " (fraction of questions where tool beat market)",
-        f"- Directional Accuracy: {acc_str}"
-        f" (n_directional={o.get('n_directional', 0)})",
-        f"- No-signal rate: {no_sig_str}"
-        f" ({o.get('no_signal_count', 0)} predictions at exactly 0.5)",
-        f"- Log Loss: {ll_str}",
-        f"- Sharpness: {sharp_str}",
-        "  - 0.0 = all predictions at 50/50, 0.5 = maximally decisive",
     ]
     return "\n".join(lines)
 
@@ -572,64 +510,6 @@ def section_reliability_issues(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def section_worst_predictions(scores: dict[str, Any], n: int = 10) -> str:
-    """Generate the worst predictions section from scores.worst_10.
-
-    :param scores: scores dict with ``worst_10`` list.
-    :param n: max entries to show.
-    :return: markdown section string.
-    """
-    entries = scores.get("worst_10", [])
-    lines = ["## Worst Predictions", ""]
-    if not entries:
-        lines.append("No prediction data available.")
-        return "\n".join(lines)
-
-    for i, entry in enumerate(entries[:n], 1):
-        outcome_str = "Yes" if entry["final_outcome"] else "No"
-        q = entry.get("question_text", "?")
-        if len(q) > 80:
-            q = q[:77] + "..."
-        lines.append(
-            f'{i}. "{q}"'
-            f"\n   {entry['tool_name']} predicted p_yes={entry['p_yes']:.2f},"
-            f" outcome: {outcome_str} (Brier: {entry['brier']:.4f})"
-            f"\n   Category: {entry.get('category', '?')},"
-            f" Platform: {entry.get('platform', '?')}"
-        )
-
-    return "\n".join(lines)
-
-
-def section_best_predictions(scores: dict[str, Any], n: int = 10) -> str:
-    """Generate the best predictions section from scores.best_10.
-
-    :param scores: scores dict with ``best_10`` list.
-    :param n: max entries to show.
-    :return: markdown section string.
-    """
-    entries = scores.get("best_10", [])
-    lines = ["## Best Predictions", ""]
-    if not entries:
-        lines.append("No prediction data available.")
-        return "\n".join(lines)
-
-    for i, entry in enumerate(entries[:n], 1):
-        outcome_str = "Yes" if entry["final_outcome"] else "No"
-        q = entry.get("question_text", "?")
-        if len(q) > 80:
-            q = q[:77] + "..."
-        lines.append(
-            f'{i}. "{q}"'
-            f"\n   {entry['tool_name']} predicted p_yes={entry['p_yes']:.2f},"
-            f" outcome: {outcome_str} (Brier: {entry['brier']:.4f})"
-            f"\n   Category: {entry.get('category', '?')},"
-            f" Platform: {entry.get('platform', '?')}"
-        )
-
-    return "\n".join(lines)
-
-
 def section_trend(
     history: list[dict[str, Any]],
     scores: dict[str, Any] | None = None,
@@ -761,117 +641,6 @@ def section_tool_platform(scores: dict[str, Any]) -> str:
             f"| {tool} | {platform} | {brier} | {bss_str} | {ll_str2} | {edge_str}"
             f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
         )
-
-    return "\n".join(lines)
-
-
-_EDGE_SECTION_HEADER = "## Edge Over Market (System Diagnostic)"
-
-
-def section_edge_analysis(scores: dict[str, Any], platform: str | None = None) -> str:
-    """Edge-over-market analysis — per platform, difficulty, and liquidity.
-
-    When ``platform`` is set, the scores input is already partitioned to
-    one platform, so the per-platform / platform × difficulty / platform
-    × liquidity sub-blocks are degenerate (one row each) and skipped.
-
-    :param scores: parsed scores dict.
-    :param platform: when set, suppresses the platform-comparison sub-blocks.
-    :return: markdown section string.
-    """
-    elig = scores.get("edge_eligibility", {})
-    n_eligible = elig.get("n_eligible", 0)
-    n_total = elig.get("n_total", 0)
-    if n_eligible == 0:
-        return (
-            f"{_EDGE_SECTION_HEADER}\n\n"
-            "No edge-eligible rows (need market_prob_at_prediction)."
-        )
-
-    pct = f" ({n_eligible / n_total:.1%} of total)" if n_total > 0 else ""
-    lines = [
-        _EDGE_SECTION_HEADER,
-        "",
-        "Edge measures whether prediction accuracy translates to trading"
-        " value — it is not a tool ranking metric.",
-        "",
-        f"Edge-eligible rows: {n_eligible} / {n_total}{pct}",
-        "",
-    ]
-
-    # Sub-blocks below compare platforms; skip them when the input is
-    # already platform-scoped.
-    if platform is not None:
-        return "\n".join(lines).rstrip()
-
-    # Per-platform edge
-    by_plat = scores.get("by_platform", {})
-    if by_plat:
-        lines.append("### By Platform")
-        lines.append("")
-        for plat, stats in sorted(by_plat.items()):
-            edge = stats.get("edge")
-            edge_n = stats.get("edge_n", 0)
-            epr = stats.get("edge_positive_rate")
-            if edge is not None:
-                lines.append(
-                    f"- **{plat}**: edge {edge:+.4f},"
-                    f" positive rate {epr:.0%}, edge_n={edge_n}"
-                )
-        lines.append("")
-
-    # Platform × difficulty
-    pd = scores.get("by_platform_difficulty", {})
-    pd_filtered = {
-        k: v for k, v in pd.items() if v.get("edge") is not None and "unknown" not in k
-    }
-    if pd_filtered:
-        lines.append("### By Platform × Difficulty")
-        lines.append("")
-        lines.append(
-            "| Platform | Difficulty | Edge | Edge +rate | Edge n | Brier | n |"
-        )
-        lines.append(
-            "|----------|-----------|------|------------|--------|-------|---|"
-        )
-        for key, stats in sorted(pd_filtered.items()):
-            parts = key.split(" | ")
-            plat, diff = parts[0], parts[1] if len(parts) > 1 else "?"
-            edge = stats["edge"]
-            epr = stats.get("edge_positive_rate", 0)
-            brier = stats.get("brier")
-            brier_str = f"{brier:.4f}" if brier is not None else "N/A"
-            lines.append(
-                f"| {plat} | {diff} | {edge:+.4f} | {epr:.0%}"
-                f" | {stats.get('edge_n', 0)} | {brier_str} | {stats['n']} |"
-            )
-        lines.append("")
-
-    # Platform × liquidity
-    pl = scores.get("by_platform_liquidity", {})
-    pl_filtered = {
-        k: v for k, v in pl.items() if v.get("edge") is not None and "unknown" not in k
-    }
-    if pl_filtered:
-        lines.append("### By Platform × Liquidity")
-        lines.append("")
-        lines.append(
-            "| Platform | Liquidity | Edge | Edge +rate | Edge n | Brier | n |"
-        )
-        lines.append(
-            "|----------|-----------|------|------------|--------|-------|---|"
-        )
-        for key, stats in sorted(pl_filtered.items()):
-            parts = key.split(" | ")
-            plat, liq = parts[0], parts[1] if len(parts) > 1 else "?"
-            edge = stats["edge"]
-            epr = stats.get("edge_positive_rate", 0)
-            brier = stats.get("brier")
-            brier_str = f"{brier:.4f}" if brier is not None else "N/A"
-            lines.append(
-                f"| {plat} | {liq} | {edge:+.4f} | {epr:.0%}"
-                f" | {stats.get('edge_n', 0)} | {brier_str} | {stats['n']} |"
-            )
 
     return "\n".join(lines)
 
@@ -1036,92 +805,6 @@ def section_diagnostic_metrics(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def section_calibration(scores: dict[str, Any]) -> str:
-    """Calibration analysis — are predictions overconfident or underconfident?"""
-    cal = scores.get("calibration", [])
-    if not cal:
-        return "## Calibration\n\nNo calibration data available."
-
-    lines = [
-        "## Calibration",
-        "",
-        "| Predicted Range | Avg Predicted | Realized Yes-Rate | Gap | n |",
-        "|-----------------|---------------|-------------------|-----|---|",
-    ]
-    for bucket in cal:
-        if bucket.get("n", 0) == 0:
-            continue
-        avg_p = f"{bucket['avg_predicted']:.2f}"
-        realized = f"{bucket['realized_rate']:.2f}"
-        gap = bucket["gap"]
-        gap_str = f"{gap:+.2f}"
-        lines.append(
-            f"| {bucket['bin']} | {avg_p} | {realized} | {gap_str} | {bucket['n']} |"
-        )
-
-    # ECE and calibration regression
-    ece = scores.get("ece")
-    if ece is not None:
-        lines.append("")
-        lines.append(f"**ECE (Expected Calibration Error):** {ece:.4f}")
-        lines.append("  - 0 = perfectly calibrated, higher = worse")
-    cal_int = scores.get("calibration_intercept")
-    cal_slope = scores.get("calibration_slope")
-    if cal_int is not None and cal_slope is not None:
-        lines.append(
-            f"**Calibration regression:** intercept={cal_int:+.4f},"
-            f" slope={cal_slope:.4f}"
-        )
-        if cal_slope < CAL_SLOPE_OVERCONFIDENT:
-            lines.append(
-                "  - Slope < 1.0 → predictions too extreme"
-                " (overpredicts high-confidence, underpredicts low-confidence)"
-            )
-        elif cal_slope > CAL_SLOPE_UNDERCONFIDENT:
-            lines.append("  - Slope > 1.0 → predictions too compressed toward 0.5")
-        # Intercept is evaluated at logit(p_yes)=0, i.e. p_yes=0.5.
-        # Only interpret when slope is not too far from 1.0; with extreme
-        # slopes the intercept alone is ambiguous.
-        if abs(cal_slope - 1.0) < 0.4 and abs(cal_int) > CAL_INTERCEPT_NOTABLE:
-            if cal_int > 0:
-                lines.append(
-                    "  - Positive intercept at p=0.5 midpoint"
-                    " (tool underpredicts at the 50% probability point)"
-                )
-            else:
-                lines.append(
-                    "  - Negative intercept at p=0.5 midpoint"
-                    " (tool overpredicts at the 50% probability point)"
-                )
-
-    # Summary interpretation
-    lines.append("")
-    high_conf = [
-        b for b in cal if b.get("avg_predicted", 0) > 0.7 and b.get("n", 0) > 0
-    ]
-    low_conf = [b for b in cal if b.get("avg_predicted", 0) < 0.3 and b.get("n", 0) > 0]
-    if high_conf:
-        avg_gap = sum(b["gap"] for b in high_conf) / len(high_conf)
-        if avg_gap > 0.1:
-            lines.append(
-                "**High-confidence bins overpredict** — predicted high yes-probability"
-                " but realized rate is much lower."
-            )
-        elif avg_gap < -0.1:
-            lines.append(
-                "**High-confidence bins underpredict** — realized rate exceeds predictions."
-            )
-    if low_conf:
-        avg_gap = sum(b["gap"] for b in low_conf) / len(low_conf)
-        if avg_gap < -0.1:
-            lines.append(
-                "**Low-confidence bins underpredict** — predicted low yes-probability"
-                " but events happen more often than predicted."
-            )
-
-    return "\n".join(lines)
-
-
 def section_parse_breakdown(scores: dict[str, Any]) -> str:
     """Per-tool parse status breakdown from scores.parse_breakdown.
 
@@ -1144,40 +827,6 @@ def section_parse_breakdown(scores: dict[str, Any]) -> str:
         lines.append(
             f"| {tool} | {c.get('valid', 0)} | {c.get('malformed', 0)}"
             f" | {c.get('missing_fields', 0)} | {c.get('error', 0)} | {total} |"
-        )
-
-    return "\n".join(lines)
-
-
-def section_latency(scores: dict[str, Any]) -> str:
-    """Latency breakdown from scores.latency_reservoir.
-
-    :param scores: scores dict with ``latency_reservoir`` mapping.
-    :return: markdown section string.
-    """
-    by_tool = scores.get("latency_reservoir", {})
-    if not by_tool:
-        return "## Latency\n\nNo latency data available."
-
-    # Filter out empty reservoirs
-    by_tool = {t: vals for t, vals in by_tool.items() if vals}
-    if not by_tool:
-        return "## Latency\n\nNo latency data available."
-
-    lines = [
-        "## Latency (seconds)",
-        "",
-        "| Tool | Median | Mean | p95 | n |",
-        "|------|--------|------|-----|---|",
-    ]
-    for tool in sorted(by_tool, key=lambda t: statistics.median(by_tool[t])):
-        vals = sorted(by_tool[tool])
-        med = statistics.median(vals)
-        mean = statistics.mean(vals)
-        p95_idx = min(int(len(vals) * 0.95), len(vals) - 1)
-        p95 = vals[p95_idx]
-        lines.append(
-            f"| {tool} | {med:.0f}s | {mean:.0f}s | {p95:.0f}s | {len(vals)} |"
         )
 
     return "\n".join(lines)
@@ -1875,18 +1524,19 @@ def generate_report(
         )
 
     rolling_heading = f"Last {ROLLING_WINDOW_DAYS} Days Rolling"
-    sections.append(section_period(rolling_scores, scores, rolling_heading))
-    if render_tournament and _has_tournament_data(rolling_scores_tournament):
-        sections.append(
-            _relabel_heading(
-                section_period(
-                    rolling_scores_tournament,
-                    tournament_scores,
-                    rolling_heading,
-                ),
-                " — Tournament",
+    if rolling_scores is not None:
+        sections.append(section_period(rolling_scores, scores, rolling_heading))
+        if render_tournament and _has_tournament_data(rolling_scores_tournament):
+            sections.append(
+                _relabel_heading(
+                    section_period(
+                        rolling_scores_tournament,
+                        tournament_scores,
+                        rolling_heading,
+                    ),
+                    " — Tournament",
+                )
             )
-        )
 
     sections.append(section_base_rates(scores))
     sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))

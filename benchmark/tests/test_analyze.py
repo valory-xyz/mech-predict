@@ -33,12 +33,8 @@ from benchmark.analyze import (
     _parse_tvm_key,
     _sample_label,
     generate_report,
-    section_best_predictions,
     section_category,
-    section_edge_analysis,
-    section_latency,
     section_metric_reference,
-    section_overall,
     section_parse_breakdown,
     section_period,
     section_sample_size_warnings,
@@ -47,7 +43,6 @@ from benchmark.analyze import (
     section_trend,
     section_version_deltas,
     section_weak_spots,
-    section_worst_predictions,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
 
@@ -113,50 +108,6 @@ def _scores(
         "parse_breakdown": parse_breakdown or {},
         "latency_reservoir": latency_reservoir or {},
     }
-
-
-# ---------------------------------------------------------------------------
-# section_overall
-# ---------------------------------------------------------------------------
-
-
-class TestSectionOverall:
-    """Tests for section_overall."""
-
-    def test_normal(self) -> None:
-        """Test normal scores with valid brier and reliability."""
-        result = section_overall(_scores(brier=0.31, reliability=0.95))
-        assert "0.31" in result
-        assert "95%" in result
-
-    def test_empty_dataset(self) -> None:
-        """Test empty dataset with no predictions."""
-        result = section_overall(
-            _scores(brier=None, reliability=None, total=0, valid=0)
-        )
-        assert "No predictions to score" in result
-
-    def test_all_invalid(self) -> None:
-        """Test all invalid predictions."""
-        result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
-        assert "N/A" in result  # Brier is N/A
-
-    def test_no_signal_rate_small_value_renders_two_decimals(self) -> None:
-        """No-signal rate formats with 2 decimal places.
-
-        Previously rendered as ':.0%' which rounded tiny-but-nonzero
-        rates like 0.00072 to '0%' even though the count shown next to
-        it was clearly positive. Two decimals surface values in the
-        0.01%-1% range where the no-signal rate typically lives.
-        """
-        s = _scores(brier=0.3, reliability=0.95)
-        s["overall"]["no_signal_rate"] = 0.00072
-        s["overall"]["no_signal_count"] = 142
-        result = section_overall(s)
-        assert "0.07%" in result
-        assert "142 predictions at exactly 0.5" in result
-        # Make sure the rendered value is not the stale '0%' form.
-        assert "No-signal rate: 0%" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -912,68 +863,6 @@ class TestSectionPeriod:
 
 
 # ---------------------------------------------------------------------------
-# section_worst_predictions / section_best_predictions
-# ---------------------------------------------------------------------------
-
-
-class TestSectionWorstPredictions:
-    """Tests for section_worst_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering worst prediction entries."""
-        s = _scores(
-            worst_10=[
-                {
-                    "question_text": "Will X happen?",
-                    "tool_name": "tool-a",
-                    "p_yes": 0.95,
-                    "final_outcome": False,
-                    "brier": 0.9025,
-                    "platform": "omen",
-                    "category": "finance",
-                },
-            ]
-        )
-        result = section_worst_predictions(s)
-        assert "Will X happen?" in result
-        assert "0.9025" in result
-        assert "tool-a" in result
-
-    def test_empty(self) -> None:
-        """Test empty worst predictions."""
-        result = section_worst_predictions(_scores())
-        assert "No prediction data" in result
-
-
-class TestSectionBestPredictions:
-    """Tests for section_best_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering best prediction entries."""
-        s = _scores(
-            best_10=[
-                {
-                    "question_text": "Will Y happen?",
-                    "tool_name": "tool-b",
-                    "p_yes": 0.98,
-                    "final_outcome": True,
-                    "brier": 0.0004,
-                    "platform": "polymarket",
-                    "category": "politics",
-                },
-            ]
-        )
-        result = section_best_predictions(s)
-        assert "Will Y happen?" in result
-        assert "0.0004" in result
-
-    def test_empty(self) -> None:
-        """Test empty best predictions."""
-        result = section_best_predictions(_scores())
-        assert "No prediction data" in result
-
-
-# ---------------------------------------------------------------------------
 # Parse breakdown
 # ---------------------------------------------------------------------------
 
@@ -996,31 +885,6 @@ class TestSectionParseBreakdown:
         """Test empty parse breakdown."""
         result = section_parse_breakdown(_scores())
         assert "No parse data" in result
-
-
-# ---------------------------------------------------------------------------
-# Latency
-# ---------------------------------------------------------------------------
-
-
-class TestSectionLatency:
-    """Tests for section_latency."""
-
-    def test_renders_table(self) -> None:
-        """Test rendering latency table."""
-        s = _scores(
-            latency_reservoir={
-                "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
-            }
-        )
-        result = section_latency(s)
-        assert "tool-a" in result
-        assert "Median" in result
-
-    def test_empty(self) -> None:
-        """Test empty latency data."""
-        result = section_latency(_scores())
-        assert "No latency data" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1811,59 +1675,6 @@ class TestGenerateReportPerPlatform:
             "omen": "Omenstrat",
             "polymarket": "Polystrat",
         }
-
-
-class TestSectionEdgeAnalysisPlatformGate:
-    """section_edge_analysis drops platform sub-blocks when platform is set."""
-
-    def _scores_with_edge(self) -> dict[str, Any]:
-        """Minimal scores dict with edge data on every platform breakdown."""
-        return {
-            "edge_eligibility": {"n_eligible": 100, "n_total": 100},
-            "by_platform": {
-                "omen": {
-                    "edge": 0.05,
-                    "edge_n": 80,
-                    "edge_positive_rate": 0.6,
-                },
-            },
-            "by_platform_difficulty": {
-                "omen | hard": {
-                    "edge": 0.03,
-                    "edge_n": 40,
-                    "edge_positive_rate": 0.55,
-                    "brier": 0.24,
-                    "n": 50,
-                },
-            },
-            "by_platform_liquidity": {
-                "omen | high": {
-                    "edge": 0.04,
-                    "edge_n": 30,
-                    "edge_positive_rate": 0.6,
-                    "brier": 0.22,
-                    "n": 40,
-                },
-            },
-        }
-
-    def test_platform_sub_blocks_dropped_when_platform_set(self) -> None:
-        """Single-platform scores: sub-blocks degenerate to one row, drop them."""
-        s = self._scores_with_edge()
-        rendered = section_edge_analysis(s, platform="omen")
-        assert "### By Platform" not in rendered
-        assert "### By Platform \u00d7 Difficulty" not in rendered
-        assert "### By Platform \u00d7 Liquidity" not in rendered
-        # Section header and eligibility summary still render.
-        assert "Edge-eligible rows: 100 / 100" in rendered
-
-    def test_platform_sub_blocks_present_when_platform_not_set(self) -> None:
-        """Fleet-wide render keeps sub-blocks (backwards-compat for callers)."""
-        s = self._scores_with_edge()
-        rendered = section_edge_analysis(s)
-        assert "### By Platform" in rendered
-        assert "### By Platform \u00d7 Difficulty" in rendered
-        assert "### By Platform \u00d7 Liquidity" in rendered
 
 
 class TestTrendSectionPlatformAnnotation:

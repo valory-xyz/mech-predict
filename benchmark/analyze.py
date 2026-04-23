@@ -138,6 +138,37 @@ def load_history(path: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def section_metric_reference() -> str:
+    """Render the metric-reference legend shown at the top of every report.
+
+    :return: markdown section string.
+    """
+    lines = [
+        "## Metric References",
+        "",
+        (
+            "All point-in-time metrics below are scoped to the rolling window "
+            f"(last {ROLLING_WINDOW_DAYS} days) unless a section explicitly says "
+            "otherwise."
+        ),
+        "",
+        f"- **Brier** — ideal 0.00, coin-flip {BRIER_RANDOM}; lower is better.",
+        (
+            "- **Log Loss** — ideal 0.00; lower is better, punishes confident "
+            "errors harder."
+        ),
+        (
+            "- **BSS (Brier Skill Score)** — ideal > 0; negative means worse than "
+            "the base-rate predictor."
+        ),
+        (
+            "- **Edge over market** — ideal > 0; positive = tool beats market "
+            "consensus. System diagnostic, not a tool ranking signal."
+        ),
+    ]
+    return "\n".join(lines)
+
+
 def section_overall(scores: dict[str, Any]) -> str:
     """Generate the overall summary section."""
     o = scores["overall"]
@@ -1810,6 +1841,8 @@ def generate_report(
     tournament_scores: dict[str, Any] = scores_tournament or {}
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
+
+    sections.append(section_metric_reference())
 
     # Since Last Report
     sections.append(section_period(period_scores, scores, "Since Last Report"))

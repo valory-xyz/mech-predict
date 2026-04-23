@@ -24,9 +24,11 @@ import pytest
 
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
+    BRIER_RANDOM,
     OMEN_CATEGORIES,
     PLATFORM_LABELS,
     POLYMARKET_ACTIVE_CATEGORIES,
+    ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
     _sample_label,
@@ -35,6 +37,7 @@ from benchmark.analyze import (
     section_category,
     section_edge_analysis,
     section_latency,
+    section_metric_reference,
     section_overall,
     section_parse_breakdown,
     section_period,
@@ -1873,3 +1876,52 @@ class TestTrendSectionPlatformAnnotation:
         """Fleet-wide render (no platform arg) stays quiet — it's correct there."""
         rendered = section_trend(self._history(), None)
         assert "Fleet-wide monthly trend" not in rendered
+
+
+class TestSectionMetricReference:
+    """Tests for section_metric_reference."""
+
+    def test_renders_heading_and_core_metrics(self) -> None:
+        """Legend names every headline metric the report renders."""
+        rendered = section_metric_reference()
+        assert "## Metric References" in rendered
+        for label in ("Brier", "Log Loss", "BSS", "Edge over market"):
+            assert label in rendered
+
+    def test_cites_rolling_window_from_constant(self) -> None:
+        """Legend quotes ROLLING_WINDOW_DAYS so a one-line change updates both."""
+        rendered = section_metric_reference()
+        assert f"last {ROLLING_WINDOW_DAYS} days" in rendered
+
+    def test_cites_brier_random_baseline(self) -> None:
+        """Coin-flip Brier anchor is sourced from BRIER_RANDOM."""
+        rendered = section_metric_reference()
+        assert f"coin-flip {BRIER_RANDOM}" in rendered
+
+
+class TestGenerateReportLegendPlacement:
+    """Regression tests for where the metric legend lands in the report body."""
+
+    def test_legend_rendered_before_since_last_report(self) -> None:
+        """Legend sits between the H1 title and the first data section."""
+        scores = _scores()
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        legend_idx = report.index("## Metric References")
+        since_last_idx = report.index("## Since Last Report")
+        assert legend_idx < since_last_idx
+        header_end = report.index("\n")
+        assert legend_idx > header_end
+
+    def test_legend_rendered_exactly_once(self) -> None:
+        """Legend is not duplicated across production + tournament branches."""
+        scores = _scores()
+        tourn = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            disabled_tools={},
+        )
+        assert report.count("## Metric References") == 1

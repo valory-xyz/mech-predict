@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 SUMMARY_SYSTEM_PROMPT_TEMPLATE = f"""\
 Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). All tool-level figures in the report are scoped to the last {ROLLING_WINDOW_DAYS} days for {{platform_label}} unless a section heading explicitly says otherwise (e.g. "Tool × Version × Mode (All-Time)", "Trend", "Base Rates"). Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
 
-*Summary:* 2-3 sentence high-level takeaway for {{platform_label}} covering the last {ROLLING_WINDOW_DAYS} days — lead with what changed since the last report.
+*Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Open with the 1-day delta from the "Since Last Report" section (what moved since yesterday's report), then pivot to the {ROLLING_WINDOW_DAYS}-day rolling view. Keep the two windows distinct — never attribute a Since-Last-Report figure to the rolling window or vice versa.
 
 *Top tools:*
 • `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X, last {ROLLING_WINDOW_DAYS} days), directional accuracy X%, one word on why

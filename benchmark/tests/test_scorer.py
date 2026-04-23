@@ -594,6 +594,25 @@ class TestIncrementalUpdate:
         same_q = [w for w in result["worst_10"] if w["question_text"] == "Same Q?"][0]
         assert same_q["brier"] == round(0.9**2, 4)  # worst of the two
 
+    def test_worst_best_skip_rows_without_question_text(self, tmp_path: Path) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        good = {**_row(p_yes=0.9, outcome=False), "question_text": "Readable Q?"}
+        empty_question = {**_row(p_yes=0.95, outcome=False), "question_text": ""}
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        result = update(
+            [good, empty_question, missing_question], scores_path, history_path
+        )
+
+        worst_qs = [w["question_text"] for w in result["worst_10"]]
+        best_qs = [b["question_text"] for b in result["best_10"]]
+        assert worst_qs == ["Readable Q?"]
+        assert best_qs == ["Readable Q?"]
+
     def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
         """Malformed rows count toward n but not valid_n or Brier."""
         scores_path = tmp_path / "scores.json"
@@ -2838,6 +2857,19 @@ class TestScoreExtremePredictions:
         no_outcome["final_outcome"] = None
 
         worst, best = _score_extreme_predictions([valid, invalid_status, no_outcome])
+        assert [e["question_text"] for e in worst] == ["q-valid"]
+        assert [e["question_text"] for e in best] == ["q-valid"]
+
+    def test_excludes_rows_with_empty_or_missing_question_text(self) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        valid = self._valid_row("q-valid", 0.5, True)
+        empty_question = self._valid_row("", 0.9, False)
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        worst, best = _score_extreme_predictions(
+            [valid, empty_question, missing_question]
+        )
         assert [e["question_text"] for e in worst] == ["q-valid"]
         assert [e["question_text"] for e in best] == ["q-valid"]
 

@@ -172,6 +172,9 @@ jobs:
       - name: Post benchmark report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty string for workflow_dispatch (no triggering comment exists).
+          # GitHub-generated URL, not attacker-controllable, so direct use is safe.
+          TRIGGER_COMMENT_URL: ${{ github.event.comment.html_url }}
         run: |
           PR="${{ steps.parse.outputs.pr }}"
           if [ -n "$PR" ]; then
@@ -180,9 +183,12 @@ jobs:
               --candidate benchmark/results/ci_replay/candidate.jsonl \
               --pr "$PR" \
               --repo "${{ github.repository }}" \
-              --triggered-by "${{ steps.parse.outputs.triggered_by }}"
+              --triggered-by "${{ steps.parse.outputs.triggered_by }}" \
+              --seed "${{ steps.parse.outputs.seed }}" \
+              --trigger-comment-url "$TRIGGER_COMMENT_URL"
           else
             uv run python -m benchmark.ci_replay \
               --baseline benchmark/results/ci_replay/baseline.jsonl \
-              --candidate benchmark/results/ci_replay/candidate.jsonl
+              --candidate benchmark/results/ci_replay/candidate.jsonl \
+              --seed "${{ steps.parse.outputs.seed }}"
           fi

@@ -28,11 +28,7 @@ from benchmark.scorer import (
     MIN_SAMPLE_SIZE,
     brier_sort_key,
 )
-from benchmark.tool_usage import (
-    failed_deployments,
-    fetch_disabled_tools,
-    iter_tools_with_disabled,
-)
+from benchmark.tool_usage import deployments_for_platform, fetch_disabled_tools
 
 DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
 DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
@@ -223,20 +219,22 @@ def _sample_label(stats: dict[str, Any]) -> str:
 def section_tool_deployment_status(
     scores: dict[str, Any],
     disabled: dict[str, list[str] | None] | None = None,
+    platform: str | None = None,
 ) -> str:
-    """Render which benchmarked tools are disabled on each deployment.
+    """Render which benchmarked tools are active on each deployment.
 
-    Tools are listed only when they appear in ``scores.by_tool`` (i.e. were
-    actually invoked) AND are on at least one deployment's
-    ``IRRELEVANT_TOOLS`` list.  Deployments whose config fetch failed are
-    called out explicitly so a reader never confuses "unavailable" with
-    "nothing disabled".
+    Deployments are filtered to ``platform`` when set; active tools are
+    the benchmarked tools minus the disabled tools for that deployment.
+    Failed-fetch deployments are called out so ``⚠️ unavailable`` is
+    never confused with "all tools active".
 
     :param scores: parsed ``scores.json`` dict.
     :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
-        Pass ``None`` to fetch on the fly (the daily-report default).  Pass
+        Pass ``None`` to fetch on the fly (the daily-report default). Pass
         an empty dict to skip the section entirely (tests use this to avoid
         the live GitHub fetch).
+    :param platform: when set, restrict the section to deployments matching
+        this platform key (``"omen"`` or ``"polymarket"``).
     :return: markdown section string, or ``""`` when the caller opted out.
     """
     if disabled is None:
@@ -248,15 +246,21 @@ def section_tool_deployment_status(
     if not disabled:
         return ""
 
-    tools = scores.get("by_tool", {})
-    # Preserve report-wide ordering (Brier ascending) so readers scan this
-    # section in the same order as Tool Ranking below.
-    ordered = [name for name, _ in sorted(tools.items(), key=brier_sort_key)]
-    entries = iter_tools_with_disabled(ordered, disabled)
+    if platform is not None:
+        allowed = set(deployments_for_platform(platform))
+        disabled = {name: v for name, v in disabled.items() if name in allowed}
+        if not disabled:
+            return ""
 
-    lines = ["## Tool Deployment Status", ""]
-    failed = failed_deployments(disabled)
-    all_failed = len(failed) == len(disabled) and len(disabled) > 0
+    tools = scores.get("by_tool", {})
+    benchmarked = [name for name, _ in sorted(tools.items(), key=brier_sort_key)]
+
+    heading = "## Tool Deployment Status"
+    if platform is not None:
+        heading = f"## Tool Deployment Status ({PLATFORM_LABELS[platform]})"
+    lines = [heading, ""]
+
+    failed = [name for name in disabled if disabled.get(name) is None]
     if failed:
         lines.append(
             "> ⚠️ Could not fetch deployment config for: "
@@ -264,20 +268,18 @@ def section_tool_deployment_status(
         )
         lines.append("")
 
-    if not entries:
-        # If every fetch failed we already told the reader — don't also claim
-        # "nothing is disabled", which would be a false negative.
-        if all_failed:
-            return "\n".join(lines).rstrip()
-        lines.append(
-            "_No benchmarked tools are disabled on any deployment._"
-            if not failed
-            else "_No disabled tools reported from the deployments that were fetched._"
-        )
-        return "\n".join(lines)
+    for deployment, disabled_tools in disabled.items():
+        if disabled_tools is None:
+            lines.append(f"- **{deployment}** — ⚠️ unavailable")
+            continue
+        disabled_set = {t.replace("_", "-") for t in disabled_tools}
+        active = [t for t in benchmarked if t.replace("_", "-") not in disabled_set]
+        if not active:
+            lines.append(f"- **{deployment}** — no benchmarked tools active")
+            continue
+        tools_str = ", ".join(f"`{t}`" for t in active)
+        lines.append(f"- **{deployment}** ({len(active)} active): {tools_str}")
 
-    for tool, deployments in entries:
-        lines.append(f"- `{tool}` — disabled on {', '.join(deployments)}")
     return "\n".join(lines)
 
 
@@ -1848,7 +1850,11 @@ def generate_report(
     sections.append(section_base_rates(scores))
 
     # Tool Deployment Status — which tools are blocked on each consumer
-    sections.append(section_tool_deployment_status(scores, disabled=disabled_tools))
+    sections.append(
+        section_tool_deployment_status(
+            scores, disabled=disabled_tools, platform=platform
+        )
+    )
 
     # Tool Ranking
     sections.append(section_tool_ranking(scores))
@@ -1856,6 +1862,8 @@ def generate_report(
         sections.append(
             _relabel_heading(section_tool_ranking(tournament_scores), " — Tournament")
         )
+
+    sections.append(section_tool_category(scores))
 
     # Tool × Version × Mode — merged
     if include_tournament:
@@ -1884,7 +1892,6 @@ def generate_report(
     sections.extend(
         [
             section_category(scores),
-            section_tool_category(scores),
             section_edge_analysis(scores, platform=platform),
             section_diagnostic_metrics(scores),
             section_calibration(scores),

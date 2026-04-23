@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from types import MappingProxyType
 from typing import Iterable, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -42,6 +43,28 @@ DEPLOYMENTS: tuple[str, ...] = (
     "omenstrat QS",
     "polystrat Pearl",
 )
+
+# Maps each deployment name to the scorer's platform key. Drives the
+# per-platform filter on the Tool Deployment Status section.
+DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
+    {
+        "omenstrat Pearl": "omen",
+        "omenstrat QS": "omen",
+        "polystrat Pearl": "polymarket",
+    }
+)
+
+
+def deployments_for_platform(platform: str) -> tuple[str, ...]:
+    """Return the deployment names belonging to ``platform``, in declared order.
+
+    :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
+    :return: deployments matching ``platform``, preserving ``DEPLOYMENTS`` order.
+    """
+    return tuple(
+        name for name in DEPLOYMENTS if DEPLOYMENT_TO_PLATFORM.get(name) == platform
+    )
+
 
 # Source URLs (GitHub raw, ``main`` branch).
 OPERATE_APP_TRADER_TS_URL = (

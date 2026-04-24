@@ -482,8 +482,49 @@ def section_category(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _always_majority(yes_rate: float | None) -> float | None:
+    """Return ``max(yes_rate, 1-yes_rate)`` — the always-majority baseline.
+
+    :param yes_rate: fraction of valid rows whose final outcome is YES.
+    :return: always-majority accuracy in ``[0.5, 1.0]`` or ``None`` when
+        ``yes_rate`` is missing.
+    """
+    if yes_rate is None:
+        return None
+    return max(yes_rate, 1.0 - yes_rate)
+
+
+def _da_lift(
+    directional_accuracy: float | None, yes_rate: float | None
+) -> float | None:
+    """Return directional-accuracy lift over the always-majority baseline.
+
+    A positive value means the tool beat "always predict the majority
+    outcome" on valid rows; a value at or below zero means the tool
+    gave no edge over a constant baseline.
+
+    :param directional_accuracy: tool's directional accuracy on valid rows.
+    :param yes_rate: outcome yes rate on valid rows.
+    :return: DA lift, or ``None`` when either input is missing.
+    """
+    majority = _always_majority(yes_rate)
+    if directional_accuracy is None or majority is None:
+        return None
+    return directional_accuracy - majority
+
+
 def section_tool_category(scores: dict[str, Any]) -> str:
-    """Tool × category cross breakdown — gated by MIN_SAMPLE_SIZE."""
+    """Tool × category cross breakdown — primary metrics, gated by MIN_SAMPLE_SIZE.
+
+    Renders the reviewer-specified column set: n, reliability, Brier,
+    baseline Brier, BSS, directional accuracy, yes/no rate,
+    always-majority baseline, and DA lift. Diagnostic metrics (edge,
+    edge_n, log loss) render in a separate ``section_tool_category_diagnostics``
+    section so this table stays scannable.
+
+    :param scores: parsed per-platform rolling scores dict.
+    :return: markdown section string.
+    """
     data = scores.get("by_tool_category") or {}
     if not data:
         return "## Tool × Category\n\nNo cross-breakdown data available."
@@ -496,38 +537,43 @@ def section_tool_category(scores: dict[str, Any]) -> str:
         "## Tool × Category",
         "",
         f"> Cells with n < {MIN_SAMPLE_SIZE} are moved to a separate list below"
-        " the ranking. This differs from Tool × Platform, which renders every"
-        " cell inline and marks small samples with ⚠.",
+        " the ranking. Diagnostic metrics (edge, log loss) live in the"
+        " next section.",
         "",
-        "| Tool | Category | Brier | BSS | LogLoss | Edge | Edge n | DirAcc | Sharpness | n |",
-        "|------|----------|-------|-----|---------|------|--------|--------|-----------|---|",
+        "| Tool | Category | n | Reliability | Brier | Baseline Brier | BSS"
+        " | DirAcc | Yes% | No% | Always-majority | DA lift |",
+        "|------|----------|---|-------------|-------|----------------|-----"
+        "|--------|------|-----|-----------------|---------|",
     ]
     if not sufficient:
-        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | | | | | |")
+        lines.append(
+            f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_" " | | | | | | | | | | | |"
+        )
     for key, stats in sufficient:
         parts = key.split(" | ")
         tool = parts[0] if parts else key
         category = parts[1] if len(parts) > 1 else "?"
         brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        baseline = stats.get("baseline_brier")
+        baseline_str = f"{baseline:.4f}" if baseline is not None else "N/A"
         bss = stats.get("brier_skill_score")
         bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
-        ll = stats.get("log_loss")
-        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
-        edge = stats.get("edge")
-        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
-        edge_n = stats.get("edge_n", 0)
-        acc = (
-            f"{stats['directional_accuracy']:.0%}"
-            if stats.get("directional_accuracy") is not None
-            else "N/A"
-        )
-        sharp = (
-            f"{stats['sharpness']:.4f}" if stats.get("sharpness") is not None else "N/A"
-        )
+        acc_val = stats.get("directional_accuracy")
+        acc = f"{acc_val:.0%}" if acc_val is not None else "N/A"
+        yes = stats.get("outcome_yes_rate")
+        yes_str = f"{yes:.0%}" if yes is not None else "N/A"
+        no_str = f"{1 - yes:.0%}" if yes is not None else "N/A"
+        majority = _always_majority(yes)
+        majority_str = f"{majority:.0%}" if majority is not None else "N/A"
+        lift = _da_lift(acc_val, yes)
+        lift_str = f"{lift:+.4f}" if lift is not None else "N/A"
+        reliability = stats.get("reliability")
+        rel_str = f"{reliability:.0%}" if reliability is not None else "N/A"
         label = _sample_label(stats)
         lines.append(
-            f"| {tool} | {category} | {brier} | {bss_str} | {ll_str} | {edge_str}"
-            f" | {edge_n} | {acc} | {sharp} | {stats['n']}{label} |"
+            f"| {tool} | {category} | {stats['n']}{label} | {rel_str}"
+            f" | {brier} | {baseline_str} | {bss_str} | {acc}"
+            f" | {yes_str} | {no_str} | {majority_str} | {lift_str} |"
         )
 
     if sparse:
@@ -543,6 +589,51 @@ def section_tool_category(scores: dict[str, Any]) -> str:
             lines.append(
                 f"- **{tool} | {category}**: insufficient data (n={stats['n']})"
             )
+
+    return "\n".join(lines)
+
+
+def section_tool_category_diagnostics(scores: dict[str, Any]) -> str:
+    """Tool × category diagnostic metrics — edge, edge_n, log loss.
+
+    Rendered as a follow-on to ``section_tool_category`` so the primary
+    table stays compact while the diagnostic view still reads at the
+    per-(tool, category) grain.
+
+    :param scores: parsed per-platform rolling scores dict.
+    :return: markdown section string.
+    """
+    data = scores.get("by_tool_category") or {}
+    if not data:
+        return "## Tool × Category Diagnostics\n\n" "No cross-breakdown data available."
+
+    ranked = sorted(data.items(), key=brier_sort_key)
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+
+    lines = [
+        "## Tool × Category Diagnostics",
+        "",
+        f"> Edge, Edge n, and Log Loss for each cell above n = {MIN_SAMPLE_SIZE}.",
+        "",
+        "| Tool | Category | Edge | Edge n | Log Loss | n |",
+        "|------|----------|------|--------|----------|---|",
+    ]
+    if not sufficient:
+        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | |")
+        return "\n".join(lines)
+    for key, stats in sufficient:
+        parts = key.split(" | ")
+        tool = parts[0] if parts else key
+        category = parts[1] if len(parts) > 1 else "?"
+        edge = stats.get("edge")
+        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+        edge_n = stats.get("edge_n", 0)
+        ll = stats.get("log_loss")
+        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+        lines.append(
+            f"| {tool} | {category} | {edge_str} | {edge_n} | {ll_str}"
+            f" | {stats['n']} |"
+        )
 
     return "\n".join(lines)
 
@@ -700,12 +791,11 @@ def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
     if n == 0:
         return f"{heading}\n\nNo rows scored in the current window."
 
-    majority_baseline: str
-    if yes_rate is None:
-        majority_baseline = "N/A"
-    else:
-        majority = max(yes_rate, 1.0 - yes_rate)
-        majority_baseline = f"{majority:.0%}"
+    majority = _always_majority(yes_rate)
+    majority_str = f"{majority:.0%}" if majority is not None else "N/A"
+    lift = _da_lift(dir_acc, yes_rate)
+    lift_str = f"{lift:+.4f}" if lift is not None else "N/A"
+    no_rate = 1.0 - yes_rate if yes_rate is not None else None
 
     lines = [
         heading,
@@ -716,10 +806,10 @@ def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
         f"- **Baseline Brier**: {_value_cell(baseline, valid_n)}",
         f"- **BSS**: {_value_cell(bss, valid_n)}",
         f"- **Directional Accuracy**: {_pct_cell(dir_acc, valid_n)}",
-        (
-            f"- **Outcome Yes Rate**: {_pct_cell(yes_rate, valid_n)}"
-            f" (always-majority baseline: {majority_baseline})"
-        ),
+        f"- **Outcome Yes Rate**: {_pct_cell(yes_rate, valid_n)}",
+        f"- **Outcome No Rate**: {_pct_cell(no_rate, valid_n)}",
+        f"- **Always-majority baseline**: {majority_str}",
+        f"- **DA lift (DirAcc - always-majority)**: {lift_str}",
     ]
     return "\n".join(lines)
 
@@ -2279,6 +2369,12 @@ def generate_report(  # pylint: disable=too-many-statements
         sections.append(
             _relabel_heading(
                 section_tool_category(rolling_scores),
+                f" (Current {ROLLING_WINDOW_DAYS}d)",
+            )
+        )
+        sections.append(
+            _relabel_heading(
+                section_tool_category_diagnostics(rolling_scores),
                 f" (Current {ROLLING_WINDOW_DAYS}d)",
             )
         )

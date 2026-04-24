@@ -50,7 +50,7 @@ Summarize this Olas Predict benchmark report for the *{{platform_label}}* deploy
 
 *Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
 
-*Tool × Category:* from the "Tool × Category (Current {ROLLING_WINDOW_DAYS}d)" section, list every cell that clears the sample-size threshold. Use format: • `tool` × `category` — Brier `X.XXXX` (n=X, Current {ROLLING_WINDOW_DAYS}d). Never cite rows from the "below n=X threshold omitted" list. FALLBACK: if fewer than 2 rows clear the threshold, write exactly "insufficient tool × category data" as the only bullet in this section.
+*Tool × Category:* from the "Tool × Category (Current {ROLLING_WINDOW_DAYS}d)" section, list every cell that clears the sample-size threshold. Use format: • `tool` × `category` — Brier `X.XXXX` (n=X, Current {ROLLING_WINDOW_DAYS}d), DirAcc X%, Always-majority X%, DA lift `±X.XXXX`. If DA lift is ≤ 0 say " — no lift over always-majority" inline so the reader isn't misled by a low Brier on a homogeneous-outcome cell. Never cite rows from the "below n=X threshold omitted" list. FALLBACK: if fewer than 2 rows clear the threshold, write exactly "insufficient tool × category data" as the only bullet in this section.
 
 If the "Tool × Category Historical Comparison" table has any row where `Δ vs Prev {ROLLING_WINDOW_DAYS}d` is a signed number (not `insufficient data`, not `no prev window`), add a single follow-up bullet naming the largest absolute-value movement and its direction.
 

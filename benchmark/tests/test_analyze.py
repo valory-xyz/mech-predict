@@ -585,7 +585,12 @@ class TestSectionToolCategory:
         assert "No cross-breakdown data" in result
 
     def test_sufficient_cell_rendered_in_table(self) -> None:
-        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table."""
+        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table.
+
+        Column order: Tool | Category | n | Reliability | Brier |
+        Baseline Brier | BSS | DirAcc | Yes% | No% | Always-majority |
+        DA lift.
+        """
         s = _scores(
             by_tool_category={
                 "tool-a | politics": {
@@ -597,14 +602,21 @@ class TestSectionToolCategory:
                     "directional_accuracy": 0.76,
                     "sharpness": 0.12,
                     "n": 60,
+                    "valid_n": 55,
+                    "reliability": 0.92,
+                    "baseline_brier": 0.25,
+                    "outcome_yes_rate": 0.40,
                     "decision_worthy": True,
                 }
             }
         )
         result = section_tool_category(s)
+        # Columns in order: Tool, Category, n, Reliability, Brier,
+        # Baseline Brier, BSS, DirAcc, Yes%, No%, Always-majority, DA lift.
+        # always_majority = max(0.4, 0.6) = 0.6; DA lift = 0.76 - 0.60 = 0.16.
         assert (
-            "| tool-a | politics | 0.1900 | +0.0500 | 0.6000 | -0.0300 | 40 | 76% | 0.1200 | 60 |"
-            in result
+            "| tool-a | politics | 60 | 92% | 0.1900 | 0.2500 | +0.0500 | 76%"
+            " | 40% | 60% | 60% | +0.1600 |" in result
         )
 
     def test_sparse_cell_listed_in_sparse_section_not_table(self) -> None:
@@ -656,7 +668,9 @@ class TestSectionToolCategory:
             }
         )
         result = section_tool_category(s)
-        assert "| tool-a | politics | 0.2000" in result
+        # Column order: Tool | Category | n | ... Brier is the 5th column.
+        assert f"| tool-a | politics | {MIN_SAMPLE_SIZE} " in result
+        assert "| 0.2000 |" in result
         assert "below n=" not in result  # no sparse section
 
     def test_sparse_examples_capped_at_five(self) -> None:
@@ -1965,6 +1979,7 @@ class TestGenerateReportRollingBanner:
             "## Platform Historical Comparison",
             "## Tool Historical Comparison",
             "## Tool × Category (Current 3d)",
+            "## Tool × Category Diagnostics (Current 3d)",
             "## Tool × Category Historical Comparison",
             "## Diagnostics Historical Comparison",
             "## Reliability & Parse Quality (Current vs All-Time)",
@@ -2018,6 +2033,7 @@ class TestGenerateReportStructure:
             "## Platform Historical Comparison",
             "## Tool Historical Comparison",
             f"## Tool × Category (Current {ROLLING_WINDOW_DAYS}d)",
+            f"## Tool × Category Diagnostics (Current {ROLLING_WINDOW_DAYS}d)",
             "## Tool × Category Historical Comparison",
             "## Diagnostics Historical Comparison",
             "## Reliability & Parse Quality (Current vs All-Time)",
@@ -2079,6 +2095,120 @@ class TestSectionCategoryPlatform:
     def test_empty_input(self) -> None:
         """Empty data renders a placeholder, never blows up."""
         assert "No cross-breakdown data available." in section_category_platform({})
+
+
+class TestAlwaysMajorityAndDALift:
+    """_always_majority / _da_lift helpers derive Maria Pia's requested fields.
+
+    Both are trivial math but they're user-facing numbers, so lock them
+    in with tests rather than trusting the diff review.
+    """
+
+    def test_always_majority_yes_heavy(self) -> None:
+        """yes_rate=0.7 → majority outcome is yes at 70%."""
+        from benchmark.analyze import _always_majority
+
+        assert _always_majority(0.7) == 0.7
+
+    def test_always_majority_no_heavy(self) -> None:
+        """yes_rate=0.3 → majority outcome is no at 70% (1 - 0.3)."""
+        from benchmark.analyze import _always_majority
+
+        assert _always_majority(0.3) == pytest.approx(0.7)
+
+    def test_always_majority_balanced(self) -> None:
+        """yes_rate=0.5 → majority baseline is 0.5 (no class is majority)."""
+        from benchmark.analyze import _always_majority
+
+        assert _always_majority(0.5) == 0.5
+
+    def test_always_majority_none(self) -> None:
+        """Missing yes_rate yields None, not a crash or 0.5 default."""
+        from benchmark.analyze import _always_majority
+
+        assert _always_majority(None) is None
+
+    def test_da_lift_positive_when_beating_majority(self) -> None:
+        """Tool predicting above always-majority has positive lift."""
+        from benchmark.analyze import _da_lift
+
+        # yes_rate=0.4 → majority=0.6. DirAcc=0.75 → lift=+0.15.
+        assert _da_lift(0.75, 0.4) == pytest.approx(0.15)
+
+    def test_da_lift_zero_when_equal_to_majority(self) -> None:
+        """Tool matching always-majority has zero lift."""
+        from benchmark.analyze import _da_lift
+
+        assert _da_lift(0.6, 0.4) == pytest.approx(0.0)
+
+    def test_da_lift_negative_when_below_majority(self) -> None:
+        """Tool worse than always-majority has negative lift."""
+        from benchmark.analyze import _da_lift
+
+        # yes_rate=0.3 → majority=0.7. DirAcc=0.55 → lift=-0.15.
+        assert _da_lift(0.55, 0.3) == pytest.approx(-0.15)
+
+    def test_da_lift_none_when_inputs_missing(self) -> None:
+        """Either missing input yields None, not arithmetic error."""
+        from benchmark.analyze import _da_lift
+
+        assert _da_lift(None, 0.4) is None
+        assert _da_lift(0.75, None) is None
+
+
+class TestSectionToolCategoryDiagnostics:
+    """section_tool_category_diagnostics renders edge / edge_n / log loss."""
+
+    def test_sufficient_cell_renders(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE render with all three diagnostics."""
+        from benchmark.analyze import section_tool_category_diagnostics
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {
+                    "n": 60,
+                    "edge": 0.03,
+                    "edge_n": 50,
+                    "log_loss": 0.48,
+                }
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "## Tool × Category Diagnostics" in rendered
+        assert "| tool-a | crypto | +0.0300 | 50 | 0.4800 | 60 |" in rendered
+
+    def test_sparse_cells_dropped(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE don't render in the table body."""
+        from benchmark.analyze import section_tool_category_diagnostics
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {"n": 5, "edge": 0.1, "edge_n": 3, "log_loss": 0.5},
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "| tool-a | crypto | +0.1000" not in rendered
+        assert f"no cells with n ≥ {MIN_SAMPLE_SIZE}" in rendered
+
+    def test_missing_diagnostic_fields_render_na(self) -> None:
+        """Cells with None edge / edge_n / log_loss render N/A rather than crash."""
+        from benchmark.analyze import section_tool_category_diagnostics
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {"n": 60}  # no edge / log_loss keys
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "N/A" in rendered
+        assert "| tool-a | crypto |" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty data collapses to a placeholder message, not a crash."""
+        from benchmark.analyze import section_tool_category_diagnostics
+
+        rendered = section_tool_category_diagnostics({})
+        assert "No cross-breakdown data available" in rendered
 
 
 class TestSectionToolCategoryPlatform:
@@ -2271,9 +2401,13 @@ class TestSectionPlatformSnapshot:
             "BSS",
             "Directional Accuracy",
             "Outcome Yes Rate",
-            "always-majority baseline",
+            "Outcome No Rate",
+            "Always-majority baseline",
+            "DA lift",
         ):
             assert label in rendered
+        # DA lift = 0.70 - max(0.55, 0.45) = +0.15
+        assert "+0.1500" in rendered
 
     def test_empty_scores_renders_placeholder(self) -> None:
         """Zero rows collapses to a placeholder, not a crash."""

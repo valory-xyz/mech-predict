@@ -2874,14 +2874,20 @@ class TestScorePeriodOffset:
         from benchmark.scorer import _load_period_rows
 
         logs = tmp_path / "logs"
-        current_row = _row(predicted_at=self._ts(1), row_id="current")
-        prev_row = _row(predicted_at=self._ts(4), row_id="prev")
-        old_row = _row(predicted_at=self._ts(8), row_id="old")
+        # Distinct tool names per row so the scored ``by_tool`` map
+        # below is a direct identity check on which row reached each
+        # window — catches a broken partitioner that silently placed
+        # the same row in both windows (n=1 each) instead of
+        # partitioning by timestamp.
+        current_row = _row(
+            predicted_at=self._ts(1), row_id="current", tool="tool-current"
+        )
+        prev_row = _row(predicted_at=self._ts(4), row_id="prev", tool="tool-prev")
+        old_row = _row(predicted_at=self._ts(8), row_id="old", tool="tool-old")
         self._populate_logs(logs, [current_row, prev_row, old_row])
 
-        # Cardinality and row-identity: the invariant isn't just "each
-        # window sees one row" (two leaky windows could each happen to
-        # catch one), it's "the two windows share no rows at all".
+        # Loader-level identity invariant — checks the partition the
+        # scorer consumes before any aggregation runs.
         current_prod, _ = _load_period_rows(logs, days=3, tournament_input=None)
         prev_prod, _ = _load_period_rows(
             logs, days=3, tournament_input=None, offset_days=3
@@ -2892,10 +2898,16 @@ class TestScorePeriodOffset:
         assert prev_ids == {"prev"}
         assert current_ids.isdisjoint(prev_ids)
 
-        # score_period returns scored aggregates — keep a coarse sanity
-        # check that the same partitioning reaches the scorer output.
-        assert score_period(logs, days=3, offset_days=0)["total_rows"] == 1
-        assert score_period(logs, days=3, offset_days=3)["total_rows"] == 1
+        # Scorer-level identity invariant — verifies the distinct tool
+        # names survive through the full scoring pipeline, not just the
+        # loader. A bug that routed a row into both windows would
+        # surface the same tool name on both sides.
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert "tool-current" in current["by_tool"]
+        assert "tool-current" not in prev["by_tool"]
+        assert "tool-prev" in prev["by_tool"]
+        assert "tool-prev" not in current["by_tool"]
 
     def test_negative_offset_raises(self, tmp_path: Path) -> None:
         """Negative offset is a user error, not a silent zero-fill."""

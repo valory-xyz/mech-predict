@@ -1166,6 +1166,7 @@ def section_diagnostics_comparison(
         ),
         "|------|--------|----------|----------|---------------|---------|-------------|",
     ]
+    header_len = len(lines)
     for tool in tools:
         c = cur_by_tool.get(tool, {})
         a = at_by_tool.get(tool, {})
@@ -1195,11 +1196,11 @@ def section_diagnostics_comparison(
                 f" | {prev_val_cell}"
                 f" | {delta_prev} |"
             )
-    # ``lines`` is initialized with 4 items (heading, blank, header row,
-    # separator). When every (tool, metric) cell was skipped via the
-    # ``all three windows None`` continue, nothing else was appended and
-    # the bare table would render with no body rows.
-    if len(lines) == 4:
+    # Pin against the header length captured above the data loop. Matching
+    # a hardcoded count here broke once already (off-by-one vs the init
+    # list) and would break again on any future header edit, so anchor
+    # to the snapshot instead of a literal.
+    if len(lines) == header_len:
         lines.append("| _(no diagnostic data)_ | | | | | | |")
     return "\n".join(lines)
 

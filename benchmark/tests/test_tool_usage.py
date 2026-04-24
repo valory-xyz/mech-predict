@@ -25,6 +25,35 @@ import pytest
 
 from benchmark import tool_usage
 from benchmark.analyze import section_tool_deployment_status
+from benchmark.tool_usage import DEPLOYMENTS, DEPLOYMENT_TO_PLATFORM
+
+
+class TestDeploymentPlatformMappingInvariants:
+    """Lock the DEPLOYMENTS ↔ DEPLOYMENT_TO_PLATFORM coverage invariant.
+
+    ``deployments_for_platform`` filters ``DEPLOYMENTS`` through
+    ``DEPLOYMENT_TO_PLATFORM``. If a deployment lands in the list but
+    not in the mapping, it silently disappears from the platform-scoped
+    Tool Deployment Status section. The tests below fail loudly at add
+    time so nobody has to rediscover the bug in production.
+    """
+
+    def test_every_deployment_has_a_platform(self) -> None:
+        """No name in DEPLOYMENTS is missing from DEPLOYMENT_TO_PLATFORM."""
+        missing = [name for name in DEPLOYMENTS if name not in DEPLOYMENT_TO_PLATFORM]
+        assert not missing, (
+            f"deployment(s) {missing} in DEPLOYMENTS have no platform mapping — "
+            "deployments_for_platform would silently drop them"
+        )
+
+    def test_no_orphan_mapping_entries(self) -> None:
+        """Every mapping key is also present in DEPLOYMENTS (no drift the other way)."""
+        orphans = [name for name in DEPLOYMENT_TO_PLATFORM if name not in DEPLOYMENTS]
+        assert not orphans, (
+            f"mapping key(s) {orphans} have no matching DEPLOYMENTS entry — "
+            "the deployment was removed but the mapping wasn't cleaned up"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -228,79 +257,6 @@ class TestFetchDisabledTools:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class TestHelpers:
-    """Tests for disabled_deployments_for_tool and friends."""
-
-    def test_disabled_deployments_for_tool(self) -> None:
-        """Returns the deployments whose list contains the tool."""
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["echo", "native-transfer"],
-            "omenstrat QS": ["echo"],
-            "polystrat Pearl": ["prediction-online"],
-        }
-        assert tool_usage.disabled_deployments_for_tool("echo", disabled) == [
-            "omenstrat Pearl",
-            "omenstrat QS",
-        ]
-
-    def test_unknown_status_is_not_disabled(self) -> None:
-        """None (fetch failed) is treated as 'unknown', not 'disabled'."""
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": None,
-            "omenstrat QS": ["echo"],
-            "polystrat Pearl": ["echo"],
-        }
-        assert tool_usage.disabled_deployments_for_tool("echo", disabled) == [
-            "omenstrat QS",
-            "polystrat Pearl",
-        ]
-
-    def test_hyphen_underscore_aliases_match(self) -> None:
-        """Tools listed under underscore alias also match their hyphen form."""
-        # Real configs list e.g. ``prediction_request_reasoning-claude`` while
-        # the benchmark logs the hyphenated ``prediction-request-reasoning-claude``;
-        # both should resolve to the same tool when we check "is it disabled here?"
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["prediction_request_reasoning-claude"],
-            "omenstrat QS": ["prediction-request-reasoning-claude"],
-            "polystrat Pearl": ["some-other-tool"],
-        }
-        assert tool_usage.disabled_deployments_for_tool(
-            "prediction-request-reasoning-claude", disabled
-        ) == ["omenstrat Pearl", "omenstrat QS"]
-        # And the reverse: a benchmarked-underscore name matches a hyphenated entry.
-        assert tool_usage.disabled_deployments_for_tool(
-            "prediction_request_reasoning-claude", disabled
-        ) == ["omenstrat Pearl", "omenstrat QS"]
-
-    def test_failed_deployments_preserves_order(self) -> None:
-        """Failure list follows DEPLOYMENTS declaration order."""
-        disabled: dict[str, list[str] | None] = {
-            "polystrat Pearl": None,
-            "omenstrat Pearl": ["echo"],
-            "omenstrat QS": None,
-        }
-        assert tool_usage.failed_deployments(disabled) == [
-            "omenstrat QS",
-            "polystrat Pearl",
-        ]
-
-    def test_iter_tools_with_disabled_preserves_tool_order(self) -> None:
-        """Output order matches the input tool_names order."""
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["a", "b", "c"],
-            "omenstrat QS": ["b"],
-            "polystrat Pearl": [],
-        }
-        entries = tool_usage.iter_tools_with_disabled(["c", "a", "b"], disabled)
-        assert [name for name, _ in entries] == ["c", "a", "b"]
-
-
-# ---------------------------------------------------------------------------
 # Rendering of the deployment-status section
 # ---------------------------------------------------------------------------
 
@@ -308,8 +264,8 @@ class TestHelpers:
 class TestSectionToolDeploymentStatus:
     """Rendering review: every code path produces the output a reader expects."""
 
-    def test_disabled_tool_rendered(self) -> None:
-        """A tool in the scores AND in a deployment's block appears in output."""
+    def test_active_tools_rendered(self) -> None:
+        """Each deployment shows the benchmarked tools that are NOT disabled."""
         scores = _scores_with_tools(["echo", "prediction-online"])
         disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["echo"],
@@ -318,38 +274,45 @@ class TestSectionToolDeploymentStatus:
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
         assert "## Tool Deployment Status" in result
-        assert "`echo`" in result
-        assert "omenstrat Pearl" in result
-        assert "omenstrat QS" in result
-        assert "`prediction-online`" in result
-        # polystrat Pearl has no disabled benchmarked tools - must NOT appear
-        # against echo (but may appear in failure banner; it doesn't here).
-        echo_line = next(line for line in result.splitlines() if "`echo`" in line)
-        assert "polystrat Pearl" not in echo_line
+        pearl_line = next(
+            line for line in result.splitlines() if "omenstrat Pearl" in line
+        )
+        assert "`prediction-online`" in pearl_line
+        assert "`echo`" not in pearl_line
+        qs_line = next(line for line in result.splitlines() if "omenstrat QS" in line)
+        assert "no benchmarked tools active" in qs_line
+        poly_line = next(
+            line for line in result.splitlines() if "polystrat Pearl" in line
+        )
+        assert "`echo`" in poly_line
+        assert "`prediction-online`" in poly_line
 
     def test_tool_in_config_but_not_benchmarked_is_hidden(self) -> None:
-        """Tools in IRRELEVANT_TOOLS but absent from scores are omitted."""
+        """Disabled entries naming non-benchmarked tools don't affect the active list."""
         scores = _scores_with_tools(["prediction-online"])
         disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["echo"],  # not in scores
+            "omenstrat Pearl": ["echo"],  # not in scores, ignored
             "omenstrat QS": [],
             "polystrat Pearl": [],
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
         assert "`echo`" not in result
-        assert "No benchmarked tools are disabled" in result
+        pearl_line = next(
+            line for line in result.splitlines() if "omenstrat Pearl" in line
+        )
+        assert "`prediction-online`" in pearl_line
 
-    def test_no_disabled_tools_shows_positive_message(self) -> None:
-        """When fetch succeeds but no disabled tools match, say so explicitly."""
+    def test_no_disabled_tools_means_all_tools_active(self) -> None:
+        """With nothing disabled, every benchmarked tool appears on every deployment."""
         scores = _scores_with_tools(["prediction-online"])
         disabled: dict[str, list[str] | None] = {
             name: [] for name in tool_usage.DEPLOYMENTS
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
-        assert "No benchmarked tools are disabled" in result
+        assert result.count("`prediction-online`") == len(tool_usage.DEPLOYMENTS)
 
-    def test_fetch_failure_is_called_out(self) -> None:
-        """Failed deployments appear in a warning banner, not silently dropped."""
+    def test_fetch_failure_renders_unavailable_banner(self) -> None:
+        """Failed deployments render ⚠️ unavailable instead of a false 'active' list."""
         scores = _scores_with_tools(["echo"])
         disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": None,
@@ -358,35 +321,44 @@ class TestSectionToolDeploymentStatus:
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
         assert "Could not fetch deployment config" in result
-        assert "omenstrat Pearl" in result
-        assert "polystrat Pearl" in result
-        # And the known-disabled entry still renders
-        assert "`echo`" in result
+        pearl_line = next(
+            line
+            for line in result.splitlines()
+            if line.startswith("- **omenstrat Pearl**")
+        )
+        poly_line = next(
+            line
+            for line in result.splitlines()
+            if line.startswith("- **polystrat Pearl**")
+        )
+        qs_line = next(
+            line
+            for line in result.splitlines()
+            if line.startswith("- **omenstrat QS**")
+        )
+        assert "⚠️ unavailable" in pearl_line
+        assert "⚠️ unavailable" in poly_line
+        assert "no benchmarked tools active" in qs_line
 
     def test_empty_dict_opts_out_entirely(self) -> None:
-        """Empty dict means "caller opted out" and returns an empty string.
-
-        Otherwise ``failed_deployments`` would flag every declared
-        deployment as missing and render a warning banner that contradicts
-        the "nothing was fetched" reality.
-        """
+        """Empty dict means "caller opted out" and returns an empty string."""
         scores = _scores_with_tools(["echo"])
         result = section_tool_deployment_status(scores, disabled={})
         assert result == ""
 
-    def test_all_fetches_fail_no_false_negative(self) -> None:
-        """If everything fails, we must not say 'no tools disabled'."""
+    def test_all_fetches_fail_no_false_active_claim(self) -> None:
+        """If everything fails, no deployment claims active tools."""
         scores = _scores_with_tools(["echo"])
         disabled: dict[str, list[str] | None] = {
             name: None for name in tool_usage.DEPLOYMENTS
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
         assert "Could not fetch deployment config" in result
-        assert "No benchmarked tools are disabled on any deployment" not in result
-        assert "No disabled tools reported from the deployments" not in result
+        assert "`echo`" not in result
+        assert result.count("⚠️ unavailable") == len(tool_usage.DEPLOYMENTS)
 
-    def test_ordering_follows_brier_ranking(self) -> None:
-        """Tools render in the same Brier-ascending order as Tool Ranking below."""
+    def test_active_tools_ordered_by_brier_ranking(self) -> None:
+        """Active tools render in the same Brier-ascending order as Tool Ranking."""
         scores = {
             "generated_at": "2026-04-14T06:00:00Z",
             "total_rows": 30,
@@ -399,12 +371,15 @@ class TestSectionToolDeploymentStatus:
             },
         }
         disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["slow-tool", "fast-tool", "mid-tool"],
+            "omenstrat Pearl": [],
             "omenstrat QS": [],
             "polystrat Pearl": [],
         }
         result = section_tool_deployment_status(scores, disabled=disabled)
-        fast_idx = result.index("`fast-tool`")
-        mid_idx = result.index("`mid-tool`")
-        slow_idx = result.index("`slow-tool`")
+        pearl_line = next(
+            line for line in result.splitlines() if "omenstrat Pearl" in line
+        )
+        fast_idx = pearl_line.index("`fast-tool`")
+        mid_idx = pearl_line.index("`mid-tool`")
+        slow_idx = pearl_line.index("`slow-tool`")
         assert fast_idx < mid_idx < slow_idx

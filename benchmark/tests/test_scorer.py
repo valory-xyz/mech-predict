@@ -18,6 +18,7 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/scorer.py."""
 
+import argparse
 import json
 import logging
 import uuid
@@ -26,15 +27,24 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
     LATENCY_RESERVOIR_SIZE,
+    PLATFORMS,
     WORST_BEST_SIZE,
     _accumulate_group,
+    _cli_legacy_full_recompute,
     _derive_group,
+    _derive_platform_path,
+    _derive_tournament_path,
     _empty_group,
     _is_edge_eligible,
+    _partition_rows_by_platform,
+    _score_extreme_predictions,
+    _score_latency_reservoir,
     brier_score,
     classify_difficulty,
     classify_disagreement,
@@ -53,6 +63,7 @@ from benchmark.scorer import (
     rebuild,
     score,
     score_period,
+    score_period_split_by_platform,
     update,
 )
 
@@ -375,6 +386,22 @@ class TestScore:
         assert result["by_tool_category"]["tool-b | crypto"]["brier"] == 0.25
         assert result["by_tool_category"]["tool-a | politics"]["brier"] == 0.64
 
+        # By category × platform — direct one-file cross-platform slice.
+        assert "crypto | omen" in result["by_category_platform"]
+        assert "politics | polymarket" in result["by_category_platform"]
+        assert result["by_category_platform"]["crypto | omen"]["n"] == 2
+        assert result["by_category_platform"]["politics | polymarket"]["n"] == 1
+
+        # By tool × category × platform — tri-dimensional slice.
+        assert "tool-a | crypto | omen" in result["by_tool_category_platform"]
+        assert "tool-a | politics | polymarket" in result["by_tool_category_platform"]
+        assert result["by_tool_category_platform"]["tool-a | crypto | omen"]["n"] == 1
+        # tool-a | crypto | omen: p=0.9, outcome=True → (0.9-1)^2 = 0.01
+        assert (
+            result["by_tool_category_platform"]["tool-a | crypto | omen"]["brier"]
+            == 0.01
+        )
+
     def test_empty_input(self) -> None:
         """Test scoring with empty input."""
         result = score([])
@@ -406,6 +433,8 @@ class TestScore:
             "by_tool",
             "by_platform",
             "by_category",
+            "by_category_platform",
+            "by_tool_category_platform",
             "by_horizon",
             "trend",
         ]
@@ -485,6 +514,55 @@ class TestIncrementalUpdate:
 
         assert result["by_tool"]["tool-a"]["n"] == 2
         assert result["by_tool"]["tool-b"]["n"] == 1
+
+    def test_cross_platform_aggregates_parity_with_batch(self, tmp_path: Path) -> None:
+        """Incremental by_category_platform + by_tool_category_platform match score().
+
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the scores / history / dedup files.
+        """
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(
+                p_yes=0.9,
+                outcome=True,
+                tool="tool-a",
+                platform="omen",
+                category="crypto",
+            ),
+            _row(
+                p_yes=0.8,
+                outcome=False,
+                tool="tool-a",
+                platform="polymarket",
+                category="politics",
+            ),
+            _row(
+                p_yes=0.5,
+                outcome=True,
+                tool="tool-b",
+                platform="omen",
+                category="crypto",
+            ),
+        ]
+
+        update(rows[:2], scores_path, history_path)
+        inc = update(rows[2:], scores_path, history_path)
+        batch = score(rows)
+
+        for dim in ("by_category_platform", "by_tool_category_platform"):
+            assert set(inc[dim].keys()) == set(
+                batch[dim].keys()
+            ), f"{dim} key set drift between incremental and batch"
+            for key in batch[dim]:
+                assert (
+                    inc[dim][key]["n"] == batch[dim][key]["n"]
+                ), f"{dim}[{key}] n mismatch"
+                assert (
+                    inc[dim][key]["brier"] == batch[dim][key]["brier"]
+                ), f"{dim}[{key}] brier mismatch"
 
     def test_calibration_buckets_accumulate(self, tmp_path: Path) -> None:
         """Calibration buckets accumulate counts correctly."""
@@ -584,6 +662,25 @@ class TestIncrementalUpdate:
         assert questions.count("Same Q?") == 1
         same_q = [w for w in result["worst_10"] if w["question_text"] == "Same Q?"][0]
         assert same_q["brier"] == round(0.9**2, 4)  # worst of the two
+
+    def test_worst_best_skip_rows_without_question_text(self, tmp_path: Path) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        good = {**_row(p_yes=0.9, outcome=False), "question_text": "Readable Q?"}
+        empty_question = {**_row(p_yes=0.95, outcome=False), "question_text": ""}
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        result = update(
+            [good, empty_question, missing_question], scores_path, history_path
+        )
+
+        worst_qs = [w["question_text"] for w in result["worst_10"]]
+        best_qs = [b["question_text"] for b in result["best_10"]]
+        assert worst_qs == ["Readable Q?"]
+        assert best_qs == ["Readable Q?"]
 
     def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
         """Malformed rows count toward n but not valid_n or Brier."""
@@ -2133,9 +2230,6 @@ class TestModeSplit:
 
     def test_derive_tournament_path(self) -> None:
         """_derive_tournament_path appends _tournament to the stem."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.scorer import _derive_tournament_path
-
         assert _derive_tournament_path(Path("/tmp/results/scores.json")) == Path(
             "/tmp/results/scores_tournament.json"
         )
@@ -2302,3 +2396,720 @@ class TestModeSplit:
         # Verify the snapshot reflects production (n=1, not n=2 from pooled modes).
         assert len(history_lines) == 1
         assert history_lines[0]["overall"]["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-platform partitioning — scorer emits scores_omen.json and
+# scores_polymarket.json alongside the combined file so the daily report can
+# render a platform-scoped view.
+# ---------------------------------------------------------------------------
+
+
+class TestDerivePlatformPath:
+    """Tests for _derive_platform_path."""
+
+    def test_basic(self) -> None:
+        """scores.json -> scores_omen.json in the same directory."""
+        p = _derive_platform_path(Path("/tmp/results/scores.json"), "omen")
+        assert p == Path("/tmp/results/scores_omen.json")
+
+    def test_tournament_stem(self) -> None:
+        """Composes with tournament suffix: scores_tournament_omen.json."""
+        p = _derive_platform_path(
+            Path("/tmp/results/scores_tournament.json"), "polymarket"
+        )
+        assert p == Path("/tmp/results/scores_tournament_polymarket.json")
+
+    def test_period_stem(self) -> None:
+        """Works for period / rolling stems too."""
+        p = _derive_platform_path(Path("/tmp/results/rolling_scores.json"), "omen")
+        assert p == Path("/tmp/results/rolling_scores_omen.json")
+
+
+class TestPartitionRowsByPlatform:
+    """Tests for _partition_rows_by_platform."""
+
+    def test_splits_by_platform(self) -> None:
+        """Rows routed to omen/polymarket buckets by row['platform']."""
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="polymarket", row_id="p1"),
+            _row(platform="omen", row_id="o2"),
+        ]
+        buckets = _partition_rows_by_platform(rows)
+        assert set(buckets.keys()) == set(PLATFORMS)
+        assert [r["row_id"] for r in buckets["omen"]] == ["o1", "o2"]
+        assert [r["row_id"] for r in buckets["polymarket"]] == ["p1"]
+
+    def test_unknown_platform_dropped(self) -> None:
+        """Rows with unknown/missing platform stay out of per-platform buckets."""
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="unknown_chain", row_id="x1"),
+            {"row_id": "n1"},  # no platform key at all
+        ]
+        buckets = _partition_rows_by_platform(rows)
+        assert [r["row_id"] for r in buckets["omen"]] == ["o1"]
+        assert buckets["polymarket"] == []
+
+    def test_empty_input_still_returns_all_platform_keys(self) -> None:
+        """Every PLATFORMS key must be present so callers can emit files."""
+        buckets = _partition_rows_by_platform([])
+        assert set(buckets.keys()) == set(PLATFORMS)
+        assert all(v == [] for v in buckets.values())
+
+
+class TestPerPlatformRebuild:
+    """Rebuild emits per-platform scores files alongside the combined file."""
+
+    def test_rebuild_emits_per_platform_files(self, tmp_path: Path) -> None:
+        """Mixed omen + polymarket rows produce three independent scores files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z") for _ in range(4)
+        ] + [
+            _row(platform="polymarket", predicted_at="2026-04-01T10:00:00Z")
+            for _ in range(2)
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 6
+        assert omen["overall"]["n"] == 4
+        assert poly["overall"]["n"] == 2
+
+    def test_rebuild_per_platform_tournament_files(self, tmp_path: Path) -> None:
+        """Tournament partition writes scores_tournament_<platform>.json."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(
+                platform="omen",
+                mode="tournament",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="t_omen",
+            ),
+            _row(
+                platform="polymarket",
+                mode="tournament",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="t_poly",
+            ),
+            _row(
+                platform="omen",
+                mode="production_replay",
+                predicted_at="2026-04-01T10:00:00Z",
+                row_id="p_omen",
+            ),
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        t_omen = json.loads((tmp_path / "scores_tournament_omen.json").read_text())
+        t_poly = json.loads(
+            (tmp_path / "scores_tournament_polymarket.json").read_text()
+        )
+        prod_omen = json.loads((tmp_path / "scores_omen.json").read_text())
+
+        assert t_omen["overall"]["n"] == 1
+        assert t_poly["overall"]["n"] == 1
+        # Mode partition holds: tournament rows do not leak into prod file.
+        assert prod_omen["overall"]["n"] == 1
+
+    def test_rebuild_unknown_platform_in_combined_only(self, tmp_path: Path) -> None:
+        """Unknown-platform rows stay in combined; drop from per-platform files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        rows = [
+            _row(platform="omen", predicted_at="2026-04-01T10:00:00Z"),
+            _row(platform="weird_chain", predicted_at="2026-04-01T10:00:00Z"),
+        ]
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 2
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 0
+
+    def test_rebuild_empty_logs_emits_empty_per_platform_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty log dir produces empty-but-valid per-platform files."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        for platform in PLATFORMS:
+            plat_path = tmp_path / f"scores_{platform}.json"
+            assert plat_path.exists()
+            assert json.loads(plat_path.read_text())["overall"]["n"] == 0
+            t_plat_path = tmp_path / f"scores_tournament_{platform}.json"
+            assert t_plat_path.exists()
+            assert json.loads(t_plat_path.read_text())["overall"]["n"] == 0
+
+    def test_rebuild_empty_platform_partition_still_emits_file(
+        self, tmp_path: Path
+    ) -> None:
+        """Only-omen rows produce a valid but-empty polymarket file."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        log_file = logs_dir / "production_log_2026_04_01.jsonl"
+        log_file.write_text(
+            json.dumps(_row(platform="omen", predicted_at="2026-04-01T10:00:00Z"))
+            + "\n"
+        )
+
+        rebuild(logs_dir, scores_path, history_path)
+
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        assert poly["overall"]["n"] == 0
+        assert poly["overall"]["brier"] is None
+
+
+class TestPerPlatformUpdate:
+    """update() emits per-platform accumulator files + incremental merge."""
+
+    def test_update_emits_per_platform_files(self, tmp_path: Path) -> None:
+        """Mixed rows via update() write three independent accumulator files."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="omen", row_id="o2"),
+            _row(platform="polymarket", row_id="p1"),
+        ]
+        update(rows, scores_path, history_path)
+
+        combined = json.loads(scores_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 3
+        assert omen["overall"]["n"] == 2
+        assert poly["overall"]["n"] == 1
+
+    def test_update_incremental_merge_per_platform(self, tmp_path: Path) -> None:
+        """Two sequential update() batches merge into per-platform accumulators."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        update(
+            [_row(platform="omen", row_id="o1")],
+            scores_path,
+            history_path,
+        )
+        update(
+            [
+                _row(platform="omen", row_id="o2"),
+                _row(platform="polymarket", row_id="p1"),
+            ],
+            scores_path,
+            history_path,
+        )
+
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        combined = json.loads(scores_path.read_text())
+
+        assert omen["overall"]["n"] == 2
+        assert poly["overall"]["n"] == 1
+        assert combined["overall"]["n"] == 3
+
+    def test_update_dedup_applies_to_per_platform(self, tmp_path: Path) -> None:
+        """Re-feeding the same rows is a no-op on per-platform accumulators too."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "ids.json"
+
+        rows = [
+            _row(platform="omen", row_id="o1"),
+            _row(platform="polymarket", row_id="p1"),
+        ]
+        update(rows, scores_path, history_path, dedup_path=dedup_path)
+        update(rows, scores_path, history_path, dedup_path=dedup_path)
+
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 1
+
+
+class TestPerPlatformLegacyRecompute:
+    """Legacy ``--input`` full-recompute path writes per-platform files too.
+
+    This CLI mode isn't used by the daily workflow but must stay at parity
+    with rebuild/update/period so local dev runs produce the same artifacts.
+    """
+
+    @staticmethod
+    def _write_input(input_path: Path, rows: list[dict[str, Any]]) -> None:
+        """Serialize ``rows`` to a jsonl file."""
+        input_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def test_legacy_full_recompute_emits_per_platform_files(
+        self, tmp_path: Path
+    ) -> None:
+        """Mixed-platform input jsonl -> combined + per-platform scores files."""
+        input_path = tmp_path / "input.jsonl"
+        self._write_input(
+            input_path,
+            [
+                _row(platform="omen", row_id="o1"),
+                _row(platform="omen", row_id="o2"),
+                _row(platform="polymarket", row_id="p1"),
+            ],
+        )
+        output_path = tmp_path / "scores.json"
+        tournament_path = _derive_tournament_path(output_path)
+
+        args = argparse.Namespace(input=input_path, output=output_path)
+        _cli_legacy_full_recompute(args, tournament_path)
+
+        combined = json.loads(output_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 3
+        assert omen["overall"]["n"] == 2
+        assert poly["overall"]["n"] == 1
+
+    def test_legacy_full_recompute_unknown_platform_in_combined_only(
+        self, tmp_path: Path
+    ) -> None:
+        """Rows on an unrecognised platform stay out of per-platform outputs."""
+        input_path = tmp_path / "input.jsonl"
+        self._write_input(
+            input_path,
+            [
+                _row(platform="omen", row_id="o1"),
+                _row(platform="weird_chain", row_id="x1"),
+            ],
+        )
+        output_path = tmp_path / "scores.json"
+        tournament_path = _derive_tournament_path(output_path)
+
+        args = argparse.Namespace(input=input_path, output=output_path)
+        _cli_legacy_full_recompute(args, tournament_path)
+
+        combined = json.loads(output_path.read_text())
+        omen = json.loads((tmp_path / "scores_omen.json").read_text())
+        poly = json.loads((tmp_path / "scores_polymarket.json").read_text())
+
+        assert combined["overall"]["n"] == 2
+        assert omen["overall"]["n"] == 1
+        assert poly["overall"]["n"] == 0
+
+
+class TestPerPlatformPeriod:
+    """score_period_split_by_platform returns {all, omen, polymarket}."""
+
+    @staticmethod
+    def _populate_logs(logs_dir: Path, rows: list[dict[str, Any]]) -> str:
+        """Write ``rows`` into a production_log file named for today."""
+        logs_dir.mkdir(exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+        log_file = logs_dir / f"production_log_{stamp}.jsonl"
+        log_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return stamp
+
+    def test_period_by_platform_shape(self, tmp_path: Path) -> None:
+        """Return dict keys cover combined + every PLATFORMS entry."""
+        logs_dir = tmp_path / "logs"
+        cutoff_date = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self._populate_logs(
+            logs_dir,
+            [
+                _row(platform="omen", predicted_at=cutoff_date, row_id="o1"),
+                _row(platform="polymarket", predicted_at=cutoff_date, row_id="p1"),
+            ],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+
+        assert set(result.keys()) == {"all", *PLATFORMS}
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        prod_poly, _ = result["polymarket"]
+        assert prod_all["overall"]["n"] == 2
+        assert prod_omen["overall"]["n"] == 1
+        assert prod_poly["overall"]["n"] == 1
+
+    def test_period_by_platform_empty_window(self, tmp_path: Path) -> None:
+        """Rows older than the window produce zero-count per-platform results."""
+        logs_dir = tmp_path / "logs"
+        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=old_date, row_id="o_old")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+
+        for scope in ("all", *PLATFORMS):
+            prod, _ = result[scope]
+            assert prod["overall"]["n"] == 0
+
+    def test_period_keeps_rows_with_fractional_seconds(self, tmp_path: Path) -> None:
+        """Fractional-second timestamps inside the window aren't dropped."""
+        logs_dir = tmp_path / "logs"
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S.123Z"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=recent, row_id="o_frac")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        assert prod_all["overall"]["n"] == 1
+        assert prod_omen["overall"]["n"] == 1
+
+    def test_period_skips_unparseable_predicted_at(self, tmp_path: Path) -> None:
+        """Rows whose predicted_at is missing or malformed are excluded."""
+        logs_dir = tmp_path / "logs"
+        self._populate_logs(
+            logs_dir,
+            [
+                _row(platform="omen", predicted_at="", row_id="o_empty"),
+                _row(platform="omen", predicted_at="not-a-date", row_id="o_bad"),
+            ],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        assert prod_all["overall"]["n"] == 0
+
+    def test_period_assumes_utc_for_naive_predicted_at(self, tmp_path: Path) -> None:
+        """Tz-less ISO timestamps are interpreted as UTC, not dropped or crashed."""
+        logs_dir = tmp_path / "logs"
+        recent_naive = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=recent_naive, row_id="o_naive")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        assert prod_all["overall"]["n"] == 1
+        assert prod_omen["overall"]["n"] == 1
+
+
+class TestScorePeriodOffset:
+    """Tests for score_period's --period-offset-days semantics.
+
+    Offset selects a non-overlapping window. Rows in the current window
+    (``offset_days=0``) must be excluded from the prev window
+    (``offset_days=days``), and vice versa.
+    """
+
+    def _ts(self, days_ago: float) -> str:
+        dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _populate_logs(self, logs_dir: Path, rows: list[dict[str, Any]]) -> None:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "2026-03-01.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n"
+        )
+
+    def test_offset_zero_matches_trailing_window(self, tmp_path: Path) -> None:
+        """offset_days=0 behaves like the legacy trailing-window filter."""
+        logs = tmp_path / "logs"
+        today_row = _row(predicted_at=self._ts(0.5), row_id="today")
+        old_row = _row(predicted_at=self._ts(10), row_id="old")
+        self._populate_logs(logs, [today_row, old_row])
+
+        result = score_period(logs, days=3, offset_days=0)
+        assert result["total_rows"] == 1
+
+    def test_offset_equal_to_days_selects_prev_non_overlapping(
+        self, tmp_path: Path
+    ) -> None:
+        """offset=days yields the preceding non-overlapping window.
+
+        :param tmp_path: pytest fixture supplying an isolated temp
+            directory for the per-test log files.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import _load_period_rows
+
+        logs = tmp_path / "logs"
+        # Distinct tool names per row so the scored ``by_tool`` map
+        # below is a direct identity check on which row reached each
+        # window — catches a broken partitioner that silently placed
+        # the same row in both windows (n=1 each) instead of
+        # partitioning by timestamp.
+        current_row = _row(
+            predicted_at=self._ts(1), row_id="current", tool="tool-current"
+        )
+        prev_row = _row(predicted_at=self._ts(4), row_id="prev", tool="tool-prev")
+        old_row = _row(predicted_at=self._ts(8), row_id="old", tool="tool-old")
+        self._populate_logs(logs, [current_row, prev_row, old_row])
+
+        # Loader-level identity invariant — checks the partition the
+        # scorer consumes before any aggregation runs.
+        current_prod, _ = _load_period_rows(logs, days=3, tournament_input=None)
+        prev_prod, _ = _load_period_rows(
+            logs, days=3, tournament_input=None, offset_days=3
+        )
+        current_ids = {r["row_id"] for r in current_prod}
+        prev_ids = {r["row_id"] for r in prev_prod}
+        assert current_ids == {"current"}
+        assert prev_ids == {"prev"}
+        assert current_ids.isdisjoint(prev_ids)
+
+        # Scorer-level identity invariant — verifies the distinct tool
+        # names survive through the full scoring pipeline, not just the
+        # loader. A bug that routed a row into both windows would
+        # surface the same tool name on both sides.
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert "tool-current" in current["by_tool"]
+        assert "tool-current" not in prev["by_tool"]
+        assert "tool-prev" in prev["by_tool"]
+        assert "tool-prev" not in current["by_tool"]
+
+    def test_negative_offset_raises(self, tmp_path: Path) -> None:
+        """Negative offset is a user error, not a silent zero-fill."""
+        logs = tmp_path / "logs"
+        self._populate_logs(logs, [_row(predicted_at=self._ts(0.5))])
+        with pytest.raises(ValueError, match="offset_days"):
+            score_period(logs, days=3, offset_days=-1)
+
+    def test_offset_respects_window_end_exclusivity(self, tmp_path: Path) -> None:
+        """Half-open window: start-inclusive, end-exclusive.
+
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the per-test log files.
+        """
+        logs = tmp_path / "logs"
+        # This row is 3 days ago exactly; for days=3 offset=0 it falls
+        # inside [now-3d, now) and should count as current, not prev.
+        boundary_row = _row(predicted_at=self._ts(2.999), row_id="boundary")
+        self._populate_logs(logs, [boundary_row])
+
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert current["total_rows"] == 1
+        assert prev["total_rows"] == 0
+
+
+class TestScoreLatencyReservoir:
+    """Tests for _score_latency_reservoir."""
+
+    def test_groups_latencies_by_tool(self) -> None:
+        """Per-tool latency lists are returned in insertion order."""
+        rows = [
+            {**_row(tool="tool-a"), "latency_s": 1.0},
+            {**_row(tool="tool-b"), "latency_s": 5.0},
+            {**_row(tool="tool-a"), "latency_s": 2.0},
+        ]
+        reservoir = _score_latency_reservoir(rows)
+        assert reservoir == {"tool-a": [1.0, 2.0], "tool-b": [5.0]}
+
+    def test_omits_rows_without_latency(self) -> None:
+        """Rows lacking latency_s do not create empty entries."""
+        rows = [
+            _row(tool="tool-a"),
+            {**_row(tool="tool-b"), "latency_s": 3.0},
+        ]
+        reservoir = _score_latency_reservoir(rows)
+        assert reservoir == {"tool-b": [3.0]}
+
+    def test_caps_at_reservoir_size_keeping_most_recent(self) -> None:
+        """Lists exceeding LATENCY_RESERVOIR_SIZE drop the oldest entries."""
+        excess = LATENCY_RESERVOIR_SIZE + 5
+        rows = [{**_row(tool="tool-a"), "latency_s": float(i)} for i in range(excess)]
+        reservoir = _score_latency_reservoir(rows)
+        assert len(reservoir["tool-a"]) == LATENCY_RESERVOIR_SIZE
+        assert reservoir["tool-a"][0] == float(excess - LATENCY_RESERVOIR_SIZE)
+        assert reservoir["tool-a"][-1] == float(excess - 1)
+
+    def test_missing_tool_name_defaults_to_unknown(self) -> None:
+        """Rows without tool_name land under the 'unknown' bucket."""
+        row = _row()
+        row.pop("tool_name", None)
+        row["tool_name"] = None
+        row["latency_s"] = 0.5
+        reservoir = _score_latency_reservoir([row])
+        assert reservoir == {"unknown": [0.5]}
+
+    def test_empty_input(self) -> None:
+        """No rows -> empty reservoir."""
+        assert not _score_latency_reservoir([])
+
+
+class TestScoreExtremePredictions:
+    """Tests for _score_extreme_predictions."""
+
+    def _valid_row(self, question: str, p_yes: float, outcome: bool) -> dict[str, Any]:
+        """Build a valid row with a question_text for dedup checks."""
+        row = _row(p_yes=p_yes, outcome=outcome)
+        row["question_text"] = question
+        return row
+
+    def test_returns_worst_sorted_descending_by_brier(self) -> None:
+        """Worst list is sorted highest Brier first."""
+        rows = [
+            self._valid_row("q1", 0.9, False),  # brier 0.81
+            self._valid_row("q2", 0.6, True),  # brier 0.16
+            self._valid_row("q3", 0.5, True),  # brier 0.25
+        ]
+        worst, _ = _score_extreme_predictions(rows)
+        assert [e["question_text"] for e in worst] == ["q1", "q3", "q2"]
+
+    def test_returns_best_sorted_ascending_by_brier(self) -> None:
+        """Best list is sorted lowest Brier first."""
+        rows = [
+            self._valid_row("q1", 0.9, False),
+            self._valid_row("q2", 0.6, True),
+            self._valid_row("q3", 0.5, True),
+        ]
+        _, best = _score_extreme_predictions(rows)
+        assert [e["question_text"] for e in best] == ["q2", "q3", "q1"]
+
+    def test_truncates_to_worst_best_size(self) -> None:
+        """Lists are capped at WORST_BEST_SIZE entries each."""
+        rows = [
+            self._valid_row(f"q{i}", 0.1 + 0.01 * i, True)
+            for i in range(WORST_BEST_SIZE + 5)
+        ]
+        worst, best = _score_extreme_predictions(rows)
+        assert len(worst) == WORST_BEST_SIZE
+        assert len(best) == WORST_BEST_SIZE
+
+    def test_deduplicates_by_question_keeping_correct_extreme(self) -> None:
+        """Duplicate questions collapse: worst keeps highest, best keeps lowest."""
+        rows = [
+            self._valid_row("q1", 0.9, False),  # brier 0.81
+            self._valid_row("q1", 0.4, False),  # brier 0.16 (same question, better)
+            self._valid_row("q2", 0.5, True),  # brier 0.25
+        ]
+        worst, best = _score_extreme_predictions(rows)
+        # q1 appears once in each list, with the extremum Brier preserved.
+        q1_worst = [e for e in worst if e["question_text"] == "q1"]
+        q1_best = [e for e in best if e["question_text"] == "q1"]
+        assert len(q1_worst) == 1
+        assert len(q1_best) == 1
+        assert q1_worst[0]["brier"] == 0.81
+        assert q1_best[0]["brier"] == 0.16
+
+    def test_excludes_invalid_rows(self) -> None:
+        """Rows with non-'valid' parse status, missing p_yes, or missing outcome drop out."""
+        valid = self._valid_row("q-valid", 0.5, True)
+        invalid_status = _row(status="invalid")
+        invalid_status["question_text"] = "q-invalid"
+        no_outcome = self._valid_row("q-no-outcome", 0.5, True)
+        no_outcome["final_outcome"] = None
+
+        worst, best = _score_extreme_predictions([valid, invalid_status, no_outcome])
+        assert [e["question_text"] for e in worst] == ["q-valid"]
+        assert [e["question_text"] for e in best] == ["q-valid"]
+
+    def test_excludes_rows_with_empty_or_missing_question_text(self) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        valid = self._valid_row("q-valid", 0.5, True)
+        empty_question = self._valid_row("", 0.9, False)
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        worst, best = _score_extreme_predictions(
+            [valid, empty_question, missing_question]
+        )
+        assert [e["question_text"] for e in worst] == ["q-valid"]
+        assert [e["question_text"] for e in best] == ["q-valid"]
+
+    def test_empty_input(self) -> None:
+        """No rows -> empty lists."""
+        worst, best = _score_extreme_predictions([])
+        assert worst == []
+        assert best == []
+
+    def test_entry_carries_expected_fields(self) -> None:
+        """Each entry exposes question, tool, p_yes, outcome, brier, platform, category."""
+        row = self._valid_row("q1", 0.8, False)
+        row["platform"] = "polymarket"
+        row["category"] = "politics"
+        row["tool_name"] = "tool-x"
+
+        worst, _ = _score_extreme_predictions([row])
+        entry = worst[0]
+        assert entry == {
+            "question_text": "q1",
+            "tool_name": "tool-x",
+            "p_yes": 0.8,
+            "final_outcome": False,
+            "brier": 0.64,
+            "platform": "polymarket",
+            "category": "politics",
+        }
+
+
+class TestScoreIncludesNewRollingFields:
+    """Regression tests confirming score() returns latency_reservoir + worst_10 + best_10."""
+
+    def test_score_output_contains_latency_reservoir(self) -> None:
+        """score() emits latency_reservoir keyed by tool."""
+        rows = [
+            {**_row(tool="tool-a"), "latency_s": 2.5},
+            {**_row(tool="tool-a"), "latency_s": 3.5},
+        ]
+        result = score(rows)
+        assert result["latency_reservoir"] == {"tool-a": [2.5, 3.5]}
+
+    def test_score_output_contains_worst_and_best(self) -> None:
+        """score() emits worst_10 and best_10 populated from valid rows."""
+        rows = [
+            {**_row(p_yes=0.9, outcome=False), "question_text": "q-worst"},
+            {**_row(p_yes=0.1, outcome=False), "question_text": "q-best"},
+        ]
+        result = score(rows)
+        assert result["worst_10"][0]["question_text"] == "q-worst"
+        assert result["best_10"][0]["question_text"] == "q-best"
+
+    def test_score_output_empty_rolling_fields_on_no_data(self) -> None:
+        """Empty rows -> empty rolling fields (no KeyError downstream)."""
+        result = score([])
+        assert result["latency_reservoir"] == {}
+        assert result["worst_10"] == []
+        assert result["best_10"] == []

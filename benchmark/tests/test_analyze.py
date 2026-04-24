@@ -2629,6 +2629,32 @@ class TestZeroRowPrevRollingRouting:
         )
         assert "no prev window" not in report
 
+    def test_prev_value_and_delta_cells_agree_when_no_prev_window(self) -> None:
+        """When prev is None, the prev-value cell and delta cell render identically.
+
+        Regression test for a consistency bug where the delta cell
+        said ``no prev window`` but the prev-value cell on the same row
+        rendered ``N/A (n=0)`` — two different messages for the same
+        state in neighboring columns of a single row.
+        """
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=None,
+            disabled_tools={},
+        )
+        # The value-cell on the prev column must carry "no prev window"
+        # wherever a delta cell does; an "N/A (n=0)" leaking through
+        # would mean a no-prev-window row is claiming it measured the
+        # previous window and found zero rows.
+        for line in report.splitlines():
+            if line.startswith("|") and "no prev window" in line:
+                assert "N/A (n=0)" not in line, line
+
 
 class TestSectionReliabilityComparison:
     """section_reliability_comparison shows reliability and valid % deltas."""

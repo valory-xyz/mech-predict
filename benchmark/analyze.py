@@ -856,14 +856,15 @@ def _platform_metric_row(
     value_fmt = _pct_cell if is_pct else lambda v, n: _value_cell(v, n, decimals)
 
     delta_alltime = _delta_cell(c_val, a_val, c_n, a_n, lower_is_better)
-    delta_prev = (
-        _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
-        if prev is not None
-        else "no prev window"
-    )
+    if prev is None:
+        prev_val_cell = "no prev window"
+        delta_prev = "no prev window"
+    else:
+        prev_val_cell = value_fmt(p_val, p_n)
+        delta_prev = _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
     return (
         f"| {label} | {value_fmt(c_val, c_n)} | {value_fmt(a_val, a_n)}"
-        f" | {delta_alltime} | {value_fmt(p_val, p_n)} | {delta_prev} |"
+        f" | {delta_alltime} | {prev_val_cell} | {delta_prev} |"
     )
 
 
@@ -1004,17 +1005,18 @@ def section_tool_comparison(
 
         flag = _sample_label(c) if c else ""
         delta_at = _delta_cell(c_brier, a_brier, c_n, a_n)
-        delta_prev = (
-            _delta_cell(c_brier, p_brier, c_n, p_n)
-            if prev_rolling_scores is not None
-            else "no prev window"
-        )
+        if prev_rolling_scores is None:
+            prev_val_cell = "no prev window"
+            delta_prev = "no prev window"
+        else:
+            prev_val_cell = _value_cell(p_brier, p_n)
+            delta_prev = _delta_cell(c_brier, p_brier, c_n, p_n)
         lines.append(
             f"| **{tool}**{flag}"
             f" | {_value_cell(c_brier, c_n)}"
             f" | {_value_cell(a_brier, a_n)}"
             f" | {delta_at}"
-            f" | {_value_cell(p_brier, p_n)}"
+            f" | {prev_val_cell}"
             f" | {delta_prev} |"
         )
     return "\n".join(lines)
@@ -1078,17 +1080,18 @@ def section_tool_category_comparison(
         p_brier = p_stats.get("brier") if p_stats else None
 
         delta_at = _delta_cell(c_brier, a_brier, c_n, a_n)
-        delta_prev = (
-            _delta_cell(c_brier, p_brier, c_n, p_n)
-            if prev_rolling_scores is not None
-            else "no prev window"
-        )
+        if prev_rolling_scores is None:
+            prev_val_cell = "no prev window"
+            delta_prev = "no prev window"
+        else:
+            prev_val_cell = _value_cell(p_brier, p_n)
+            delta_prev = _delta_cell(c_brier, p_brier, c_n, p_n)
         lines.append(
             f"| {tool} | {cat}"
             f" | {_value_cell(c_brier, c_n)}"
             f" | {_value_cell(a_brier, a_n)}"
             f" | {delta_at}"
-            f" | {_value_cell(p_brier, p_n)}"
+            f" | {prev_val_cell}"
             f" | {delta_prev} |"
         )
     return "\n".join(lines)
@@ -1178,17 +1181,18 @@ def section_diagnostics_comparison(
                 continue
 
             delta_at = _delta_cell(c_val, a_val, c_n, a_n, lower_is_better)
-            delta_prev = (
-                _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
-                if prev_rolling_scores is not None
-                else "no prev window"
-            )
+            if prev_rolling_scores is None:
+                prev_val_cell = "no prev window"
+                delta_prev = "no prev window"
+            else:
+                prev_val_cell = _value_cell(p_val, p_n)
+                delta_prev = _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
             lines.append(
                 f"| **{tool}** | {_diag_metric_label(metric_key)}"
                 f" | {_value_cell(c_val, c_n)}"
                 f" | {_value_cell(a_val, a_n)}"
                 f" | {delta_at}"
-                f" | {_value_cell(p_val, p_n)}"
+                f" | {prev_val_cell}"
                 f" | {delta_prev} |"
             )
     # ``lines`` is initialized with 4 items (heading, blank, header row,

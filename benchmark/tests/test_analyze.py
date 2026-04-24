@@ -24,18 +24,17 @@ import pytest
 
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
+    BRIER_RANDOM,
     OMEN_CATEGORIES,
     PLATFORM_LABELS,
     POLYMARKET_ACTIVE_CATEGORIES,
+    ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
     _sample_label,
     generate_report,
-    section_best_predictions,
     section_category,
-    section_edge_analysis,
-    section_latency,
-    section_overall,
+    section_metric_reference,
     section_parse_breakdown,
     section_period,
     section_sample_size_warnings,
@@ -45,7 +44,6 @@ from benchmark.analyze import (
     section_trend,
     section_version_deltas,
     section_weak_spots,
-    section_worst_predictions,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
 
@@ -111,50 +109,6 @@ def _scores(
         "parse_breakdown": parse_breakdown or {},
         "latency_reservoir": latency_reservoir or {},
     }
-
-
-# ---------------------------------------------------------------------------
-# section_overall
-# ---------------------------------------------------------------------------
-
-
-class TestSectionOverall:
-    """Tests for section_overall."""
-
-    def test_normal(self) -> None:
-        """Test normal scores with valid brier and reliability."""
-        result = section_overall(_scores(brier=0.31, reliability=0.95))
-        assert "0.31" in result
-        assert "95%" in result
-
-    def test_empty_dataset(self) -> None:
-        """Test empty dataset with no predictions."""
-        result = section_overall(
-            _scores(brier=None, reliability=None, total=0, valid=0)
-        )
-        assert "No predictions to score" in result
-
-    def test_all_invalid(self) -> None:
-        """Test all invalid predictions."""
-        result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
-        assert "N/A" in result  # Brier is N/A
-
-    def test_no_signal_rate_small_value_renders_two_decimals(self) -> None:
-        """No-signal rate formats with 2 decimal places.
-
-        Previously rendered as ':.0%' which rounded tiny-but-nonzero
-        rates like 0.00072 to '0%' even though the count shown next to
-        it was clearly positive. Two decimals surface values in the
-        0.01%-1% range where the no-signal rate typically lives.
-        """
-        s = _scores(brier=0.3, reliability=0.95)
-        s["overall"]["no_signal_rate"] = 0.00072
-        s["overall"]["no_signal_count"] = 142
-        result = section_overall(s)
-        assert "0.07%" in result
-        assert "142 predictions at exactly 0.5" in result
-        # Make sure the rendered value is not the stale '0%' form.
-        assert "No-signal rate: 0%" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -910,68 +864,6 @@ class TestSectionPeriod:
 
 
 # ---------------------------------------------------------------------------
-# section_worst_predictions / section_best_predictions
-# ---------------------------------------------------------------------------
-
-
-class TestSectionWorstPredictions:
-    """Tests for section_worst_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering worst prediction entries."""
-        s = _scores(
-            worst_10=[
-                {
-                    "question_text": "Will X happen?",
-                    "tool_name": "tool-a",
-                    "p_yes": 0.95,
-                    "final_outcome": False,
-                    "brier": 0.9025,
-                    "platform": "omen",
-                    "category": "finance",
-                },
-            ]
-        )
-        result = section_worst_predictions(s)
-        assert "Will X happen?" in result
-        assert "0.9025" in result
-        assert "tool-a" in result
-
-    def test_empty(self) -> None:
-        """Test empty worst predictions."""
-        result = section_worst_predictions(_scores())
-        assert "No prediction data" in result
-
-
-class TestSectionBestPredictions:
-    """Tests for section_best_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering best prediction entries."""
-        s = _scores(
-            best_10=[
-                {
-                    "question_text": "Will Y happen?",
-                    "tool_name": "tool-b",
-                    "p_yes": 0.98,
-                    "final_outcome": True,
-                    "brier": 0.0004,
-                    "platform": "polymarket",
-                    "category": "politics",
-                },
-            ]
-        )
-        result = section_best_predictions(s)
-        assert "Will Y happen?" in result
-        assert "0.0004" in result
-
-    def test_empty(self) -> None:
-        """Test empty best predictions."""
-        result = section_best_predictions(_scores())
-        assert "No prediction data" in result
-
-
-# ---------------------------------------------------------------------------
 # Parse breakdown
 # ---------------------------------------------------------------------------
 
@@ -994,31 +886,6 @@ class TestSectionParseBreakdown:
         """Test empty parse breakdown."""
         result = section_parse_breakdown(_scores())
         assert "No parse data" in result
-
-
-# ---------------------------------------------------------------------------
-# Latency
-# ---------------------------------------------------------------------------
-
-
-class TestSectionLatency:
-    """Tests for section_latency."""
-
-    def test_renders_table(self) -> None:
-        """Test rendering latency table."""
-        s = _scores(
-            latency_reservoir={
-                "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
-            }
-        )
-        result = section_latency(s)
-        assert "tool-a" in result
-        assert "Median" in result
-
-    def test_empty(self) -> None:
-        """Test empty latency data."""
-        result = section_latency(_scores())
-        assert "No latency data" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1059,31 +926,38 @@ class TestGenerateReport:
             ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(s, history, platform="omen", disabled_tools={})
+        report = generate_report(
+            s, history, platform="omen", rolling_scores=s, disabled_tools={}
+        )
 
         assert "# Benchmark Report (Omenstrat) — " in report
-        assert "## Overall" in report
-        assert "## Tool Ranking" in report
+        assert "## Metric References" in report
+        assert "## Tool Ranking (Last 3 Days)" in report
         # Per-platform reports drop Platform Comparison / Tool × Platform —
         # they'd be single-row tables with no signal.
         assert "## Platform Comparison" not in report
         assert "## Tool \u00d7 Platform" not in report
-        assert "## Category Performance" in report
-        assert "## Tool \u00d7 Category" in report
-        assert "## Weak Spots" in report
+        assert "## Category Performance (Last 3 Days)" in report
+        assert "## Tool \u00d7 Category (Last 3 Days)" in report
+        assert "## Weak Spots (Last 3 Days)" in report
         assert "## Reliability Issues" in report
-        assert "## Worst Predictions" in report
-        assert "## Best Predictions" in report
         assert "## Trend" in report
         assert "## Sample Size Warnings" in report
-        assert "## Diagnostic Edge Metrics" in report
+        assert "## Diagnostic Edge Metrics (Last 3 Days)" in report
+        # Dropped in the Phase 2 single-window collapse.
+        assert "## Overall" not in report
+        assert "## Worst Predictions" not in report
+        assert "## Best Predictions" not in report
+        assert "## Edge Over Market" not in report
+        assert "## Calibration" not in report
+        assert "## Latency" not in report
 
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
         report = generate_report(s, [], platform="omen", disabled_tools={})
         assert "# Benchmark Report (Omenstrat) — " in report
-        assert "No predictions to score" in report
+        assert "No period data available." in report
 
 
 # ---------------------------------------------------------------------------
@@ -1498,7 +1372,7 @@ class TestGenerateReportTournamentToggle:
             disabled_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "Tool × Version × Mode (Last 7 Days)" in report
+        assert "Tool × Version × Mode (Last 3 Days)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1669,9 +1543,12 @@ class TestGenerateReportWithTournamentFiles:
             platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
+            rolling_scores=prod,
+            rolling_scores_tournament=tourn,
         )
-        assert "## Overall — Tournament" in report
-        assert "## Tool Ranking — Tournament" in report
+        # Overall is dropped in Phase 2; Tool Ranking carries the rolling suffix.
+        assert "## Overall" not in report
+        assert "## Tool Ranking (Last 3 Days) — Tournament" in report
 
     def test_empty_period_tournament_does_not_render_section(self) -> None:
         """Tournament period files with zero rows don't emit empty sections.
@@ -1695,7 +1572,7 @@ class TestGenerateReportWithTournamentFiles:
             rolling_scores_tournament=empty_period_tourn,
         )
         assert "## Since Last Report — Tournament" not in report
-        assert "## Last 7 Days Rolling — Tournament" not in report
+        assert "## Last 3 Days Rolling — Tournament" not in report
 
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""
@@ -1799,59 +1676,6 @@ class TestGenerateReportPerPlatform:
             "omen": "Omenstrat",
             "polymarket": "Polystrat",
         }
-
-
-class TestSectionEdgeAnalysisPlatformGate:
-    """section_edge_analysis drops platform sub-blocks when platform is set."""
-
-    def _scores_with_edge(self) -> dict[str, Any]:
-        """Minimal scores dict with edge data on every platform breakdown."""
-        return {
-            "edge_eligibility": {"n_eligible": 100, "n_total": 100},
-            "by_platform": {
-                "omen": {
-                    "edge": 0.05,
-                    "edge_n": 80,
-                    "edge_positive_rate": 0.6,
-                },
-            },
-            "by_platform_difficulty": {
-                "omen | hard": {
-                    "edge": 0.03,
-                    "edge_n": 40,
-                    "edge_positive_rate": 0.55,
-                    "brier": 0.24,
-                    "n": 50,
-                },
-            },
-            "by_platform_liquidity": {
-                "omen | high": {
-                    "edge": 0.04,
-                    "edge_n": 30,
-                    "edge_positive_rate": 0.6,
-                    "brier": 0.22,
-                    "n": 40,
-                },
-            },
-        }
-
-    def test_platform_sub_blocks_dropped_when_platform_set(self) -> None:
-        """Single-platform scores: sub-blocks degenerate to one row, drop them."""
-        s = self._scores_with_edge()
-        rendered = section_edge_analysis(s, platform="omen")
-        assert "### By Platform" not in rendered
-        assert "### By Platform \u00d7 Difficulty" not in rendered
-        assert "### By Platform \u00d7 Liquidity" not in rendered
-        # Section header and eligibility summary still render.
-        assert "Edge-eligible rows: 100 / 100" in rendered
-
-    def test_platform_sub_blocks_present_when_platform_not_set(self) -> None:
-        """Fleet-wide render keeps sub-blocks (backwards-compat for callers)."""
-        s = self._scores_with_edge()
-        rendered = section_edge_analysis(s)
-        assert "### By Platform" in rendered
-        assert "### By Platform \u00d7 Difficulty" in rendered
-        assert "### By Platform \u00d7 Liquidity" in rendered
 
 
 class TestTrendSectionPlatformAnnotation:
@@ -2006,7 +1830,9 @@ class TestToolCategoryPositionInReport:
     def test_tool_category_rendered_exactly_once(self) -> None:
         """The reorder moved the call site, it didn't duplicate the section."""
         scores = _scores_with_tool("tool-a", 0.20, 1000)
-        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        report = generate_report(
+            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+        )
         assert report.count("## Tool \u00d7 Category") == 1
 
     def test_tool_category_lands_before_tool_version_mode(self) -> None:
@@ -2023,9 +1849,151 @@ class TestToolCategoryPositionInReport:
             scores,
             [],
             platform="omen",
+            rolling_scores=scores,
             include_tournament=True,
             disabled_tools={},
         )
-        tc_idx = report.index("## Tool \u00d7 Category")
+        tc_idx = report.index(
+            f"## Tool \u00d7 Category (Last {ROLLING_WINDOW_DAYS} Days)"
+        )
         tvm_idx = report.index("## Tool \u00d7 Version \u00d7 Mode (All-Time)")
         assert tc_idx < tvm_idx
+
+
+class TestSectionMetricReference:
+    """Tests for section_metric_reference."""
+
+    def test_renders_heading_and_core_metrics(self) -> None:
+        """Legend names every headline metric the report renders."""
+        rendered = section_metric_reference()
+        assert "## Metric References" in rendered
+        for label in ("Brier", "Log Loss", "BSS", "Edge over market"):
+            assert label in rendered
+
+    def test_cites_rolling_window_from_constant(self) -> None:
+        """Legend quotes ROLLING_WINDOW_DAYS so a one-line change updates both."""
+        rendered = section_metric_reference()
+        assert f"last {ROLLING_WINDOW_DAYS} days" in rendered
+
+    def test_cites_brier_random_baseline(self) -> None:
+        """Coin-flip Brier anchor is sourced from BRIER_RANDOM."""
+        rendered = section_metric_reference()
+        assert f"coin-flip {BRIER_RANDOM}" in rendered
+
+
+class TestGenerateReportLegendPlacement:
+    """Regression tests for where the metric legend lands in the report body."""
+
+    def test_legend_rendered_before_since_last_report(self) -> None:
+        """Legend sits between the H1 title and the first data section."""
+        scores = _scores()
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        legend_idx = report.index("## Metric References")
+        since_last_idx = report.index("## Since Last Report")
+        assert legend_idx < since_last_idx
+        header_end = report.index("\n")
+        assert legend_idx > header_end
+
+    def test_legend_rendered_exactly_once(self) -> None:
+        """Legend is not duplicated across production + tournament branches."""
+        scores = _scores()
+        tourn = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            disabled_tools={},
+        )
+        assert report.count("## Metric References") == 1
+
+
+class TestGenerateReportRollingWindowAnnotations:
+    """Rolling sections carry the '_n= over last N days._' note; others do not."""
+
+    def test_rolling_sections_carry_window_note(self) -> None:
+        """Tool Ranking / Category / Tool × Category / Diagnostics / Weak Spots."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+        )
+        note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
+        # At least the five rolling point-in-time sections carry it.
+        assert report.count(note) >= 5
+
+    def test_tool_version_mode_rolling_section_carries_window_note(self) -> None:
+        """Tool × Version × Mode (Last N Days) gets the n= qualifier like siblings."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        scores["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 1000,
+                "valid_n": 1000,
+                "brier": 0.2,
+            }
+        }
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            include_tournament=True,
+            disabled_tools={},
+        )
+        heading_idx = report.index(
+            f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
+        )
+        next_heading = report.find("##", heading_idx + 1)
+        body = report[heading_idx : next_heading if next_heading > -1 else len(report)]
+        assert (
+            f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._" in body
+        )
+
+    def test_rolling_sections_absent_when_rolling_scores_missing(self) -> None:
+        """No rolling_scores -> rolling point-in-time sections omitted.
+
+        Falling back to all-time ``scores`` under a "(Last N Days)" heading
+        would mislabel the window. Instead, a single banner explains the gap
+        and the five rolling sections are skipped entirely.
+        """
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        assert f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)" in report
+        assert (
+            f"Rolling scores for the last {ROLLING_WINDOW_DAYS} days are unavailable"
+            in report
+        )
+        for heading in (
+            "## Tool Ranking (Last 3 Days)",
+            "## Category Performance (Last 3 Days)",
+            "## Tool \u00d7 Category (Last 3 Days)",
+            "## Diagnostic Edge Metrics (Last 3 Days)",
+            "## Weak Spots (Last 3 Days)",
+        ):
+            assert heading not in report
+
+    def test_non_rolling_sections_do_not_carry_window_note(self) -> None:
+        """Trend, Base Rates, Tool Deployment Status never claim rolling scope."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
+        report = generate_report(
+            scores,
+            history,
+            platform="omen",
+            rolling_scores=scores,
+            disabled_tools={},
+        )
+        note = f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._"
+        # Split on the Trend header and assert the note is absent between it and
+        # the next section heading.
+        trend_idx = report.index("## Trend")
+        next_section = report.find("##", trend_idx + 1)
+        trend_body = report[
+            trend_idx : next_section if next_section > -1 else len(report)
+        ]
+        assert note not in trend_body
+
+        base_rates_idx = report.index("## Base Rates")
+        next_section = report.find("##", base_rates_idx + 1)
+        base_body = report[base_rates_idx:next_section]
+        assert note not in base_body

@@ -41,6 +41,8 @@ from benchmark.scorer import (
     _empty_group,
     _is_edge_eligible,
     _partition_rows_by_platform,
+    _score_extreme_predictions,
+    _score_latency_reservoir,
     brier_score,
     classify_difficulty,
     classify_disagreement,
@@ -591,6 +593,25 @@ class TestIncrementalUpdate:
         assert questions.count("Same Q?") == 1
         same_q = [w for w in result["worst_10"] if w["question_text"] == "Same Q?"][0]
         assert same_q["brier"] == round(0.9**2, 4)  # worst of the two
+
+    def test_worst_best_skip_rows_without_question_text(self, tmp_path: Path) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        good = {**_row(p_yes=0.9, outcome=False), "question_text": "Readable Q?"}
+        empty_question = {**_row(p_yes=0.95, outcome=False), "question_text": ""}
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        result = update(
+            [good, empty_question, missing_question], scores_path, history_path
+        )
+
+        worst_qs = [w["question_text"] for w in result["worst_10"]]
+        best_qs = [b["question_text"] for b in result["best_10"]]
+        assert worst_qs == ["Readable Q?"]
+        assert best_qs == ["Readable Q?"]
 
     def test_mixed_valid_invalid(self, tmp_path: Path) -> None:
         """Malformed rows count toward n but not valid_n or Brier."""
@@ -2742,3 +2763,184 @@ class TestPerPlatformPeriod:
         prod_omen, _ = result["omen"]
         assert prod_all["overall"]["n"] == 1
         assert prod_omen["overall"]["n"] == 1
+
+
+class TestScoreLatencyReservoir:
+    """Tests for _score_latency_reservoir."""
+
+    def test_groups_latencies_by_tool(self) -> None:
+        """Per-tool latency lists are returned in insertion order."""
+        rows = [
+            {**_row(tool="tool-a"), "latency_s": 1.0},
+            {**_row(tool="tool-b"), "latency_s": 5.0},
+            {**_row(tool="tool-a"), "latency_s": 2.0},
+        ]
+        reservoir = _score_latency_reservoir(rows)
+        assert reservoir == {"tool-a": [1.0, 2.0], "tool-b": [5.0]}
+
+    def test_omits_rows_without_latency(self) -> None:
+        """Rows lacking latency_s do not create empty entries."""
+        rows = [
+            _row(tool="tool-a"),
+            {**_row(tool="tool-b"), "latency_s": 3.0},
+        ]
+        reservoir = _score_latency_reservoir(rows)
+        assert reservoir == {"tool-b": [3.0]}
+
+    def test_caps_at_reservoir_size_keeping_most_recent(self) -> None:
+        """Lists exceeding LATENCY_RESERVOIR_SIZE drop the oldest entries."""
+        excess = LATENCY_RESERVOIR_SIZE + 5
+        rows = [{**_row(tool="tool-a"), "latency_s": float(i)} for i in range(excess)]
+        reservoir = _score_latency_reservoir(rows)
+        assert len(reservoir["tool-a"]) == LATENCY_RESERVOIR_SIZE
+        assert reservoir["tool-a"][0] == float(excess - LATENCY_RESERVOIR_SIZE)
+        assert reservoir["tool-a"][-1] == float(excess - 1)
+
+    def test_missing_tool_name_defaults_to_unknown(self) -> None:
+        """Rows without tool_name land under the 'unknown' bucket."""
+        row = _row()
+        row.pop("tool_name", None)
+        row["tool_name"] = None
+        row["latency_s"] = 0.5
+        reservoir = _score_latency_reservoir([row])
+        assert reservoir == {"unknown": [0.5]}
+
+    def test_empty_input(self) -> None:
+        """No rows -> empty reservoir."""
+        assert not _score_latency_reservoir([])
+
+
+class TestScoreExtremePredictions:
+    """Tests for _score_extreme_predictions."""
+
+    def _valid_row(self, question: str, p_yes: float, outcome: bool) -> dict[str, Any]:
+        """Build a valid row with a question_text for dedup checks."""
+        row = _row(p_yes=p_yes, outcome=outcome)
+        row["question_text"] = question
+        return row
+
+    def test_returns_worst_sorted_descending_by_brier(self) -> None:
+        """Worst list is sorted highest Brier first."""
+        rows = [
+            self._valid_row("q1", 0.9, False),  # brier 0.81
+            self._valid_row("q2", 0.6, True),  # brier 0.16
+            self._valid_row("q3", 0.5, True),  # brier 0.25
+        ]
+        worst, _ = _score_extreme_predictions(rows)
+        assert [e["question_text"] for e in worst] == ["q1", "q3", "q2"]
+
+    def test_returns_best_sorted_ascending_by_brier(self) -> None:
+        """Best list is sorted lowest Brier first."""
+        rows = [
+            self._valid_row("q1", 0.9, False),
+            self._valid_row("q2", 0.6, True),
+            self._valid_row("q3", 0.5, True),
+        ]
+        _, best = _score_extreme_predictions(rows)
+        assert [e["question_text"] for e in best] == ["q2", "q3", "q1"]
+
+    def test_truncates_to_worst_best_size(self) -> None:
+        """Lists are capped at WORST_BEST_SIZE entries each."""
+        rows = [
+            self._valid_row(f"q{i}", 0.1 + 0.01 * i, True)
+            for i in range(WORST_BEST_SIZE + 5)
+        ]
+        worst, best = _score_extreme_predictions(rows)
+        assert len(worst) == WORST_BEST_SIZE
+        assert len(best) == WORST_BEST_SIZE
+
+    def test_deduplicates_by_question_keeping_correct_extreme(self) -> None:
+        """Duplicate questions collapse: worst keeps highest, best keeps lowest."""
+        rows = [
+            self._valid_row("q1", 0.9, False),  # brier 0.81
+            self._valid_row("q1", 0.4, False),  # brier 0.16 (same question, better)
+            self._valid_row("q2", 0.5, True),  # brier 0.25
+        ]
+        worst, best = _score_extreme_predictions(rows)
+        # q1 appears once in each list, with the extremum Brier preserved.
+        q1_worst = [e for e in worst if e["question_text"] == "q1"]
+        q1_best = [e for e in best if e["question_text"] == "q1"]
+        assert len(q1_worst) == 1
+        assert len(q1_best) == 1
+        assert q1_worst[0]["brier"] == 0.81
+        assert q1_best[0]["brier"] == 0.16
+
+    def test_excludes_invalid_rows(self) -> None:
+        """Rows with non-'valid' parse status, missing p_yes, or missing outcome drop out."""
+        valid = self._valid_row("q-valid", 0.5, True)
+        invalid_status = _row(status="invalid")
+        invalid_status["question_text"] = "q-invalid"
+        no_outcome = self._valid_row("q-no-outcome", 0.5, True)
+        no_outcome["final_outcome"] = None
+
+        worst, best = _score_extreme_predictions([valid, invalid_status, no_outcome])
+        assert [e["question_text"] for e in worst] == ["q-valid"]
+        assert [e["question_text"] for e in best] == ["q-valid"]
+
+    def test_excludes_rows_with_empty_or_missing_question_text(self) -> None:
+        """Without the guard, empty/missing questions collide into one "" bucket."""
+        valid = self._valid_row("q-valid", 0.5, True)
+        empty_question = self._valid_row("", 0.9, False)
+        missing_question = _row(p_yes=0.1, outcome=True)
+        missing_question.pop("question_text", None)
+
+        worst, best = _score_extreme_predictions(
+            [valid, empty_question, missing_question]
+        )
+        assert [e["question_text"] for e in worst] == ["q-valid"]
+        assert [e["question_text"] for e in best] == ["q-valid"]
+
+    def test_empty_input(self) -> None:
+        """No rows -> empty lists."""
+        worst, best = _score_extreme_predictions([])
+        assert worst == []
+        assert best == []
+
+    def test_entry_carries_expected_fields(self) -> None:
+        """Each entry exposes question, tool, p_yes, outcome, brier, platform, category."""
+        row = self._valid_row("q1", 0.8, False)
+        row["platform"] = "polymarket"
+        row["category"] = "politics"
+        row["tool_name"] = "tool-x"
+
+        worst, _ = _score_extreme_predictions([row])
+        entry = worst[0]
+        assert entry == {
+            "question_text": "q1",
+            "tool_name": "tool-x",
+            "p_yes": 0.8,
+            "final_outcome": False,
+            "brier": 0.64,
+            "platform": "polymarket",
+            "category": "politics",
+        }
+
+
+class TestScoreIncludesNewRollingFields:
+    """Regression tests confirming score() returns latency_reservoir + worst_10 + best_10."""
+
+    def test_score_output_contains_latency_reservoir(self) -> None:
+        """score() emits latency_reservoir keyed by tool."""
+        rows = [
+            {**_row(tool="tool-a"), "latency_s": 2.5},
+            {**_row(tool="tool-a"), "latency_s": 3.5},
+        ]
+        result = score(rows)
+        assert result["latency_reservoir"] == {"tool-a": [2.5, 3.5]}
+
+    def test_score_output_contains_worst_and_best(self) -> None:
+        """score() emits worst_10 and best_10 populated from valid rows."""
+        rows = [
+            {**_row(p_yes=0.9, outcome=False), "question_text": "q-worst"},
+            {**_row(p_yes=0.1, outcome=False), "question_text": "q-best"},
+        ]
+        result = score(rows)
+        assert result["worst_10"][0]["question_text"] == "q-worst"
+        assert result["best_10"][0]["question_text"] == "q-best"
+
+    def test_score_output_empty_rolling_fields_on_no_data(self) -> None:
+        """Empty rows -> empty rolling fields (no KeyError downstream)."""
+        result = score([])
+        assert result["latency_reservoir"] == {}
+        assert result["worst_10"] == []
+        assert result["best_10"] == []

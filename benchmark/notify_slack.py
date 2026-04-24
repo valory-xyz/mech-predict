@@ -26,29 +26,33 @@ from types import MappingProxyType
 from typing import Mapping
 from urllib.request import Request, urlopen
 
-from benchmark.analyze import PLATFORM_LABELS, VERSION_DELTA_LOW_SAMPLE_STRICT
+from benchmark.analyze import (
+    PLATFORM_LABELS,
+    ROLLING_WINDOW_DAYS,
+    VERSION_DELTA_LOW_SAMPLE_STRICT,
+)
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
 SUMMARY_SYSTEM_PROMPT_TEMPLATE = f"""\
-Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). Every number in this report is already scoped to {{platform_label}} — do NOT compare platforms or reference the other deployment.
+Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). All tool-level figures in the report are scoped to the last {ROLLING_WINDOW_DAYS} days for {{platform_label}} unless a section heading explicitly says otherwise (e.g. "Tool × Version × Mode (All-Time)", "Trend", "Base Rates"). Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
 
-*Summary:* 2-3 sentence high-level takeaway for {{platform_label}} — lead with what changed since last report and in the last 7 days. Only mention all-time numbers for context. Include deltas vs all-time where available.
+*Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Open with the 1-day delta from the "Since Last Report" section (what moved since yesterday's report), then pivot to the {ROLLING_WINDOW_DAYS}-day rolling view. Keep the two windows distinct — never attribute a Since-Last-Report figure to the rolling window or vice versa.
 
 *Top tools:*
-• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
-(list top 3, rank by Brier. Log Loss and Edge are shown alongside for context)
+• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X, last {ROLLING_WINDOW_DAYS} days), directional accuracy X%, one word on why
+(list top 3 from the "Tool Ranking (Last {ROLLING_WINDOW_DAYS} Days)" section, rank by Brier. Log Loss and Edge are shown alongside for context)
 
 *Worst tools:*
-• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
+• `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X, last {ROLLING_WINDOW_DAYS} days), directional accuracy X%, one word on why
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
 *Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
 
-*Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the answer to "where do our agents do well vs poorly" for {{platform_label}} — always include when data is present. IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
+*Category performance:* from the "Category Performance (Last {ROLLING_WINDOW_DAYS} Days)" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X, last {ROLLING_WINDOW_DAYS} days). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
 
-*Tool × Category:* from the "Tool × Category" section, list every tool-category cell that clears the sample-size threshold. Use format: • `tool` × `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("tools struggle on X across the board"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
+*Tool × Category:* from the "Tool × Category (Last {ROLLING_WINDOW_DAYS} Days)" section, list every tool-category cell that clears the sample-size threshold. Use format: • `tool` × `category` — Brier `X.XX`, Edge `±X.XX` (n=X, last {ROLLING_WINDOW_DAYS} days). Never cite rows from the "below n=X threshold omitted" list. If all tools underperform on a category, say that explicitly ("tools struggle on X across the board"). FALLBACK: if fewer than 2 rows clear the sample-size threshold in the Tool × Category ranking table, do NOT cite any sparse examples or fabricate — write exactly "insufficient tool × category data" as the only bullet in this section.
 
 *Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes, one bullet per row.
 
@@ -66,15 +70,16 @@ Rules:
 *Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Skip this section entirely if no Tournament Callouts section is present in the report.
 
 *Diagnostics:*
-If the report includes "Diagnostic Edge Metrics", summarize:
-• Conditional accuracy: X% tool-wins when disagreeing (n=X) — when the tool would trigger a trade, how often is it closer to truth than the market?
+If the report includes "Diagnostic Edge Metrics (Last {ROLLING_WINDOW_DAYS} Days)", summarize:
+• Conditional accuracy: X% tool-wins when disagreeing (n=X, last {ROLLING_WINDOW_DAYS} days) — when the tool would trigger a trade, how often is it closer to truth than the market?
 • Disagreement Brier (large trade): X.XX — prediction accuracy on high-disagreement questions where PnL impact is highest
 • Directional bias: ±X.XX — positive = tool overestimates, negative = underestimates, near 0 = no systematic bias
 Only include this section if the report has diagnostic metric data. Skip if insufficient data.
 
-*Recommended actions:* 2-3 concrete next steps for {{platform_label}} based on the data. If edge is negative for all tools, this is important — recommend specific improvements.
+*Recommended actions:* 2-3 concrete next steps for {{platform_label}} based on the last {ROLLING_WINDOW_DAYS} days of data. If edge is negative for all tools, this is important — recommend specific improvements.
 
 Rules:
+- Every tool-level or category-level n= citation is over the last {ROLLING_WINDOW_DAYS} days. Do NOT attribute point-in-time Brier / Edge / accuracy / BSS figures to "all-time" or "cumulative" scope.
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
 - Wrap tool names, Brier scores, and Edge scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.

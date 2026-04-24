@@ -1900,7 +1900,7 @@ class TestSectionToolDeploymentStatusInverted:
     def test_omen_platform_hides_polystrat_deployment(self) -> None:
         """Omenstrat report never mentions polystrat Pearl."""
         scores = self._scores_with_tools("tool-a", "tool-b")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": [],
             "omenstrat QS": [],
             "polystrat Pearl": ["tool-a"],
@@ -1913,7 +1913,7 @@ class TestSectionToolDeploymentStatusInverted:
     def test_polymarket_platform_hides_omenstrat_deployments(self) -> None:
         """Polystrat report never mentions omenstrat-anything."""
         scores = self._scores_with_tools("tool-a")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-a"],
             "omenstrat QS": ["tool-a"],
             "polystrat Pearl": [],
@@ -1927,14 +1927,18 @@ class TestSectionToolDeploymentStatusInverted:
     def test_heading_carries_platform_label(self) -> None:
         """Section heading is scoped with the deployment label."""
         scores = self._scores_with_tools("tool-a")
-        disabled = {"omenstrat Pearl": [], "omenstrat QS": [], "polystrat Pearl": []}
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
         rendered = section_tool_deployment_status(scores, disabled, platform="omen")
         assert rendered.startswith("## Tool Deployment Status (Omenstrat)")
 
     def test_active_tools_exclude_disabled(self) -> None:
         """Active tools are the benchmarked set with disabled tools removed."""
         scores = self._scores_with_tools("tool-a", "tool-b", "tool-c")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-b"],
             "omenstrat QS": [],
             "polystrat Pearl": [],
@@ -1953,7 +1957,7 @@ class TestSectionToolDeploymentStatusInverted:
     def test_normalizes_underscores_in_disabled_list(self) -> None:
         """Config files sometimes list prediction_request_X; treat as equivalent."""
         scores = self._scores_with_tools("prediction-request-reasoning")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["prediction_request_reasoning"],
             "omenstrat QS": [],
             "polystrat Pearl": [],
@@ -1967,7 +1971,7 @@ class TestSectionToolDeploymentStatusInverted:
     def test_failed_fetch_renders_unavailable_banner(self) -> None:
         """Deployment whose fetch returned None is not claimed as empty."""
         scores = self._scores_with_tools("tool-a")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": None,
             "omenstrat QS": [],
             "polystrat Pearl": [],
@@ -1979,7 +1983,7 @@ class TestSectionToolDeploymentStatusInverted:
     def test_fleet_wide_mode_still_supported(self) -> None:
         """platform=None keeps the legacy fleet-wide render for ad-hoc callers."""
         scores = self._scores_with_tools("tool-a")
-        disabled = {
+        disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": [],
             "omenstrat QS": [],
             "polystrat Pearl": [],

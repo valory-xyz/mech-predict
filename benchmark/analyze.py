@@ -129,34 +129,46 @@ def load_history(path: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def section_metric_reference() -> str:
+def section_metric_reference(include_scope_note: bool = True) -> str:
     """Render the metric-reference legend shown at the top of every report.
 
+    :param include_scope_note: when True, prepends the rolling-vs-all-time
+        scope explanation. The fleet report omits the note because it
+        contains no rolling-scoped sections.
     :return: markdown section string.
     """
-    lines = [
-        "## Metric References",
-        "",
-        (
-            "All point-in-time metrics below are scoped to the rolling window "
-            f"(last {ROLLING_WINDOW_DAYS} days) unless a section explicitly says "
-            "otherwise."
-        ),
-        "",
-        f"- **Brier** — ideal 0.00, coin-flip {BRIER_RANDOM}; lower is better.",
-        (
-            "- **Log Loss** — ideal 0.00; lower is better, punishes confident "
-            "errors harder."
-        ),
-        (
-            "- **BSS (Brier Skill Score)** — ideal > 0; negative means worse than "
-            "the base-rate predictor."
-        ),
-        (
-            "- **Edge over market** — ideal > 0; positive = tool beats market "
-            "consensus. System diagnostic, not a tool ranking signal."
-        ),
-    ]
+    lines = ["## Metric References", ""]
+    if include_scope_note:
+        lines.extend(
+            [
+                (
+                    f"Sections whose heading carries `(Last {ROLLING_WINDOW_DAYS} "
+                    "Days)` are scoped to the rolling window — a single aggregate "
+                    "over that window, not a trailing-average series. Sections "
+                    "tagged `(All-Time)` are cumulative from the first scored "
+                    "row. The Trend section is fleet-wide monthly, independent "
+                    "of this report's platform scope."
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            f"- **Brier** — ideal 0.00, coin-flip {BRIER_RANDOM}; lower is better.",
+            (
+                "- **Log Loss** — ideal 0.00; lower is better, punishes confident "
+                "errors harder."
+            ),
+            (
+                "- **BSS (Brier Skill Score)** — ideal > 0; negative means worse "
+                "than the base-rate predictor."
+            ),
+            (
+                "- **Edge over market** — ideal > 0; positive = tool beats "
+                "market consensus. System diagnostic, not a tool ranking signal."
+            ),
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -444,6 +456,128 @@ def section_tool_category(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def section_category_platform(scores: dict[str, Any]) -> str:
+    """Category × platform cross breakdown — gated by MIN_SAMPLE_SIZE.
+
+    :param scores: parsed combined ``scores.json`` dict with a
+        ``by_category_platform`` mapping.
+    :return: markdown section string.
+    """
+    data = scores.get("by_category_platform") or {}
+    if not data:
+        return "## Category × Platform\n\n" "No cross-breakdown data available."
+
+    ranked = sorted(data.items(), key=brier_sort_key)
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+    sparse = [(k, s) for k, s in ranked if s["n"] < MIN_SAMPLE_SIZE]
+
+    lines = [
+        "## Category × Platform",
+        "",
+        f"> Cells with n < {MIN_SAMPLE_SIZE} are moved to a separate list below.",
+        "",
+        "| Category | Platform | Brier | BSS | LogLoss | DirAcc | n |",
+        "|----------|----------|-------|-----|---------|--------|---|",
+    ]
+    if not sufficient:
+        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | | |")
+    for key, stats in sufficient:
+        parts = key.split(" | ")
+        category = parts[0] if parts else key
+        platform = parts[1] if len(parts) > 1 else "?"
+        brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        bss = stats.get("brier_skill_score")
+        bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        ll = stats.get("log_loss")
+        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
+        lines.append(
+            f"| {category} | {platform} | {brier} | {bss_str} | {ll_str} | {acc}"
+            f" | {stats['n']} |"
+        )
+
+    if sparse:
+        lines.append("")
+        lines.append(
+            f"_{len(sparse)} cell(s) below n={MIN_SAMPLE_SIZE} threshold omitted"
+            " from ranking._"
+        )
+        for key, stats in sparse[:5]:
+            parts = key.split(" | ")
+            category = parts[0] if parts else key
+            platform = parts[1] if len(parts) > 1 else "?"
+            lines.append(
+                f"- **{category} | {platform}**: insufficient data (n={stats['n']})"
+            )
+
+    return "\n".join(lines)
+
+
+def section_tool_category_platform(scores: dict[str, Any]) -> str:
+    """Tool × category × platform tri-dimensional breakdown.
+
+    Gated by MIN_SAMPLE_SIZE. Rendered as a table so readers can rank
+    the combined (tool, category, platform) slice directly from one
+    artifact.
+
+    :param scores: parsed combined ``scores.json`` dict with a
+        ``by_tool_category_platform`` mapping.
+    :return: markdown section string.
+    """
+    data = scores.get("by_tool_category_platform") or {}
+    if not data:
+        return "## Tool × Category × Platform\n\n" "No cross-breakdown data available."
+
+    ranked = sorted(data.items(), key=brier_sort_key)
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+    sparse_count = len(ranked) - len(sufficient)
+
+    lines = [
+        "## Tool × Category × Platform",
+        "",
+        f"> Cells with n < {MIN_SAMPLE_SIZE} are omitted.",
+        "",
+        "| Tool | Category | Platform | Brier | BSS | LogLoss | Edge | DirAcc | n |",
+        "|------|----------|----------|-------|-----|---------|------|--------|---|",
+    ]
+    if not sufficient:
+        lines.append(f"| _(no cells with n ≥ {MIN_SAMPLE_SIZE})_ | | | | | | | | |")
+    for key, stats in sufficient:
+        parts = key.split(" | ")
+        tool = parts[0] if parts else key
+        category = parts[1] if len(parts) > 1 else "?"
+        platform = parts[2] if len(parts) > 2 else "?"
+        brier = f"{stats['brier']:.4f}" if stats.get("brier") is not None else "N/A"
+        bss = stats.get("brier_skill_score")
+        bss_str = f"{bss:+.4f}" if bss is not None else "N/A"
+        ll = stats.get("log_loss")
+        ll_str = f"{ll:.4f}" if ll is not None else "N/A"
+        edge = stats.get("edge")
+        edge_str = f"{edge:+.4f}" if edge is not None else "N/A"
+        acc = (
+            f"{stats['directional_accuracy']:.0%}"
+            if stats.get("directional_accuracy") is not None
+            else "N/A"
+        )
+        lines.append(
+            f"| {tool} | {category} | {platform} | {brier} | {bss_str} | {ll_str}"
+            f" | {edge_str} | {acc} | {stats['n']} |"
+        )
+
+    if sparse_count:
+        lines.append("")
+        lines.append(
+            f"_{sparse_count} cell(s) below n={MIN_SAMPLE_SIZE} threshold"
+            " omitted from ranking._"
+        )
+
+    return "\n".join(lines)
+
+
 def section_weak_spots(scores: dict[str, Any]) -> str:
     """Generate the weak spots section."""
     lines = ["## Weak Spots", ""]
@@ -540,9 +674,9 @@ def section_trend(
             }
         )
 
-    lines = ["## Trend", ""]
+    lines = ["## Trend (Fleet-wide, Monthly)", ""]
     if platform is not None:
-        lines.append("_Fleet-wide monthly trend — not scoped to this platform._")
+        lines.append("_Aggregated across all platforms — not scoped to this report._")
         lines.append("")
 
     if not trend:
@@ -893,6 +1027,10 @@ def section_period(
     label: str = "Since last report",
 ) -> str:
     """Generate a period comparison section.
+
+    Renders a single aggregate computed over all rows in the period, not a
+    moving-average series. Deltas compare the period aggregate to the
+    all-time aggregate.
 
     :param period_scores: scores from the recent period.
     :param alltime_scores: all-time scores for delta comparison.
@@ -1528,7 +1666,7 @@ def generate_report(  # pylint: disable=too-many-statements
             )
         )
 
-    rolling_heading = f"Last {ROLLING_WINDOW_DAYS} Days Rolling"
+    rolling_heading = f"Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)"
     if rolling_scores is not None:
         sections.append(section_period(rolling_scores, scores, rolling_heading))
         if render_tournament and _has_tournament_data(rolling_scores_tournament):
@@ -1543,13 +1681,6 @@ def generate_report(  # pylint: disable=too-many-statements
                 )
             )
 
-    sections.append(section_base_rates(scores))
-    sections.append(
-        section_tool_deployment_status(
-            scores, disabled=disabled_tools, platform=platform
-        )
-    )
-
     rolling_suffix = f" (Last {ROLLING_WINDOW_DAYS} Days)"
     rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
 
@@ -1561,8 +1692,8 @@ def generate_report(  # pylint: disable=too-many-statements
 
     if rolling_scores is None:
         sections.append(
-            f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)\n\n"
-            f"Rolling scores for the last {ROLLING_WINDOW_DAYS} days are "
+            f"## Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)\n\n"
+            f"Scores for the last {ROLLING_WINDOW_DAYS} days are "
             "unavailable — the scoring step did not produce "
             f"`rolling_scores_{platform}.json` for this run. Tool Ranking, "
             "Category Performance, Tool × Category, Diagnostic Edge Metrics, "
@@ -1579,6 +1710,17 @@ def generate_report(  # pylint: disable=too-many-statements
                 )
             )
         sections.append(_rolling(section_tool_category(rolling_scores)))
+        sections.append(_rolling(section_category(rolling_scores)))
+        sections.append(_rolling(section_diagnostic_metrics(rolling_scores)))
+        sections.append(_rolling(section_weak_spots(rolling_scores)))
+
+    sections.append(_relabel_heading(section_tool_ranking(scores), " (All-Time)"))
+    sections.append(_relabel_heading(section_base_rates(scores), " (All-Time)"))
+    sections.append(
+        section_tool_deployment_status(
+            scores, disabled=disabled_tools, platform=platform
+        )
+    )
 
     if include_tournament:
         merged = _merged_tvm_scores(scores, scores_tournament)
@@ -1601,21 +1743,12 @@ def generate_report(  # pylint: disable=too-many-statements
         if deltas:
             sections.append(deltas)
 
-    if rolling_scores is not None:
-        sections.extend(
-            [
-                _rolling(section_category(rolling_scores)),
-                _rolling(section_diagnostic_metrics(rolling_scores)),
-                _rolling(section_weak_spots(rolling_scores)),
-            ]
-        )
-
     sections.extend(
         [
-            section_reliability_issues(scores),
-            section_parse_breakdown(scores),
+            _relabel_heading(section_reliability_issues(scores), " (All-Time)"),
+            _relabel_heading(section_parse_breakdown(scores), " (All-Time)"),
             section_trend(history, None, platform=platform),
-            section_sample_size_warnings(scores),
+            _relabel_heading(section_sample_size_warnings(scores), " (All-Time)"),
         ]
     )
 
@@ -1623,6 +1756,47 @@ def generate_report(  # pylint: disable=too-many-statements
         callouts = section_tournament_callouts(scores, scores_tournament)
         if callouts:
             sections.append(callouts)
+
+    return "\n\n".join(sections) + "\n"
+
+
+def generate_fleet_report(
+    scores: dict[str, Any],
+    history: list[dict[str, Any]] | None = None,
+) -> str:
+    """Generate a cross-platform fleet report from the combined scores file.
+
+    Consumes the fleet-wide ``by_platform``, ``by_category_platform`` and
+    ``by_tool_category_platform`` aggregates so readers can rank tools
+    and categories across platforms directly from one artifact. Does not
+    duplicate the per-platform deep dives — those live in
+    ``report_<platform>.md``.
+
+    :param scores: parsed combined ``scores.json`` dict.
+    :param history: list of monthly snapshots from ``scores_history.jsonl``.
+    :return: full markdown report string.
+    """
+    if history is None:
+        history = []
+
+    date = scores.get("generated_at", "")[:10] or datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d"
+    )
+
+    sections: list[str] = [
+        f"# Benchmark Report (Fleet, Cross-Platform) — {date}",
+        (
+            "_Cross-platform view for direct category and tool × category ranking "
+            "across platforms. For per-platform deep dives (rolling window, weak "
+            "spots, deployment status) see `report_omen.md` and "
+            "`report_polymarket.md`._"
+        ),
+        section_metric_reference(include_scope_note=False),
+        section_platform(scores),
+        section_category_platform(scores),
+        section_tool_category_platform(scores),
+        section_trend(history, None),
+    ]
 
     return "\n\n".join(sections) + "\n"
 
@@ -1637,17 +1811,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate benchmark report from scores.",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
         "--platform",
-        required=True,
         choices=sorted(PLATFORM_LABELS),
         help="Platform to scope the report to (drives default paths + header).",
+    )
+    mode_group.add_argument(
+        "--fleet",
+        action="store_true",
+        help=(
+            "Render a cross-platform fleet report from the combined "
+            "scores.json. Uses by_category_platform and "
+            "by_tool_category_platform for direct tri-dimensional ranking."
+        ),
     )
     parser.add_argument(
         "--scores",
         type=Path,
         default=None,
-        help="Override for scores file. Default: results/scores_<platform>.json.",
+        help=(
+            "Override for scores file. Default: results/scores_<platform>.json "
+            "(per-platform) or results/scores.json (fleet)."
+        ),
     )
     parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument(
@@ -1709,9 +1895,25 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    results_dir = DEFAULT_RESULTS_DIR
+    history = load_history(args.history)
+
+    if args.fleet:
+        scores_path = args.scores or results_dir / "scores.json"
+        output_path = args.output or results_dir / "report_fleet.md"
+        scores = load_scores(scores_path)
+        print(
+            f"Loaded fleet scores ({scores.get('total_rows', 0)} rows), "
+            f"{len(history)} months of history"
+        )
+        report = generate_fleet_report(scores, history)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report)
+        print(f"Report written to {output_path}")
+        print(f"\n{report}")
+        return
 
     platform = args.platform
-    results_dir = DEFAULT_RESULTS_DIR
     scores_path = args.scores or results_dir / f"scores_{platform}.json"
     output_path = args.output or results_dir / f"report_{platform}.md"
     period_path = args.period or results_dir / f"period_scores_{platform}.json"
@@ -1732,7 +1934,6 @@ def main() -> None:
         return load_scores(path) if path and path.exists() else None
 
     scores = load_scores(scores_path)
-    history = load_history(args.history)
     period = _maybe_load(period_path)
     rolling = _maybe_load(rolling_path)
     scores_tournament = _maybe_load(scores_tournament_path)

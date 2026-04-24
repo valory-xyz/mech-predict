@@ -32,13 +32,16 @@ from benchmark.analyze import (
     SAMPLE_SIZE_WARNING,
     _parse_tvm_key,
     _sample_label,
+    generate_fleet_report,
     generate_report,
     section_category,
+    section_category_platform,
     section_metric_reference,
     section_parse_breakdown,
     section_period,
     section_sample_size_warnings,
     section_tool_category,
+    section_tool_category_platform,
     section_tool_deployment_status,
     section_tool_version_breakdown,
     section_trend,
@@ -1692,12 +1695,17 @@ class TestTrendSectionPlatformAnnotation:
     def test_fleet_wide_note_renders_with_platform(self) -> None:
         """Platform-scoped render inserts the fleet-wide disclaimer."""
         rendered = section_trend(self._history(), None, platform="omen")
-        assert "Fleet-wide monthly trend" in rendered
+        assert "Aggregated across all platforms" in rendered
 
     def test_no_note_without_platform(self) -> None:
         """Fleet-wide render (no platform arg) stays quiet — it's correct there."""
         rendered = section_trend(self._history(), None)
-        assert "Fleet-wide monthly trend" not in rendered
+        assert "Aggregated across all platforms" not in rendered
+
+    def test_heading_is_fleet_wide_monthly(self) -> None:
+        """Heading names the scope so it's unambiguous even out of context."""
+        rendered = section_trend(self._history(), None)
+        assert "## Trend (Fleet-wide, Monthly)" in rendered
 
     def test_per_platform_report_omits_in_progress_row(self) -> None:
         """generate_report does not append a current-month row in per-platform mode.
@@ -1873,7 +1881,13 @@ class TestSectionMetricReference:
     def test_cites_rolling_window_from_constant(self) -> None:
         """Legend quotes ROLLING_WINDOW_DAYS so a one-line change updates both."""
         rendered = section_metric_reference()
-        assert f"last {ROLLING_WINDOW_DAYS} days" in rendered
+        assert f"(Last {ROLLING_WINDOW_DAYS} Days)" in rendered
+
+    def test_distinguishes_rolling_from_alltime(self) -> None:
+        """Legend explicitly names both scope tags so readers aren't left guessing."""
+        rendered = section_metric_reference()
+        assert "(All-Time)" in rendered
+        assert "not a trailing-average series" in rendered
 
     def test_cites_brier_random_baseline(self) -> None:
         """Coin-flip Brier anchor is sourced from BRIER_RANDOM."""
@@ -1958,10 +1972,9 @@ class TestGenerateReportRollingWindowAnnotations:
         """
         scores = _scores_with_tool("tool-a", 0.20, 1000)
         report = generate_report(scores, [], platform="omen", disabled_tools={})
-        assert f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)" in report
+        assert f"## Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)" in report
         assert (
-            f"Rolling scores for the last {ROLLING_WINDOW_DAYS} days are unavailable"
-            in report
+            f"Scores for the last {ROLLING_WINDOW_DAYS} days are unavailable" in report
         )
         for heading in (
             "## Tool Ranking (Last 3 Days)",
@@ -1997,3 +2010,186 @@ class TestGenerateReportRollingWindowAnnotations:
         next_section = report.find("##", base_rates_idx + 1)
         base_body = report[base_rates_idx:next_section]
         assert note not in base_body
+
+
+class TestGenerateReportAllTimeLabels:
+    """All-time sections carry an explicit (All-Time) suffix in their headings."""
+
+    def test_alltime_sections_labeled(self) -> None:
+        """Every cumulative section is tagged so the legend stays accurate."""
+        scores = _scores_with_tool("tool-a", 0.20, 100)
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        for heading in (
+            "## Tool Ranking (All-Time)",
+            "## Base Rates (All-Time)",
+            "## Reliability Issues (All-Time)",
+            "## Parse/Error Breakdown by Tool (All-Time)",
+            "## Sample Size Warnings (All-Time)",
+        ):
+            assert heading in report, f"missing: {heading}"
+
+    def test_rolling_summary_and_ranking_are_adjacent(self) -> None:
+        """No all-time section slips between the rolling summary and ranking.
+
+        The two rolling-scoped sections must sit next to each other so
+        readers can't mistakenly compare the rolling summary against
+        base-rate numbers from an interleaved all-time section.
+        """
+        scores = _scores_with_tool("tool-a", 0.20, 100)
+        rolling = _scores_with_tool("tool-a", 0.15, 60)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            disabled_tools={},
+        )
+        summary_idx = report.index(
+            f"## Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)"
+        )
+        ranking_idx = report.index(f"## Tool Ranking (Last {ROLLING_WINDOW_DAYS} Days)")
+        between = report[summary_idx:ranking_idx]
+        assert "(All-Time)" not in between, (
+            f"all-time section interleaved between rolling summary and ranking: "
+            f"{between!r}"
+        )
+
+
+class TestSectionCategoryPlatform:
+    """section_category_platform renders the category × platform cross cell table."""
+
+    def _scores_with_cp(self) -> dict[str, Any]:
+        return {
+            "by_category_platform": {
+                "crypto | omen": {
+                    "brier": 0.22,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.5,
+                    "directional_accuracy": 0.6,
+                    "n": 50,
+                },
+                "politics | polymarket": {
+                    "brier": 0.31,
+                    "brier_skill_score": None,
+                    "log_loss": 0.62,
+                    "directional_accuracy": 0.55,
+                    "n": 10,
+                },
+            }
+        }
+
+    def test_sufficient_cells_render_in_table(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE render inline in the main table."""
+        rendered = section_category_platform(self._scores_with_cp())
+        assert "| crypto | omen | 0.2200" in rendered
+
+    def test_sparse_cells_moved_to_footnote(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE are moved out of the ranking."""
+        rendered = section_category_platform(self._scores_with_cp())
+        # politics | polymarket has n=10, below the gate
+        assert "| politics | polymarket | 0.3100" not in rendered
+        assert "insufficient data (n=10)" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty data renders a placeholder, never blows up."""
+        assert "No cross-breakdown data available." in section_category_platform({})
+
+
+class TestSectionToolCategoryPlatform:
+    """section_tool_category_platform renders the tri-dimensional slice."""
+
+    def test_sufficient_cell_rendered(self) -> None:
+        """Cell with n >= MIN_SAMPLE_SIZE appears in the table."""
+        scores = {
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {
+                    "brier": 0.18,
+                    "brier_skill_score": 0.12,
+                    "log_loss": 0.48,
+                    "edge": 0.03,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            }
+        }
+        rendered = section_tool_category_platform(scores)
+        assert "| tool-a | crypto | omen | 0.1800" in rendered
+
+    def test_sparse_cells_omitted(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE are omitted with a count footnote."""
+        scores = {
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {"brier": 0.1, "n": 5},
+                "tool-b | crypto | omen": {"brier": 0.2, "n": 7},
+            }
+        }
+        rendered = section_tool_category_platform(scores)
+        # Neither sparse row renders inline.
+        assert "| tool-a | crypto | omen | 0.1000" not in rendered
+        assert "2 cell(s) below" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty input renders a placeholder."""
+        assert "No cross-breakdown data available." in section_tool_category_platform(
+            {}
+        )
+
+
+class TestGenerateFleetReport:
+    """generate_fleet_report renders the cross-platform view."""
+
+    def _fleet_scores(self) -> dict[str, Any]:
+        return {
+            "generated_at": "2026-03-31T06:00:00Z",
+            "overall": {"brier": 0.25, "n": 100},
+            "by_platform": {
+                "omen": {"brier": 0.22, "n": 60},
+                "polymarket": {"brier": 0.28, "n": 40},
+            },
+            "by_category_platform": {
+                "crypto | omen": {
+                    "brier": 0.20,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.5,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            },
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {
+                    "brier": 0.18,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.48,
+                    "edge": 0.03,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            },
+        }
+
+    def test_header_names_fleet_scope(self) -> None:
+        """Fleet header makes the cross-platform scope unambiguous."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        assert "# Benchmark Report (Fleet, Cross-Platform)" in report
+
+    def test_includes_cross_platform_sections(self) -> None:
+        """Fleet report carries the two cross-platform breakdown headings."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        assert "## Category × Platform" in report
+        assert "## Tool × Category × Platform" in report
+
+    def test_skips_per_platform_deep_dives(self) -> None:
+        """Fleet report does not duplicate per-platform deep dives."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        # No rolling window content, no deployment status, no weak spots —
+        # those live in the per-platform reports.
+        assert "Tool Deployment Status" not in report
+        assert "(Last 3 Days)" not in report
+        assert "Weak Spots" not in report
+
+    def test_trend_renders_without_disclaimer(self) -> None:
+        """Fleet scope matches Trend's fleet-wide semantics — no disclaimer."""
+        history = [{"month": "2026-03", "overall": {"brier": 0.25, "n": 100}}]
+        report = generate_fleet_report(self._fleet_scores(), history)
+        assert "## Trend (Fleet-wide, Monthly)" in report
+        assert "not scoped to this report" not in report

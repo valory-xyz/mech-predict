@@ -77,15 +77,16 @@ class TestBuildSystemPrompt:
         assert "*Summary:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Top tools:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Worst tools:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
-        assert "*Category performance:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Tool × Category:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Tournament callouts:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Diagnostics:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "*Reliability:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Recommended actions:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
     def test_prompt_references_rolling_window_days_constant(self) -> None:
-        """Prompt cites the current ROLLING_WINDOW_DAYS value in its summary bullet."""
-        assert f"last {ROLLING_WINDOW_DAYS} days" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        """Prompt cites the current ROLLING_WINDOW_DAYS value in its window labels."""
+        assert f"Current {ROLLING_WINDOW_DAYS}d" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert f"Prev {ROLLING_WINDOW_DAYS}d" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
     def test_prompt_drops_alltime_scope_instructions(self) -> None:
         """Prompt no longer tells the LLM to cite all-time or cumulative figures.
@@ -96,17 +97,30 @@ class TestBuildSystemPrompt:
         assert "Only mention all-time numbers for context" not in (
             SUMMARY_SYSTEM_PROMPT_TEMPLATE
         )
+        # The prompt still refers to "All-Time" as a window label, but not
+        # as a bolt-on scope that the LLM should opportunistically mix in.
         assert "deltas vs all-time" not in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
-    def test_prompt_anchors_sections_to_rolling_heading_names(self) -> None:
-        """Prompt points the LLM at the Last-N-Days section headings by name."""
+    def test_prompt_anchors_sections_to_comparison_heading_names(self) -> None:
+        """Prompt points the LLM at the new three-window comparison headings."""
         for heading in (
-            f"Tool Ranking (Last {ROLLING_WINDOW_DAYS} Days)",
-            f"Category Performance (Last {ROLLING_WINDOW_DAYS} Days)",
-            f"Tool × Category (Last {ROLLING_WINDOW_DAYS} Days)",
-            f"Diagnostic Edge Metrics (Last {ROLLING_WINDOW_DAYS} Days)",
+            "Platform Snapshot",
+            "Platform Historical Comparison",
+            "Tool Historical Comparison",
+            f"Tool × Category (Current {ROLLING_WINDOW_DAYS}d)",
+            "Tool × Category Historical Comparison",
+            "Diagnostics Historical Comparison",
+            "Reliability & Parse Quality",
         ):
-            assert heading in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+            assert heading in SUMMARY_SYSTEM_PROMPT_TEMPLATE, f"missing: {heading}"
+
+    def test_prompt_enforces_no_mixed_window_claims(self) -> None:
+        """Every cited number must be paired with its window label."""
+        assert "Never mix windows" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        # Guardrail wording for the `insufficient data` / `no prev window`
+        # cells the comparison tables render when n is too small.
+        assert "insufficient data" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "no prev window" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
     def test_deployment_status_points_at_platform_scoped_section(self) -> None:
         """Deployment status bullet anchors to the per-platform section heading.
@@ -132,7 +146,7 @@ class TestBuildSystemPrompt:
         picking an editorial subset.
         """
         assert (
-            "list every tool-category cell that clears the sample-size threshold"
+            "list every cell that clears the sample-size threshold"
             in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         )
         assert "insufficient tool × category data" in SUMMARY_SYSTEM_PROMPT_TEMPLATE

@@ -125,6 +125,88 @@ def load_history(path: Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Three-window comparison helpers
+# ---------------------------------------------------------------------------
+#
+# The per-platform report renders each metric against three windows:
+#
+#   - Current 3d (the rolling window the report is anchored to)
+#   - All-time (cumulative since the first scored row)
+#   - Prev non-overlapping 3d (the 3-day window immediately preceding
+#     the current one, shifted back by the window width so the two
+#     windows share no rows)
+#
+# Delta formatting obeys two hard rules:
+#   - No delta when either side has n < MIN_SAMPLE_SIZE. "insufficient
+#     data" is rendered instead so readers never see a signed number
+#     with no sample-size anchor.
+#   - n is always cited next to the absolute value it measures.
+
+
+_INSUFFICIENT = "insufficient data"
+
+
+def _delta_cell(
+    current: float | None,
+    reference: float | None,
+    current_n: int,
+    reference_n: int,
+    lower_is_better: bool = True,
+) -> str:
+    """Format a delta cell with sample-size guardrails.
+
+    :param current: value from the current window.
+    :param reference: value from the reference window (all-time or prev 3d).
+    :param current_n: sample size for the current window.
+    :param reference_n: sample size for the reference window.
+    :param lower_is_better: when True (default, matches Brier/LogLoss),
+        a negative delta renders as "better"; when False (for BSS,
+        Edge, directional accuracy), a positive delta renders as
+        "better" instead.
+    :return: delta cell string.
+    """
+    if current is None or reference is None:
+        return "N/A"
+    if current_n < MIN_SAMPLE_SIZE or reference_n < MIN_SAMPLE_SIZE:
+        return _INSUFFICIENT
+    delta = current - reference
+    if lower_is_better:
+        direction = "better" if delta < 0 else "worse" if delta > 0 else "same"
+    else:
+        direction = "better" if delta > 0 else "worse" if delta < 0 else "same"
+    return f"{delta:+.4f} {direction}"
+
+
+def _value_cell(
+    value: float | None,
+    sample_n: int,
+    decimals: int = 4,
+) -> str:
+    """Format an absolute-value cell with an n= anchor.
+
+    :param value: metric value (already rounded by the scorer).
+    :param sample_n: sample size that produced this value.
+    :param decimals: number of decimal places to render.
+    :return: cell string such as ``"0.2100 (n=42)"`` or ``"N/A (n=5)"``.
+    """
+    if value is None:
+        return f"N/A (n={sample_n})"
+    return f"{value:.{decimals}f} (n={sample_n})"
+
+
+def _pct_cell(value: float | None, sample_n: int) -> str:
+    """Format a percentage-value cell with an n= anchor.
+
+    :param value: metric value in [0, 1] or ``None``.
+    :param sample_n: sample size that produced this value.
+    :return: cell string such as ``"70% (n=42)"``.
+    """
+    if value is None:
+        return f"N/A (n={sample_n})"
+    return f"{value:.0%} (n={sample_n})"
+
+
+# ---------------------------------------------------------------------------
 # Report sections
 # ---------------------------------------------------------------------------
 
@@ -142,11 +224,20 @@ def section_metric_reference(include_scope_note: bool = True) -> str:
         lines.extend(
             [
                 (
-                    f"Sections whose heading carries `(Last {ROLLING_WINDOW_DAYS} "
-                    "Days)` are scoped to the rolling window — a single aggregate "
-                    "over that window, not a trailing-average series. Sections "
-                    "tagged `(All-Time)` are cumulative from the first scored "
-                    "row. The Trend section is fleet-wide monthly, independent "
+                    f"Every comparison below uses three windows: `Current "
+                    f"{ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day "
+                    "aggregate), `All-Time` (cumulative since first scored row), "
+                    f"and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding "
+                    f"non-overlapping {ROLLING_WINDOW_DAYS}-day window). Deltas "
+                    "compare `Current` against each reference window."
+                ),
+                "",
+                (
+                    "Guardrails:"
+                    " a delta is suppressed when either side has n < "
+                    f"{MIN_SAMPLE_SIZE} (rendered as `insufficient data`);"
+                    " n is cited next to every absolute value;"
+                    " the Trend section is fleet-wide monthly, independent "
                     "of this report's platform scope."
                 ),
                 "",
@@ -575,6 +666,522 @@ def section_tool_category_platform(scores: dict[str, Any]) -> str:
             " omitted from ranking._"
         )
 
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Three-window comparison sections
+# ---------------------------------------------------------------------------
+
+
+def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
+    """Render the current rolling-window platform snapshot.
+
+    Metrics: n, reliability, Brier, baseline Brier, BSS, directional
+    accuracy, outcome yes rate, and the always-majority baseline
+    (``max(yes_rate, 1-yes_rate)``) so readers can eyeball whether the
+    dataset is homogeneous enough for a low Brier to reflect base rate
+    rather than prediction skill.
+
+    :param rolling_scores: parsed ``rolling_scores_<platform>.json``.
+    :return: markdown section string.
+    """
+    heading = f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)"
+    overall = rolling_scores.get("overall") or {}
+    n = overall.get("n", 0)
+    valid_n = overall.get("valid_n", 0)
+    reliability = overall.get("reliability")
+    brier = overall.get("brier")
+    baseline = overall.get("baseline_brier")
+    bss = overall.get("brier_skill_score")
+    dir_acc = overall.get("directional_accuracy")
+    yes_rate = overall.get("outcome_yes_rate")
+
+    if n == 0:
+        return f"{heading}\n\nNo rows scored in the current window."
+
+    majority_baseline: str
+    if yes_rate is None:
+        majority_baseline = "N/A"
+    else:
+        majority = max(yes_rate, 1.0 - yes_rate)
+        majority_baseline = f"{majority:.0%}"
+
+    lines = [
+        heading,
+        "",
+        f"- **n**: {n} (valid_n: {valid_n})",
+        f"- **Reliability**: {_pct_cell(reliability, n)}",
+        f"- **Brier**: {_value_cell(brier, valid_n)}",
+        f"- **Baseline Brier**: {_value_cell(baseline, valid_n)}",
+        f"- **BSS**: {_value_cell(bss, valid_n)}",
+        f"- **Directional Accuracy**: {_pct_cell(dir_acc, valid_n)}",
+        (
+            f"- **Outcome Yes Rate**: {_pct_cell(yes_rate, valid_n)}"
+            f" (always-majority baseline: {majority_baseline})"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _platform_metric_row(
+    label: str,
+    current: dict[str, Any],
+    alltime: dict[str, Any],
+    prev: dict[str, Any] | None,
+    key: str,
+    *,
+    lower_is_better: bool = True,
+    decimals: int = 4,
+    is_pct: bool = False,
+) -> str:
+    """Build one comparison-table row for a platform-level metric.
+
+    :param label: row label (e.g. ``"Brier"``).
+    :param current: current-window overall stats dict.
+    :param alltime: all-time overall stats dict.
+    :param prev: previous-window overall stats dict, or ``None`` when
+        prev-rolling scores are unavailable for this run.
+    :param key: stats-dict key for the metric (e.g. ``"brier"``).
+    :param lower_is_better: passed to ``_delta_cell`` direction labeling.
+    :param decimals: decimal places for absolute values (ignored when
+        ``is_pct`` is True).
+    :param is_pct: when True, render absolute values as percentages.
+    :return: markdown table row (leading and trailing pipe included).
+    """
+    c_val = current.get(key)
+    a_val = alltime.get(key)
+    p_val = prev.get(key) if prev is not None else None
+    # valid_n drives sample-size gating for rate metrics; "reliability"
+    # uses n (row count) not valid_n, so the caller passes the right
+    # denominator key by using "n" as the metric key for that row.
+    c_n = current.get("valid_n", current.get("n", 0))
+    a_n = alltime.get("valid_n", alltime.get("n", 0))
+    p_n = prev.get("valid_n", prev.get("n", 0)) if prev is not None else 0
+    if key == "reliability":
+        c_n = current.get("n", 0)
+        a_n = alltime.get("n", 0)
+        p_n = prev.get("n", 0) if prev is not None else 0
+
+    value_fmt = _pct_cell if is_pct else lambda v, n: _value_cell(v, n, decimals)
+
+    delta_alltime = _delta_cell(c_val, a_val, c_n, a_n, lower_is_better)
+    delta_prev = (
+        _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
+        if prev is not None
+        else "no prev window"
+    )
+    return (
+        f"| {label} | {value_fmt(c_val, c_n)} | {value_fmt(a_val, a_n)}"
+        f" | {delta_alltime} | {value_fmt(p_val, p_n)} | {delta_prev} |"
+    )
+
+
+def section_platform_comparison(
+    rolling_scores: dict[str, Any],
+    alltime_scores: dict[str, Any],
+    prev_rolling_scores: dict[str, Any] | None,
+) -> str:
+    """Render the platform historical comparison table.
+
+    Each metric row compares the current window against all-time and
+    (when available) the previous non-overlapping window, with deltas
+    and sample sizes gated by ``MIN_SAMPLE_SIZE``.
+
+    :param rolling_scores: current rolling-window scores.
+    :param alltime_scores: all-time / cumulative scores.
+    :param prev_rolling_scores: previous non-overlapping rolling scores,
+        or ``None`` when the upstream scoring step has not yet landed
+        one on disk.
+    :return: markdown section string.
+    """
+    heading = "## Platform Historical Comparison"
+    current = rolling_scores.get("overall") or {}
+    alltime = alltime_scores.get("overall") or {}
+    prev = (prev_rolling_scores or {}).get("overall")
+
+    lines = [
+        heading,
+        "",
+        (
+            "| Metric"
+            f" | Current {ROLLING_WINDOW_DAYS}d"
+            " | All-Time"
+            " | Δ vs All-Time"
+            f" | Prev {ROLLING_WINDOW_DAYS}d"
+            f" | Δ vs Prev {ROLLING_WINDOW_DAYS}d |"
+        ),
+        "|--------|---------|----------|---------------|---------|-------------|",
+        _platform_metric_row(
+            "Reliability", current, alltime, prev, "reliability", is_pct=True
+        ),
+        _platform_metric_row("Brier", current, alltime, prev, "brier"),
+        _platform_metric_row(
+            "Baseline Brier", current, alltime, prev, "baseline_brier"
+        ),
+        _platform_metric_row(
+            "BSS", current, alltime, prev, "brier_skill_score", lower_is_better=False
+        ),
+        _platform_metric_row(
+            "Directional Accuracy",
+            current,
+            alltime,
+            prev,
+            "directional_accuracy",
+            lower_is_better=False,
+            is_pct=True,
+        ),
+        _platform_metric_row("Log Loss", current, alltime, prev, "log_loss"),
+    ]
+    return "\n".join(lines)
+
+
+def _tool_universe(
+    *score_dicts: dict[str, Any] | None,
+) -> list[str]:
+    """Return the ordered union of tool names across the given scores.
+
+    Ordering: tools that appear in the first non-None scores dict keep
+    its ranking order; tools unique to later dicts are appended in the
+    order they're first seen. This keeps comparison rows aligned with
+    the current-window ranking when it exists.
+
+    :param score_dicts: any number of scores dicts (``None`` entries are
+        ignored).
+    :return: ordered list of unique tool names.
+    """
+    seen: dict[str, None] = {}
+    for sd in score_dicts:
+        if sd is None:
+            continue
+        by_tool = sd.get("by_tool") or {}
+        ranked = sorted(by_tool.items(), key=brier_sort_key)
+        for tool, _ in ranked:
+            if tool not in seen:
+                seen[tool] = None
+    return list(seen)
+
+
+def section_tool_comparison(
+    rolling_scores: dict[str, Any],
+    alltime_scores: dict[str, Any],
+    prev_rolling_scores: dict[str, Any] | None,
+) -> str:
+    """Render the tool historical comparison table.
+
+    One row per tool, ranked by current-window Brier. Brier is shown for
+    each window with n= anchors, plus deltas vs all-time and vs prev
+    non-overlapping window. Low-sample cells are gated — deltas
+    disappear rather than mislead.
+
+    :param rolling_scores: current rolling-window scores.
+    :param alltime_scores: all-time scores (used for Δ vs all-time).
+    :param prev_rolling_scores: previous non-overlapping rolling scores,
+        or ``None``.
+    :return: markdown section string.
+    """
+    heading = "## Tool Historical Comparison"
+    tools = _tool_universe(rolling_scores, alltime_scores)
+    if not tools:
+        return f"{heading}\n\nNo tool data available."
+
+    lines = [
+        heading,
+        "",
+        (
+            "| Tool"
+            f" | Current {ROLLING_WINDOW_DAYS}d Brier"
+            " | All-Time Brier"
+            " | Δ vs All-Time"
+            f" | Prev {ROLLING_WINDOW_DAYS}d Brier"
+            f" | Δ vs Prev {ROLLING_WINDOW_DAYS}d |"
+        ),
+        "|------|----------|----------|---------------|---------|-------------|",
+    ]
+    cur_by_tool = rolling_scores.get("by_tool") or {}
+    at_by_tool = alltime_scores.get("by_tool") or {}
+    prev_by_tool = (prev_rolling_scores or {}).get("by_tool") or {}
+    for tool in tools:
+        c = cur_by_tool.get(tool, {})
+        a = at_by_tool.get(tool, {})
+        p = prev_by_tool.get(tool) if prev_rolling_scores is not None else None
+        c_n = c.get("valid_n", 0) if c else 0
+        a_n = a.get("valid_n", 0) if a else 0
+        p_n = p.get("valid_n", 0) if p else 0
+        c_brier = c.get("brier") if c else None
+        a_brier = a.get("brier") if a else None
+        p_brier = p.get("brier") if p else None
+
+        flag = _sample_label(c) if c else ""
+        delta_at = _delta_cell(c_brier, a_brier, c_n, a_n)
+        delta_prev = (
+            _delta_cell(c_brier, p_brier, c_n, p_n)
+            if prev_rolling_scores is not None
+            else "no prev window"
+        )
+        lines.append(
+            f"| **{tool}**{flag}"
+            f" | {_value_cell(c_brier, c_n)}"
+            f" | {_value_cell(a_brier, a_n)}"
+            f" | {delta_at}"
+            f" | {_value_cell(p_brier, p_n)}"
+            f" | {delta_prev} |"
+        )
+    return "\n".join(lines)
+
+
+def section_tool_category_comparison(
+    rolling_scores: dict[str, Any],
+    alltime_scores: dict[str, Any],
+    prev_rolling_scores: dict[str, Any] | None,
+) -> str:
+    """Render the tool × category historical comparison table.
+
+    One row per (tool, category) cell that clears ``MIN_SAMPLE_SIZE`` in
+    the current window. Cells that lack current-window coverage are
+    dropped from the ranking (they'd otherwise clutter the table with
+    rows where the comparison is meaningless).
+
+    :param rolling_scores: current rolling-window scores.
+    :param alltime_scores: all-time scores.
+    :param prev_rolling_scores: previous non-overlapping rolling scores.
+    :return: markdown section string.
+    """
+    heading = "## Tool × Category Historical Comparison"
+    cur = rolling_scores.get("by_tool_category") or {}
+    at = alltime_scores.get("by_tool_category") or {}
+    prev = (prev_rolling_scores or {}).get("by_tool_category") or {}
+
+    ranked = sorted(cur.items(), key=brier_sort_key)
+    sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
+    if not sufficient:
+        return (
+            f"{heading}\n\n"
+            f"No (tool × category) cells clear n ≥ {MIN_SAMPLE_SIZE} in the "
+            "current window."
+        )
+
+    lines = [
+        heading,
+        "",
+        (
+            "| Tool | Category"
+            f" | Current {ROLLING_WINDOW_DAYS}d Brier"
+            " | All-Time Brier"
+            " | Δ vs All-Time"
+            f" | Prev {ROLLING_WINDOW_DAYS}d Brier"
+            f" | Δ vs Prev {ROLLING_WINDOW_DAYS}d |"
+        ),
+        "|------|----------|----------|----------|---------------|---------|-------------|",
+    ]
+    for key, c_stats in sufficient:
+        parts = key.split(" | ")
+        tool = parts[0] if parts else key
+        cat = parts[1] if len(parts) > 1 else "?"
+        a_stats = at.get(key, {})
+        p_stats = prev.get(key, {}) if prev_rolling_scores is not None else None
+        c_n = c_stats.get("valid_n", 0)
+        a_n = a_stats.get("valid_n", 0)
+        p_n = p_stats.get("valid_n", 0) if p_stats else 0
+        c_brier = c_stats.get("brier")
+        a_brier = a_stats.get("brier")
+        p_brier = p_stats.get("brier") if p_stats else None
+
+        delta_at = _delta_cell(c_brier, a_brier, c_n, a_n)
+        delta_prev = (
+            _delta_cell(c_brier, p_brier, c_n, p_n)
+            if prev_rolling_scores is not None
+            else "no prev window"
+        )
+        lines.append(
+            f"| {tool} | {cat}"
+            f" | {_value_cell(c_brier, c_n)}"
+            f" | {_value_cell(a_brier, a_n)}"
+            f" | {delta_at}"
+            f" | {_value_cell(p_brier, p_n)}"
+            f" | {delta_prev} |"
+        )
+    return "\n".join(lines)
+
+
+def _diag_metric_label(metric_key: str) -> str:
+    """Return the display label for a diagnostic metric key.
+
+    :param metric_key: one of the diagnostic metric keys on a stats dict.
+    :return: human-readable label.
+    """
+    labels = {
+        "edge": "Edge",
+        "log_loss": "Log Loss",
+        "conditional_accuracy_rate": "Conditional Accuracy",
+        "brier_large_trade": "Disagreement Brier (large trade)",
+        "directional_bias": "Directional Bias",
+    }
+    return labels.get(metric_key, metric_key)
+
+
+def section_diagnostics_comparison(
+    rolling_scores: dict[str, Any],
+    alltime_scores: dict[str, Any],
+    prev_rolling_scores: dict[str, Any] | None,
+) -> str:
+    """Render the diagnostics historical comparison table.
+
+    Per tool, renders the diagnostic metrics (edge, log loss, conditional
+    accuracy, disagreement Brier at large trade, directional bias) for
+    the three windows with deltas. Uses the tool's per-metric
+    denominator (``edge_n``, ``disagree_n``, ``n_large_trade``,
+    ``n_bias_losses``) for sample-size gating so deltas aren't gated by
+    the wrong ``valid_n``.
+
+    :param rolling_scores: current rolling-window scores.
+    :param alltime_scores: all-time scores.
+    :param prev_rolling_scores: previous non-overlapping rolling scores.
+    :return: markdown section string.
+    """
+    heading = "## Diagnostics Historical Comparison"
+    tools = _tool_universe(rolling_scores, alltime_scores)
+    if not tools:
+        return f"{heading}\n\nNo tool data available."
+
+    # For each metric, the stats dict key + the denominator key that
+    # gates its sample size. Edge n lives in `edge_n`, not `valid_n`,
+    # so a tool with low edge-eligible rows doesn't drag its Brier
+    # delta into "insufficient data".
+    metrics: list[tuple[str, str, bool]] = [
+        ("edge", "edge_n", False),
+        ("log_loss", "valid_n", True),
+        ("conditional_accuracy_rate", "disagree_n", False),
+        ("brier_large_trade", "n_large_trade", True),
+        ("directional_bias", "n_bias_losses", True),
+    ]
+
+    cur_by_tool = rolling_scores.get("by_tool") or {}
+    at_by_tool = alltime_scores.get("by_tool") or {}
+    prev_by_tool = (prev_rolling_scores or {}).get("by_tool") or {}
+
+    lines = [
+        heading,
+        "",
+        (
+            "| Tool | Metric"
+            f" | Current {ROLLING_WINDOW_DAYS}d"
+            " | All-Time"
+            " | Δ vs All-Time"
+            f" | Prev {ROLLING_WINDOW_DAYS}d"
+            f" | Δ vs Prev {ROLLING_WINDOW_DAYS}d |"
+        ),
+        "|------|--------|----------|----------|---------------|---------|-------------|",
+    ]
+    for tool in tools:
+        c = cur_by_tool.get(tool, {})
+        a = at_by_tool.get(tool, {})
+        p = prev_by_tool.get(tool) if prev_rolling_scores is not None else None
+        for metric_key, n_key, lower_is_better in metrics:
+            c_val = c.get(metric_key) if c else None
+            a_val = a.get(metric_key) if a else None
+            p_val = p.get(metric_key) if p else None
+            c_n = c.get(n_key, 0) if c else 0
+            a_n = a.get(n_key, 0) if a else 0
+            p_n = p.get(n_key, 0) if p else 0
+            if c_val is None and a_val is None and p_val is None:
+                continue
+
+            delta_at = _delta_cell(c_val, a_val, c_n, a_n, lower_is_better)
+            delta_prev = (
+                _delta_cell(c_val, p_val, c_n, p_n, lower_is_better)
+                if prev_rolling_scores is not None
+                else "no prev window"
+            )
+            lines.append(
+                f"| **{tool}** | {_diag_metric_label(metric_key)}"
+                f" | {_value_cell(c_val, c_n)}"
+                f" | {_value_cell(a_val, a_n)}"
+                f" | {delta_at}"
+                f" | {_value_cell(p_val, p_n)}"
+                f" | {delta_prev} |"
+            )
+    if len(lines) == 5:
+        # Only the header rows — no tool had data across any diagnostic
+        # metric for any window.
+        lines.append("| _(no diagnostic data)_ | | | | | | |")
+    return "\n".join(lines)
+
+
+def section_reliability_comparison(
+    rolling_scores: dict[str, Any],
+    alltime_scores: dict[str, Any],
+) -> str:
+    """Render the reliability & parse quality comparison table.
+
+    Per-tool reliability and parse-rate stats for the current window
+    versus all-time. Prev-rolling intentionally omitted: reliability is
+    a pipeline-health signal, not a tool-performance one, and comparing
+    two short trailing windows against each other adds noise without
+    signal.
+
+    :param rolling_scores: current rolling-window scores.
+    :param alltime_scores: all-time scores.
+    :return: markdown section string.
+    """
+    heading = "## Reliability & Parse Quality (Current vs All-Time)"
+    tools = _tool_universe(rolling_scores, alltime_scores)
+    if not tools:
+        return f"{heading}\n\nNo tool data available."
+
+    cur_by_tool = rolling_scores.get("by_tool") or {}
+    at_by_tool = alltime_scores.get("by_tool") or {}
+    cur_parse = rolling_scores.get("parse_breakdown") or {}
+    at_parse = alltime_scores.get("parse_breakdown") or {}
+
+    def _rate(breakdown: dict[str, int], status: str) -> tuple[float | None, int]:
+        total = sum(breakdown.values())
+        if total == 0:
+            return None, 0
+        return breakdown.get(status, 0) / total, total
+
+    lines = [
+        heading,
+        "",
+        (
+            "| Tool"
+            f" | Current {ROLLING_WINDOW_DAYS}d Reliability"
+            " | All-Time Reliability"
+            " | Δ"
+            f" | Current {ROLLING_WINDOW_DAYS}d Valid %"
+            " | All-Time Valid %"
+            " | Δ |"
+        ),
+        "|------|----------|----------|-----|----------|----------|-----|",
+    ]
+    for tool in tools:
+        c = cur_by_tool.get(tool, {})
+        a = at_by_tool.get(tool, {})
+        c_n = c.get("n", 0) if c else 0
+        a_n = a.get("n", 0) if a else 0
+        c_rel = c.get("reliability") if c else None
+        a_rel = a.get("reliability") if a else None
+
+        c_valid_rate, c_parse_n = _rate(cur_parse.get(tool) or {}, "valid")
+        a_valid_rate, a_parse_n = _rate(at_parse.get(tool) or {}, "valid")
+
+        delta_rel = _delta_cell(c_rel, a_rel, c_n, a_n, lower_is_better=False)
+        delta_valid = _delta_cell(
+            c_valid_rate,
+            a_valid_rate,
+            c_parse_n,
+            a_parse_n,
+            lower_is_better=False,
+        )
+        lines.append(
+            f"| **{tool}**"
+            f" | {_pct_cell(c_rel, c_n)}"
+            f" | {_pct_cell(a_rel, a_n)}"
+            f" | {delta_rel}"
+            f" | {_pct_cell(c_valid_rate, c_parse_n)}"
+            f" | {_pct_cell(a_valid_rate, a_parse_n)}"
+            f" | {delta_valid} |"
+        )
     return "\n".join(lines)
 
 
@@ -1593,39 +2200,38 @@ def generate_report(  # pylint: disable=too-many-statements
     history: list[dict[str, Any]] | None = None,
     *,
     platform: str,
-    period_scores: dict[str, Any] | None = None,
     rolling_scores: dict[str, Any] | None = None,
+    prev_rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
     scores_tournament: dict[str, Any] | None = None,
-    period_scores_tournament: dict[str, Any] | None = None,
     rolling_scores_tournament: dict[str, Any] | None = None,
     disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a platform-scoped benchmark report from scores and history.
 
     Every section is driven by scores already partitioned to ``platform``
-    by the scorer, so the fleet-wide comparison sections (``section_platform``,
-    ``section_tool_platform``, Platform × Difficulty, Platform × Liquidity)
-    are dropped — they'd render a single-row view that adds noise without
-    signal. The report header names the deployment this report covers.
+    by the scorer. Each metric is compared across three windows: current
+    rolling (``rolling_scores``), cumulative (``scores``), and previous
+    non-overlapping rolling (``prev_rolling_scores``). Deltas are
+    suppressed when either side has n < ``MIN_SAMPLE_SIZE`` so a reader
+    never sees a signed number without an adequate sample-size anchor.
 
-    Production-mode sections are rendered from ``scores`` /
-    ``period_scores`` / ``rolling_scores``. When tournament scores are
-    supplied and contain rows, a duplicate set of the mode-sensitive
-    sections is rendered with a ``— Tournament`` suffix.
+    Overlapping-window comparisons (such as "since last report") are
+    intentionally omitted — prev-rolling is the only change-over-time
+    reference, and it is non-overlapping by construction.
 
     :param scores: parsed platform-scoped ``scores_<platform>.json`` dict.
     :param history: list of monthly snapshots from ``scores_history.jsonl``.
     :param platform: one of ``PLATFORM_LABELS`` keys (``"omen"`` or
-        ``"polymarket"``). Drives the report header and gates platform-
-        comparison sections.
-    :param period_scores: production scores since last report.
-    :param rolling_scores: production scores from the rolling window.
+        ``"polymarket"``). Drives the report header.
+    :param rolling_scores: production scores from the current rolling window.
+    :param prev_rolling_scores: production scores from the preceding
+        non-overlapping rolling window, or ``None`` when the upstream
+        scoring step has not landed one on disk.
     :param include_tournament: master switch for rendering the Tool ×
         Version × Mode breakdown. When False, tournament inputs are
         ignored entirely.
     :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
-    :param period_scores_tournament: tournament since last report.
     :param rolling_scores_tournament: tournament rolling window scores.
     :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
         map used by the Tool Deployment Status section.
@@ -1645,77 +2251,47 @@ def generate_report(  # pylint: disable=too-many-statements
     )
 
     render_tournament = include_tournament and _has_tournament_data(scores_tournament)
-    # Local non-optional alias for mypy once _has_tournament_data has narrowed.
-    tournament_scores: dict[str, Any] = scores_tournament or {}
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
 
     sections.append(section_metric_reference())
 
-    # Since Last Report
-    sections.append(section_period(period_scores, scores, "Since Last Report"))
-    if render_tournament and _has_tournament_data(period_scores_tournament):
-        sections.append(
-            _relabel_heading(
-                section_period(
-                    period_scores_tournament,
-                    tournament_scores,
-                    "Since Last Report",
-                ),
-                " — Tournament",
-            )
-        )
-
-    rolling_heading = f"Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)"
-    if rolling_scores is not None:
-        sections.append(section_period(rolling_scores, scores, rolling_heading))
-        if render_tournament and _has_tournament_data(rolling_scores_tournament):
-            sections.append(
-                _relabel_heading(
-                    section_period(
-                        rolling_scores_tournament,
-                        tournament_scores,
-                        rolling_heading,
-                    ),
-                    " — Tournament",
-                )
-            )
-
-    rolling_suffix = f" (Last {ROLLING_WINDOW_DAYS} Days)"
-    rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
-
-    def _rolling(section_md: str, heading_suffix: str = rolling_suffix) -> str:
-        """Add the rolling-window heading suffix and n= qualifier note."""
-        return _annotate_with_window(
-            _relabel_heading(section_md, heading_suffix), rolling_window_note
-        )
-
     if rolling_scores is None:
         sections.append(
-            f"## Last {ROLLING_WINDOW_DAYS} Days (Window Aggregate)\n\n"
+            f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)\n\n"
             f"Scores for the last {ROLLING_WINDOW_DAYS} days are "
             "unavailable — the scoring step did not produce "
-            f"`rolling_scores_{platform}.json` for this run. Tool Ranking, "
-            "Category Performance, Tool × Category, Diagnostic Edge Metrics, "
-            "and Weak Spots sections are omitted."
+            f"`rolling_scores_{platform}.json` for this run. All rolling "
+            "sections (snapshot, platform/tool/tool×category/diagnostics "
+            "comparisons, reliability) are omitted."
         )
     else:
-        sections.append(_rolling(section_tool_ranking(rolling_scores)))
-        if render_tournament and _has_tournament_data(rolling_scores_tournament):
-            rolling_tourn: dict[str, Any] = rolling_scores_tournament or {}
-            sections.append(
-                _rolling(
-                    section_tool_ranking(rolling_tourn),
-                    f"{rolling_suffix} — Tournament",
-                )
+        sections.append(section_platform_snapshot(rolling_scores))
+        sections.append(
+            section_platform_comparison(rolling_scores, scores, prev_rolling_scores)
+        )
+        sections.append(
+            section_tool_comparison(rolling_scores, scores, prev_rolling_scores)
+        )
+        # Tool × Category — the reviewer asked for both the current-window
+        # ranking table AND the historical comparison, so render the two
+        # in sequence.
+        sections.append(
+            _relabel_heading(
+                section_tool_category(rolling_scores),
+                f" (Current {ROLLING_WINDOW_DAYS}d)",
             )
-        sections.append(_rolling(section_tool_category(rolling_scores)))
-        sections.append(_rolling(section_category(rolling_scores)))
-        sections.append(_rolling(section_diagnostic_metrics(rolling_scores)))
-        sections.append(_rolling(section_weak_spots(rolling_scores)))
+        )
+        sections.append(
+            section_tool_category_comparison(
+                rolling_scores, scores, prev_rolling_scores
+            )
+        )
+        sections.append(
+            section_diagnostics_comparison(rolling_scores, scores, prev_rolling_scores)
+        )
+        sections.append(section_reliability_comparison(rolling_scores, scores))
 
-    sections.append(_relabel_heading(section_tool_ranking(scores), " (All-Time)"))
-    sections.append(_relabel_heading(section_base_rates(scores), " (All-Time)"))
     sections.append(
         section_tool_deployment_status(
             scores, disabled=disabled_tools, platform=platform
@@ -1733,6 +2309,7 @@ def generate_report(  # pylint: disable=too-many-statements
             merged_rolling = _merged_tvm_scores(
                 rolling_scores, rolling_scores_tournament
             )
+            rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
             tvm_rolling = section_tool_version_breakdown(
                 merged_rolling,
                 f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)",
@@ -1745,8 +2322,6 @@ def generate_report(  # pylint: disable=too-many-statements
 
     sections.extend(
         [
-            _relabel_heading(section_reliability_issues(scores), " (All-Time)"),
-            _relabel_heading(section_parse_breakdown(scores), " (All-Time)"),
             section_trend(history, None, platform=platform),
             _relabel_heading(section_sample_size_warnings(scores), " (All-Time)"),
         ]
@@ -1787,9 +2362,9 @@ def generate_fleet_report(
         f"# Benchmark Report (Fleet, Cross-Platform) — {date}",
         (
             "_Cross-platform view for direct category and tool × category ranking "
-            "across platforms. For per-platform deep dives (rolling window, weak "
-            "spots, deployment status) see `report_omen.md` and "
-            "`report_polymarket.md`._"
+            "across platforms. All metrics here are all-time / cumulative — for "
+            f"change-over-time and {ROLLING_WINDOW_DAYS}-day comparisons, see "
+            "`report_omen.md` and `report_polymarket.md`._"
         ),
         section_metric_reference(include_scope_note=False),
         section_platform(scores),
@@ -1843,20 +2418,20 @@ def main() -> None:
         help="Report output path. Default: results/report_<platform>.md.",
     )
     parser.add_argument(
-        "--period",
-        type=Path,
-        default=None,
-        help=(
-            "Period scores JSON (since last report). "
-            "Default: results/period_scores_<platform>.json."
-        ),
-    )
-    parser.add_argument(
         "--rolling",
         type=Path,
         default=None,
         help=(
             "Rolling scores JSON. " "Default: results/rolling_scores_<platform>.json."
+        ),
+    )
+    parser.add_argument(
+        "--prev-rolling",
+        type=Path,
+        default=None,
+        help=(
+            "Previous non-overlapping rolling scores JSON. Default: "
+            "results/prev_rolling_scores_<platform>.json."
         ),
     )
     parser.add_argument(
@@ -1866,15 +2441,6 @@ def main() -> None:
         help=(
             "Tournament scores JSON. "
             "Default: results/scores_tournament_<platform>.json."
-        ),
-    )
-    parser.add_argument(
-        "--period-tournament",
-        type=Path,
-        default=None,
-        help=(
-            "Tournament period scores JSON. "
-            "Default: results/period_scores_tournament_<platform>.json."
         ),
     )
     parser.add_argument(
@@ -1916,14 +2482,12 @@ def main() -> None:
     platform = args.platform
     scores_path = args.scores or results_dir / f"scores_{platform}.json"
     output_path = args.output or results_dir / f"report_{platform}.md"
-    period_path = args.period or results_dir / f"period_scores_{platform}.json"
     rolling_path = args.rolling or results_dir / f"rolling_scores_{platform}.json"
+    prev_rolling_path = (
+        args.prev_rolling or results_dir / f"prev_rolling_scores_{platform}.json"
+    )
     scores_tournament_path = (
         args.scores_tournament or results_dir / f"scores_tournament_{platform}.json"
-    )
-    period_tournament_path = (
-        args.period_tournament
-        or results_dir / f"period_scores_tournament_{platform}.json"
     )
     rolling_tournament_path = (
         args.rolling_tournament
@@ -1934,10 +2498,9 @@ def main() -> None:
         return load_scores(path) if path and path.exists() else None
 
     scores = load_scores(scores_path)
-    period = _maybe_load(period_path)
     rolling = _maybe_load(rolling_path)
+    prev_rolling = _maybe_load(prev_rolling_path)
     scores_tournament = _maybe_load(scores_tournament_path)
-    period_tournament = _maybe_load(period_tournament_path)
     rolling_tournament = _maybe_load(rolling_tournament_path)
 
     print(
@@ -1949,11 +2512,10 @@ def main() -> None:
         scores,
         history,
         platform=platform,
-        period_scores=period,
         rolling_scores=rolling,
+        prev_rolling_scores=prev_rolling,
         include_tournament=args.include_tournament,
         scores_tournament=scores_tournament,
-        period_scores_tournament=period_tournament,
         rolling_scores_tournament=rolling_tournament,
     )
 

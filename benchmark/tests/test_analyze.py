@@ -1813,7 +1813,10 @@ class TestGenerateReportRollingWindowAnnotations:
         scores = _scores_with_tool("tool-a", 0.20, 1000)
         report = generate_report(scores, [], platform="omen", disabled_tools={})
         assert f"## Rolling Window (Last {ROLLING_WINDOW_DAYS} Days)" in report
-        assert "Rolling scores for the last 3 days are unavailable" in report
+        assert (
+            f"Rolling scores for the last {ROLLING_WINDOW_DAYS} days are unavailable"
+            in report
+        )
         for heading in (
             "## Tool Ranking (Last 3 Days)",
             "## Category Performance (Last 3 Days)",

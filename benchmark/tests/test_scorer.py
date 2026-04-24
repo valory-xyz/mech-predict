@@ -2747,6 +2747,23 @@ class TestPerPlatformPeriod:
         prod_all, _ = result["all"]
         assert prod_all["overall"]["n"] == 0
 
+    def test_period_assumes_utc_for_naive_predicted_at(self, tmp_path: Path) -> None:
+        """Tz-less ISO timestamps are interpreted as UTC, not dropped or crashed."""
+        logs_dir = tmp_path / "logs"
+        recent_naive = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        self._populate_logs(
+            logs_dir,
+            [_row(platform="omen", predicted_at=recent_naive, row_id="o_naive")],
+        )
+
+        result = score_period_split_by_platform(logs_dir=logs_dir, days=7)
+        prod_all, _ = result["all"]
+        prod_omen, _ = result["omen"]
+        assert prod_all["overall"]["n"] == 1
+        assert prod_omen["overall"]["n"] == 1
+
 
 class TestScoreLatencyReservoir:
     """Tests for _score_latency_reservoir."""

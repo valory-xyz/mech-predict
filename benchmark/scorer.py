@@ -2173,17 +2173,24 @@ def score_period_split_by_platform(
 
 
 def _parse_predicted_at(value: Any) -> datetime | None:
-    """Parse a row's ``predicted_at`` field into a UTC ``datetime``.
+    """Parse a row's ``predicted_at`` field into a UTC-aware ``datetime``.
+
+    Naive timestamps (no offset suffix) are assumed UTC so the returned
+    value is always comparable against a tz-aware cutoff.
 
     :param value: raw ``predicted_at`` value from the row dict.
-    :return: parsed ``datetime``, or ``None`` when missing or unparseable.
+    :return: parsed UTC-aware ``datetime``, or ``None`` when missing or
+        unparseable.
     """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _load_period_rows(

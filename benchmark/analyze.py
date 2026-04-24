@@ -1,13 +1,16 @@
 """
-Generate a human-readable benchmark report.
+Generate a human-readable benchmark report for one platform deployment.
 
-Reads scores.json (current month accumulators) and scores_history.jsonl
-(monthly snapshots) to produce a markdown report with rankings, weak
-spots, and highlights.  Never reads raw log files.
+Reads scores_<platform>.json (current month accumulators) and
+scores_history.jsonl (monthly snapshots) to produce a markdown report
+with rankings, weak spots, and highlights. Never reads raw log files.
 
 Usage:
-    python benchmark/analyze.py
-    python benchmark/analyze.py --scores path/to/scores.json --output path/to/report.md
+    python -m benchmark.analyze --platform omen --include-tournament
+    python -m benchmark.analyze --platform polymarket --include-tournament
+
+Overrides (for ad-hoc renders against a specific scores file):
+    python -m benchmark.analyze --platform omen --scores scores_omen.json --output report_omen.md
 """
 
 from __future__ import annotations

@@ -42,7 +42,11 @@ the mech is performing in production right now.
 
 ```bash
 python benchmark/datasets/fetch_production.py    # fetch + match + score
-python benchmark/analyze.py                       # generate report
+
+# Analyze is now per-platform; --platform is required. Runs once per
+# deployment to emit report_omen.md and report_polymarket.md.
+python -m benchmark.analyze --platform omen --include-tournament
+python -m benchmark.analyze --platform polymarket --include-tournament
 
 # Period scoring — analyse trends from the last N days.
 # Filters rows by predicted_at timestamp, so it works even if all data
@@ -53,9 +57,9 @@ python -m benchmark.scorer --period-days 7 --logs-dir benchmark/datasets/logs/ -
 python -m benchmark.scorer --period-days 30 --logs-dir benchmark/datasets/logs/ --output results/last_month.json
 
 # Pass period scores to analyze for delta-vs-alltime reporting.
-# The report will lead with "Since Last Report" and "Last 3 Days Rolling"
+# The report leads with "Since Last Report" and "Last 3 Days Rolling"
 # sections showing how recent performance compares to all-time.
-python -m benchmark.analyze --period results/last_day.json --rolling results/last_week.json
+python -m benchmark.analyze --platform omen --period results/last_day.json --rolling results/last_week.json
 ```
 
 ### 2. Cached replay (local dev — sweep.py)

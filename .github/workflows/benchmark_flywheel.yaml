@@ -219,8 +219,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      # The hashFiles() guard keeps the per-platform Slack post independent
+      # of the other platform's Analyze step: if report_<platform>.md was
+      # not written (because Analyze crashed before writing it), we skip
+      # the Slack post for that platform rather than firing notify_slack
+      # against a missing file. The neighboring platform's Slack post
+      # still runs, since each step gates on its own report file.
       - name: Post Omenstrat summary to Slack
-        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_omen.md') != ''
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
@@ -231,7 +237,7 @@ jobs:
             --platform-label Omenstrat
 
       - name: Post Polystrat summary to Slack
-        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_polymarket.md') != ''
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}

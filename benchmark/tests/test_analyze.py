@@ -39,6 +39,7 @@ from benchmark.analyze import (
     section_period,
     section_sample_size_warnings,
     section_tool_category,
+    section_tool_deployment_status,
     section_tool_version_breakdown,
     section_trend,
     section_version_deltas,
@@ -1712,6 +1713,151 @@ class TestTrendSectionPlatformAnnotation:
         report = generate_report(prod, history, platform="omen", disabled_tools={})
         assert "*(in progress)*" not in report
         assert "2026-04" not in report
+
+
+class TestSectionToolDeploymentStatusInverted:
+    """Phase 3: section renders active tools per deployment, scoped to platform."""
+
+    def _scores_with_tools(self, *tools: str) -> dict[str, Any]:
+        return {"by_tool": {t: {"brier": 0.2, "n": 100, "valid_n": 100} for t in tools}}
+
+    def test_omen_platform_hides_polystrat_deployment(self) -> None:
+        """Omenstrat report never mentions polystrat Pearl."""
+        scores = self._scores_with_tools("tool-a", "tool-b")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": ["tool-a"],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert "omenstrat Pearl" in rendered
+        assert "omenstrat QS" in rendered
+        assert "polystrat" not in rendered
+
+    def test_polymarket_platform_hides_omenstrat_deployments(self) -> None:
+        """Polystrat report never mentions omenstrat-anything."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "omenstrat QS": ["tool-a"],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(
+            scores, disabled, platform="polymarket"
+        )
+        assert "polystrat Pearl" in rendered
+        assert "omenstrat" not in rendered
+
+    def test_heading_carries_platform_label(self) -> None:
+        """Section heading is scoped with the deployment label."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert rendered.startswith("## Tool Deployment Status (Omenstrat)")
+
+    def test_active_tools_exclude_disabled(self) -> None:
+        """Active tools are the benchmarked set with disabled tools removed."""
+        scores = self._scores_with_tools("tool-a", "tool-b", "tool-c")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-b"],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        pearl_line = [
+            line for line in rendered.splitlines() if "omenstrat Pearl" in line
+        ][0]
+        assert "`tool-a`" in pearl_line
+        assert "`tool-c`" in pearl_line
+        assert "`tool-b`" not in pearl_line
+        qs_line = [line for line in rendered.splitlines() if "omenstrat QS" in line][0]
+        for expected in ("`tool-a`", "`tool-b`", "`tool-c`"):
+            assert expected in qs_line
+
+    def test_normalizes_underscores_in_disabled_list(self) -> None:
+        """Config files sometimes list prediction_request_X; treat as equivalent."""
+        scores = self._scores_with_tools("prediction-request-reasoning")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["prediction_request_reasoning"],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        pearl_line = [
+            line for line in rendered.splitlines() if "omenstrat Pearl" in line
+        ][0]
+        assert "prediction-request-reasoning" not in pearl_line
+
+    def test_failed_fetch_renders_unavailable_banner(self) -> None:
+        """Deployment whose fetch returned None is not claimed as empty."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": None,
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert "omenstrat Pearl" in rendered
+        assert "⚠️ unavailable" in rendered
+
+    def test_fleet_wide_mode_still_supported(self) -> None:
+        """platform=None keeps the legacy fleet-wide render for ad-hoc callers."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform=None)
+        for deployment in ("omenstrat Pearl", "omenstrat QS", "polystrat Pearl"):
+            assert deployment in rendered
+        assert "(Omenstrat)" not in rendered
+        assert "(Polystrat)" not in rendered
+
+    def test_empty_disabled_opts_out_of_section(self) -> None:
+        """Existing contract: empty dict skips the section entirely."""
+        scores = self._scores_with_tools("tool-a")
+        assert section_tool_deployment_status(scores, {}, platform="omen") == ""
+
+
+class TestToolCategoryPositionInReport:
+    """Phase 3: Tool × Category is rendered before Tool × Version × Mode."""
+
+    def test_tool_category_rendered_exactly_once(self) -> None:
+        """The reorder moved the call site, it didn't duplicate the section."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+        )
+        assert report.count("## Tool \u00d7 Category") == 1
+
+    def test_tool_category_lands_before_tool_version_mode(self) -> None:
+        """Ordering matters for LLM attention weighting."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        scores["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 1000,
+                "valid_n": 1000,
+                "brier": 0.2,
+            }
+        }
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            include_tournament=True,
+            disabled_tools={},
+        )
+        tc_idx = report.index(
+            f"## Tool \u00d7 Category (Last {ROLLING_WINDOW_DAYS} Days)"
+        )
+        tvm_idx = report.index("## Tool \u00d7 Version \u00d7 Mode (All-Time)")
+        assert tc_idx < tvm_idx
 
 
 class TestSectionMetricReference:

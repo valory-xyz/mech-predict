@@ -78,7 +78,7 @@ class TestBuildSystemPrompt:
         assert "*Top tools:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Worst tools:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Category performance:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
-        assert "*Tool × Category highlights:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "*Tool × Category:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Tournament callouts:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Diagnostics:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "*Recommended actions:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
@@ -108,23 +108,34 @@ class TestBuildSystemPrompt:
         ):
             assert heading in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
-    def test_deployment_status_scoped_to_platform(self) -> None:
-        """Deployment status bullet filters the fleet-wide section per platform.
+    def test_deployment_status_points_at_platform_scoped_section(self) -> None:
+        """Deployment status bullet anchors to the per-platform section heading.
 
-        The "Tool Deployment Status" section in the report is still fleet-wide
-        (lists disabled tools across omenstrat and polystrat deployments);
-        Phase 3 will partition it in analyze.py. Until then, the prompt must
-        instruct the LLM to include only deployments belonging to the current
-        platform so a Polystrat summary never cites an omenstrat-only
-        deployment and vice versa.
+        Phase 3 partitioned Tool Deployment Status in analyze.py, so the
+        prompt no longer needs a lowercase-match filter — it simply names
+        the "Tool Deployment Status ({platform_label})" heading and tells
+        the LLM to summarize every deployment listed there.
         """
-        # Instruction must filter by deployment-name prefix matching the
-        # platform label, and must forbid mentions of other platforms'
-        # deployments even though they appear in the source section.
-        assert "starts with the lowercase" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
-        assert "deployments belonging to other platforms" in (
-            SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert (
+            '"Tool Deployment Status ({platform_label})"'
+            in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         )
+        assert "count of active tools only" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "do NOT enumerate the tool names" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "`⚠️ unavailable`" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_tool_category_prompt_lists_every_qualifying_cell(self) -> None:
+        """Tool × Category bullet instructs the LLM to list every qualifying cell.
+
+        Per-platform tables are small enough that exhaustively listing
+        cells that clear the sample-size threshold is preferable to
+        picking an editorial subset.
+        """
+        assert (
+            "list every tool-category cell that clears the sample-size threshold"
+            in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        )
+        assert "insufficient tool × category data" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
 
 class TestInferPlatformLabel:

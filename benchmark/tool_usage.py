@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -221,60 +221,3 @@ def fetch_disabled_tools() -> dict[str, list[str] | None]:
         log.warning("quickstart fetch/parse failed: %s", exc)
 
     return disabled
-
-
-def disabled_deployments_for_tool(
-    tool_name: str,
-    disabled: Mapping[str, list[str] | None],
-) -> list[str]:
-    """Return the deployments that disable ``tool_name``.
-
-    Matching is underscore/hyphen insensitive via ``_normalize_tool_name``:
-    real configs list both spellings for the same tool, so a literal match
-    would under-report.  Unknown status (fetch failed for a deployment)
-    does not count as disabled — we err on the side of under-reporting
-    rather than implying a tool is disabled when we couldn't verify.
-
-    :param tool_name: name of the benchmarked tool.
-    :param disabled: map from deployment to its disabled-tool list.
-    :return: deployment names that currently disable ``tool_name``.
-    """
-    needle = _normalize_tool_name(tool_name)
-    return [
-        deployment
-        for deployment, tools in disabled.items()
-        if tools is not None and any(_normalize_tool_name(t) == needle for t in tools)
-    ]
-
-
-def failed_deployments(
-    disabled: Mapping[str, list[str] | None],
-) -> list[str]:
-    """Return deployments whose fetch/parse failed, in declared order.
-
-    :param disabled: map from deployment to its disabled-tool list.
-    :return: names of deployments with ``None`` status, in ``DEPLOYMENTS`` order.
-    """
-    return [name for name in DEPLOYMENTS if disabled.get(name) is None]
-
-
-def iter_tools_with_disabled(
-    tool_names: Iterable[str],
-    disabled: Mapping[str, list[str] | None],
-) -> list[tuple[str, list[str]]]:
-    """Return ``(name, disabled_deployments)`` pairs for tools disabled somewhere.
-
-    Ordering matches the input ``tool_names`` iteration order so the
-    renderer can present tools in the same order as the rest of the report.
-
-    :param tool_names: iterable of tool names (report ordering).
-    :param disabled: map from deployment to its disabled-tool list.
-    :return: list of ``(tool_name, [deployments_disabling_it])`` for tools
-        disabled on at least one deployment.
-    """
-    out: list[tuple[str, list[str]]] = []
-    for name in tool_names:
-        where = disabled_deployments_for_tool(name, disabled)
-        if where:
-            out.append((name, where))
-    return out

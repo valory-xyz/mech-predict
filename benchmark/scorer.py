@@ -860,6 +860,73 @@ def brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
     return brier if brier is not None else 999.0
 
 
+def _score_latency_reservoir(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
+    """Return the last ``LATENCY_RESERVOIR_SIZE`` latencies per tool in insertion order.
+
+    :param rows: input rows.
+    :return: ``{tool_name: [latencies]}``. Tools with no ``latency_s``
+        values are omitted.
+    """
+    reservoir: dict[str, list[float]] = {}
+    for row in rows:
+        latency = row.get("latency_s")
+        if latency is None:
+            continue
+        tool = row.get("tool_name") or "unknown"
+        reservoir.setdefault(tool, []).append(latency)
+    for tool, samples in reservoir.items():
+        if len(samples) > LATENCY_RESERVOIR_SIZE:
+            reservoir[tool] = samples[-LATENCY_RESERVOIR_SIZE:]
+    return reservoir
+
+
+def _score_extreme_predictions(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the top-``WORST_BEST_SIZE`` worst and best predictions by Brier.
+
+    Considers only valid rows (parse status ``"valid"`` with both
+    ``p_yes`` and ``final_outcome`` present). Deduplicated by
+    ``question_text``: each question contributes at most one entry per
+    list.
+
+    :param rows: input rows.
+    :return: ``(worst, best)``. Worst sorted by Brier descending, best
+        ascending. Each truncated to ``WORST_BEST_SIZE``.
+    """
+    worst_by_q: dict[str, dict[str, Any]] = {}
+    best_by_q: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("prediction_parse_status") != "valid":
+            continue
+        p_yes = row.get("p_yes")
+        outcome = row.get("final_outcome")
+        if p_yes is None or outcome is None:
+            continue
+        question = row.get("question_text")
+        if not question:
+            continue
+        entry = {
+            "question_text": question,
+            "tool_name": row.get("tool_name") or "unknown",
+            "p_yes": p_yes,
+            "final_outcome": outcome,
+            "brier": round(brier_score(p_yes, outcome), 4),
+            "platform": row.get("platform") or "unknown",
+            "category": row.get("category"),
+        }
+        prev_worst = worst_by_q.get(question)
+        if prev_worst is None or entry["brier"] > prev_worst["brier"]:
+            worst_by_q[question] = entry
+        prev_best = best_by_q.get(question)
+        if prev_best is None or entry["brier"] < prev_best["brier"]:
+            best_by_q[question] = entry
+
+    worst = sorted(worst_by_q.values(), key=lambda e: e["brier"], reverse=True)
+    best = sorted(best_by_q.values(), key=lambda e: e["brier"])
+    return worst[:WORST_BEST_SIZE], best[:WORST_BEST_SIZE]
+
+
 def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute all scores from production log rows."""
     total = len(rows)
@@ -966,6 +1033,14 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
 
+    # Schema parity with _accumulate_and_write: both score() and the
+    # incremental path write the same finalized dict shape to
+    # scores_<platform>.json. Kept even when generate_report does not
+    # render Latency / Worst / Best so consumers reading the JSON
+    # directly see the same keys regardless of which path produced it.
+    latency_reservoir = _score_latency_reservoir(rows)
+    worst_10, best_10 = _score_extreme_predictions(rows)
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_rows": total,
@@ -990,6 +1065,9 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         **cal_reg,
         "calibration_by_tool": calibration_by_tool,
         "edge_eligibility": edge_eligibility,
+        "latency_reservoir": latency_reservoir,
+        "worst_10": worst_10,
+        "best_10": best_10,
     }
 
 
@@ -1377,10 +1455,11 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
             reservoir.pop(0)
 
     # Worst / best 10 (deduplicated by question_text)
-    if is_valid:
+    question_text = row.get("question_text")
+    if is_valid and question_text:
         row_brier = brier_score(row["p_yes"], row["final_outcome"])
         entry = {
-            "question_text": row.get("question_text", ""),
+            "question_text": question_text,
             "tool_name": tool,
             "p_yes": row["p_yes"],
             "final_outcome": row["final_outcome"],

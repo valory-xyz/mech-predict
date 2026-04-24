@@ -1564,10 +1564,11 @@ def generate_report(
         )
     else:
         sections.append(_rolling(section_tool_ranking(rolling_scores)))
-        if render_tournament and rolling_scores_tournament is not None:
+        if render_tournament and _has_tournament_data(rolling_scores_tournament):
+            rolling_tourn: dict[str, Any] = rolling_scores_tournament or {}
             sections.append(
                 _rolling(
-                    section_tool_ranking(rolling_scores_tournament),
+                    section_tool_ranking(rolling_tourn),
                     f"{rolling_suffix} — Tournament",
                 )
             )

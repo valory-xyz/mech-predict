@@ -44,7 +44,7 @@ Summarize this Olas Predict benchmark report for the *{{platform_label}}* deploy
 • `tool-name` — Brier `X.XX`, LogLoss `X.XX`, Edge `±X.XX` (n=X), directional accuracy X%, one word on why
 (list bottom 3, ignore tools with 0% reliability or < 50 predictions)
 
-*Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools (and the tool names in backticks if the list is short enough to fit inline). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
+*Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
 
 *Category performance:* from the "Category Performance" section, list every category with sufficient data (skip rows flagged "insufficient data"). Use format: • `category` — Brier `X.XX`, Edge `±X.XX` (n=X). Call out the single strongest and weakest category inline (e.g. " — strongest" / " — weakest"). This is the answer to "where do our agents do well vs poorly" for {{platform_label}} — always include when data is present. IMPORTANT: a category with "yes rate: 0%" or "yes rate: 100%" has homogeneous outcomes — a low Brier there reflects the base rate, not prediction skill. If you cite such a category as "strongest", append " (homogeneous outcomes — reflects base rate)" so the reader isn't misled.
 

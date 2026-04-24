@@ -95,7 +95,8 @@ class TestBuildSystemPrompt:
             '"Tool Deployment Status ({platform_label})"'
             in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         )
-        assert "active tools" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "count of active tools only" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "do NOT enumerate the tool names" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
         assert "`⚠️ unavailable`" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
 
     def test_tool_category_prompt_lists_every_qualifying_cell(self) -> None:

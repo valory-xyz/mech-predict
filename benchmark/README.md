@@ -53,13 +53,17 @@ python -m benchmark.analyze --platform polymarket --include-tournament
 # is in a single log file. Useful for spotting recent regressions or
 # checking if a prompt change improved scores over the last week.
 python -m benchmark.scorer --period-days 1 --logs-dir benchmark/datasets/logs/ --output results/last_day.json
-python -m benchmark.scorer --period-days 7 --logs-dir benchmark/datasets/logs/ --output results/last_week.json
+python -m benchmark.scorer --period-days 3 --logs-dir benchmark/datasets/logs/ --output results/last_3_days.json
 python -m benchmark.scorer --period-days 30 --logs-dir benchmark/datasets/logs/ --output results/last_month.json
 
 # Pass period scores to analyze for delta-vs-alltime reporting.
-# The report leads with "Since Last Report" and "Last 3 Days Rolling"
+# The report leads with "Since Last Report" and "Last 3 Days (Window Aggregate)"
 # sections showing how recent performance compares to all-time.
-python -m benchmark.analyze --platform omen --period results/last_day.json --rolling results/last_week.json
+python -m benchmark.analyze --platform omen --period results/last_day.json --rolling results/last_3_days.json
+
+# Fleet view: cross-platform category and tool × category × platform ranking
+# from the combined scores.json.
+python -m benchmark.analyze --fleet
 ```
 
 ### 2. Cached replay (local dev — sweep.py)

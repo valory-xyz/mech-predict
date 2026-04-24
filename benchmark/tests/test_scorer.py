@@ -518,8 +518,8 @@ class TestIncrementalUpdate:
     def test_cross_platform_aggregates_parity_with_batch(self, tmp_path: Path) -> None:
         """Incremental by_category_platform + by_tool_category_platform match score().
 
-        Guards against a new key landing in score() but being skipped by
-        _empty_scores / _accumulate_row / _finalize_scores / _load_scores_for_resume.
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the scores / history / dedup files.
         """
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
@@ -2890,10 +2890,8 @@ class TestScorePeriodOffset:
     def test_offset_respects_window_end_exclusivity(self, tmp_path: Path) -> None:
         """Half-open window: start-inclusive, end-exclusive.
 
-        A row at exactly the upper boundary of the previous window
-        (``now - offset_days``) belongs to the current window, not the
-        previous. Guards against double-counting if the offset is set
-        equal to ``days``.
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the per-test log files.
         """
         logs = tmp_path / "logs"
         # This row is 3 days ago exactly; for days=3 offset=0 it falls

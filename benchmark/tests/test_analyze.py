@@ -30,6 +30,9 @@ from benchmark.analyze import (
     POLYMARKET_ACTIVE_CATEGORIES,
     ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
+    _always_majority,
+    _da_lift,
+    _delta_cell,
     _parse_tvm_key,
     _sample_label,
     generate_fleet_report,
@@ -39,9 +42,14 @@ from benchmark.analyze import (
     section_metric_reference,
     section_parse_breakdown,
     section_period,
+    section_platform_comparison,
+    section_platform_snapshot,
+    section_reliability_comparison,
     section_sample_size_warnings,
     section_tool_category,
+    section_tool_category_diagnostics,
     section_tool_category_platform,
+    section_tool_comparison,
     section_tool_deployment_status,
     section_tool_version_breakdown,
     section_trend,
@@ -2106,51 +2114,43 @@ class TestAlwaysMajorityAndDALift:
 
     def test_always_majority_yes_heavy(self) -> None:
         """yes_rate=0.7 → majority outcome is yes at 70%."""
-        from benchmark.analyze import _always_majority
 
         assert _always_majority(0.7) == 0.7
 
     def test_always_majority_no_heavy(self) -> None:
         """yes_rate=0.3 → majority outcome is no at 70% (1 - 0.3)."""
-        from benchmark.analyze import _always_majority
 
         assert _always_majority(0.3) == pytest.approx(0.7)
 
     def test_always_majority_balanced(self) -> None:
         """yes_rate=0.5 → majority baseline is 0.5 (no class is majority)."""
-        from benchmark.analyze import _always_majority
 
         assert _always_majority(0.5) == 0.5
 
     def test_always_majority_none(self) -> None:
         """Missing yes_rate yields None, not a crash or 0.5 default."""
-        from benchmark.analyze import _always_majority
 
         assert _always_majority(None) is None
 
     def test_da_lift_positive_when_beating_majority(self) -> None:
         """Tool predicting above always-majority has positive lift."""
-        from benchmark.analyze import _da_lift
 
         # yes_rate=0.4 → majority=0.6. DirAcc=0.75 → lift=+0.15.
         assert _da_lift(0.75, 0.4) == pytest.approx(0.15)
 
     def test_da_lift_zero_when_equal_to_majority(self) -> None:
         """Tool matching always-majority has zero lift."""
-        from benchmark.analyze import _da_lift
 
         assert _da_lift(0.6, 0.4) == pytest.approx(0.0)
 
     def test_da_lift_negative_when_below_majority(self) -> None:
         """Tool worse than always-majority has negative lift."""
-        from benchmark.analyze import _da_lift
 
         # yes_rate=0.3 → majority=0.7. DirAcc=0.55 → lift=-0.15.
         assert _da_lift(0.55, 0.3) == pytest.approx(-0.15)
 
     def test_da_lift_none_when_inputs_missing(self) -> None:
         """Either missing input yields None, not arithmetic error."""
-        from benchmark.analyze import _da_lift
 
         assert _da_lift(None, 0.4) is None
         assert _da_lift(0.75, None) is None
@@ -2161,7 +2161,6 @@ class TestSectionToolCategoryDiagnostics:
 
     def test_sufficient_cell_renders(self) -> None:
         """Cells with n >= MIN_SAMPLE_SIZE render with all three diagnostics."""
-        from benchmark.analyze import section_tool_category_diagnostics
 
         scores = {
             "by_tool_category": {
@@ -2179,7 +2178,6 @@ class TestSectionToolCategoryDiagnostics:
 
     def test_sparse_cells_dropped(self) -> None:
         """Cells below MIN_SAMPLE_SIZE don't render in the table body."""
-        from benchmark.analyze import section_tool_category_diagnostics
 
         scores = {
             "by_tool_category": {
@@ -2192,7 +2190,6 @@ class TestSectionToolCategoryDiagnostics:
 
     def test_missing_diagnostic_fields_render_na(self) -> None:
         """Cells with None edge / edge_n / log_loss render N/A rather than crash."""
-        from benchmark.analyze import section_tool_category_diagnostics
 
         scores = {
             "by_tool_category": {
@@ -2205,7 +2202,6 @@ class TestSectionToolCategoryDiagnostics:
 
     def test_empty_input(self) -> None:
         """Empty data collapses to a placeholder message, not a crash."""
-        from benchmark.analyze import section_tool_category_diagnostics
 
         rendered = section_tool_category_diagnostics({})
         assert "No cross-breakdown data available" in rendered
@@ -2328,7 +2324,6 @@ class TestDeltaCell:
 
     def test_delta_suppressed_when_current_below_min(self) -> None:
         """Low current-window n yields insufficient data, not a signed number."""
-        from benchmark.analyze import _delta_cell
 
         assert _delta_cell(0.2, 0.3, current_n=5, reference_n=1000) == (
             "insufficient data"
@@ -2336,7 +2331,6 @@ class TestDeltaCell:
 
     def test_delta_suppressed_when_reference_below_min(self) -> None:
         """Low reference-window n yields insufficient data."""
-        from benchmark.analyze import _delta_cell
 
         assert _delta_cell(0.2, 0.3, current_n=1000, reference_n=5) == (
             "insufficient data"
@@ -2344,14 +2338,12 @@ class TestDeltaCell:
 
     def test_none_values_yield_na(self) -> None:
         """Missing values collapse to N/A rather than arithmetic error."""
-        from benchmark.analyze import _delta_cell
 
         assert _delta_cell(None, 0.3, 1000, 1000) == "N/A"
         assert _delta_cell(0.2, None, 1000, 1000) == "N/A"
 
     def test_lower_is_better_direction(self) -> None:
         """For Brier-like metrics, negative delta = better."""
-        from benchmark.analyze import _delta_cell
 
         rendered = _delta_cell(0.20, 0.25, 100, 100, lower_is_better=True)
         assert rendered.startswith("-0.0500")
@@ -2359,7 +2351,6 @@ class TestDeltaCell:
 
     def test_higher_is_better_direction(self) -> None:
         """For BSS / directional accuracy, positive delta = better."""
-        from benchmark.analyze import _delta_cell
 
         rendered = _delta_cell(0.75, 0.70, 100, 100, lower_is_better=False)
         assert rendered.startswith("+0.0500")
@@ -2367,7 +2358,6 @@ class TestDeltaCell:
 
     def test_zero_delta_labeled_same(self) -> None:
         """Delta of exactly zero renders as same, not better/worse."""
-        from benchmark.analyze import _delta_cell
 
         rendered = _delta_cell(0.20, 0.20, 100, 100)
         assert "same" in rendered
@@ -2378,7 +2368,6 @@ class TestSectionPlatformSnapshot:
 
     def test_renders_all_snapshot_metrics(self) -> None:
         """Every reviewer-requested snapshot metric appears in the output."""
-        from benchmark.analyze import section_platform_snapshot
 
         scores = {
             "overall": {
@@ -2411,7 +2400,6 @@ class TestSectionPlatformSnapshot:
 
     def test_empty_scores_renders_placeholder(self) -> None:
         """Zero rows collapses to a placeholder, not a crash."""
-        from benchmark.analyze import section_platform_snapshot
 
         assert "No rows scored" in section_platform_snapshot({"overall": {"n": 0}})
 
@@ -2463,7 +2451,6 @@ class TestSectionPlatformComparison:
 
     def test_three_window_table_header(self) -> None:
         """Header names current, all-time, and prev windows with delta columns."""
-        from benchmark.analyze import section_platform_comparison
 
         rendered = section_platform_comparison(
             self._rolling(), self._alltime(), self._prev()
@@ -2476,14 +2463,12 @@ class TestSectionPlatformComparison:
 
     def test_no_prev_window_when_prev_is_none(self) -> None:
         """Prev column renders 'no prev window' placeholder instead of a delta."""
-        from benchmark.analyze import section_platform_comparison
 
         rendered = section_platform_comparison(self._rolling(), self._alltime(), None)
         assert "no prev window" in rendered
 
     def test_brier_row_renders_signed_delta(self) -> None:
         """Brier delta sign + direction word appears in the table body."""
-        from benchmark.analyze import section_platform_comparison
 
         rendered = section_platform_comparison(
             self._rolling(), self._alltime(), self._prev()
@@ -2511,7 +2496,6 @@ class TestSectionToolComparison:
 
     def test_tool_row_cites_current_value_and_deltas(self) -> None:
         """Each row shows the current Brier, all-time delta, and prev delta."""
-        from benchmark.analyze import section_tool_comparison
 
         rolling = self._s({"tool-a": (0.22, 100)})
         alltime = self._s({"tool-a": (0.25, 5000)})
@@ -2523,7 +2507,6 @@ class TestSectionToolComparison:
 
     def test_no_prev_window_placeholder(self) -> None:
         """None prev-rolling renders the placeholder instead of N/A or empty."""
-        from benchmark.analyze import section_tool_comparison
 
         rolling = self._s({"tool-a": (0.22, 100)})
         alltime = self._s({"tool-a": (0.25, 5000)})
@@ -2532,7 +2515,6 @@ class TestSectionToolComparison:
 
     def test_empty_universe_renders_placeholder(self) -> None:
         """No tools anywhere collapses to a placeholder."""
-        from benchmark.analyze import section_tool_comparison
 
         rendered = section_tool_comparison({}, {}, None)
         assert "No tool data available." in rendered
@@ -2543,7 +2525,6 @@ class TestSectionReliabilityComparison:
 
     def test_reliability_regression_labeled_worse(self) -> None:
         """Tool whose reliability dropped renders with 'worse' direction."""
-        from benchmark.analyze import section_reliability_comparison
 
         rolling = {
             "by_tool": {"tool-a": {"reliability": 0.85, "n": 100}},
@@ -2559,7 +2540,6 @@ class TestSectionReliabilityComparison:
 
     def test_low_sample_suppresses_delta(self) -> None:
         """Low-n reliability delta renders insufficient data, not a signed %."""
-        from benchmark.analyze import section_reliability_comparison
 
         rolling = {
             "by_tool": {"tool-a": {"reliability": 0.85, "n": 5}},

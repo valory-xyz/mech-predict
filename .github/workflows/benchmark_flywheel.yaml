@@ -173,6 +173,7 @@ jobs:
         run: python -m benchmark.analyze --platform omen --include-tournament
 
       - name: Analyze (Polystrat)
+        if: always() && !cancelled()
         run: python -m benchmark.analyze --platform polymarket --include-tournament
 
       # Upload state + scores (small, needed for next run).
@@ -213,7 +214,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
       - name: Post Omenstrat summary to Slack
-        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}

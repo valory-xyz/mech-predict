@@ -1,11 +1,17 @@
 """
-Post an AI-summarized benchmark report to Slack.
+Post an AI-summarized benchmark report to Slack for one platform deployment.
 
-Reads a markdown report, sends it to OpenAI for a concise Slack-formatted
-summary, and posts the result via an incoming webhook.
+Reads a per-platform markdown report (``report_<platform>.md``), sends it
+to OpenAI for a concise Slack-formatted summary scoped to the named
+deployment, and posts the result via an incoming webhook.
 
 Usage:
-    python benchmark/notify_slack.py --report benchmark/results/report.md
+    python -m benchmark.notify_slack --report benchmark/results/report_omen.md --platform-label Omenstrat
+    python -m benchmark.notify_slack --report benchmark/results/report_polymarket.md --platform-label Polystrat
+
+When ``--platform-label`` is omitted, the deployment name is inferred
+from the report filename (``report_omen.md`` -> Omenstrat,
+``report_polymarket.md`` -> Polystrat).
 """
 
 from __future__ import annotations

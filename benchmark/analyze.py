@@ -1191,9 +1191,11 @@ def section_diagnostics_comparison(
                 f" | {_value_cell(p_val, p_n)}"
                 f" | {delta_prev} |"
             )
-    if len(lines) == 5:
-        # Only the header rows — no tool had data across any diagnostic
-        # metric for any window.
+    # ``lines`` is initialized with 4 items (heading, blank, header row,
+    # separator). When every (tool, metric) cell was skipped via the
+    # ``all three windows None`` continue, nothing else was appended and
+    # the bare table would render with no body rows.
+    if len(lines) == 4:
         lines.append("| _(no diagnostic data)_ | | | | | | |")
     return "\n".join(lines)
 
@@ -2157,6 +2159,25 @@ def _has_tournament_data(scores_tournament: dict[str, Any] | None) -> bool:
     return bool(scores_tournament and scores_tournament.get("total_rows", 0) > 0)
 
 
+def _has_scored_rows(scores: dict[str, Any] | None) -> bool:
+    """Return True when a scores dict has at least one scored row.
+
+    Used to collapse zero-row scoring output to the same "no data" signal
+    a missing-file case emits, so downstream renderers don't have to
+    distinguish the two for user-facing copy.
+
+    :param scores: a parsed scores dict or ``None``.
+    :return: True when the dict carries at least one row in ``total_rows``
+        or its ``overall`` accumulator.
+    """
+    if not scores:
+        return False
+    if scores.get("total_rows", 0) > 0:
+        return True
+    overall = scores.get("overall") or {}
+    return overall.get("n", 0) > 0
+
+
 def _merged_tvm_scores(
     scores_prod: dict[str, Any],
     scores_tournament: dict[str, Any] | None,
@@ -2341,6 +2362,14 @@ def generate_report(  # pylint: disable=too-many-statements
     )
 
     render_tournament = include_tournament and _has_tournament_data(scores_tournament)
+
+    # A zero-row prev scoring run (CI step succeeded but the window was
+    # empty) lands as ``{"total_rows": 0, "overall": {}}`` on disk. Treat
+    # that as "no prev window" so readers see the same explicit
+    # placeholder they see when the file is missing, rather than a
+    # stream of ``N/A (n=0)`` cells that silently merges the two cases.
+    if prev_rolling_scores is not None and not _has_scored_rows(prev_rolling_scores):
+        prev_rolling_scores = None
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
 

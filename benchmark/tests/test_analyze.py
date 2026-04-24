@@ -39,6 +39,7 @@ from benchmark.analyze import (
     generate_report,
     section_category,
     section_category_platform,
+    section_diagnostics_comparison,
     section_metric_reference,
     section_parse_breakdown,
     section_period,
@@ -2518,6 +2519,115 @@ class TestSectionToolComparison:
 
         rendered = section_tool_comparison({}, {}, None)
         assert "No tool data available." in rendered
+
+
+class TestSectionDiagnosticsComparisonPlaceholder:
+    """Diagnostics table renders an explicit placeholder when all cells skip.
+
+    Before the ``len(lines) == 4`` fix the table would emit a bare
+    header + separator with no body rows when every metric cell hit
+    the ``all three windows None`` continue — readers saw an empty
+    table and had to guess whether that meant "no data" or "rendering
+    bug".
+    """
+
+    def test_placeholder_rendered_when_every_cell_skips(self) -> None:
+        """Tool with no edge / log_loss / ... keys triggers the placeholder."""
+        # tool-a exists in by_tool so _tool_universe yields it, but
+        # none of the five diagnostic metric keys are populated on any
+        # window — every (tool, metric) pair hits the continue branch.
+        bare_tool = {"by_tool": {"tool-a": {"n": 100, "valid_n": 90}}}
+        rendered = section_diagnostics_comparison(bare_tool, bare_tool, bare_tool)
+        assert "_(no diagnostic data)_" in rendered
+
+    def test_placeholder_absent_when_any_metric_populated(self) -> None:
+        """Placeholder only fires when no (tool, metric) cell renders."""
+        with_edge = {
+            "by_tool": {
+                "tool-a": {
+                    "n": 100,
+                    "valid_n": 90,
+                    "edge": 0.02,
+                    "edge_n": 80,
+                }
+            }
+        }
+        rendered = section_diagnostics_comparison(with_edge, with_edge, with_edge)
+        assert "_(no diagnostic data)_" not in rendered
+        assert "**tool-a** | Edge" in rendered
+
+
+class TestZeroRowPrevRollingRouting:
+    """Zero-row prev_rolling_scores routes to the "no prev window" placeholder.
+
+    A prev-scoring CI step that succeeds on an empty window writes
+    ``{"total_rows": 0, "overall": {}}`` to disk. Pre-normalization,
+    ``prev is not None`` was True in the comparison sections and the
+    "no prev window" placeholder never fired — readers saw ``N/A (n=0)``
+    cells that read as "we measured zero rows" instead of "no reference
+    window available".
+    """
+
+    def _scores(self, tool: str, brier: float, n: int) -> dict:
+        return _scores_with_tool(tool, brier, n)
+
+    def test_empty_prev_rolling_routes_to_no_prev_window(self) -> None:
+        """Zero total_rows on prev_rolling_scores renders the explicit placeholder."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        empty_prev = {"total_rows": 0, "overall": {}}
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=empty_prev,
+            disabled_tools={},
+        )
+        assert "no prev window" in report
+
+    def test_missing_prev_rolling_and_empty_prev_rolling_render_the_same(
+        self,
+    ) -> None:
+        """Zero-row prev and None prev emit the same user-facing copy."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        empty_prev = {"total_rows": 0, "overall": {}}
+        report_empty = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=empty_prev,
+            disabled_tools={},
+        )
+        report_none = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=None,
+            disabled_tools={},
+        )
+        # The date stamps in the header carry ``generated_at`` which is
+        # identical across both calls for a single-scorer fixture, so the
+        # full reports compare equal.
+        assert report_empty == report_none
+
+    def test_populated_prev_rolling_still_renders_deltas(self) -> None:
+        """The zero-row guard does not accidentally swallow real prev data."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        populated_prev = self._scores("tool-a", 0.21, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=populated_prev,
+            disabled_tools={},
+        )
+        assert "no prev window" not in report
 
 
 class TestSectionReliabilityComparison:

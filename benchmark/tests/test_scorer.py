@@ -2865,20 +2865,37 @@ class TestScorePeriodOffset:
     def test_offset_equal_to_days_selects_prev_non_overlapping(
         self, tmp_path: Path
     ) -> None:
-        """offset=days yields the preceding non-overlapping window."""
+        """offset=days yields the preceding non-overlapping window.
+
+        :param tmp_path: pytest fixture supplying an isolated temp
+            directory for the per-test log files.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import _load_period_rows
+
         logs = tmp_path / "logs"
         current_row = _row(predicted_at=self._ts(1), row_id="current")
         prev_row = _row(predicted_at=self._ts(4), row_id="prev")
         old_row = _row(predicted_at=self._ts(8), row_id="old")
         self._populate_logs(logs, [current_row, prev_row, old_row])
 
-        current = score_period(logs, days=3, offset_days=0)
-        prev = score_period(logs, days=3, offset_days=3)
+        # Cardinality and row-identity: the invariant isn't just "each
+        # window sees one row" (two leaky windows could each happen to
+        # catch one), it's "the two windows share no rows at all".
+        current_prod, _ = _load_period_rows(logs, days=3, tournament_input=None)
+        prev_prod, _ = _load_period_rows(
+            logs, days=3, tournament_input=None, offset_days=3
+        )
+        current_ids = {r["row_id"] for r in current_prod}
+        prev_ids = {r["row_id"] for r in prev_prod}
+        assert current_ids == {"current"}
+        assert prev_ids == {"prev"}
+        assert current_ids.isdisjoint(prev_ids)
 
-        assert current["total_rows"] == 1
-        assert prev["total_rows"] == 1
-        # Non-overlap: the row from the current window is NOT in prev, and
-        # vice versa.
+        # score_period returns scored aggregates — keep a coarse sanity
+        # check that the same partitioning reaches the scorer output.
+        assert score_period(logs, days=3, offset_days=0)["total_rows"] == 1
+        assert score_period(logs, days=3, offset_days=3)["total_rows"] == 1
 
     def test_negative_offset_raises(self, tmp_path: Path) -> None:
         """Negative offset is a user error, not a silent zero-fill."""

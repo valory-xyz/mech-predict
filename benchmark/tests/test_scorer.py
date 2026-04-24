@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
@@ -384,6 +386,22 @@ class TestScore:
         assert result["by_tool_category"]["tool-b | crypto"]["brier"] == 0.25
         assert result["by_tool_category"]["tool-a | politics"]["brier"] == 0.64
 
+        # By category × platform — direct one-file cross-platform slice.
+        assert "crypto | omen" in result["by_category_platform"]
+        assert "politics | polymarket" in result["by_category_platform"]
+        assert result["by_category_platform"]["crypto | omen"]["n"] == 2
+        assert result["by_category_platform"]["politics | polymarket"]["n"] == 1
+
+        # By tool × category × platform — tri-dimensional slice.
+        assert "tool-a | crypto | omen" in result["by_tool_category_platform"]
+        assert "tool-a | politics | polymarket" in result["by_tool_category_platform"]
+        assert result["by_tool_category_platform"]["tool-a | crypto | omen"]["n"] == 1
+        # tool-a | crypto | omen: p=0.9, outcome=True → (0.9-1)^2 = 0.01
+        assert (
+            result["by_tool_category_platform"]["tool-a | crypto | omen"]["brier"]
+            == 0.01
+        )
+
     def test_empty_input(self) -> None:
         """Test scoring with empty input."""
         result = score([])
@@ -415,6 +433,8 @@ class TestScore:
             "by_tool",
             "by_platform",
             "by_category",
+            "by_category_platform",
+            "by_tool_category_platform",
             "by_horizon",
             "trend",
         ]
@@ -494,6 +514,55 @@ class TestIncrementalUpdate:
 
         assert result["by_tool"]["tool-a"]["n"] == 2
         assert result["by_tool"]["tool-b"]["n"] == 1
+
+    def test_cross_platform_aggregates_parity_with_batch(self, tmp_path: Path) -> None:
+        """Incremental by_category_platform + by_tool_category_platform match score().
+
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the scores / history / dedup files.
+        """
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(
+                p_yes=0.9,
+                outcome=True,
+                tool="tool-a",
+                platform="omen",
+                category="crypto",
+            ),
+            _row(
+                p_yes=0.8,
+                outcome=False,
+                tool="tool-a",
+                platform="polymarket",
+                category="politics",
+            ),
+            _row(
+                p_yes=0.5,
+                outcome=True,
+                tool="tool-b",
+                platform="omen",
+                category="crypto",
+            ),
+        ]
+
+        update(rows[:2], scores_path, history_path)
+        inc = update(rows[2:], scores_path, history_path)
+        batch = score(rows)
+
+        for dim in ("by_category_platform", "by_tool_category_platform"):
+            assert set(inc[dim].keys()) == set(
+                batch[dim].keys()
+            ), f"{dim} key set drift between incremental and batch"
+            for key in batch[dim]:
+                assert (
+                    inc[dim][key]["n"] == batch[dim][key]["n"]
+                ), f"{dim}[{key}] n mismatch"
+                assert (
+                    inc[dim][key]["brier"] == batch[dim][key]["brier"]
+                ), f"{dim}[{key}] brier mismatch"
 
     def test_calibration_buckets_accumulate(self, tmp_path: Path) -> None:
         """Calibration buckets accumulate counts correctly."""
@@ -2763,6 +2832,106 @@ class TestPerPlatformPeriod:
         prod_omen, _ = result["omen"]
         assert prod_all["overall"]["n"] == 1
         assert prod_omen["overall"]["n"] == 1
+
+
+class TestScorePeriodOffset:
+    """Tests for score_period's --period-offset-days semantics.
+
+    Offset selects a non-overlapping window. Rows in the current window
+    (``offset_days=0``) must be excluded from the prev window
+    (``offset_days=days``), and vice versa.
+    """
+
+    def _ts(self, days_ago: float) -> str:
+        dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _populate_logs(self, logs_dir: Path, rows: list[dict[str, Any]]) -> None:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "2026-03-01.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n"
+        )
+
+    def test_offset_zero_matches_trailing_window(self, tmp_path: Path) -> None:
+        """offset_days=0 behaves like the legacy trailing-window filter."""
+        logs = tmp_path / "logs"
+        today_row = _row(predicted_at=self._ts(0.5), row_id="today")
+        old_row = _row(predicted_at=self._ts(10), row_id="old")
+        self._populate_logs(logs, [today_row, old_row])
+
+        result = score_period(logs, days=3, offset_days=0)
+        assert result["total_rows"] == 1
+
+    def test_offset_equal_to_days_selects_prev_non_overlapping(
+        self, tmp_path: Path
+    ) -> None:
+        """offset=days yields the preceding non-overlapping window.
+
+        :param tmp_path: pytest fixture supplying an isolated temp
+            directory for the per-test log files.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import _load_period_rows
+
+        logs = tmp_path / "logs"
+        # Distinct tool names per row so the scored ``by_tool`` map
+        # below is a direct identity check on which row reached each
+        # window — catches a broken partitioner that silently placed
+        # the same row in both windows (n=1 each) instead of
+        # partitioning by timestamp.
+        current_row = _row(
+            predicted_at=self._ts(1), row_id="current", tool="tool-current"
+        )
+        prev_row = _row(predicted_at=self._ts(4), row_id="prev", tool="tool-prev")
+        old_row = _row(predicted_at=self._ts(8), row_id="old", tool="tool-old")
+        self._populate_logs(logs, [current_row, prev_row, old_row])
+
+        # Loader-level identity invariant — checks the partition the
+        # scorer consumes before any aggregation runs.
+        current_prod, _ = _load_period_rows(logs, days=3, tournament_input=None)
+        prev_prod, _ = _load_period_rows(
+            logs, days=3, tournament_input=None, offset_days=3
+        )
+        current_ids = {r["row_id"] for r in current_prod}
+        prev_ids = {r["row_id"] for r in prev_prod}
+        assert current_ids == {"current"}
+        assert prev_ids == {"prev"}
+        assert current_ids.isdisjoint(prev_ids)
+
+        # Scorer-level identity invariant — verifies the distinct tool
+        # names survive through the full scoring pipeline, not just the
+        # loader. A bug that routed a row into both windows would
+        # surface the same tool name on both sides.
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert "tool-current" in current["by_tool"]
+        assert "tool-current" not in prev["by_tool"]
+        assert "tool-prev" in prev["by_tool"]
+        assert "tool-prev" not in current["by_tool"]
+
+    def test_negative_offset_raises(self, tmp_path: Path) -> None:
+        """Negative offset is a user error, not a silent zero-fill."""
+        logs = tmp_path / "logs"
+        self._populate_logs(logs, [_row(predicted_at=self._ts(0.5))])
+        with pytest.raises(ValueError, match="offset_days"):
+            score_period(logs, days=3, offset_days=-1)
+
+    def test_offset_respects_window_end_exclusivity(self, tmp_path: Path) -> None:
+        """Half-open window: start-inclusive, end-exclusive.
+
+        :param tmp_path: pytest fixture supplying an isolated temp directory
+            for the per-test log files.
+        """
+        logs = tmp_path / "logs"
+        # This row is 3 days ago exactly; for days=3 offset=0 it falls
+        # inside [now-3d, now) and should count as current, not prev.
+        boundary_row = _row(predicted_at=self._ts(2.999), row_id="boundary")
+        self._populate_logs(logs, [boundary_row])
+
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert current["total_rows"] == 1
+        assert prev["total_rows"] == 0
 
 
 class TestScoreLatencyReservoir:

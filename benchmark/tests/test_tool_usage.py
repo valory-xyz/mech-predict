@@ -25,6 +25,35 @@ import pytest
 
 from benchmark import tool_usage
 from benchmark.analyze import section_tool_deployment_status
+from benchmark.tool_usage import DEPLOYMENTS, DEPLOYMENT_TO_PLATFORM
+
+
+class TestDeploymentPlatformMappingInvariants:
+    """Lock the DEPLOYMENTS ↔ DEPLOYMENT_TO_PLATFORM coverage invariant.
+
+    ``deployments_for_platform`` filters ``DEPLOYMENTS`` through
+    ``DEPLOYMENT_TO_PLATFORM``. If a deployment lands in the list but
+    not in the mapping, it silently disappears from the platform-scoped
+    Tool Deployment Status section. The tests below fail loudly at add
+    time so nobody has to rediscover the bug in production.
+    """
+
+    def test_every_deployment_has_a_platform(self) -> None:
+        """No name in DEPLOYMENTS is missing from DEPLOYMENT_TO_PLATFORM."""
+        missing = [name for name in DEPLOYMENTS if name not in DEPLOYMENT_TO_PLATFORM]
+        assert not missing, (
+            f"deployment(s) {missing} in DEPLOYMENTS have no platform mapping — "
+            "deployments_for_platform would silently drop them"
+        )
+
+    def test_no_orphan_mapping_entries(self) -> None:
+        """Every mapping key is also present in DEPLOYMENTS (no drift the other way)."""
+        orphans = [name for name in DEPLOYMENT_TO_PLATFORM if name not in DEPLOYMENTS]
+        assert not orphans, (
+            f"mapping key(s) {orphans} have no matching DEPLOYMENTS entry — "
+            "the deployment was removed but the mapping wasn't cleaned up"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -145,18 +145,6 @@ jobs:
         continue-on-error: true
 
       # Score recent periods for diff reporting
-      - name: Score today
-        run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
-          fi
-          python -m benchmark.scorer --period-days 1 \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/period_scores.json \
-            $TOURNAMENT_FLAG
-        continue-on-error: true
-
       # Keep the "3" in the step name and --period-days flag in sync with
       # ROLLING_WINDOW_DAYS in benchmark/analyze.py. YAML can't import the
       # Python constant; a bump to ROLLING_WINDOW_DAYS must be mirrored here.
@@ -169,6 +157,21 @@ jobs:
           python -m benchmark.scorer --period-days 3 \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
+            $TOURNAMENT_FLAG
+        continue-on-error: true
+
+      # Score the preceding non-overlapping window (days 4-6 ago for a
+      # 3-day rolling window). Feeds the "Δ vs Prev 3d" columns in the
+      # three-window comparison tables.
+      - name: Score previous 3 days (non-overlapping)
+        run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          python -m benchmark.scorer --period-days 3 --period-offset-days 3 \
+            --logs-dir benchmark/datasets/logs/ \
+            --output benchmark/results/prev_rolling_scores.json \
             $TOURNAMENT_FLAG
         continue-on-error: true
 

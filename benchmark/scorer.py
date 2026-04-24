@@ -2146,19 +2146,25 @@ def score_period_split(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
+    offset_days: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Score the last *days* days, returning (production, tournament).
+    """Score a windowed slice of rows, returning (production, tournament).
 
     Same collection rules as ``score_period`` but returns a tuple so
     callers can write both files separately.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``offset_days=days`` selects the immediately-preceding non-overlapping
+        window.
     :return: tuple of (production_scores, tournament_scores).
     """
-    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+    prod_rows, tourn_rows = _load_period_rows(
+        logs_dir, days, tournament_input, offset_days
+    )
     return score(prod_rows), score(tourn_rows)
 
 
@@ -2191,19 +2197,25 @@ def score_period_split_by_platform(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
+    offset_days: int = 0,
 ) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
-    """Score the last *days* days, returning combined + per-platform results.
+    """Score a windowed slice of rows, returning combined + per-platform results.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``offset_days=days`` selects the immediately-preceding non-overlapping
+        window (used to compute prev-rolling scores without overlap).
     :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
         "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
         matches the shape of ``score_period_split``. Unknown-platform
         rows stay in ``"all"`` only.
     """
-    prod_rows, tourn_rows = _load_period_rows(logs_dir, days, tournament_input)
+    prod_rows, tourn_rows = _load_period_rows(
+        logs_dir, days, tournament_input, offset_days
+    )
     return _score_rows_by_platform(prod_rows, tourn_rows)
 
 
@@ -2232,17 +2244,29 @@ def _load_period_rows(
     logs_dir: Path,
     days: int,
     tournament_input: Path | None,
+    offset_days: int = 0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Load + filter + mode-partition period rows.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``0`` means the trailing window ending at "now" (current window);
+        ``days`` means the immediately-preceding non-overlapping window.
     :return: ``(production_rows, tournament_rows)`` both filtered to the
         period window.
+    :raises ValueError: when ``days`` or ``offset_days`` is negative.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    if days < 0 or offset_days < 0:
+        raise ValueError(
+            f"days and offset_days must be >= 0 (got days={days},"
+            f" offset_days={offset_days})"
+        )
+    now = datetime.now(timezone.utc)
+    window_end = now - timedelta(days=offset_days)
+    window_start = window_end - timedelta(days=days)
 
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
@@ -2251,17 +2275,20 @@ def _load_period_rows(
         key=_extract_date_from_log_path,
     )
 
+    def _in_window(predicted_at: datetime | None) -> bool:
+        if predicted_at is None:
+            return False
+        return window_start <= predicted_at < window_end
+
     rows: list[dict[str, Any]] = []
     for filepath in all_files:
         for row in load_rows(Path(filepath)):
-            predicted_at = _parse_predicted_at(row.get("predicted_at"))
-            if predicted_at is not None and predicted_at >= cutoff:
+            if _in_window(_parse_predicted_at(row.get("predicted_at"))):
                 rows.append(row)
 
     if tournament_input is not None and tournament_input.exists():
         for row in load_rows(tournament_input):
-            predicted_at = _parse_predicted_at(row.get("predicted_at"))
-            if predicted_at is not None and predicted_at >= cutoff:
+            if _in_window(_parse_predicted_at(row.get("predicted_at"))):
                 rows.append(row)
 
     return _partition_rows_by_mode(rows)
@@ -2271,20 +2298,22 @@ def score_period(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
+    offset_days: int = 0,
 ) -> dict[str, Any]:
-    """Score production rows in the last *days* days (backward-compat).
+    """Score production rows in a windowed slice (backward-compat).
 
     Backward-compat wrapper around ``score_period_split``; returns the
     production partition only. Callers that need the tournament scores
     should use ``score_period_split`` directly.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
     :return: production scores dict.
     """
-    prod, _ = score_period_split(logs_dir, days, tournament_input)
+    prod, _ = score_period_split(logs_dir, days, tournament_input, offset_days)
     return prod
 
 
@@ -2343,6 +2372,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Score only the last N daily log files (for period reports)",
     )
     parser.add_argument(
+        "--period-offset-days",
+        type=int,
+        default=0,
+        help=(
+            "Shift the scoring window back by N days. Combined with "
+            "--period-days=N this selects the immediately-preceding "
+            "non-overlapping window (used for prev-rolling scores)."
+        ),
+    )
+    parser.add_argument(
         "--tournament-input",
         type=Path,
         default=None,
@@ -2379,6 +2418,7 @@ def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
         logs_dir=args.logs_dir,
         days=args.period_days,
         tournament_input=args.tournament_input,
+        offset_days=args.period_offset_days,
     )
     prod_result, tourn_result = results["all"]
 

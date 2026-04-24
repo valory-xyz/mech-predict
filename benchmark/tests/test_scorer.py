@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
@@ -2830,6 +2832,79 @@ class TestPerPlatformPeriod:
         prod_omen, _ = result["omen"]
         assert prod_all["overall"]["n"] == 1
         assert prod_omen["overall"]["n"] == 1
+
+
+class TestScorePeriodOffset:
+    """Tests for score_period's --period-offset-days semantics.
+
+    Offset selects a non-overlapping window. Rows in the current window
+    (``offset_days=0``) must be excluded from the prev window
+    (``offset_days=days``), and vice versa.
+    """
+
+    def _ts(self, days_ago: float) -> str:
+        dt = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _populate_logs(self, logs_dir: Path, rows: list[dict[str, Any]]) -> None:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "2026-03-01.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n"
+        )
+
+    def test_offset_zero_matches_trailing_window(self, tmp_path: Path) -> None:
+        """offset_days=0 behaves like the legacy trailing-window filter."""
+        logs = tmp_path / "logs"
+        today_row = _row(predicted_at=self._ts(0.5), row_id="today")
+        old_row = _row(predicted_at=self._ts(10), row_id="old")
+        self._populate_logs(logs, [today_row, old_row])
+
+        result = score_period(logs, days=3, offset_days=0)
+        assert result["total_rows"] == 1
+
+    def test_offset_equal_to_days_selects_prev_non_overlapping(
+        self, tmp_path: Path
+    ) -> None:
+        """offset=days yields the preceding non-overlapping window."""
+        logs = tmp_path / "logs"
+        current_row = _row(predicted_at=self._ts(1), row_id="current")
+        prev_row = _row(predicted_at=self._ts(4), row_id="prev")
+        old_row = _row(predicted_at=self._ts(8), row_id="old")
+        self._populate_logs(logs, [current_row, prev_row, old_row])
+
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+
+        assert current["total_rows"] == 1
+        assert prev["total_rows"] == 1
+        # Non-overlap: the row from the current window is NOT in prev, and
+        # vice versa.
+
+    def test_negative_offset_raises(self, tmp_path: Path) -> None:
+        """Negative offset is a user error, not a silent zero-fill."""
+        logs = tmp_path / "logs"
+        self._populate_logs(logs, [_row(predicted_at=self._ts(0.5))])
+        with pytest.raises(ValueError, match="offset_days"):
+            score_period(logs, days=3, offset_days=-1)
+
+    def test_offset_respects_window_end_exclusivity(self, tmp_path: Path) -> None:
+        """Half-open window: start-inclusive, end-exclusive.
+
+        A row at exactly the upper boundary of the previous window
+        (``now - offset_days``) belongs to the current window, not the
+        previous. Guards against double-counting if the offset is set
+        equal to ``days``.
+        """
+        logs = tmp_path / "logs"
+        # This row is 3 days ago exactly; for days=3 offset=0 it falls
+        # inside [now-3d, now) and should count as current, not prev.
+        boundary_row = _row(predicted_at=self._ts(2.999), row_id="boundary")
+        self._populate_logs(logs, [boundary_row])
+
+        current = score_period(logs, days=3, offset_days=0)
+        prev = score_period(logs, days=3, offset_days=3)
+        assert current["total_rows"] == 1
+        assert prev["total_rows"] == 0
 
 
 class TestScoreLatencyReservoir:

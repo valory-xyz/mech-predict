@@ -384,6 +384,22 @@ class TestScore:
         assert result["by_tool_category"]["tool-b | crypto"]["brier"] == 0.25
         assert result["by_tool_category"]["tool-a | politics"]["brier"] == 0.64
 
+        # By category × platform — direct one-file cross-platform slice.
+        assert "crypto | omen" in result["by_category_platform"]
+        assert "politics | polymarket" in result["by_category_platform"]
+        assert result["by_category_platform"]["crypto | omen"]["n"] == 2
+        assert result["by_category_platform"]["politics | polymarket"]["n"] == 1
+
+        # By tool × category × platform — tri-dimensional slice.
+        assert "tool-a | crypto | omen" in result["by_tool_category_platform"]
+        assert "tool-a | politics | polymarket" in result["by_tool_category_platform"]
+        assert result["by_tool_category_platform"]["tool-a | crypto | omen"]["n"] == 1
+        # tool-a | crypto | omen: p=0.9, outcome=True → (0.9-1)^2 = 0.01
+        assert (
+            result["by_tool_category_platform"]["tool-a | crypto | omen"]["brier"]
+            == 0.01
+        )
+
     def test_empty_input(self) -> None:
         """Test scoring with empty input."""
         result = score([])
@@ -415,6 +431,8 @@ class TestScore:
             "by_tool",
             "by_platform",
             "by_category",
+            "by_category_platform",
+            "by_tool_category_platform",
             "by_horizon",
             "trend",
         ]
@@ -494,6 +512,55 @@ class TestIncrementalUpdate:
 
         assert result["by_tool"]["tool-a"]["n"] == 2
         assert result["by_tool"]["tool-b"]["n"] == 1
+
+    def test_cross_platform_aggregates_parity_with_batch(self, tmp_path: Path) -> None:
+        """Incremental by_category_platform + by_tool_category_platform match score().
+
+        Guards against a new key landing in score() but being skipped by
+        _empty_scores / _accumulate_row / _finalize_scores / _load_scores_for_resume.
+        """
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+
+        rows = [
+            _row(
+                p_yes=0.9,
+                outcome=True,
+                tool="tool-a",
+                platform="omen",
+                category="crypto",
+            ),
+            _row(
+                p_yes=0.8,
+                outcome=False,
+                tool="tool-a",
+                platform="polymarket",
+                category="politics",
+            ),
+            _row(
+                p_yes=0.5,
+                outcome=True,
+                tool="tool-b",
+                platform="omen",
+                category="crypto",
+            ),
+        ]
+
+        update(rows[:2], scores_path, history_path)
+        inc = update(rows[2:], scores_path, history_path)
+        batch = score(rows)
+
+        for dim in ("by_category_platform", "by_tool_category_platform"):
+            assert set(inc[dim].keys()) == set(
+                batch[dim].keys()
+            ), f"{dim} key set drift between incremental and batch"
+            for key in batch[dim]:
+                assert (
+                    inc[dim][key]["n"] == batch[dim][key]["n"]
+                ), f"{dim}[{key}] n mismatch"
+                assert (
+                    inc[dim][key]["brier"] == batch[dim][key]["brier"]
+                ), f"{dim}[{key}] brier mismatch"
 
     def test_calibration_buckets_accumulate(self, tmp_path: Path) -> None:
         """Calibration buckets accumulate counts correctly."""

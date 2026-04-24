@@ -927,7 +927,9 @@ def _score_extreme_predictions(
     return worst[:WORST_BEST_SIZE], best[:WORST_BEST_SIZE]
 
 
-def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def score(  # pylint: disable=too-many-statements
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Compute all scores from production log rows."""
     total = len(rows)
     overall = compute_group_stats(rows)
@@ -988,6 +990,19 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Tool × category cross breakdown
     by_tool_category = group_by_composite(rows, ["tool_name", "category"])
+
+    # Category × platform cross breakdown
+    cp_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        cat = row.get("category") or "unknown"
+        plat = row.get("platform") or "unknown"
+        cp_groups[f"{cat} | {plat}"].append(row)
+    by_category_platform = {k: compute_group_stats(g) for k, g in cp_groups.items()}
+
+    # Tool × category × platform cross breakdown
+    by_tool_category_platform = group_by_composite(
+        rows, ["tool_name", "category", "platform"]
+    )
 
     # Tool × version (normalized: tool_version OR tool_ipfs_hash) cross breakdown
     tv_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1056,6 +1071,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
         "by_tool_category": by_tool_category,
+        "by_category_platform": by_category_platform,
+        "by_tool_category_platform": by_tool_category_platform,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "by_tool_version": by_tool_version,
         "by_tool_version_mode": by_tool_version_mode,
@@ -1121,6 +1138,8 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_horizon": {},
         "by_tool_platform": {},
         "by_tool_category": {},
+        "by_category_platform": {},
+        "by_tool_category_platform": {},
         "by_tool_version": {},
         "by_tool_version_mode": {},
         "by_config": {},
@@ -1407,6 +1426,14 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_horizon"], horizon, row)
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
     _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
+    _ensure_and_accumulate(
+        scores["by_category_platform"], f"{category} | {platform}", row
+    )
+    _ensure_and_accumulate(
+        scores["by_tool_category_platform"],
+        f"{tool} | {category} | {platform}",
+        row,
+    )
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
     _ensure_and_accumulate(
         scores["by_tool_version_mode"],
@@ -1502,6 +1529,8 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1674,6 +1703,8 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1765,6 +1796,8 @@ def _accumulate_and_write(
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1976,6 +2009,8 @@ def _rebuild_single_mode(
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",

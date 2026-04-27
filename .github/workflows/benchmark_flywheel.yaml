@@ -91,6 +91,20 @@ jobs:
                 benchmark/results/scored_row_ids.json \
                 benchmark/datasets/.fetch_state.json
 
+      # One-shot bootstrap: clear only the fetch cursor so the lookback_days
+      # window actually fires on this run (default cursor-driven incremental
+      # fetch otherwise drowns the lookback). scores.json,
+      # scores_history.jsonl, and scored_row_ids.json are intentionally
+      # untouched so the all-time aggregate stays intact and the scorer
+      # dedups any re-fetched rows against the master row_id set.
+      #
+      # This step exists ONLY on this side branch and is removed before
+      # merging back to main. Trigger via workflow_dispatch on this branch
+      # with lookback_days=14 to populate benchmark/datasets/logs/ with
+      # multi-day predicted_at coverage.
+      - name: Bootstrap — clear fetch cursor only
+        run: rm -f benchmark/datasets/.fetch_state.json
+
       # Fetch writes daily log file + calls scorer.update() inline (fast path).
       # On force_rebuild, --no-score disables the inline scoring so the
       # dedicated Score step below owns scores.json creation (slow path).

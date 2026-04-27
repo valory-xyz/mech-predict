@@ -386,6 +386,7 @@ INSTRUCTIONS:
 2. Write a Factual Summary (2-4 sentences) synthesising the key state-of-the-world facts.
    - Report what is verifiably true *and what has not yet happened*.
    - Do NOT predict outcomes or imply likelihood.
+   - **Temporal anchor**: if the original question contains a date anchor (e.g. "on April 26, 2026", "as of D"), the Factual Summary MUST explicitly state the relevant variable's value/state **as of that date**. If the evidence shows only a future-effective value (e.g. "rate will rise to 55% from July 1"), state BOTH: (a) the **current value/state** as of the question's anchor date, and (b) the **future-effective value with its effective date**. Do not let the future-effective value be the only one surfaced.
 3. List only the most relevant sources (max 6 total).
 4. Rate how useful the evidence was (info_utility, 0-1).
    - High info_utility means the evidence is informative, not that it supports success.
@@ -406,6 +407,9 @@ Tail discipline (SYMMETRIC — applies equally to YES and NO extremes):
 • Probabilities above 80% or below 20% require strong historical precedents under similar conditions.
 • When confidence is low, extreme probabilities are rarely justified.
 • If you find yourself tempted to output p_yes < 0.05 or p_yes > 0.95 on a future event with any remaining path to the other outcome, step back toward the base rate.
+
+Temporal-anchor discipline:
+• An announcement that a value WILL CHANGE on a future effective date is NOT evidence that the value HAS ALREADY CHANGED on a date before that effective date. Treat it as evidence-against if the question's answer-as-of date precedes the effective date.
 """
 
 ESTIMATE_USER = """Relying exclusively on the factual briefing provided below, assess the probability that the event in the original question will occur.
@@ -426,6 +430,13 @@ b. State an explicit base-rate probability for events of this type.
    - Use historical data if available.
    - If not, use a conservative implied base rate and justify it.
 c. This base rate is your starting point.
+
+STEP 1b — Temporal anchor (MANDATORY when the question contains a date)
+a. Identify the **answer-as-of date** in the original question — the date the question asks about, distinct from today's date. If the question asks "is X = Y on date D?" then D is the answer-as-of date.
+b. For each evidence item in the briefing, identify which date it concerns: announcement date, effective/start date, valid-until date, or undated background.
+c. RULE: evidence that supports the YES condition only as of an effective date AFTER the answer-as-of date does NOT satisfy YES for the answer-as-of date. Treat such evidence as NEGATIVE for the answer-as-of date, not positive.
+   - Example: question is "is rate Y on April 26?"; evidence is "rate will rise to Y on July 1". This is evidence-AGAINST p_yes for the April 26 question, because the rate has not risen to Y as of April 26.
+d. Quote the answer-as-of date and the relevant effective date(s) explicitly in your STEP 2 reasoning.
 
 STEP 2 — Evidence evaluation
 a. List the key YES signals (facts that materially increase probability).

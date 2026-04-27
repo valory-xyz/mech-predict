@@ -86,6 +86,48 @@ def _partition_rows_by_mode(
     return prod, tourn
 
 
+# Platforms the scorer emits a dedicated scores file for. A file is written
+# for every entry even when the partition is empty, so consumers can assume
+# the path exists.
+PLATFORMS: tuple[str, ...] = ("omen", "polymarket")
+
+
+def _derive_platform_path(base_path: Path, platform: str) -> Path:
+    """Return the per-platform sibling of ``base_path``.
+
+    Convention: ``<stem>.json`` -> ``<stem>_<platform>.json`` in the same
+    directory. Composed with ``_derive_tournament_path`` this yields
+    ``scores_tournament_omen.json`` etc.
+
+    :param base_path: base scores path (combined output).
+    :param platform: one of ``PLATFORMS``.
+    :return: sibling path scoped to ``platform``.
+    """
+    return base_path.with_name(f"{base_path.stem}_{platform}{base_path.suffix}")
+
+
+def _partition_rows_by_platform(
+    rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group rows by ``row['platform']`` for the platforms we report on.
+
+    Rows with unknown/missing platforms stay in the combined output but are
+    excluded from per-platform partitions — the daily report only needs
+    omen and polymarket.
+
+    :param rows: input rows (any platform).
+    :return: ``{platform: [rows]}`` with one entry per ``PLATFORMS`` value.
+        Empty lists are returned for platforms with no rows (so callers can
+        still emit an empty-but-valid output file).
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {plat: [] for plat in PLATFORMS}
+    for row in rows:
+        plat = row.get("platform")
+        if plat in buckets:
+            buckets[plat].append(row)
+    return buckets
+
+
 LATENCY_RESERVOIR_SIZE = 200
 CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
 _RESERVOIR_RNG = random.Random(42)
@@ -818,7 +860,76 @@ def brier_sort_key(item: tuple[str, dict[str, Any]]) -> float:
     return brier if brier is not None else 999.0
 
 
-def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _score_latency_reservoir(rows: list[dict[str, Any]]) -> dict[str, list[float]]:
+    """Return the last ``LATENCY_RESERVOIR_SIZE`` latencies per tool in insertion order.
+
+    :param rows: input rows.
+    :return: ``{tool_name: [latencies]}``. Tools with no ``latency_s``
+        values are omitted.
+    """
+    reservoir: dict[str, list[float]] = {}
+    for row in rows:
+        latency = row.get("latency_s")
+        if latency is None:
+            continue
+        tool = row.get("tool_name") or "unknown"
+        reservoir.setdefault(tool, []).append(latency)
+    for tool, samples in reservoir.items():
+        if len(samples) > LATENCY_RESERVOIR_SIZE:
+            reservoir[tool] = samples[-LATENCY_RESERVOIR_SIZE:]
+    return reservoir
+
+
+def _score_extreme_predictions(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the top-``WORST_BEST_SIZE`` worst and best predictions by Brier.
+
+    Considers only valid rows (parse status ``"valid"`` with both
+    ``p_yes`` and ``final_outcome`` present). Deduplicated by
+    ``question_text``: each question contributes at most one entry per
+    list.
+
+    :param rows: input rows.
+    :return: ``(worst, best)``. Worst sorted by Brier descending, best
+        ascending. Each truncated to ``WORST_BEST_SIZE``.
+    """
+    worst_by_q: dict[str, dict[str, Any]] = {}
+    best_by_q: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("prediction_parse_status") != "valid":
+            continue
+        p_yes = row.get("p_yes")
+        outcome = row.get("final_outcome")
+        if p_yes is None or outcome is None:
+            continue
+        question = row.get("question_text")
+        if not question:
+            continue
+        entry = {
+            "question_text": question,
+            "tool_name": row.get("tool_name") or "unknown",
+            "p_yes": p_yes,
+            "final_outcome": outcome,
+            "brier": round(brier_score(p_yes, outcome), 4),
+            "platform": row.get("platform") or "unknown",
+            "category": row.get("category"),
+        }
+        prev_worst = worst_by_q.get(question)
+        if prev_worst is None or entry["brier"] > prev_worst["brier"]:
+            worst_by_q[question] = entry
+        prev_best = best_by_q.get(question)
+        if prev_best is None or entry["brier"] < prev_best["brier"]:
+            best_by_q[question] = entry
+
+    worst = sorted(worst_by_q.values(), key=lambda e: e["brier"], reverse=True)
+    best = sorted(best_by_q.values(), key=lambda e: e["brier"])
+    return worst[:WORST_BEST_SIZE], best[:WORST_BEST_SIZE]
+
+
+def score(  # pylint: disable=too-many-statements
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Compute all scores from production log rows."""
     total = len(rows)
     overall = compute_group_stats(rows)
@@ -880,6 +991,19 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # Tool × category cross breakdown
     by_tool_category = group_by_composite(rows, ["tool_name", "category"])
 
+    # Category × platform cross breakdown
+    cp_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        cat = row.get("category") or "unknown"
+        plat = row.get("platform") or "unknown"
+        cp_groups[f"{cat} | {plat}"].append(row)
+    by_category_platform = {k: compute_group_stats(g) for k, g in cp_groups.items()}
+
+    # Tool × category × platform cross breakdown
+    by_tool_category_platform = group_by_composite(
+        rows, ["tool_name", "category", "platform"]
+    )
+
     # Tool × version (normalized: tool_version OR tool_ipfs_hash) cross breakdown
     tv_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     tvm_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -924,6 +1048,14 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
 
+    # Schema parity with _accumulate_and_write: both score() and the
+    # incremental path write the same finalized dict shape to
+    # scores_<platform>.json. Kept even when generate_report does not
+    # render Latency / Worst / Best so consumers reading the JSON
+    # directly see the same keys regardless of which path produced it.
+    latency_reservoir = _score_latency_reservoir(rows)
+    worst_10, best_10 = _score_extreme_predictions(rows)
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_rows": total,
@@ -939,6 +1071,8 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "by_platform_liquidity": by_platform_liquidity,
         "by_tool_platform": by_tool_platform,
         "by_tool_category": by_tool_category,
+        "by_category_platform": by_category_platform,
+        "by_tool_category_platform": by_tool_category_platform,
         "by_tool_platform_horizon": by_tool_platform_horizon,
         "by_tool_version": by_tool_version,
         "by_tool_version_mode": by_tool_version_mode,
@@ -948,6 +1082,9 @@ def score(rows: list[dict[str, Any]]) -> dict[str, Any]:
         **cal_reg,
         "calibration_by_tool": calibration_by_tool,
         "edge_eligibility": edge_eligibility,
+        "latency_reservoir": latency_reservoir,
+        "worst_10": worst_10,
+        "best_10": best_10,
     }
 
 
@@ -1001,6 +1138,8 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "by_horizon": {},
         "by_tool_platform": {},
         "by_tool_category": {},
+        "by_category_platform": {},
+        "by_tool_category_platform": {},
         "by_tool_version": {},
         "by_tool_version_mode": {},
         "by_config": {},
@@ -1287,6 +1426,14 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     _ensure_and_accumulate(scores["by_horizon"], horizon, row)
     _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
     _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
+    _ensure_and_accumulate(
+        scores["by_category_platform"], f"{category} | {platform}", row
+    )
+    _ensure_and_accumulate(
+        scores["by_tool_category_platform"],
+        f"{tool} | {category} | {platform}",
+        row,
+    )
     _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
     _ensure_and_accumulate(
         scores["by_tool_version_mode"],
@@ -1335,10 +1482,11 @@ def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
             reservoir.pop(0)
 
     # Worst / best 10 (deduplicated by question_text)
-    if is_valid:
+    question_text = row.get("question_text")
+    if is_valid and question_text:
         row_brier = brier_score(row["p_yes"], row["final_outcome"])
         entry = {
-            "question_text": row.get("question_text", ""),
+            "question_text": question_text,
             "tool_name": tool,
             "p_yes": row["p_yes"],
             "final_outcome": row["final_outcome"],
@@ -1381,6 +1529,8 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1553,6 +1703,8 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1644,6 +1796,8 @@ def _accumulate_and_write(
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1742,6 +1896,24 @@ def update(
     )
     _accumulate_and_write(tourn_rows, tournament_scores_path, None, emit_history=False)
 
+    # Per-platform accumulators each track their own _ACCUM_KEYS state so
+    # future update() calls merge correctly. Dedup is shared via the
+    # caller-level scored_row_ids.json, so a row can never double-count.
+    for platform, plat_prod in _partition_rows_by_platform(prod_rows).items():
+        _accumulate_and_write(
+            plat_prod,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+        )
+    for platform, plat_tourn in _partition_rows_by_platform(tourn_rows).items():
+        _accumulate_and_write(
+            plat_tourn,
+            _derive_platform_path(tournament_scores_path, platform),
+            None,
+            emit_history=False,
+        )
+
     return prod_result
 
 
@@ -1837,6 +2009,8 @@ def _rebuild_single_mode(
         "by_horizon",
         "by_tool_platform",
         "by_tool_category",
+        "by_category_platform",
+        "by_tool_category_platform",
         "by_tool_version",
         "by_tool_version_mode",
         "by_config",
@@ -1903,6 +2077,14 @@ def rebuild(
         scores_path.write_text(json.dumps(finalized, indent=2))
         tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
         tournament_scores_path.write_text(json.dumps(finalized, indent=2))
+        # Empty per-platform files so the paths always exist.
+        for platform in PLATFORMS:
+            _derive_platform_path(scores_path, platform).write_text(
+                json.dumps(finalized, indent=2)
+            )
+            _derive_platform_path(tournament_scores_path, platform).write_text(
+                json.dumps(finalized, indent=2)
+            )
         _save_dedup_ids(dedup_path, set())
         return finalized
 
@@ -1914,6 +2096,23 @@ def rebuild(
     _, tourn_ids = _rebuild_single_mode(
         tourn_rows, tournament_scores_path, None, emit_history=False
     )
+
+    # History is emitted for the combined accumulator only; per-platform
+    # rebuilds skip the monthly snapshot step.
+    for platform, plat_prod in _partition_rows_by_platform(prod_rows).items():
+        _rebuild_single_mode(
+            plat_prod,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+        )
+    for platform, plat_tourn in _partition_rows_by_platform(tourn_rows).items():
+        _rebuild_single_mode(
+            plat_tourn,
+            _derive_platform_path(tournament_scores_path, platform),
+            None,
+            emit_history=False,
+        )
 
     _save_dedup_ids(dedup_path, prod_ids | tourn_ids)
 
@@ -1947,21 +2146,127 @@ def score_period_split(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
+    offset_days: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Score the last *days* days, returning (production, tournament).
+    """Score a windowed slice of rows, returning (production, tournament).
 
     Same collection rules as ``score_period`` but returns a tuple so
     callers can write both files separately.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``offset_days=days`` selects the immediately-preceding non-overlapping
+        window.
     :return: tuple of (production_scores, tournament_scores).
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
+    prod_rows, tourn_rows = _load_period_rows(
+        logs_dir, days, tournament_input, offset_days
     )
+    return score(prod_rows), score(tourn_rows)
+
+
+def _score_rows_by_platform(
+    prod_rows: list[dict[str, Any]],
+    tourn_rows: list[dict[str, Any]],
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score combined + per-platform partitions of pre-loaded rows in one pass.
+
+    :param prod_rows: production-mode rows (any platform).
+    :param tourn_rows: tournament-mode rows (any platform).
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Unknown-platform rows stay in
+        ``"all"`` only.
+    """
+    result: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+        "all": (score(prod_rows), score(tourn_rows)),
+    }
+    prod_by_plat = _partition_rows_by_platform(prod_rows)
+    tourn_by_plat = _partition_rows_by_platform(tourn_rows)
+    for platform in PLATFORMS:
+        result[platform] = (
+            score(prod_by_plat[platform]),
+            score(tourn_by_plat[platform]),
+        )
+    return result
+
+
+def score_period_split_by_platform(
+    logs_dir: Path = DEFAULT_LOGS_DIR,
+    days: int = 1,
+    tournament_input: Path | None = None,
+    offset_days: int = 0,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score a windowed slice of rows, returning combined + per-platform results.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from a window ``days`` days wide.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``offset_days=days`` selects the immediately-preceding non-overlapping
+        window (used to compute prev-rolling scores without overlap).
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Each ``(prod, tourn)`` tuple
+        matches the shape of ``score_period_split``. Unknown-platform
+        rows stay in ``"all"`` only.
+    """
+    prod_rows, tourn_rows = _load_period_rows(
+        logs_dir, days, tournament_input, offset_days
+    )
+    return _score_rows_by_platform(prod_rows, tourn_rows)
+
+
+def _parse_predicted_at(value: Any) -> datetime | None:
+    """Parse a row's ``predicted_at`` field into a UTC-aware ``datetime``.
+
+    Naive timestamps (no offset suffix) are assumed UTC so the returned
+    value is always comparable against a tz-aware cutoff.
+
+    :param value: raw ``predicted_at`` value from the row dict.
+    :return: parsed UTC-aware ``datetime``, or ``None`` when missing or
+        unparseable.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _load_period_rows(
+    logs_dir: Path,
+    days: int,
+    tournament_input: Path | None,
+    offset_days: int = 0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load + filter + mode-partition period rows.
+
+    :param logs_dir: directory containing daily log files.
+    :param days: score rows from a window ``days`` days wide.
+    :param tournament_input: optional path to ``tournament_scored.jsonl``
+        whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
+        ``0`` means the trailing window ending at "now" (current window);
+        ``days`` means the immediately-preceding non-overlapping window.
+    :return: ``(production_rows, tournament_rows)`` both filtered to the
+        period window.
+    :raises ValueError: when ``days`` or ``offset_days`` is negative.
+    """
+    if days < 0 or offset_days < 0:
+        raise ValueError(
+            f"days and offset_days must be >= 0 (got days={days},"
+            f" offset_days={offset_days})"
+        )
+    now = datetime.now(timezone.utc)
+    window_end = now - timedelta(days=offset_days)
+    window_start = window_end - timedelta(days=days)
 
     daily_pattern = str(logs_dir / "????-??-??.jsonl")
     prod_pattern = str(logs_dir / "production_log_*.jsonl")
@@ -1970,41 +2275,45 @@ def score_period_split(
         key=_extract_date_from_log_path,
     )
 
+    def _in_window(predicted_at: datetime | None) -> bool:
+        if predicted_at is None:
+            return False
+        return window_start <= predicted_at < window_end
+
     rows: list[dict[str, Any]] = []
     for filepath in all_files:
         for row in load_rows(Path(filepath)):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            if _in_window(_parse_predicted_at(row.get("predicted_at"))):
                 rows.append(row)
 
     if tournament_input is not None and tournament_input.exists():
         for row in load_rows(tournament_input):
-            predicted_at = row.get("predicted_at") or ""
-            if predicted_at >= cutoff:
+            if _in_window(_parse_predicted_at(row.get("predicted_at"))):
                 rows.append(row)
 
-    prod_rows, tourn_rows = _partition_rows_by_mode(rows)
-    return score(prod_rows), score(tourn_rows)
+    return _partition_rows_by_mode(rows)
 
 
 def score_period(
     logs_dir: Path = DEFAULT_LOGS_DIR,
     days: int = 1,
     tournament_input: Path | None = None,
+    offset_days: int = 0,
 ) -> dict[str, Any]:
-    """Score production rows in the last *days* days (backward-compat).
+    """Score production rows in a windowed slice (backward-compat).
 
     Backward-compat wrapper around ``score_period_split``; returns the
     production partition only. Callers that need the tournament scores
     should use ``score_period_split`` directly.
 
     :param logs_dir: directory containing daily log files.
-    :param days: score rows from the last N calendar days.
+    :param days: score rows from a window ``days`` days wide.
     :param tournament_input: optional path to ``tournament_scored.jsonl``
         whose rows are filtered to the same window and merged.
+    :param offset_days: number of days to shift the window back from "now".
     :return: production scores dict.
     """
-    prod, _ = score_period_split(logs_dir, days, tournament_input)
+    prod, _ = score_period_split(logs_dir, days, tournament_input, offset_days)
     return prod
 
 
@@ -2063,6 +2372,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Score only the last N daily log files (for period reports)",
     )
     parser.add_argument(
+        "--period-offset-days",
+        type=int,
+        default=0,
+        help=(
+            "Shift the scoring window back by N days. Combined with "
+            "--period-days=N this selects the immediately-preceding "
+            "non-overlapping window (used for prev-rolling scores)."
+        ),
+    )
+    parser.add_argument(
         "--tournament-input",
         type=Path,
         default=None,
@@ -2095,15 +2414,28 @@ def _cli_update(args: argparse.Namespace, output_tournament: Path) -> None:
 
 def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
     """Handle the ``--period-days`` CLI mode."""
-    prod_result, tourn_result = score_period_split(
+    results = score_period_split_by_platform(
         logs_dir=args.logs_dir,
         days=args.period_days,
         tournament_input=args.tournament_input,
+        offset_days=args.period_offset_days,
     )
+    prod_result, tourn_result = results["all"]
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(prod_result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
+
+    for platform in PLATFORMS:
+        plat_prod, plat_tourn = results[platform]
+        _derive_platform_path(args.output, platform).write_text(
+            json.dumps(plat_prod, indent=2)
+        )
+        _derive_platform_path(output_tournament, platform).write_text(
+            json.dumps(plat_tourn, indent=2)
+        )
+
     overall = prod_result["overall"]
     t_overall = tourn_result["overall"]
     print(
@@ -2142,13 +2474,23 @@ def _cli_legacy_full_recompute(
     print(f"Loaded {len(rows)} rows from {args.input}")
 
     prod_rows, tourn_rows = _partition_rows_by_mode(rows)
-    result = score(prod_rows)
-    tourn_result = score(tourn_rows)
+    results = _score_rows_by_platform(prod_rows, tourn_rows)
+    result, tourn_result = results["all"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2))
     output_tournament.parent.mkdir(parents=True, exist_ok=True)
     output_tournament.write_text(json.dumps(tourn_result, indent=2))
+
+    for platform in PLATFORMS:
+        plat_prod, plat_tourn = results[platform]
+        _derive_platform_path(args.output, platform).write_text(
+            json.dumps(plat_prod, indent=2)
+        )
+        _derive_platform_path(output_tournament, platform).write_text(
+            json.dumps(plat_tourn, indent=2)
+        )
+
     print(
         f"Scores written to {args.output} (production, n={result['overall']['n']}) "
         f"and {output_tournament} (tournament, n={tourn_result['overall']['n']})"

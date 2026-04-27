@@ -24,25 +24,38 @@ import pytest
 
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
+    BRIER_RANDOM,
     OMEN_CATEGORIES,
+    PLATFORM_LABELS,
     POLYMARKET_ACTIVE_CATEGORIES,
+    ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
+    _always_majority,
+    _da_lift,
+    _delta_cell,
     _parse_tvm_key,
     _sample_label,
+    generate_fleet_report,
     generate_report,
-    section_best_predictions,
     section_category,
-    section_latency,
-    section_overall,
+    section_category_platform,
+    section_diagnostics_comparison,
+    section_metric_reference,
     section_parse_breakdown,
     section_period,
+    section_platform_comparison,
+    section_platform_snapshot,
+    section_reliability_comparison,
     section_sample_size_warnings,
     section_tool_category,
+    section_tool_category_diagnostics,
+    section_tool_category_platform,
+    section_tool_comparison,
+    section_tool_deployment_status,
     section_tool_version_breakdown,
     section_trend,
     section_version_deltas,
     section_weak_spots,
-    section_worst_predictions,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
 
@@ -108,50 +121,6 @@ def _scores(
         "parse_breakdown": parse_breakdown or {},
         "latency_reservoir": latency_reservoir or {},
     }
-
-
-# ---------------------------------------------------------------------------
-# section_overall
-# ---------------------------------------------------------------------------
-
-
-class TestSectionOverall:
-    """Tests for section_overall."""
-
-    def test_normal(self) -> None:
-        """Test normal scores with valid brier and reliability."""
-        result = section_overall(_scores(brier=0.31, reliability=0.95))
-        assert "0.31" in result
-        assert "95%" in result
-
-    def test_empty_dataset(self) -> None:
-        """Test empty dataset with no predictions."""
-        result = section_overall(
-            _scores(brier=None, reliability=None, total=0, valid=0)
-        )
-        assert "No predictions to score" in result
-
-    def test_all_invalid(self) -> None:
-        """Test all invalid predictions."""
-        result = section_overall(_scores(brier=None, reliability=0.0, total=5, valid=0))
-        assert "N/A" in result  # Brier is N/A
-
-    def test_no_signal_rate_small_value_renders_two_decimals(self) -> None:
-        """No-signal rate formats with 2 decimal places.
-
-        Previously rendered as ':.0%' which rounded tiny-but-nonzero
-        rates like 0.00072 to '0%' even though the count shown next to
-        it was clearly positive. Two decimals surface values in the
-        0.01%-1% range where the no-signal rate typically lives.
-        """
-        s = _scores(brier=0.3, reliability=0.95)
-        s["overall"]["no_signal_rate"] = 0.00072
-        s["overall"]["no_signal_count"] = 142
-        result = section_overall(s)
-        assert "0.07%" in result
-        assert "142 predictions at exactly 0.5" in result
-        # Make sure the rendered value is not the stale '0%' form.
-        assert "No-signal rate: 0%" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +594,12 @@ class TestSectionToolCategory:
         assert "No cross-breakdown data" in result
 
     def test_sufficient_cell_rendered_in_table(self) -> None:
-        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table."""
+        """Cells with n >= MIN_SAMPLE_SIZE appear in the ranked table.
+
+        Column order: Tool | Category | n | Reliability | Brier |
+        Baseline Brier | BSS | DirAcc | Yes% | No% | Always-majority |
+        DA lift.
+        """
         s = _scores(
             by_tool_category={
                 "tool-a | politics": {
@@ -637,14 +611,21 @@ class TestSectionToolCategory:
                     "directional_accuracy": 0.76,
                     "sharpness": 0.12,
                     "n": 60,
+                    "valid_n": 55,
+                    "reliability": 0.92,
+                    "baseline_brier": 0.25,
+                    "outcome_yes_rate": 0.40,
                     "decision_worthy": True,
                 }
             }
         )
         result = section_tool_category(s)
+        # Columns in order: Tool, Category, n, Reliability, Brier,
+        # Baseline Brier, BSS, DirAcc, Yes%, No%, Always-majority, DA lift.
+        # always_majority = max(0.4, 0.6) = 0.6; DA lift = 0.76 - 0.60 = 0.16.
         assert (
-            "| tool-a | politics | 0.1900 | +0.0500 | 0.6000 | -0.0300 | 40 | 76% | 0.1200 | 60 |"
-            in result
+            "| tool-a | politics | 60 | 92% | 0.1900 | 0.2500 | +0.0500 | 76%"
+            " | 40% | 60% | 60% | +0.1600 |" in result
         )
 
     def test_sparse_cell_listed_in_sparse_section_not_table(self) -> None:
@@ -696,7 +677,9 @@ class TestSectionToolCategory:
             }
         )
         result = section_tool_category(s)
-        assert "| tool-a | politics | 0.2000" in result
+        # Column order: Tool | Category | n | ... Brier is the 5th column.
+        assert f"| tool-a | politics | {MIN_SAMPLE_SIZE} " in result
+        assert "| 0.2000 |" in result
         assert "below n=" not in result  # no sparse section
 
     def test_sparse_examples_capped_at_five(self) -> None:
@@ -907,68 +890,6 @@ class TestSectionPeriod:
 
 
 # ---------------------------------------------------------------------------
-# section_worst_predictions / section_best_predictions
-# ---------------------------------------------------------------------------
-
-
-class TestSectionWorstPredictions:
-    """Tests for section_worst_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering worst prediction entries."""
-        s = _scores(
-            worst_10=[
-                {
-                    "question_text": "Will X happen?",
-                    "tool_name": "tool-a",
-                    "p_yes": 0.95,
-                    "final_outcome": False,
-                    "brier": 0.9025,
-                    "platform": "omen",
-                    "category": "finance",
-                },
-            ]
-        )
-        result = section_worst_predictions(s)
-        assert "Will X happen?" in result
-        assert "0.9025" in result
-        assert "tool-a" in result
-
-    def test_empty(self) -> None:
-        """Test empty worst predictions."""
-        result = section_worst_predictions(_scores())
-        assert "No prediction data" in result
-
-
-class TestSectionBestPredictions:
-    """Tests for section_best_predictions."""
-
-    def test_renders_entries(self) -> None:
-        """Test rendering best prediction entries."""
-        s = _scores(
-            best_10=[
-                {
-                    "question_text": "Will Y happen?",
-                    "tool_name": "tool-b",
-                    "p_yes": 0.98,
-                    "final_outcome": True,
-                    "brier": 0.0004,
-                    "platform": "polymarket",
-                    "category": "politics",
-                },
-            ]
-        )
-        result = section_best_predictions(s)
-        assert "Will Y happen?" in result
-        assert "0.0004" in result
-
-    def test_empty(self) -> None:
-        """Test empty best predictions."""
-        result = section_best_predictions(_scores())
-        assert "No prediction data" in result
-
-
-# ---------------------------------------------------------------------------
 # Parse breakdown
 # ---------------------------------------------------------------------------
 
@@ -991,31 +912,6 @@ class TestSectionParseBreakdown:
         """Test empty parse breakdown."""
         result = section_parse_breakdown(_scores())
         assert "No parse data" in result
-
-
-# ---------------------------------------------------------------------------
-# Latency
-# ---------------------------------------------------------------------------
-
-
-class TestSectionLatency:
-    """Tests for section_latency."""
-
-    def test_renders_table(self) -> None:
-        """Test rendering latency table."""
-        s = _scores(
-            latency_reservoir={
-                "tool-a": [10, 12, 15, 20, 25, 30, 8, 11, 14, 18],
-            }
-        )
-        result = section_latency(s)
-        assert "tool-a" in result
-        assert "Median" in result
-
-    def test_empty(self) -> None:
-        """Test empty latency data."""
-        result = section_latency(_scores())
-        assert "No latency data" in result
 
 
 # ---------------------------------------------------------------------------
@@ -1056,28 +952,44 @@ class TestGenerateReport:
             ],
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
-        report = generate_report(s, history, disabled_tools={})
+        report = generate_report(
+            s, history, platform="omen", rolling_scores=s, disabled_tools={}
+        )
 
-        assert "# Benchmark Report" in report
-        assert "## Overall" in report
-        assert "## Tool Ranking" in report
-        assert "## Platform Comparison" in report
-        assert "## Category Performance" in report
-        assert "## Tool × Category" in report
-        assert "## Weak Spots" in report
-        assert "## Reliability Issues" in report
-        assert "## Worst Predictions" in report
-        assert "## Best Predictions" in report
+        assert "# Benchmark Report (Omenstrat) — " in report
+        assert "## Metric References" in report
+        assert "## Platform Snapshot (Current 3d)" in report
+        assert "## Platform Historical Comparison" in report
+        assert "## Tool Historical Comparison" in report
+        assert "## Tool \u00d7 Category (Current 3d)" in report
+        assert "## Tool \u00d7 Category Historical Comparison" in report
+        assert "## Diagnostics Historical Comparison" in report
+        assert "## Reliability & Parse Quality (Current vs All-Time)" in report
+        # Per-platform reports drop Platform Comparison / Tool × Platform —
+        # they'd be single-row tables with no signal.
+        assert "## Platform Comparison" not in report
+        assert "## Tool \u00d7 Platform" not in report
         assert "## Trend" in report
         assert "## Sample Size Warnings" in report
-        assert "## Diagnostic Edge Metrics" in report
+        # The reviewer's P1 restructure dropped overlapping-window and
+        # single-scope point-in-time sections. Their data is now folded
+        # into the three-window comparison tables.
+        assert "## Since Last Report" not in report
+        assert "## Last 3 Days" not in report
+        assert "## Overall" not in report
+        assert "## Worst Predictions" not in report
+        assert "## Best Predictions" not in report
+        assert "## Edge Over Market" not in report
+        assert "## Calibration" not in report
+        assert "## Latency" not in report
 
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
-        report = generate_report(s, [], disabled_tools={})
-        assert "# Benchmark Report" in report
-        assert "No predictions to score" in report
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "# Benchmark Report (Omenstrat) — " in report
+        # With no rolling_scores, the snapshot banner explains the gap.
+        assert "Scores for the last 3 days are unavailable" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1454,7 +1366,7 @@ class TestGenerateReportTournamentToggle:
     def test_off_by_default_omits_tournament_sections(self) -> None:
         """Default behavior: no tournament sections in the rendered report."""
         s = self._scores_with_versions()
-        report = generate_report(s, [], disabled_tools={})
+        report = generate_report(s, [], platform="omen", disabled_tools={})
         assert "Tool × Version × Mode" not in report
         assert "Version Deltas" not in report
 
@@ -1464,7 +1376,9 @@ class TestGenerateReportTournamentToggle:
         Version Deltas emerges only when a tool has 2+ versions in one mode.
         """
         s = self._scores_with_versions()
-        report = generate_report(s, [], include_tournament=True, disabled_tools={})
+        report = generate_report(
+            s, [], platform="omen", include_tournament=True, disabled_tools={}
+        )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "## Version Deltas" in report
 
@@ -1482,10 +1396,15 @@ class TestGenerateReportTournamentToggle:
             }
         }
         report = generate_report(
-            s, [], rolling_scores=rolling, include_tournament=True, disabled_tools={}
+            s,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            include_tournament=True,
+            disabled_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "Tool × Version × Mode (Last 7 Days)" in report
+        assert "Tool × Version × Mode (Last 3 Days)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1642,45 +1561,49 @@ class TestGenerateReportWithTournamentFiles:
     def test_tournament_sections_omitted_when_file_absent(self) -> None:
         """No tournament inputs -> no '— Tournament' headings, no callouts."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
-        report = generate_report(prod, [], include_tournament=True)
+        report = generate_report(prod, [], platform="omen", include_tournament=True)
         assert "— Tournament" not in report
         assert "## Tournament Callouts" not in report
 
     def test_tournament_sections_rendered_when_data_present(self) -> None:
-        """Tournament inputs with rows -> duplicated per-mode headings render."""
+        """Tournament inputs with rows -> Tool × Version × Mode covers both modes."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
+            rolling_scores=prod,
+            rolling_scores_tournament=tourn,
         )
-        assert "## Overall — Tournament" in report
-        assert "## Tool Ranking — Tournament" in report
+        # Under the three-window restructure the per-mode headings live in
+        # Tool × Version × Mode, not a duplicated " — Tournament" ranking.
+        assert "## Overall" not in report
+        assert "## Tool × Version × Mode (All-Time)" in report
+        assert "## Tool × Version × Mode (Last 3 Days)" in report
 
-    def test_empty_period_tournament_does_not_render_section(self) -> None:
-        """Tournament period files with zero rows don't emit empty sections.
+    def test_empty_rolling_tournament_does_not_crash(self) -> None:
+        """Rolling tournament input with zero rows renders cleanly.
 
         scorer.score_period_split writes tournament period files on every
-        run; days with zero tournament rows in the window must not add a
-        dangling '## Since Last Report — Tournament' header.
+        run; days with zero tournament rows in the window must not blow
+        up the TVM merge.
         """
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
-        empty_period_tourn = {"total_rows": 0, "overall": {}}
+        empty_rolling_tourn = {"total_rows": 0, "overall": {}}
         report = generate_report(
             prod,
             [],
-            period_scores=None,
+            platform="omen",
             rolling_scores=None,
             include_tournament=True,
             scores_tournament=all_time_tourn,
-            period_scores_tournament=empty_period_tourn,
-            rolling_scores_tournament=empty_period_tourn,
+            rolling_scores_tournament=empty_rolling_tourn,
         )
-        assert "## Since Last Report — Tournament" not in report
-        assert "## Last 7 Days Rolling — Tournament" not in report
+        assert "# Benchmark Report (Omenstrat)" in report
 
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""
@@ -1698,6 +1621,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
@@ -1711,6 +1635,7 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
@@ -1723,7 +1648,1042 @@ class TestGenerateReportWithTournamentFiles:
         report = generate_report(
             prod,
             [],
+            platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
         )
         assert "## Tournament Callouts" not in report
+
+
+# ---------------------------------------------------------------------------
+# Per-platform rendering — generate_report gates fleet-wide comparison
+# sections when the scores are already partitioned to one platform.
+# ---------------------------------------------------------------------------
+
+
+class TestGenerateReportPerPlatform:
+    """generate_report(platform=...) scopes the report to one deployment."""
+
+    def test_header_uses_deployment_label_for_omen(self) -> None:
+        """Omen scores render with 'Omenstrat' in the header."""
+        s = _scores()
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "# Benchmark Report (Omenstrat) — " in report
+
+    def test_header_uses_deployment_label_for_polymarket(self) -> None:
+        """Polymarket scores render with 'Polystrat' in the header."""
+        s = _scores()
+        report = generate_report(s, [], platform="polymarket", disabled_tools={})
+        assert "# Benchmark Report (Polystrat) — " in report
+
+    def test_platform_comparison_absent(self) -> None:
+        """Platform Comparison section never renders in per-platform mode."""
+        s = _scores()
+        # Give by_platform some content so the fleet-wide path would render
+        # the section in the old code path.
+        s["by_platform"] = {
+            "omen": {"brier": 0.2, "n": 100, "edge": 0.04, "edge_n": 80},
+        }
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "## Platform Comparison" not in report
+
+    def test_tool_platform_section_absent(self) -> None:
+        """Tool × Platform section never renders in per-platform mode."""
+        s = _scores()
+        report = generate_report(s, [], platform="omen", disabled_tools={})
+        assert "## Tool \u00d7 Platform" not in report
+
+    def test_rejects_unknown_platform(self) -> None:
+        """Unknown platform raises ValueError with a helpful message."""
+        s = _scores()
+        with pytest.raises(ValueError, match="platform must be one of"):
+            generate_report(s, [], platform="gnosis", disabled_tools={})
+
+    def test_platform_labels_are_deployment_names(self) -> None:
+        """Label map pairs scorer keys with the team's deployment names."""
+        # Guards against a silent relabel — the Slack ask explicitly said
+        # Omenstrat / Polystrat, so a rename to e.g. "Omen" would read wrong.
+        assert PLATFORM_LABELS == {
+            "omen": "Omenstrat",
+            "polymarket": "Polystrat",
+        }
+
+
+class TestTrendSectionPlatformAnnotation:
+    """section_trend warns when rendered inside a per-platform report.
+
+    scores_history.jsonl is only populated by the combined prod accumulator,
+    so the same monthly numbers appear in every per-platform report. The
+    annotation prevents a reader from mistaking the data for platform-scoped.
+    """
+
+    def _history(self) -> list[dict[str, Any]]:
+        return [{"month": "2026-03", "overall": {"brier": 0.2, "n": 100}}]
+
+    def test_fleet_wide_note_renders_with_platform(self) -> None:
+        """Platform-scoped render inserts the fleet-wide disclaimer."""
+        rendered = section_trend(self._history(), None, platform="omen")
+        assert "Aggregated across all platforms" in rendered
+
+    def test_no_note_without_platform(self) -> None:
+        """Fleet-wide render (no platform arg) stays quiet — it's correct there."""
+        rendered = section_trend(self._history(), None)
+        assert "Aggregated across all platforms" not in rendered
+
+    def test_heading_is_fleet_wide_monthly(self) -> None:
+        """Heading names the scope so it's unambiguous even out of context."""
+        rendered = section_trend(self._history(), None)
+        assert "## Trend (Fleet-wide, Monthly)" in rendered
+
+    def test_per_platform_report_omits_in_progress_row(self) -> None:
+        """generate_report does not append a current-month row in per-platform mode.
+
+        The per-platform scores dict is all-time cumulative (history is never
+        emitted for per-platform accumulators), so appending it beside
+        fleet-wide per-month history would mix two different quantities. A
+        platform-scoped report renders only the fleet-wide completed months.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        prod["current_month"] = "2026-04"
+        history = [{"month": "2026-03", "overall": {"brier": 0.2, "n": 100}}]
+        report = generate_report(prod, history, platform="omen", disabled_tools={})
+        assert "*(in progress)*" not in report
+        assert "2026-04" not in report
+
+
+class TestSectionToolDeploymentStatusInverted:
+    """Phase 3: section renders active tools per deployment, scoped to platform."""
+
+    def _scores_with_tools(self, *tools: str) -> dict[str, Any]:
+        return {"by_tool": {t: {"brier": 0.2, "n": 100, "valid_n": 100} for t in tools}}
+
+    def test_omen_platform_hides_polystrat_deployment(self) -> None:
+        """Omenstrat report never mentions polystrat Pearl."""
+        scores = self._scores_with_tools("tool-a", "tool-b")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": ["tool-a"],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert "omenstrat Pearl" in rendered
+        assert "omenstrat QS" in rendered
+        assert "polystrat" not in rendered
+
+    def test_polymarket_platform_hides_omenstrat_deployments(self) -> None:
+        """Polystrat report never mentions omenstrat-anything."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "omenstrat QS": ["tool-a"],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(
+            scores, disabled, platform="polymarket"
+        )
+        assert "polystrat Pearl" in rendered
+        assert "omenstrat" not in rendered
+
+    def test_heading_carries_platform_label(self) -> None:
+        """Section heading is scoped with the deployment label."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert rendered.startswith("## Tool Deployment Status (Omenstrat)")
+
+    def test_active_tools_exclude_disabled(self) -> None:
+        """Active tools are the benchmarked set with disabled tools removed."""
+        scores = self._scores_with_tools("tool-a", "tool-b", "tool-c")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-b"],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        pearl_line = [
+            line for line in rendered.splitlines() if "omenstrat Pearl" in line
+        ][0]
+        assert "`tool-a`" in pearl_line
+        assert "`tool-c`" in pearl_line
+        assert "`tool-b`" not in pearl_line
+        qs_line = [line for line in rendered.splitlines() if "omenstrat QS" in line][0]
+        for expected in ("`tool-a`", "`tool-b`", "`tool-c`"):
+            assert expected in qs_line
+
+    def test_normalizes_underscores_in_disabled_list(self) -> None:
+        """Config files sometimes list prediction_request_X; treat as equivalent."""
+        scores = self._scores_with_tools("prediction-request-reasoning")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["prediction_request_reasoning"],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        pearl_line = [
+            line for line in rendered.splitlines() if "omenstrat Pearl" in line
+        ][0]
+        assert "prediction-request-reasoning" not in pearl_line
+
+    def test_failed_fetch_renders_unavailable_banner(self) -> None:
+        """Deployment whose fetch returned None is not claimed as empty."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": None,
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        assert "omenstrat Pearl" in rendered
+        assert "⚠️ unavailable" in rendered
+
+    def test_fleet_wide_mode_still_supported(self) -> None:
+        """platform=None keeps the legacy fleet-wide render for ad-hoc callers."""
+        scores = self._scores_with_tools("tool-a")
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": [],
+        }
+        rendered = section_tool_deployment_status(scores, disabled, platform=None)
+        for deployment in ("omenstrat Pearl", "omenstrat QS", "polystrat Pearl"):
+            assert deployment in rendered
+        assert "(Omenstrat)" not in rendered
+        assert "(Polystrat)" not in rendered
+
+    def test_empty_disabled_opts_out_of_section(self) -> None:
+        """Existing contract: empty dict skips the section entirely."""
+        scores = self._scores_with_tools("tool-a")
+        assert section_tool_deployment_status(scores, {}, platform="omen") == ""
+
+
+class TestToolCategoryPositionInReport:
+    """Phase 3: Tool × Category is rendered before Tool × Version × Mode."""
+
+    def test_tool_category_current_and_comparison_both_render(self) -> None:
+        """Current-3d table and historical comparison both render, in that order."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+        )
+        current_idx = report.index(
+            f"## Tool \u00d7 Category (Current {ROLLING_WINDOW_DAYS}d)"
+        )
+        comparison_idx = report.index("## Tool \u00d7 Category Historical Comparison")
+        assert current_idx < comparison_idx
+
+    def test_tool_category_lands_before_tool_version_mode(self) -> None:
+        """Ordering: comparison tables before the Tool × Version × Mode tables."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        scores["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 1000,
+                "valid_n": 1000,
+                "brier": 0.2,
+            }
+        }
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            include_tournament=True,
+            disabled_tools={},
+        )
+        tc_idx = report.index("## Tool \u00d7 Category Historical Comparison")
+        tvm_idx = report.index("## Tool \u00d7 Version \u00d7 Mode (All-Time)")
+        assert tc_idx < tvm_idx
+
+
+class TestSectionMetricReference:
+    """Tests for section_metric_reference."""
+
+    def test_renders_heading_and_core_metrics(self) -> None:
+        """Legend names every headline metric the report renders."""
+        rendered = section_metric_reference()
+        assert "## Metric References" in rendered
+        for label in ("Brier", "Log Loss", "BSS", "Edge over market"):
+            assert label in rendered
+
+    def test_cites_rolling_window_from_constant(self) -> None:
+        """Legend quotes ROLLING_WINDOW_DAYS so a one-line change updates both."""
+        rendered = section_metric_reference()
+        assert f"Current {ROLLING_WINDOW_DAYS}d" in rendered
+        assert f"Prev {ROLLING_WINDOW_DAYS}d" in rendered
+
+    def test_names_all_three_windows(self) -> None:
+        """Legend explicitly names current, all-time, and prev-rolling windows."""
+        rendered = section_metric_reference()
+        assert "Current 3d" in rendered
+        assert "All-Time" in rendered
+        assert "Prev 3d" in rendered
+
+    def test_documents_sample_size_guardrail(self) -> None:
+        """Legend spells out the MIN_SAMPLE_SIZE delta-suppression rule."""
+        rendered = section_metric_reference()
+        assert f"n < {MIN_SAMPLE_SIZE}" in rendered
+        assert "insufficient data" in rendered
+
+    def test_cites_brier_random_baseline(self) -> None:
+        """Coin-flip Brier anchor is sourced from BRIER_RANDOM."""
+        rendered = section_metric_reference()
+        assert f"coin-flip {BRIER_RANDOM}" in rendered
+
+
+class TestGenerateReportLegendPlacement:
+    """Regression tests for where the metric legend lands in the report body."""
+
+    def test_legend_rendered_before_first_data_section(self) -> None:
+        """Legend sits between the H1 title and the first data section."""
+        scores = _scores()
+        rolling = _scores_with_tool("tool-a", 0.20, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            disabled_tools={},
+        )
+        legend_idx = report.index("## Metric References")
+        snapshot_idx = report.index("## Platform Snapshot")
+        assert legend_idx < snapshot_idx
+        header_end = report.index("\n")
+        assert legend_idx > header_end
+
+    def test_legend_rendered_exactly_once(self) -> None:
+        """Legend is not duplicated across production + tournament branches."""
+        scores = _scores()
+        tourn = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            disabled_tools={},
+        )
+        assert report.count("## Metric References") == 1
+
+
+class TestGenerateReportRollingBanner:
+    """Missing rolling_scores must not silently fall back to all-time data."""
+
+    def test_rolling_sections_absent_when_rolling_scores_missing(self) -> None:
+        """No rolling_scores -> comparison sections omitted with an explicit banner.
+
+        Falling back to all-time ``scores`` under a "(Current 3d)" heading
+        would mislabel the window. Instead, a single banner explains the
+        gap and every rolling/comparison section is skipped.
+        """
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        assert f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)" in report
+        assert (
+            f"Scores for the last {ROLLING_WINDOW_DAYS} days are unavailable" in report
+        )
+        for heading in (
+            "## Platform Historical Comparison",
+            "## Tool Historical Comparison",
+            "## Tool × Category (Current 3d)",
+            "## Tool × Category Diagnostics (Current 3d)",
+            "## Tool × Category Historical Comparison",
+            "## Diagnostics Historical Comparison",
+            "## Reliability & Parse Quality (Current vs All-Time)",
+        ):
+            assert heading not in report
+
+    def test_tool_version_mode_rolling_section_carries_window_note(self) -> None:
+        """Tool × Version × Mode (Last N Days) carries the n= annotation."""
+        scores = _scores_with_tool("tool-a", 0.20, 1000)
+        scores["by_tool_version_mode"] = {
+            "tool-a | v1 | production_replay": {
+                "n": 1000,
+                "valid_n": 1000,
+                "brier": 0.2,
+            }
+        }
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            include_tournament=True,
+            disabled_tools={},
+        )
+        heading_idx = report.index(
+            f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
+        )
+        next_heading = report.find("##", heading_idx + 1)
+        body = report[heading_idx : next_heading if next_heading > -1 else len(report)]
+        assert (
+            f"_n= values below are over the last {ROLLING_WINDOW_DAYS} days._" in body
+        )
+
+
+class TestGenerateReportStructure:
+    """Seven-section report structure from the P1 restructure."""
+
+    def test_sections_in_reviewer_order(self) -> None:
+        """The new comparison sections render in the reviewer-specified order."""
+        scores = _scores_with_tool("tool-a", 0.20, 100)
+        rolling = _scores_with_tool("tool-a", 0.15, 60)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            disabled_tools={},
+        )
+        ordered_headings = [
+            f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)",
+            "## Platform Historical Comparison",
+            "## Tool Historical Comparison",
+            f"## Tool × Category (Current {ROLLING_WINDOW_DAYS}d)",
+            f"## Tool × Category Diagnostics (Current {ROLLING_WINDOW_DAYS}d)",
+            "## Tool × Category Historical Comparison",
+            "## Diagnostics Historical Comparison",
+            "## Reliability & Parse Quality (Current vs All-Time)",
+        ]
+        prev_idx = -1
+        for heading in ordered_headings:
+            idx = report.index(heading)
+            assert idx > prev_idx, f"{heading} out of order"
+            prev_idx = idx
+
+    def test_since_last_report_not_in_report(self) -> None:
+        """Overlapping-window 'Since Last Report' was dropped per reviewer."""
+        scores = _scores_with_tool("tool-a", 0.20, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=scores,
+            disabled_tools={},
+        )
+        assert "## Since Last Report" not in report
+
+
+class TestSectionCategoryPlatform:
+    """section_category_platform renders the category × platform cross cell table."""
+
+    def _scores_with_cp(self) -> dict[str, Any]:
+        return {
+            "by_category_platform": {
+                "crypto | omen": {
+                    "brier": 0.22,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.5,
+                    "directional_accuracy": 0.6,
+                    "n": 50,
+                },
+                "politics | polymarket": {
+                    "brier": 0.31,
+                    "brier_skill_score": None,
+                    "log_loss": 0.62,
+                    "directional_accuracy": 0.55,
+                    "n": 10,
+                },
+            }
+        }
+
+    def test_sufficient_cells_render_in_table(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE render inline in the main table."""
+        rendered = section_category_platform(self._scores_with_cp())
+        assert "| crypto | omen | 0.2200" in rendered
+
+    def test_sparse_cells_moved_to_footnote(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE are moved out of the ranking."""
+        rendered = section_category_platform(self._scores_with_cp())
+        # politics | polymarket has n=10, below the gate
+        assert "| politics | polymarket | 0.3100" not in rendered
+        assert "insufficient data (n=10)" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty data renders a placeholder, never blows up."""
+        assert "No cross-breakdown data available." in section_category_platform({})
+
+
+class TestAlwaysMajorityAndDALift:
+    """_always_majority / _da_lift helpers derive Maria Pia's requested fields.
+
+    Both are trivial math but they're user-facing numbers, so lock them
+    in with tests rather than trusting the diff review.
+    """
+
+    def test_always_majority_yes_heavy(self) -> None:
+        """yes_rate=0.7 → majority outcome is yes at 70%."""
+
+        assert _always_majority(0.7) == 0.7
+
+    def test_always_majority_no_heavy(self) -> None:
+        """yes_rate=0.3 → majority outcome is no at 70% (1 - 0.3)."""
+
+        assert _always_majority(0.3) == pytest.approx(0.7)
+
+    def test_always_majority_balanced(self) -> None:
+        """yes_rate=0.5 → majority baseline is 0.5 (no class is majority)."""
+
+        assert _always_majority(0.5) == 0.5
+
+    def test_always_majority_none(self) -> None:
+        """Missing yes_rate yields None, not a crash or 0.5 default."""
+
+        assert _always_majority(None) is None
+
+    def test_da_lift_positive_when_beating_majority(self) -> None:
+        """Tool predicting above always-majority has positive lift."""
+
+        # yes_rate=0.4 → majority=0.6. DirAcc=0.75 → lift=+0.15.
+        assert _da_lift(0.75, 0.4) == pytest.approx(0.15)
+
+    def test_da_lift_zero_when_equal_to_majority(self) -> None:
+        """Tool matching always-majority has zero lift."""
+
+        assert _da_lift(0.6, 0.4) == pytest.approx(0.0)
+
+    def test_da_lift_negative_when_below_majority(self) -> None:
+        """Tool worse than always-majority has negative lift."""
+
+        # yes_rate=0.3 → majority=0.7. DirAcc=0.55 → lift=-0.15.
+        assert _da_lift(0.55, 0.3) == pytest.approx(-0.15)
+
+    def test_da_lift_none_when_inputs_missing(self) -> None:
+        """Either missing input yields None, not arithmetic error."""
+
+        assert _da_lift(None, 0.4) is None
+        assert _da_lift(0.75, None) is None
+
+
+class TestSectionToolCategoryDiagnostics:
+    """section_tool_category_diagnostics renders edge / edge_n / log loss."""
+
+    def test_sufficient_cell_renders(self) -> None:
+        """Cells with n >= MIN_SAMPLE_SIZE render with all three diagnostics."""
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {
+                    "n": 60,
+                    "edge": 0.03,
+                    "edge_n": 50,
+                    "log_loss": 0.48,
+                }
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "## Tool × Category Diagnostics" in rendered
+        assert "| tool-a | crypto | +0.0300 | 50 | 0.4800 | 60 |" in rendered
+
+    def test_sparse_cells_dropped(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE don't render in the table body."""
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {"n": 5, "edge": 0.1, "edge_n": 3, "log_loss": 0.5},
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "| tool-a | crypto | +0.1000" not in rendered
+        assert f"no cells with n ≥ {MIN_SAMPLE_SIZE}" in rendered
+
+    def test_missing_diagnostic_fields_render_na(self) -> None:
+        """Cells with None edge / edge_n / log_loss render N/A rather than crash."""
+
+        scores = {
+            "by_tool_category": {
+                "tool-a | crypto": {"n": 60}  # no edge / log_loss keys
+            }
+        }
+        rendered = section_tool_category_diagnostics(scores)
+        assert "N/A" in rendered
+        assert "| tool-a | crypto |" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty data collapses to a placeholder message, not a crash."""
+
+        rendered = section_tool_category_diagnostics({})
+        assert "No cross-breakdown data available" in rendered
+
+
+class TestSectionToolCategoryPlatform:
+    """section_tool_category_platform renders the tri-dimensional slice."""
+
+    def test_sufficient_cell_rendered(self) -> None:
+        """Cell with n >= MIN_SAMPLE_SIZE appears in the table."""
+        scores = {
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {
+                    "brier": 0.18,
+                    "brier_skill_score": 0.12,
+                    "log_loss": 0.48,
+                    "edge": 0.03,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            }
+        }
+        rendered = section_tool_category_platform(scores)
+        assert "| tool-a | crypto | omen | 0.1800" in rendered
+
+    def test_sparse_cells_omitted(self) -> None:
+        """Cells below MIN_SAMPLE_SIZE are omitted with a count footnote."""
+        scores = {
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {"brier": 0.1, "n": 5},
+                "tool-b | crypto | omen": {"brier": 0.2, "n": 7},
+            }
+        }
+        rendered = section_tool_category_platform(scores)
+        # Neither sparse row renders inline.
+        assert "| tool-a | crypto | omen | 0.1000" not in rendered
+        assert "2 cell(s) below" in rendered
+
+    def test_empty_input(self) -> None:
+        """Empty input renders a placeholder."""
+        assert "No cross-breakdown data available." in section_tool_category_platform(
+            {}
+        )
+
+
+class TestGenerateFleetReport:
+    """generate_fleet_report renders the cross-platform view."""
+
+    def _fleet_scores(self) -> dict[str, Any]:
+        return {
+            "generated_at": "2026-03-31T06:00:00Z",
+            "overall": {"brier": 0.25, "n": 100},
+            "by_platform": {
+                "omen": {"brier": 0.22, "n": 60},
+                "polymarket": {"brier": 0.28, "n": 40},
+            },
+            "by_category_platform": {
+                "crypto | omen": {
+                    "brier": 0.20,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.5,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            },
+            "by_tool_category_platform": {
+                "tool-a | crypto | omen": {
+                    "brier": 0.18,
+                    "brier_skill_score": 0.1,
+                    "log_loss": 0.48,
+                    "edge": 0.03,
+                    "directional_accuracy": 0.7,
+                    "n": 50,
+                },
+            },
+        }
+
+    def test_header_names_fleet_scope(self) -> None:
+        """Fleet header makes the cross-platform scope unambiguous."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        assert "# Benchmark Report (Fleet, Cross-Platform)" in report
+
+    def test_includes_cross_platform_sections(self) -> None:
+        """Fleet report carries the two cross-platform breakdown headings."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        assert "## Category × Platform" in report
+        assert "## Tool × Category × Platform" in report
+
+    def test_skips_per_platform_deep_dives(self) -> None:
+        """Fleet report does not duplicate per-platform deep dives."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        # No rolling window content, no deployment status, no weak spots —
+        # those live in the per-platform reports.
+        assert "Tool Deployment Status" not in report
+        assert "(Last 3 Days)" not in report
+        assert "Weak Spots" not in report
+
+    def test_trend_renders_without_disclaimer(self) -> None:
+        """Fleet scope matches Trend's fleet-wide semantics — no disclaimer."""
+        history = [{"month": "2026-03", "overall": {"brier": 0.25, "n": 100}}]
+        report = generate_fleet_report(self._fleet_scores(), history)
+        assert "## Trend (Fleet-wide, Monthly)" in report
+        assert "not scoped to this report" not in report
+
+    def test_header_notes_all_time_scope(self) -> None:
+        """Fleet report intro points readers to per-platform reports for deltas."""
+        report = generate_fleet_report(self._fleet_scores(), [])
+        assert "All metrics here are all-time" in report
+        assert "report_omen.md" in report
+        assert "report_polymarket.md" in report
+
+
+# ---------------------------------------------------------------------------
+# Three-window comparison helpers
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaCell:
+    """_delta_cell enforces the sample-size and direction-label contract."""
+
+    def test_delta_suppressed_when_current_below_min(self) -> None:
+        """Low current-window n yields insufficient data, not a signed number."""
+
+        assert _delta_cell(0.2, 0.3, current_n=5, reference_n=1000) == (
+            "insufficient data"
+        )
+
+    def test_delta_suppressed_when_reference_below_min(self) -> None:
+        """Low reference-window n yields insufficient data."""
+
+        assert _delta_cell(0.2, 0.3, current_n=1000, reference_n=5) == (
+            "insufficient data"
+        )
+
+    def test_none_values_yield_na(self) -> None:
+        """Missing values collapse to N/A rather than arithmetic error."""
+
+        assert _delta_cell(None, 0.3, 1000, 1000) == "N/A"
+        assert _delta_cell(0.2, None, 1000, 1000) == "N/A"
+
+    def test_lower_is_better_direction(self) -> None:
+        """For Brier-like metrics, negative delta = better."""
+
+        rendered = _delta_cell(0.20, 0.25, 100, 100, lower_is_better=True)
+        assert rendered.startswith("-0.0500")
+        assert "better" in rendered
+
+    def test_higher_is_better_direction(self) -> None:
+        """For BSS / directional accuracy, positive delta = better."""
+
+        rendered = _delta_cell(0.75, 0.70, 100, 100, lower_is_better=False)
+        assert rendered.startswith("+0.0500")
+        assert "better" in rendered
+
+    def test_zero_delta_labeled_same(self) -> None:
+        """Delta of exactly zero renders as same, not better/worse."""
+
+        rendered = _delta_cell(0.20, 0.20, 100, 100)
+        assert "same" in rendered
+
+
+class TestSectionPlatformSnapshot:
+    """section_platform_snapshot renders the current-window overall metrics."""
+
+    def test_renders_all_snapshot_metrics(self) -> None:
+        """Every reviewer-requested snapshot metric appears in the output."""
+
+        scores = {
+            "overall": {
+                "n": 200,
+                "valid_n": 190,
+                "reliability": 0.95,
+                "brier": 0.22,
+                "baseline_brier": 0.25,
+                "brier_skill_score": 0.12,
+                "directional_accuracy": 0.70,
+                "outcome_yes_rate": 0.55,
+            }
+        }
+        rendered = section_platform_snapshot(scores)
+        for label in (
+            "n",
+            "Reliability",
+            "Brier",
+            "Baseline Brier",
+            "BSS",
+            "Directional Accuracy",
+            "Outcome Yes Rate",
+            "Outcome No Rate",
+            "Always-majority baseline",
+            "DA lift",
+        ):
+            assert label in rendered
+        # DA lift = 0.70 - max(0.55, 0.45) = +0.15
+        assert "+0.1500" in rendered
+
+    def test_empty_scores_renders_placeholder(self) -> None:
+        """Zero rows collapses to a placeholder, not a crash."""
+
+        assert "No rows scored" in section_platform_snapshot({"overall": {"n": 0}})
+
+
+class TestSectionPlatformComparison:
+    """section_platform_comparison threads the three windows correctly."""
+
+    def _rolling(self) -> dict:
+        return {
+            "overall": {
+                "n": 200,
+                "valid_n": 190,
+                "reliability": 0.95,
+                "brier": 0.22,
+                "baseline_brier": 0.25,
+                "brier_skill_score": 0.12,
+                "directional_accuracy": 0.70,
+                "log_loss": 0.50,
+            }
+        }
+
+    def _alltime(self) -> dict:
+        return {
+            "overall": {
+                "n": 5000,
+                "valid_n": 4800,
+                "reliability": 0.93,
+                "brier": 0.24,
+                "baseline_brier": 0.26,
+                "brier_skill_score": 0.08,
+                "directional_accuracy": 0.68,
+                "log_loss": 0.52,
+            }
+        }
+
+    def _prev(self) -> dict:
+        return {
+            "overall": {
+                "n": 200,
+                "valid_n": 185,
+                "reliability": 0.94,
+                "brier": 0.23,
+                "baseline_brier": 0.25,
+                "brier_skill_score": 0.10,
+                "directional_accuracy": 0.69,
+                "log_loss": 0.51,
+            }
+        }
+
+    def test_three_window_table_header(self) -> None:
+        """Header names current, all-time, and prev windows with delta columns."""
+
+        rendered = section_platform_comparison(
+            self._rolling(), self._alltime(), self._prev()
+        )
+        assert "Current 3d" in rendered
+        assert "All-Time" in rendered
+        assert "Prev 3d" in rendered
+        assert "Δ vs All-Time" in rendered
+        assert "Δ vs Prev 3d" in rendered
+
+    def test_no_prev_window_when_prev_is_none(self) -> None:
+        """Prev column renders 'no prev window' placeholder instead of a delta."""
+
+        rendered = section_platform_comparison(self._rolling(), self._alltime(), None)
+        assert "no prev window" in rendered
+
+    def test_brier_row_renders_signed_delta(self) -> None:
+        """Brier delta sign + direction word appears in the table body."""
+
+        rendered = section_platform_comparison(
+            self._rolling(), self._alltime(), self._prev()
+        )
+        # current=0.22, all-time=0.24 → delta=-0.02, better (Brier is
+        # lower-is-better).
+        assert "-0.0200 better" in rendered
+
+
+class TestSectionToolComparison:
+    """section_tool_comparison ranks tools and threads deltas correctly."""
+
+    def _s(self, tools: dict[str, tuple[float | None, int]]) -> dict:
+        return {
+            "by_tool": {
+                name: {
+                    "brier": brier,
+                    "valid_n": n,
+                    "n": n,
+                    "decision_worthy": n >= 30,
+                }
+                for name, (brier, n) in tools.items()
+            }
+        }
+
+    def test_tool_row_cites_current_value_and_deltas(self) -> None:
+        """Each row shows the current Brier, all-time delta, and prev delta."""
+
+        rolling = self._s({"tool-a": (0.22, 100)})
+        alltime = self._s({"tool-a": (0.25, 5000)})
+        prev = self._s({"tool-a": (0.24, 100)})
+        rendered = section_tool_comparison(rolling, alltime, prev)
+        assert "**tool-a**" in rendered
+        assert "0.2200 (n=100)" in rendered
+        assert "better" in rendered
+
+    def test_no_prev_window_placeholder(self) -> None:
+        """None prev-rolling renders the placeholder instead of N/A or empty."""
+
+        rolling = self._s({"tool-a": (0.22, 100)})
+        alltime = self._s({"tool-a": (0.25, 5000)})
+        rendered = section_tool_comparison(rolling, alltime, None)
+        assert "no prev window" in rendered
+
+    def test_empty_universe_renders_placeholder(self) -> None:
+        """No tools anywhere collapses to a placeholder."""
+
+        rendered = section_tool_comparison({}, {}, None)
+        assert "No tool data available." in rendered
+
+
+class TestSectionDiagnosticsComparisonPlaceholder:
+    """Diagnostics table renders an explicit placeholder when all cells skip.
+
+    Before the ``len(lines) == 4`` fix the table would emit a bare
+    header + separator with no body rows when every metric cell hit
+    the ``all three windows None`` continue — readers saw an empty
+    table and had to guess whether that meant "no data" or "rendering
+    bug".
+    """
+
+    def test_placeholder_rendered_when_every_cell_skips(self) -> None:
+        """Tool with no edge / log_loss / ... keys triggers the placeholder."""
+        # tool-a exists in by_tool so _tool_universe yields it, but
+        # none of the five diagnostic metric keys are populated on any
+        # window — every (tool, metric) pair hits the continue branch.
+        bare_tool = {"by_tool": {"tool-a": {"n": 100, "valid_n": 90}}}
+        rendered = section_diagnostics_comparison(bare_tool, bare_tool, bare_tool)
+        assert "_(no diagnostic data)_" in rendered
+
+    def test_placeholder_absent_when_any_metric_populated(self) -> None:
+        """Placeholder only fires when no (tool, metric) cell renders."""
+        with_edge = {
+            "by_tool": {
+                "tool-a": {
+                    "n": 100,
+                    "valid_n": 90,
+                    "edge": 0.02,
+                    "edge_n": 80,
+                }
+            }
+        }
+        rendered = section_diagnostics_comparison(with_edge, with_edge, with_edge)
+        assert "_(no diagnostic data)_" not in rendered
+        assert "**tool-a** | Edge" in rendered
+
+
+class TestZeroRowPrevRollingRouting:
+    """Zero-row prev_rolling_scores routes to the "no prev window" placeholder.
+
+    A prev-scoring CI step that succeeds on an empty window writes
+    ``{"total_rows": 0, "overall": {}}`` to disk. Pre-normalization,
+    ``prev is not None`` was True in the comparison sections and the
+    "no prev window" placeholder never fired — readers saw ``N/A (n=0)``
+    cells that read as "we measured zero rows" instead of "no reference
+    window available".
+    """
+
+    def _scores(self, tool: str, brier: float, n: int) -> dict:
+        return _scores_with_tool(tool, brier, n)
+
+    def test_empty_prev_rolling_routes_to_no_prev_window(self) -> None:
+        """Zero total_rows on prev_rolling_scores renders the explicit placeholder."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        empty_prev = {"total_rows": 0, "overall": {}}
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=empty_prev,
+            disabled_tools={},
+        )
+        assert "no prev window" in report
+
+    def test_missing_prev_rolling_and_empty_prev_rolling_render_the_same(
+        self,
+    ) -> None:
+        """Zero-row prev and None prev emit the same user-facing copy."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        empty_prev = {"total_rows": 0, "overall": {}}
+        report_empty = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=empty_prev,
+            disabled_tools={},
+        )
+        report_none = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=None,
+            disabled_tools={},
+        )
+        # The date stamps in the header carry ``generated_at`` which is
+        # identical across both calls for a single-scorer fixture, so the
+        # full reports compare equal.
+        assert report_empty == report_none
+
+    def test_populated_prev_rolling_still_renders_deltas(self) -> None:
+        """The zero-row guard does not accidentally swallow real prev data."""
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        populated_prev = self._scores("tool-a", 0.21, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=populated_prev,
+            disabled_tools={},
+        )
+        assert "no prev window" not in report
+
+    def test_prev_value_and_delta_cells_agree_when_no_prev_window(self) -> None:
+        """When prev is None, the prev-value cell and delta cell render identically.
+
+        Regression test for a consistency bug where the delta cell
+        said ``no prev window`` but the prev-value cell on the same row
+        rendered ``N/A (n=0)`` — two different messages for the same
+        state in neighboring columns of a single row.
+        """
+        scores = self._scores("tool-a", 0.22, 1000)
+        rolling = self._scores("tool-a", 0.20, 100)
+        report = generate_report(
+            scores,
+            [],
+            platform="omen",
+            rolling_scores=rolling,
+            prev_rolling_scores=None,
+            disabled_tools={},
+        )
+        # The value-cell on the prev column must carry "no prev window"
+        # wherever a delta cell does; an "N/A (n=0)" leaking through
+        # would mean a no-prev-window row is claiming it measured the
+        # previous window and found zero rows.
+        for line in report.splitlines():
+            if line.startswith("|") and "no prev window" in line:
+                assert "N/A (n=0)" not in line, line
+
+
+class TestSectionReliabilityComparison:
+    """section_reliability_comparison shows reliability and valid % deltas."""
+
+    def test_reliability_regression_labeled_worse(self) -> None:
+        """Tool whose reliability dropped renders with 'worse' direction."""
+
+        rolling = {
+            "by_tool": {"tool-a": {"reliability": 0.85, "n": 100}},
+            "parse_breakdown": {"tool-a": {"valid": 80, "malformed": 20}},
+        }
+        alltime = {
+            "by_tool": {"tool-a": {"reliability": 0.95, "n": 5000}},
+            "parse_breakdown": {"tool-a": {"valid": 4750, "malformed": 250}},
+        }
+        rendered = section_reliability_comparison(rolling, alltime)
+        assert "**tool-a**" in rendered
+        assert "worse" in rendered
+
+    def test_low_sample_suppresses_delta(self) -> None:
+        """Low-n reliability delta renders insufficient data, not a signed %."""
+
+        rolling = {
+            "by_tool": {"tool-a": {"reliability": 0.85, "n": 5}},
+            "parse_breakdown": {"tool-a": {"valid": 4, "malformed": 1}},
+        }
+        alltime = {
+            "by_tool": {"tool-a": {"reliability": 0.95, "n": 5000}},
+            "parse_breakdown": {"tool-a": {"valid": 4750, "malformed": 250}},
+        }
+        rendered = section_reliability_comparison(rolling, alltime)
+        assert "insufficient data" in rendered

@@ -145,46 +145,50 @@ jobs:
         continue-on-error: true
 
       # Score recent periods for diff reporting
-      - name: Score today
+      # Keep the "3" in the step name and --period-days flag in sync with
+      # ROLLING_WINDOW_DAYS in benchmark/analyze.py. YAML can't import the
+      # Python constant; a bump to ROLLING_WINDOW_DAYS must be mirrored here.
+      - name: Score last 3 days
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          python -m benchmark.scorer --period-days 1 \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/period_scores.json \
-            $TOURNAMENT_FLAG
-        continue-on-error: true
-
-      - name: Score last 7 days
-        run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
-          fi
-          python -m benchmark.scorer --period-days 7 \
+          python -m benchmark.scorer --period-days 3 \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
             $TOURNAMENT_FLAG
         continue-on-error: true
 
-      # Analyze reads scores.json + tournament scores + history + period scores
-      - name: Analyze
+      # Score the preceding non-overlapping window (days 4-6 ago for a
+      # 3-day rolling window). Feeds the "Δ vs Prev 3d" columns in the
+      # three-window comparison tables.
+      - name: Score previous 3 days (non-overlapping)
         run: |
-          python -m benchmark.analyze \
-            --period benchmark/results/period_scores.json \
-            --rolling benchmark/results/rolling_scores.json \
-            --scores-tournament benchmark/results/scores_tournament.json \
-            --period-tournament benchmark/results/period_scores_tournament.json \
-            --rolling-tournament benchmark/results/rolling_scores_tournament.json \
-            --include-tournament
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          python -m benchmark.scorer --period-days 3 --period-offset-days 3 \
+            --logs-dir benchmark/datasets/logs/ \
+            --output benchmark/results/prev_rolling_scores.json \
+            $TOURNAMENT_FLAG
+        continue-on-error: true
+
+      - name: Analyze (Omenstrat)
+        run: python -m benchmark.analyze --platform omen --include-tournament
+
+      - name: Analyze (Polystrat)
+        if: always() && !cancelled()
+        run: python -m benchmark.analyze --platform polymarket --include-tournament
 
       # Upload state + scores (small, needed for next run).
       # include-hidden-files: true is required so .fetch_state.json
       # (leading dot = hidden under v4's default filter) actually ships
       # in the artifact. Without it, the incremental fetch cursor is
       # silently dropped every run and the scorer compounds double-counts.
+      # Per-platform scores files each carry their own incremental-resume
+      # state; dropping any of them resets that platform's accumulator.
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
@@ -193,10 +197,15 @@ jobs:
           path: |
             benchmark/datasets/.fetch_state.json
             benchmark/results/scores.json
+            benchmark/results/scores_omen.json
+            benchmark/results/scores_polymarket.json
             benchmark/results/scores_tournament.json
+            benchmark/results/scores_tournament_omen.json
+            benchmark/results/scores_tournament_polymarket.json
             benchmark/results/scores_history.jsonl
             benchmark/results/scored_row_ids.json
-            benchmark/results/report.md
+            benchmark/results/report_omen.md
+            benchmark/results/report_polymarket.md
           retention-days: 90
 
       - name: Resolve report artifact URL
@@ -210,13 +219,33 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Post summary to Slack
-        if: (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+      # The hashFiles() guard keeps the per-platform Slack post independent
+      # of the other platform's Analyze step: if report_<platform>.md was
+      # not written (because Analyze crashed before writing it), we skip
+      # the Slack post for that platform rather than firing notify_slack
+      # against a missing file. The neighboring platform's Slack post
+      # still runs, since each step gates on its own report file.
+      - name: Post Omenstrat summary to Slack
+        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_omen.md') != ''
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-        run: python -m benchmark.notify_slack --report benchmark/results/report.md
+        run: |
+          python -m benchmark.notify_slack \
+            --report benchmark/results/report_omen.md \
+            --platform-label Omenstrat
+
+      - name: Post Polystrat summary to Slack
+        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_polymarket.md') != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+          REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
+        run: |
+          python -m benchmark.notify_slack \
+            --report benchmark/results/report_polymarket.md \
+            --platform-label Polystrat
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

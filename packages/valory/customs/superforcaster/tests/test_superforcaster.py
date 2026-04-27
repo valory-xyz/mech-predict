@@ -17,7 +17,7 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for superforcaster: thread-safe client, structured outputs, source_content."""
+"""Unit tests for superforcaster: thread-safe client, offline tiktoken, and source_content."""
 
 import inspect
 import json
@@ -29,8 +29,7 @@ import pytest
 import packages.valory.customs.superforcaster.superforcaster as module
 from packages.valory.customs.superforcaster.superforcaster import (
     OpenAIClientManager,
-    PredictionResult,
-    _parse_completion,
+    generate_prediction_with_retry,
     run,
 )
 
@@ -38,20 +37,20 @@ from packages.valory.customs.superforcaster.superforcaster import (
 class TestOpenAIClientManager:
     """Verify OpenAIClientManager creates per-context clients without globals."""
 
-    def test_context_manager_returns_openai_client(self) -> None:
-        """__enter__ returns a fresh openai.OpenAI client, __exit__ closes it."""
+    def test_context_manager_returns_client_instance(self) -> None:
+        """__enter__ returns a fresh OpenAIClient, __exit__ closes it."""
         mgr = OpenAIClientManager(api_key="sk-test")
         with patch(
-            "packages.valory.customs.superforcaster.superforcaster.OpenAI"
-        ) as MockOpenAI:
+            "packages.valory.customs.superforcaster.superforcaster.OpenAIClient"
+        ) as MockClient:
             mock_instance = MagicMock()
-            MockOpenAI.return_value = mock_instance
+            MockClient.return_value = mock_instance
 
             with mgr as client:
                 assert client is mock_instance
-                MockOpenAI.assert_called_once_with(api_key="sk-test")
+                MockClient.assert_called_once_with(api_key="sk-test")
 
-            mock_instance.close.assert_called_once()
+            mock_instance.client.close.assert_called_once()
 
     def test_no_global_client_variable(self) -> None:
         """The module must not define a module-level 'client' variable."""
@@ -64,9 +63,9 @@ class TestOpenAIClientManager:
                         f"Module-level 'client' variable found at line {i}: {line}"
                     )
 
-    def test_parse_completion_requires_client_param(self) -> None:
-        """_parse_completion requires client as first param."""
-        params = list(inspect.signature(_parse_completion).parameters)
+    def test_generate_prediction_requires_client_param(self) -> None:
+        """generate_prediction_with_retry requires client as first param."""
+        params = list(inspect.signature(generate_prediction_with_retry).parameters)
         assert params[0] == "client"
 
 
@@ -87,16 +86,8 @@ FAKE_SERPER_RESPONSE = {
     ],
 }
 
-FAKE_PREDICTION = PredictionResult(
-    facts="Fact 1. Fact 2.",
-    reasons_no="No 1 (strength 6). No 2 (strength 4).",
-    reasons_yes="Yes 1 (strength 5). Yes 2 (strength 3).",
-    aggregation="Base rate 0.5. Tentative: 0.5.",
-    reflection="Passes evidence bar.",
-    p_yes=0.5,
-    p_no=0.5,
-    confidence=0.5,
-    info_utility=0.5,
+PREDICTION_JSON = json.dumps(
+    {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.5, "info_utility": 0.5}
 )
 
 PREDICTION_PROMPT = (
@@ -119,116 +110,6 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
     return mock
 
 
-def _mock_parse_response() -> MagicMock:
-    """Build a fake response object matching the beta.chat.completions.parse shape."""
-    return MagicMock(
-        choices=[MagicMock(message=MagicMock(parsed=FAKE_PREDICTION, refusal=None))],
-        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
-    )
-
-
-class TestStructuredOutputContract:
-    """Verify the tool uses OpenAI Structured Outputs and returns only the 4 on-chain fields."""
-
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_uses_beta_parse_with_prediction_result_schema(
-        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
-    ) -> None:
-        """run() calls client.beta.chat.completions.parse with response_format=PredictionResult."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = FAKE_SERPER_RESPONSE
-        mock_fetch.return_value = mock_response
-
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
-
-        run(
-            tool="superforcaster",
-            model="gpt-4.1-2025-04-14",
-            prompt=PREDICTION_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=None,
-        )
-
-        mock_client.beta.chat.completions.parse.assert_called_once()
-        kwargs = mock_client.beta.chat.completions.parse.call_args.kwargs
-        assert kwargs["response_format"] is PredictionResult
-        assert kwargs["model"] == "gpt-4.1-2025-04-14"
-        mock_client.chat.completions.create.assert_not_called()
-
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_returns_only_four_mech_fields_on_chain(
-        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
-    ) -> None:
-        """The on-chain result JSON contains exactly p_yes/p_no/confidence/info_utility."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = FAKE_SERPER_RESPONSE
-        mock_fetch.return_value = mock_response
-
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
-
-        result = run(
-            tool="superforcaster",
-            model="gpt-4.1-2025-04-14",
-            prompt=PREDICTION_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=None,
-        )
-
-        on_chain_json = result[0]
-        parsed = json.loads(on_chain_json)
-        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
-        assert "facts" not in parsed
-        assert "reasons_no" not in parsed
-        assert "aggregation" not in parsed
-        assert "reflection" not in parsed
-        assert parsed["p_yes"] == 0.5
-        assert parsed["p_no"] == 0.5
-
-
-class TestPredictionResultValidator:
-    """Pydantic sum validator rejects malformed probabilities."""
-
-    def test_valid_sum_accepted(self) -> None:
-        """p_yes + p_no = 1.0 is accepted."""
-        obj = PredictionResult(
-            facts="f",
-            reasons_no="n",
-            reasons_yes="y",
-            aggregation="a",
-            reflection="r",
-            p_yes=0.7,
-            p_no=0.3,
-            confidence=0.6,
-            info_utility=0.5,
-        )
-        assert obj.p_yes == 0.7
-
-    def test_sum_violation_rejected(self) -> None:
-        """p_yes + p_no outside 0.01 tolerance raises ValidationError."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            PredictionResult(
-                facts="f",
-                reasons_no="n",
-                reasons_yes="y",
-                aggregation="a",
-                reflection="r",
-                p_yes=0.7,
-                p_no=0.2,
-                confidence=0.6,
-                info_utility=0.5,
-            )
-
-
 class TestSuperforcasterSourceContent:
     """Verify superforcaster captures and replays source_content correctly."""
 
@@ -243,13 +124,16 @@ class TestSuperforcasterSourceContent:
         mock_fetch.return_value = mock_response
 
         mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
         mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
         result = run(
             tool="superforcaster",
-            model="gpt-4.1-2025-04-14",
+            model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
             counter_callback=None,
@@ -267,14 +151,17 @@ class TestSuperforcasterSourceContent:
     ) -> None:
         """Replay with {'serper_response': ...} uses organic and peopleAlsoAsk."""
         mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
         mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
             tool="superforcaster",
-            model="gpt-4.1-2025-04-14",
+            model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
             counter_callback=None,
@@ -298,13 +185,16 @@ class TestSuperforcasterSourceContent:
         mock_fetch.return_value = mock_response
 
         mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
         mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
         result = run(
             tool="superforcaster",
-            model="gpt-4.1-2025-04-14",
+            model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
             counter_callback=None,

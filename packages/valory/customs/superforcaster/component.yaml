@@ -7,9 +7,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeifvbuxt54l5jsxextf6ru5yvimkfdg4gfkcsnmyvsyqcsgclg7vey
-  superforcaster.py: bafybeic7vbcjcq5jomciosjaez2nnktwsdlbf2ctakdrbh5nl7cgod5z6e
+  superforcaster.py: bafybeibfat4z2tdqvrjz6dukdz34oyb36j7bi5rqtgat42vxncai5hw6im
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster.py: bafybeiboaixfm4itoashxu5a4fshfe36plhnkk2tw3reznnoxz4yl7ovhm
+  tests/test_superforcaster.py: bafybeigscr6ayqdkgchxxvygp25yzqlu6g6rkwg3fcbflxx2sbfpymgdqa
 fingerprint_ignore_patterns: []
 entry_point: superforcaster.py
 callable: run
@@ -22,7 +22,5 @@ dependencies:
     version: ==0.25.2
   tiktoken:
     version: ==0.12.0
-  pydantic:
-    version: '>=2.0.0,<3.0.0'
   requests:
     version: ==2.32.5

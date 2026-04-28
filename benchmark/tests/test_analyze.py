@@ -2770,8 +2770,10 @@ class TestActiveToolsForPlatform:
         up yet (or whose all-time write failed mid-run) is not silently
         filtered out.
         """
-        all_time = {"by_tool": {"tool-a": {}, "tool-b": {}}}
-        rolling = {"by_tool": {"tool-a": {}, "tool-b": {}, "tool-new": {}}}
+        all_time: dict[str, Any] = {"by_tool": {"tool-a": {}, "tool-b": {}}}
+        rolling: dict[str, Any] = {
+            "by_tool": {"tool-a": {}, "tool-b": {}, "tool-new": {}}
+        }
         disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": [],
             "omenstrat QS": [],
@@ -2789,7 +2791,7 @@ class TestActiveToolsForPlatform:
         Backward-compatible default — callers that haven't been updated
         yet still produce the same active set as before.
         """
-        all_time = {"by_tool": {"tool-a": {}, "tool-b": {}}}
+        all_time: dict[str, Any] = {"by_tool": {"tool-a": {}, "tool-b": {}}}
         disabled: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-a"],
             "omenstrat QS": [],

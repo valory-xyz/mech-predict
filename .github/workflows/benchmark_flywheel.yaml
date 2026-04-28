@@ -196,6 +196,7 @@ jobs:
           include-hidden-files: true
           path: |
             benchmark/datasets/.fetch_state.json
+            benchmark/datasets/logs/
             benchmark/results/scores.json
             benchmark/results/scores_omen.json
             benchmark/results/scores_polymarket.json

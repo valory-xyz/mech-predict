@@ -263,6 +263,7 @@ def _active_tools_for_platform(
     disabled: dict[str, list[str] | None] | None,
     platform: str,
     scores: dict[str, Any],
+    rolling_scores: dict[str, Any] | None = None,
 ) -> frozenset[str] | None:
     """Return tools currently active on at least one deployment of ``platform``.
 
@@ -272,17 +273,20 @@ def _active_tools_for_platform(
 
     Tool-name normalization mirrors ``section_tool_deployment_status``:
     underscores and hyphens are treated as interchangeable when comparing
-    against the disabled list, but the returned set uses the names as
-    they appear in ``scores["by_tool"]`` (the form the report sections
-    iterate over).
+    against the disabled list. The returned set uses the names as they
+    appear in ``by_tool`` keys.
 
     :param disabled: ``{deployment: [tool_names] | None}`` map, where
         ``None`` indicates a fetch/parse failure for that deployment.
         ``None`` for the whole map (or an empty dict) is treated as
         "no deployment data available".
     :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
-    :param scores: parsed platform-scoped scores dict, used to recover
-        the canonical ``by_tool`` names.
+    :param scores: parsed platform-scoped all-time scores dict.
+    :param rolling_scores: parsed platform-scoped current-window scores
+        dict. The benchmarked-tool universe is the union of ``scores``
+        and ``rolling_scores`` ``by_tool`` keys so a freshly-deployed
+        tool with rolling data but no all-time history yet is still
+        included in the active set.
     :return: frozenset of active tool names, or ``None`` when **every**
         deployment of this platform has ``disabled=None`` (full fetch
         failure for the platform). Callers fall back to "show all
@@ -298,7 +302,9 @@ def _active_tools_for_platform(
         # warning and shows all tools rather than blanking the report.
         return None
 
-    benchmarked = list(scores.get("by_tool", {}).keys())
+    benchmarked = set((scores.get("by_tool") or {}).keys())
+    if rolling_scores is not None:
+        benchmarked |= set((rolling_scores.get("by_tool") or {}).keys())
 
     active: set[str] = set()
     for disabled_tools in relevant.values():
@@ -2492,7 +2498,9 @@ def generate_report(  # pylint: disable=too-many-statements
     # deployment fetch failed for this platform; the caller's fallback
     # is to skip the filter and prepend a one-line warning so the
     # reader knows the tool list is unfiltered for this run.
-    active_tools = _active_tools_for_platform(disabled_tools, platform, scores)
+    active_tools = _active_tools_for_platform(
+        disabled_tools, platform, scores, rolling_scores
+    )
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
     # Warning fires only when the caller actually attempted a fetch

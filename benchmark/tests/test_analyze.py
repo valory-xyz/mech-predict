@@ -2761,6 +2761,44 @@ class TestActiveToolsForPlatform:
         assert "tool-a" not in active
         assert "tool-b" in active and "tool-c" in active
 
+    def test_benchmarked_universe_unions_rolling_and_alltime(self) -> None:
+        """Tool with rolling rows but no all-time entry is still considered.
+
+        ``section_tool_comparison`` builds its row universe from the union
+        of rolling + all-time. The active set must use the same universe
+        so a freshly-deployed tool whose all-time aggregate hasn't caught
+        up yet (or whose all-time write failed mid-run) is not silently
+        filtered out.
+        """
+        all_time = {"by_tool": {"tool-a": {}, "tool-b": {}}}
+        rolling = {"by_tool": {"tool-a": {}, "tool-b": {}, "tool-new": {}}}
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(
+            disabled, "omen", all_time, rolling_scores=rolling
+        )
+        assert active is not None
+        assert "tool-new" in active
+
+    def test_rolling_scores_optional_preserves_alltime_only_behaviour(self) -> None:
+        """Omitting ``rolling_scores`` falls back to the all-time-only universe.
+
+        Backward-compatible default — callers that haven't been updated
+        yet still produce the same active set as before.
+        """
+        all_time = {"by_tool": {"tool-a": {}, "tool-b": {}}}
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "omenstrat QS": [],
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(disabled, "omen", all_time)
+        # tool-a is disabled on Pearl but enabled on QS → in active set
+        assert active == frozenset({"tool-a", "tool-b"})
+
 
 class TestFilterByActive:
     """``_filter_by_active`` drops non-deployed tools from ranked iterations."""

@@ -131,8 +131,11 @@ def _count_eligible_tools(report_text: str) -> int:
     :param report_text: full markdown report for one platform.
     :return: count of eligible rows; ``0`` when the section is absent.
     """
+    # The block terminates on the next ``^## `` heading OR at end-of-report
+    # so this helper is robust to Tool Historical Comparison being the
+    # final section.
     block_match = re.search(
-        r"^## Tool Historical Comparison\n(.*?)^## ",
+        r"^## Tool Historical Comparison\n(.*?)(?=^## |\Z)",
         report_text,
         re.S | re.M,
     )

@@ -319,6 +319,25 @@ class TestCountEligibleTools:
         )
         assert _count_eligible_tools(report) == 3
 
+    def test_counts_when_section_is_last_in_report(self) -> None:
+        r"""Block parser also terminates at end-of-report.
+
+        Without the ``\Z`` anchor, the regex needs another ``^## ``
+        heading to close the block. If a future analyze.py reorder ever
+        lands Tool Historical Comparison as the final section, the
+        helper would silently return 0 and every report would render
+        the "no eligible tools" placeholder. Pin the contract.
+        """
+        report = (
+            "## Tool Historical Comparison\n"
+            "\n"
+            "| Tool | Current 7d Brier | All-Time | Δ |\n"
+            "|------|------------------|----------|---|\n"
+            "| **a** | 0.1 (n=73) | x | x |\n"
+            "| **b** | 0.2 (n=79) | x | x |\n"
+        )
+        assert _count_eligible_tools(report) == 2
+
 
 class TestRankingBlockDispatch:
     """The prompt only ever exposes ONE section convention per request.

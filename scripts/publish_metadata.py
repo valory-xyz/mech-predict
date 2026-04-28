@@ -22,9 +22,8 @@ import argparse
 import sys
 
 from aea.helpers.cid import to_v1
+from aea.helpers.multiformat import multibase_decode, multicodec_remove_prefix
 from aea_cli_ipfs.ipfs_utils import IPFSTool
-from multibase import multibase
-from multicodec import multicodec
 
 from scripts.generate_metadata import METADATA_FILE_PATH
 
@@ -52,8 +51,8 @@ def push_metadata_to_ipfs() -> None:
         print(f"Key '{RESPONSE_KEY!r}' not found in ipfs response")
         sys.exit(1)
 
-    cid_bytes = multibase.decode(to_v1(response[RESPONSE_KEY]))
-    multihash_bytes = multicodec.remove_prefix(cid_bytes)
+    cid_bytes = multibase_decode(to_v1(response[RESPONSE_KEY]).encode("ascii"))
+    multihash_bytes = multicodec_remove_prefix(cid_bytes)
     hex_multihash = multihash_bytes.hex()
     ipfs_hash = PREFIX + hex_multihash[IPFS_PREFIX_LENGTH:]
     print(f"Metadata successfully pushed to ipfs. The metadata hash is: {ipfs_hash}")

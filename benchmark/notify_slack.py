@@ -31,6 +31,7 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
+from benchmark.scorer import MIN_SAMPLE_SIZE
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -40,13 +41,17 @@ Summarize this Olas Predict benchmark report for the *{{platform_label}}* deploy
 
 *Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Lead with the Current-{ROLLING_WINDOW_DAYS}d platform Brier (from the "Platform Snapshot" section). Then name the direction of change: "Δ vs All-Time" from the "Platform Historical Comparison" row for Brier, and "Δ vs Prev {ROLLING_WINDOW_DAYS}d" from the same row. If either delta shows `insufficient data`, say so plainly instead of guessing.
 
+*Eligibility for Top tools / Worst tools / Tool performance bullets:* a row is eligible only if its Current {ROLLING_WINDOW_DAYS}d n is at least {MIN_SAMPLE_SIZE} AND the row carries no ⚠ low sample / ⚠ all malformed flag. Apply this filter BEFORE picking ranks — never let a flagged or below-floor row reach the top or the bottom of the list.
+
+SINGLE-TOOL FALLBACK: if exactly one tool in the "Tool Historical Comparison" table is eligible, render a single `*Tool performance:*` bullet for that tool using the same format as the Top/Worst bullets, and skip both `*Top tools:*` and `*Worst tools:*` sections entirely. If zero tools are eligible, write `*Tool performance:*` with the bullet `_no eligible tools — every row is below n={MIN_SAMPLE_SIZE} or flagged_` and skip Top/Worst.
+
 *Top tools:*
 • `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list top 3 from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
+(list top 3 eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
 
 *Worst tools:*
 • `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list bottom 3 from the same table, ignore rows with ⚠ low sample / all malformed flags.)
+(list bottom 3 eligible rows from the same table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier descending.)
 
 *Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
 

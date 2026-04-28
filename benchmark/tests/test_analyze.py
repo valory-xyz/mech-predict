@@ -30,9 +30,11 @@ from benchmark.analyze import (
     POLYMARKET_ACTIVE_CATEGORIES,
     ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
+    _active_tools_for_platform,
     _always_majority,
     _da_lift,
     _delta_cell,
+    _filter_by_active,
     _parse_tvm_key,
     _sample_label,
     generate_fleet_report,
@@ -958,10 +960,10 @@ class TestGenerateReport:
 
         assert "# Benchmark Report (Omenstrat) — " in report
         assert "## Metric References" in report
-        assert "## Platform Snapshot (Current 3d)" in report
+        assert f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)" in report
         assert "## Platform Historical Comparison" in report
         assert "## Tool Historical Comparison" in report
-        assert "## Tool \u00d7 Category (Current 3d)" in report
+        assert f"## Tool \u00d7 Category (Current {ROLLING_WINDOW_DAYS}d)" in report
         assert "## Tool \u00d7 Category Historical Comparison" in report
         assert "## Diagnostics Historical Comparison" in report
         assert "## Reliability & Parse Quality (Current vs All-Time)" in report
@@ -975,7 +977,7 @@ class TestGenerateReport:
         # single-scope point-in-time sections. Their data is now folded
         # into the three-window comparison tables.
         assert "## Since Last Report" not in report
-        assert "## Last 3 Days" not in report
+        assert f"## Last {ROLLING_WINDOW_DAYS} Days" not in report
         assert "## Overall" not in report
         assert "## Worst Predictions" not in report
         assert "## Best Predictions" not in report
@@ -989,7 +991,9 @@ class TestGenerateReport:
         report = generate_report(s, [], platform="omen", disabled_tools={})
         assert "# Benchmark Report (Omenstrat) — " in report
         # With no rolling_scores, the snapshot banner explains the gap.
-        assert "Scores for the last 3 days are unavailable" in report
+        assert (
+            f"Scores for the last {ROLLING_WINDOW_DAYS} days are unavailable" in report
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1404,7 +1408,7 @@ class TestGenerateReportTournamentToggle:
             disabled_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
-        assert "Tool × Version × Mode (Last 3 Days)" in report
+        assert f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1582,7 +1586,7 @@ class TestGenerateReportWithTournamentFiles:
         # Tool × Version × Mode, not a duplicated " — Tournament" ranking.
         assert "## Overall" not in report
         assert "## Tool × Version × Mode (All-Time)" in report
-        assert "## Tool × Version × Mode (Last 3 Days)" in report
+        assert f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)" in report
 
     def test_empty_rolling_tournament_does_not_crash(self) -> None:
         """Rolling tournament input with zero rows renders cleanly.
@@ -1917,9 +1921,9 @@ class TestSectionMetricReference:
     def test_names_all_three_windows(self) -> None:
         """Legend explicitly names current, all-time, and prev-rolling windows."""
         rendered = section_metric_reference()
-        assert "Current 3d" in rendered
+        assert f"Current {ROLLING_WINDOW_DAYS}d" in rendered
         assert "All-Time" in rendered
-        assert "Prev 3d" in rendered
+        assert f"Prev {ROLLING_WINDOW_DAYS}d" in rendered
 
     def test_documents_sample_size_guardrail(self) -> None:
         """Legend spells out the MIN_SAMPLE_SIZE delta-suppression rule."""
@@ -1987,8 +1991,8 @@ class TestGenerateReportRollingBanner:
         for heading in (
             "## Platform Historical Comparison",
             "## Tool Historical Comparison",
-            "## Tool × Category (Current 3d)",
-            "## Tool × Category Diagnostics (Current 3d)",
+            f"## Tool × Category (Current {ROLLING_WINDOW_DAYS}d)",
+            f"## Tool × Category Diagnostics (Current {ROLLING_WINDOW_DAYS}d)",
             "## Tool × Category Historical Comparison",
             "## Diagnostics Historical Comparison",
             "## Reliability & Parse Quality (Current vs All-Time)",
@@ -2297,7 +2301,7 @@ class TestGenerateFleetReport:
         # No rolling window content, no deployment status, no weak spots —
         # those live in the per-platform reports.
         assert "Tool Deployment Status" not in report
-        assert "(Last 3 Days)" not in report
+        assert f"(Last {ROLLING_WINDOW_DAYS} Days)" not in report
         assert "Weak Spots" not in report
 
     def test_trend_renders_without_disclaimer(self) -> None:
@@ -2456,11 +2460,11 @@ class TestSectionPlatformComparison:
         rendered = section_platform_comparison(
             self._rolling(), self._alltime(), self._prev()
         )
-        assert "Current 3d" in rendered
+        assert f"Current {ROLLING_WINDOW_DAYS}d" in rendered
         assert "All-Time" in rendered
-        assert "Prev 3d" in rendered
+        assert f"Prev {ROLLING_WINDOW_DAYS}d" in rendered
         assert "Δ vs All-Time" in rendered
-        assert "Δ vs Prev 3d" in rendered
+        assert f"Δ vs Prev {ROLLING_WINDOW_DAYS}d" in rendered
 
     def test_no_prev_window_when_prev_is_none(self) -> None:
         """Prev column renders 'no prev window' placeholder instead of a delta."""
@@ -2687,3 +2691,231 @@ class TestSectionReliabilityComparison:
         }
         rendered = section_reliability_comparison(rolling, alltime)
         assert "insufficient data" in rendered
+
+
+class TestActiveToolsForPlatform:
+    """``_active_tools_for_platform`` builds the per-platform deployed set."""
+
+    _SCORES: dict[str, dict[str, dict[str, Any]]] = {
+        "by_tool": {"tool-a": {}, "tool-b": {}, "tool-c": {}}
+    }
+
+    def test_full_failure_returns_none(self) -> None:
+        """All deployments None -> caller falls back to "show all" with a notice."""
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": None,
+            "omenstrat QS": None,
+            "polystrat Pearl": None,
+        }
+        assert _active_tools_for_platform(disabled, "omen", self._SCORES) is None
+
+    def test_partial_failure_uses_what_is_available(self) -> None:
+        """One omen deployment fails, the other still drives the active set."""
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "omenstrat QS": None,
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
+        # tool-a is disabled on Pearl and QS is unknown; union of (benchmarked - disabled)
+        # over successful deployments is {tool-b, tool-c}.
+        assert active == frozenset({"tool-b", "tool-c"})
+
+    def test_polystrat_failure_returns_none(self) -> None:
+        """Polystrat has one deployment — its failure means full failure."""
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": [],
+            "omenstrat QS": [],
+            "polystrat Pearl": None,
+        }
+        assert _active_tools_for_platform(disabled, "polymarket", self._SCORES) is None
+
+    def test_union_across_deployments(self) -> None:
+        """A tool active on at least one deployment is in the active set."""
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "omenstrat QS": ["tool-b"],
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
+        # Pearl excludes tool-a (so {tool-b, tool-c}); QS excludes tool-b (so
+        # {tool-a, tool-c}); union = {tool-a, tool-b, tool-c}.
+        assert active == frozenset({"tool-a", "tool-b", "tool-c"})
+
+    def test_empty_disabled_returns_none(self) -> None:
+        """Empty input is the test-only opt-out — caller skips both filter and warning."""
+        assert _active_tools_for_platform({}, "omen", self._SCORES) is None
+        assert _active_tools_for_platform(None, "omen", self._SCORES) is None
+
+    def test_underscore_hyphen_normalization(self) -> None:
+        """Disabled list with underscores excludes the hyphenated benchmark name."""
+        disabled: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool_a"],  # underscore variant of "tool-a"
+            "omenstrat QS": ["tool_a"],
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
+        # Both deployments disable tool-a (underscore variant), so it should
+        # NOT appear in the active set.
+        assert active is not None
+        assert "tool-a" not in active
+        assert "tool-b" in active and "tool-c" in active
+
+
+class TestFilterByActive:
+    """``_filter_by_active`` drops non-deployed tools from ranked iterations."""
+
+    def test_none_active_disables_filter(self) -> None:
+        """``active_tools=None`` is the deployment-config-fallback path: no filter."""
+        items: list[tuple[str, Any]] = [("tool-a", {}), ("tool-b", {})]
+        assert _filter_by_active(items, None) == items
+
+    def test_simple_key_filter(self) -> None:
+        """Plain tool-name keys are filtered by membership."""
+        items: list[tuple[str, Any]] = [("tool-a", {}), ("tool-b", {}), ("tool-c", {})]
+        out = _filter_by_active(items, frozenset({"tool-a", "tool-c"}))
+        assert [k for k, _ in out] == ["tool-a", "tool-c"]
+
+    def test_composite_key_filter(self) -> None:
+        """``by_tool_category`` keys filter on the tool half (before separator)."""
+        items: list[tuple[str, Any]] = [
+            ("tool-a | politics", {}),
+            ("tool-b | politics", {}),
+            ("tool-a | finance", {}),
+        ]
+        out = _filter_by_active(
+            items, frozenset({"tool-a"}), composite_key_separator=" | "
+        )
+        assert [k for k, _ in out] == ["tool-a | politics", "tool-a | finance"]
+
+
+class TestActiveToolsFilterInSections:
+    """End-to-end: each comparison section drops tools not in active_tools."""
+
+    def _scores(self, brier: float, n: int) -> dict[str, Any]:
+        return {
+            "valid_n": n,
+            "n": n,
+            "brier": brier,
+            "reliability": 0.95,
+            "directional_accuracy": 0.7,
+        }
+
+    def _by_tool(self) -> dict[str, dict[str, Any]]:
+        return {
+            "tool-a": self._scores(0.20, 200),
+            "tool-b": self._scores(0.30, 200),
+            "tool-historical": self._scores(0.15, 200),
+        }
+
+    def test_tool_comparison_drops_non_active(self) -> None:
+        """Tool Historical Comparison hides tool-historical when filter is active."""
+        rolling = {"by_tool": self._by_tool()}
+        alltime = {"by_tool": self._by_tool()}
+        rendered = section_tool_comparison(
+            rolling, alltime, None, active_tools=frozenset({"tool-a", "tool-b"})
+        )
+        assert "**tool-a**" in rendered
+        assert "**tool-b**" in rendered
+        assert "**tool-historical**" not in rendered
+
+    def test_tool_comparison_no_filter_when_none(self) -> None:
+        """``active_tools=None`` preserves the legacy "all tools" rendering."""
+        rolling = {"by_tool": self._by_tool()}
+        alltime = {"by_tool": self._by_tool()}
+        rendered = section_tool_comparison(rolling, alltime, None, active_tools=None)
+        assert "**tool-historical**" in rendered
+
+    def test_tool_category_drops_non_active_cells(self) -> None:
+        """Tool × Category snapshot hides cells whose tool is not in active set."""
+        scores = {
+            "by_tool_category": {
+                "tool-a | politics": self._scores(0.20, 200),
+                "tool-historical | politics": self._scores(0.15, 200),
+            }
+        }
+        rendered = section_tool_category(scores, active_tools=frozenset({"tool-a"}))
+        assert "tool-a | politics" in rendered or (
+            "tool-a" in rendered and "politics" in rendered
+        )
+        assert "tool-historical" not in rendered
+
+    def test_diagnostics_comparison_drops_non_active(self) -> None:
+        """Diagnostics Historical Comparison hides non-deployed tools."""
+        rolling = {
+            "by_tool": {
+                "tool-a": {
+                    "edge": 0.05,
+                    "edge_n": 200,
+                    "log_loss": 0.5,
+                    "valid_n": 200,
+                },
+                "tool-historical": {
+                    "edge": 0.10,
+                    "edge_n": 200,
+                    "log_loss": 0.4,
+                    "valid_n": 200,
+                },
+            }
+        }
+        alltime = rolling
+        rendered = section_diagnostics_comparison(
+            rolling, alltime, None, active_tools=frozenset({"tool-a"})
+        )
+        assert "**tool-a**" in rendered
+        assert "**tool-historical**" not in rendered
+
+    def test_reliability_comparison_drops_non_active(self) -> None:
+        """Reliability & Parse Quality table drops non-deployed tools."""
+        rolling = {
+            "by_tool": {
+                "tool-a": {"reliability": 0.95, "n": 200},
+                "tool-historical": {"reliability": 0.80, "n": 200},
+            },
+            "parse_breakdown": {
+                "tool-a": {"valid": 190, "malformed": 10},
+                "tool-historical": {"valid": 160, "malformed": 40},
+            },
+        }
+        alltime = rolling
+        rendered = section_reliability_comparison(
+            rolling, alltime, active_tools=frozenset({"tool-a"})
+        )
+        assert "**tool-a**" in rendered
+        assert "**tool-historical**" not in rendered
+
+
+class TestGenerateReportDeploymentConfigUnavailable:
+    """Full deployment-fetch failure renders a notice + falls back to all tools."""
+
+    def test_notice_rendered_when_all_deployments_fail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the live fetch returns all-None, a ⚠ notice prefixes the report."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark import analyze
+
+        monkeypatch.setattr(
+            analyze,
+            "fetch_disabled_tools",
+            lambda: {
+                "omenstrat Pearl": None,
+                "omenstrat QS": None,
+                "polystrat Pearl": None,
+            },
+        )
+        scores = {
+            "by_tool": {"tool-a": {"brier": 0.20, "n": 100, "valid_n": 100}},
+            "by_tool_category": {},
+        }
+        report = generate_report(scores, [], platform="omen")
+        assert "Deployment config unavailable" in report
+
+    def test_no_notice_for_explicit_test_optout(self) -> None:
+        """``disabled_tools={}`` is the unit-test opt-out; no notice rendered."""
+        scores = {
+            "by_tool": {"tool-a": {"brier": 0.20, "n": 100, "valid_n": 100}},
+            "by_tool_category": {},
+        }
+        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        assert "Deployment config unavailable" not in report

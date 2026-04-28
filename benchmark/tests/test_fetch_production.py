@@ -343,6 +343,86 @@ class TestClassifyCategory:
         assert classify_category("WILL BITCOIN HIT $100K?") == "finance"
 
 
+class TestClassifyCategoryPlatformAware:
+    """Platform-aware filter routes off-list categories to ``other``.
+
+    When ``platform`` is provided, the keyword-classified category must be
+    in that platform's upstream taxonomy (``OMEN_CATEGORIES`` for omen,
+    ``POLYMARKET_ACTIVE_CATEGORIES`` for polymarket); otherwise the row
+    drops to ``"other"`` so per-platform reports never advertise a
+    category the platform doesn't actually trade.
+    """
+
+    def test_travel_question_omen_buckets_as_other(self) -> None:
+        """``travel`` is in CATEGORY_KEYWORDS but NOT in OMEN_CATEGORIES.
+
+        Market-creator never emits ``travel``; a keyword leak (e.g. an
+        omen question mentioning a flight or vacation) must land in
+        ``other`` instead.
+        """
+        assert (
+            classify_category("Will the airline launch a new flight route?", "omen")
+            == "other"
+        )
+
+    def test_curiosities_question_polymarket_buckets_as_other(self) -> None:
+        """``curiosities`` is not in trader's POLYMARKET_CATEGORY_TAGS."""
+        assert (
+            classify_category("Will UFO sightings double this year?", "polymarket")
+            == "other"
+        )
+
+    def test_legitimate_finance_passes_through_for_polymarket(self) -> None:
+        """Categories already in the platform's allowed set pass unchanged."""
+        assert (
+            classify_category("Will Tesla stock close above 380?", "polymarket")
+            == "business"
+        )
+        assert (
+            classify_category(
+                "Will the S&P 500 close above 7000 on Friday?", "polymarket"
+            )
+            == "finance"
+        )
+
+    def test_legitimate_omen_categories_pass_through(self) -> None:
+        """Omen questions hitting OMEN_CATEGORIES keep their bucket."""
+        assert (
+            classify_category("Will the president win the election?", "omen")
+            == "politics"
+        )
+        assert classify_category("Will the hurricane hit Florida?", "omen") == "weather"
+
+    def test_no_platform_preserves_legacy_behavior(self) -> None:
+        """``platform=None`` (default) keeps the historical, unfiltered behavior.
+
+        Used by callers that don't yet know the platform. Backward-
+        compatible — a row whose keyword matches ``travel`` still gets
+        ``travel`` back.
+        """
+        assert (
+            classify_category("Will the airline launch a new flight route?") == "travel"
+        )
+
+    def test_unknown_platform_disables_filter(self) -> None:
+        """A platform key not in ``PLATFORM_ALLOWED_CATEGORIES`` disables the filter.
+
+        Defensive: a future platform name shouldn't silently drop every
+        row to ``other`` before its allowed set is registered.
+        """
+        assert (
+            classify_category(
+                "Will the airline launch a new flight route?", "future-chain"
+            )
+            == "travel"
+        )
+
+    def test_no_keyword_match_returns_other_regardless_of_platform(self) -> None:
+        """A question with no keyword match is always ``other``."""
+        assert classify_category("Will quux?", "omen") == "other"
+        assert classify_category("Will quux?", "polymarket") == "other"
+
+
 # ---------------------------------------------------------------------------
 # _parse_request_context
 # ---------------------------------------------------------------------------

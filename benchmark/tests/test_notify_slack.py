@@ -201,3 +201,45 @@ class TestPromptRejectsUnformattedPlaceholder:
         """
         for label in PLATFORM_LABELS.values():
             _build_system_prompt(label)
+
+
+class TestTopToolsEligibilityFilter:
+    """Top tools must apply the same low-sample / floor filter as Worst tools."""
+
+    def test_min_sample_size_floor_named_in_eligibility_block(self) -> None:
+        """Eligibility block cites the live ``MIN_SAMPLE_SIZE`` constant."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scorer import MIN_SAMPLE_SIZE
+
+        assert "Eligibility for Top tools" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert f"at least {MIN_SAMPLE_SIZE}" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_top_tools_lists_only_eligible_rows(self) -> None:
+        """Top-tools instruction restricts ranking to the eligible set."""
+        assert "top 3 eligible rows" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_worst_tools_lists_only_eligible_rows(self) -> None:
+        """Worst-tools instruction restricts ranking to the eligible set."""
+        assert "bottom 3 eligible rows" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_eligibility_excludes_low_sample_and_malformed(self) -> None:
+        """Eligibility block names both ⚠ flags so neither leaks into rankings."""
+        assert "⚠ low sample" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "⚠ all malformed" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+
+class TestSingleToolFallback:
+    """When only one tool is eligible, collapse to a single Tool performance bullet."""
+
+    def test_single_tool_fallback_section_named(self) -> None:
+        """Prompt names the ``*Tool performance:*`` fallback heading."""
+        assert "*Tool performance:*" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_fallback_clause_mentions_skip_top_and_worst(self) -> None:
+        """Single-tool path explicitly skips both Top and Worst sections."""
+        assert "SINGLE-TOOL FALLBACK" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+        assert "skip both" in SUMMARY_SYSTEM_PROMPT_TEMPLATE
+
+    def test_zero_eligible_renders_explicit_placeholder(self) -> None:
+        """Zero-eligible case has a deterministic placeholder so the LLM doesn't guess."""
+        assert "no eligible tools" in SUMMARY_SYSTEM_PROMPT_TEMPLATE

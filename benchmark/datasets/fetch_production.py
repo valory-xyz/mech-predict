@@ -33,6 +33,7 @@ from typing import Any, Optional
 
 import requests
 
+from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
 from benchmark.io import append_jsonl
 
 # ---------------------------------------------------------------------------
@@ -1285,13 +1286,38 @@ def parse_tool_response(tool_response: Optional[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def classify_category(question_text: str) -> str:
-    """Classify a question into a category using word-boundary keyword matching."""
+def classify_category(question_text: str, platform: Optional[str] = None) -> str:
+    """Classify a question into a category using word-boundary keyword matching.
+
+    When ``platform`` is provided, the classified category is filtered
+    against that platform's upstream taxonomy
+    (``PLATFORM_ALLOWED_CATEGORIES``); a keyword match for a category the
+    platform never emits (e.g. ``travel`` for omen, or ``curiosities``
+    for polymarket) drops to ``"other"`` so per-platform reports don't
+    show categories the platform doesn't actually trade.
+
+    :param question_text: market question, used for keyword matching.
+    :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
+        ``None`` is accepted for callers that don't yet know the
+        platform — the classifier behaves as before.
+    :return: category name, or ``"other"`` when no keyword matches or
+        the matched category is outside ``platform``'s allowed set.
+    """
     text_lower = question_text.lower()
+    matched = "other"
     for category, keywords in CATEGORY_KEYWORDS.items():
         for kw in keywords:
             if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
-                return category
+                matched = category
+                break
+        if matched != "other":
+            break
+
+    if platform is None:
+        return matched
+    allowed = PLATFORM_ALLOWED_CATEGORIES.get(platform)
+    if allowed is None or matched in allowed:
+        return matched
     return "other"
 
 
@@ -1410,7 +1436,7 @@ def build_row(
         "resolved_at": _ts_to_iso(resolved_at_ts),
         "latency_s": latency_s,
         "prediction_lead_time_days": prediction_lead_time_days,
-        "category": classify_category(question_text),
+        "category": classify_category(question_text, platform),
         "match_confidence": match_confidence,
     }
     return row

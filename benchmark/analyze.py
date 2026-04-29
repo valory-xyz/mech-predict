@@ -17,12 +17,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
 from benchmark import release_map
+
+# OMEN_CATEGORIES / POLYMARKET_ACTIVE_CATEGORIES are re-exported so
+# callers that previously imported these constants from benchmark.analyze
+# keep working after the constants moved to benchmark.categories.
+from benchmark.categories import (  # noqa: F401  # pylint: disable=unused-import
+    ACTIVE_CATEGORIES,
+    OMEN_CATEGORIES,
+    POLYMARKET_ACTIVE_CATEGORIES,
+)
 from benchmark.io import load_jsonl
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
@@ -45,7 +55,12 @@ PLATFORM_LABELS: Mapping[str, str] = MappingProxyType(
     }
 )
 
-ROLLING_WINDOW_DAYS = 3
+# Trailing-window length (in days) for the Current-window snapshot and
+# the previous non-overlapping window used by the comparison sections.
+# Read from BENCHMARK_ROLLING_WINDOW_DAYS so the CI workflow drives the
+# Python constant and the ``--period-days`` flag passed to the scorer
+# from one source of truth (see .github/workflows/benchmark_flywheel.yaml).
+ROLLING_WINDOW_DAYS = int(os.environ.get("BENCHMARK_ROLLING_WINDOW_DAYS", "7"))
 
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
@@ -53,55 +68,6 @@ BSS_HARMFUL_THRESHOLD = 0.0
 RELIABILITY_ISSUE_THRESHOLD = 0.90
 SAMPLE_SIZE_WARNING = 20
 TREND_WORSENING_THRESHOLD = 0.02
-
-# Categories currently emitted by the two upstream platforms.
-# Keep these in sync with:
-#   Omen:       valory-xyz/market-creator — DEFAULT_TOPICS in
-#               packages/valory/skills/market_creation_manager_abci/propose_questions.py
-#   Polymarket: valory-xyz/trader — POLYMARKET_CATEGORY_TAGS in
-#               packages/valory/connections/polymarket_client/connection.py
-# Historical labels not in either set (e.g. "travel", "crypto", "tech") are
-# treated as legacy and skipped by weak-spot reporting.
-OMEN_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "business",
-        "cryptocurrency",
-        "politics",
-        "science",
-        "technology",
-        "trending",
-        "social",
-        "health",
-        "sustainability",
-        "internet",
-        "food",
-        "pets",
-        "animals",
-        "curiosities",
-        "economy",
-        "arts",
-        "entertainment",
-        "weather",
-        "sports",
-        "finance",
-        "international",
-    }
-)
-POLYMARKET_ACTIVE_CATEGORIES: frozenset[str] = frozenset(
-    {
-        "business",
-        "politics",
-        "science",
-        "technology",
-        "health",
-        "entertainment",
-        "weather",
-        "finance",
-        "international",
-    }
-)
-ACTIVE_CATEGORIES: frozenset[str] = OMEN_CATEGORIES | POLYMARKET_ACTIVE_CATEGORIES
-
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -293,6 +259,94 @@ def _sample_label(stats: dict[str, Any]) -> str:
     return ""
 
 
+def _active_tools_for_platform(
+    disabled: dict[str, list[str] | None] | None,
+    platform: str,
+    scores: dict[str, Any],
+    rolling_scores: dict[str, Any] | None = None,
+) -> frozenset[str] | None:
+    """Return tools currently active on at least one deployment of ``platform``.
+
+    Computed as the union of (benchmarked tools - disabled tools) across
+    every deployment of ``platform`` whose config fetch succeeded. A tool
+    is "active" if any deployment has it enabled.
+
+    Tool-name normalization mirrors ``section_tool_deployment_status``:
+    underscores and hyphens are treated as interchangeable when comparing
+    against the disabled list. The returned set uses the names as they
+    appear in ``by_tool`` keys.
+
+    :param disabled: ``{deployment: [tool_names] | None}`` map, where
+        ``None`` indicates a fetch/parse failure for that deployment.
+        ``None`` for the whole map (or an empty dict) is treated as
+        "no deployment data available".
+    :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
+    :param scores: parsed platform-scoped all-time scores dict.
+    :param rolling_scores: parsed platform-scoped current-window scores
+        dict. The benchmarked-tool universe is the union of ``scores``
+        and ``rolling_scores`` ``by_tool`` keys so a freshly-deployed
+        tool with rolling data but no all-time history yet is still
+        included in the active set.
+    :return: frozenset of active tool names, or ``None`` when **every**
+        deployment of this platform has ``disabled=None`` (full fetch
+        failure for the platform). Callers fall back to "show all
+        tools" plus a ``⚠ deployment config unavailable`` notice.
+    """
+    if not disabled:
+        return None
+
+    deployments = deployments_for_platform(platform)
+    relevant = {name: disabled.get(name) for name in deployments}
+    if all(disabled_tools is None for disabled_tools in relevant.values()):
+        # Every deployment for this platform failed — caller renders the
+        # warning and shows all tools rather than blanking the report.
+        return None
+
+    benchmarked = set((scores.get("by_tool") or {}).keys())
+    if rolling_scores is not None:
+        benchmarked |= set((rolling_scores.get("by_tool") or {}).keys())
+
+    active: set[str] = set()
+    for disabled_tools in relevant.values():
+        if disabled_tools is None:
+            continue
+        disabled_set = {t.replace("_", "-") for t in disabled_tools}
+        for tool in benchmarked:
+            if tool.replace("_", "-") not in disabled_set:
+                active.add(tool)
+
+    return frozenset(active)
+
+
+def _filter_by_active(
+    items: list[tuple[str, Any]],
+    active_tools: frozenset[str] | None,
+    *,
+    composite_key_separator: str | None = None,
+) -> list[tuple[str, Any]]:
+    """Drop entries whose tool name is not in ``active_tools``.
+
+    :param items: ``[(key, stats), ...]`` ranked-iteration list.
+    :param active_tools: set of tools currently deployed on the platform,
+        or ``None`` to disable filtering (caller's fallback path when
+        deployment config could not be fetched).
+    :param composite_key_separator: when set, treat ``key`` as a
+        composite ``"tool{sep}other"`` and filter on the first segment.
+        Pass ``" | "`` for ``by_tool_category`` keys.
+    :return: ``items`` with non-active entries removed; identity when
+        ``active_tools`` is ``None``.
+    """
+    if active_tools is None:
+        return items
+    if composite_key_separator is None:
+        return [(k, s) for k, s in items if k in active_tools]
+    return [
+        (k, s)
+        for k, s in items
+        if k.split(composite_key_separator, 1)[0] in active_tools
+    ]
+
+
 def section_tool_deployment_status(
     scores: dict[str, Any],
     disabled: dict[str, list[str] | None] | None = None,
@@ -360,12 +414,23 @@ def section_tool_deployment_status(
     return "\n".join(lines)
 
 
-def section_tool_ranking(scores: dict[str, Any]) -> str:
-    """Generate the tool ranking section."""
+def section_tool_ranking(
+    scores: dict[str, Any],
+    active_tools: frozenset[str] | None = None,
+) -> str:
+    """Generate the tool ranking section.
+
+    :param scores: parsed platform-scoped scores dict.
+    :param active_tools: when set, only tools in this set are ranked.
+        ``None`` (the default) preserves the legacy "show every tool
+        with rows" behaviour and is used as a fallback when deployment
+        config could not be fetched.
+    :return: markdown section string.
+    """
     tools = scores.get("by_tool", {})
-    ranked = sorted(
-        tools.items(),
-        key=brier_sort_key,
+    ranked = _filter_by_active(
+        sorted(tools.items(), key=brier_sort_key),
+        active_tools,
     )
 
     lines = ["## Tool Ranking", ""]
@@ -513,7 +578,10 @@ def _da_lift(
     return directional_accuracy - majority
 
 
-def section_tool_category(scores: dict[str, Any]) -> str:
+def section_tool_category(
+    scores: dict[str, Any],
+    active_tools: frozenset[str] | None = None,
+) -> str:
     """Tool × category cross breakdown — primary metrics, gated by MIN_SAMPLE_SIZE.
 
     Renders the reviewer-specified column set: n, reliability, Brier,
@@ -523,13 +591,20 @@ def section_tool_category(scores: dict[str, Any]) -> str:
     section so this table stays scannable.
 
     :param scores: parsed per-platform rolling scores dict.
+    :param active_tools: when set, only cells whose tool half is in this
+        set render. ``None`` disables filtering (used as the fallback
+        when deployment config could not be fetched).
     :return: markdown section string.
     """
     data = scores.get("by_tool_category") or {}
     if not data:
         return "## Tool × Category\n\nNo cross-breakdown data available."
 
-    ranked = sorted(data.items(), key=brier_sort_key)
+    ranked = _filter_by_active(
+        sorted(data.items(), key=brier_sort_key),
+        active_tools,
+        composite_key_separator=" | ",
+    )
     sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
     sparse = [(k, s) for k, s in ranked if s["n"] < MIN_SAMPLE_SIZE]
 
@@ -593,7 +668,10 @@ def section_tool_category(scores: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def section_tool_category_diagnostics(scores: dict[str, Any]) -> str:
+def section_tool_category_diagnostics(
+    scores: dict[str, Any],
+    active_tools: frozenset[str] | None = None,
+) -> str:
     """Tool × category diagnostic metrics — edge, edge_n, log loss.
 
     Rendered as a follow-on to ``section_tool_category`` so the primary
@@ -601,13 +679,20 @@ def section_tool_category_diagnostics(scores: dict[str, Any]) -> str:
     per-(tool, category) grain.
 
     :param scores: parsed per-platform rolling scores dict.
+    :param active_tools: when set, only cells whose tool half is in this
+        set render. ``None`` disables filtering (deployment-config
+        fallback).
     :return: markdown section string.
     """
     data = scores.get("by_tool_category") or {}
     if not data:
         return "## Tool × Category Diagnostics\n\n" "No cross-breakdown data available."
 
-    ranked = sorted(data.items(), key=brier_sort_key)
+    ranked = _filter_by_active(
+        sorted(data.items(), key=brier_sort_key),
+        active_tools,
+        composite_key_separator=" | ",
+    )
     sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
 
     lines = [
@@ -957,6 +1042,7 @@ def section_tool_comparison(
     rolling_scores: dict[str, Any],
     alltime_scores: dict[str, Any],
     prev_rolling_scores: dict[str, Any] | None,
+    active_tools: frozenset[str] | None = None,
 ) -> str:
     """Render the tool historical comparison table.
 
@@ -969,10 +1055,16 @@ def section_tool_comparison(
     :param alltime_scores: all-time scores (used for Δ vs all-time).
     :param prev_rolling_scores: previous non-overlapping rolling scores,
         or ``None``.
+    :param active_tools: when set, restrict the table to currently-deployed
+        tools so historical/tournament-only entries don't clutter the
+        per-platform report. ``None`` disables filtering (used as the
+        fallback when deployment config could not be fetched).
     :return: markdown section string.
     """
     heading = "## Tool Historical Comparison"
     tools = _tool_universe(rolling_scores, alltime_scores)
+    if active_tools is not None:
+        tools = [t for t in tools if t in active_tools]
     if not tools:
         return f"{heading}\n\nNo tool data available."
 
@@ -1026,6 +1118,7 @@ def section_tool_category_comparison(
     rolling_scores: dict[str, Any],
     alltime_scores: dict[str, Any],
     prev_rolling_scores: dict[str, Any] | None,
+    active_tools: frozenset[str] | None = None,
 ) -> str:
     """Render the tool × category historical comparison table.
 
@@ -1037,6 +1130,9 @@ def section_tool_category_comparison(
     :param rolling_scores: current rolling-window scores.
     :param alltime_scores: all-time scores.
     :param prev_rolling_scores: previous non-overlapping rolling scores.
+    :param active_tools: when set, only cells whose tool half is in this
+        set render. ``None`` disables filtering (deployment-config
+        fallback).
     :return: markdown section string.
     """
     heading = "## Tool × Category Historical Comparison"
@@ -1044,7 +1140,11 @@ def section_tool_category_comparison(
     at = alltime_scores.get("by_tool_category") or {}
     prev = (prev_rolling_scores or {}).get("by_tool_category") or {}
 
-    ranked = sorted(cur.items(), key=brier_sort_key)
+    ranked = _filter_by_active(
+        sorted(cur.items(), key=brier_sort_key),
+        active_tools,
+        composite_key_separator=" | ",
+    )
     sufficient = [(k, s) for k, s in ranked if s["n"] >= MIN_SAMPLE_SIZE]
     if not sufficient:
         return (
@@ -1117,6 +1217,7 @@ def section_diagnostics_comparison(
     rolling_scores: dict[str, Any],
     alltime_scores: dict[str, Any],
     prev_rolling_scores: dict[str, Any] | None,
+    active_tools: frozenset[str] | None = None,
 ) -> str:
     """Render the diagnostics historical comparison table.
 
@@ -1130,10 +1231,14 @@ def section_diagnostics_comparison(
     :param rolling_scores: current rolling-window scores.
     :param alltime_scores: all-time scores.
     :param prev_rolling_scores: previous non-overlapping rolling scores.
+    :param active_tools: when set, restrict the table to currently-deployed
+        tools. ``None`` disables filtering (deployment-config fallback).
     :return: markdown section string.
     """
     heading = "## Diagnostics Historical Comparison"
     tools = _tool_universe(rolling_scores, alltime_scores)
+    if active_tools is not None:
+        tools = [t for t in tools if t in active_tools]
     if not tools:
         return f"{heading}\n\nNo tool data available."
 
@@ -1208,6 +1313,7 @@ def section_diagnostics_comparison(
 def section_reliability_comparison(
     rolling_scores: dict[str, Any],
     alltime_scores: dict[str, Any],
+    active_tools: frozenset[str] | None = None,
 ) -> str:
     """Render the reliability & parse quality comparison table.
 
@@ -1219,10 +1325,14 @@ def section_reliability_comparison(
 
     :param rolling_scores: current rolling-window scores.
     :param alltime_scores: all-time scores.
+    :param active_tools: when set, restrict the table to currently-deployed
+        tools. ``None`` disables filtering (deployment-config fallback).
     :return: markdown section string.
     """
     heading = "## Reliability & Parse Quality (Current vs All-Time)"
     tools = _tool_universe(rolling_scores, alltime_scores)
+    if active_tools is not None:
+        tools = [t for t in tools if t in active_tools]
     if not tools:
         return f"{heading}\n\nNo tool data available."
 
@@ -2376,7 +2486,33 @@ def generate_report(  # pylint: disable=too-many-statements
     if prev_rolling_scores is not None and not _has_scored_rows(prev_rolling_scores):
         prev_rolling_scores = None
 
+    # Hoist the deployment-config fetch above the section calls so the
+    # comparison sections, the deployment-status section, and the
+    # warning notice all see the same map. ``None`` (the default)
+    # triggers a live fetch; an empty dict is the test-only opt-out.
+    if disabled_tools is None:
+        disabled_tools = fetch_disabled_tools()
+
+    # Restrict the per-platform comparison sections to tools currently
+    # deployed somewhere on this platform. Returns ``None`` when every
+    # deployment fetch failed for this platform; the caller's fallback
+    # is to skip the filter and prepend a one-line warning so the
+    # reader knows the tool list is unfiltered for this run.
+    active_tools = _active_tools_for_platform(
+        disabled_tools, platform, scores, rolling_scores
+    )
+
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
+    # Warning fires only when the caller actually attempted a fetch
+    # (non-empty input) but every deployment for this platform failed.
+    # Empty-dict callers are the unit-test opt-out and shouldn't see
+    # the notice.
+    if active_tools is None and disabled_tools:
+        sections.append(
+            "> ⚠️ Deployment config unavailable for this platform — comparison "
+            "sections show every benchmarked tool, including tools that may "
+            "no longer be deployed."
+        )
 
     sections.append(section_metric_reference())
 
@@ -2395,32 +2531,48 @@ def generate_report(  # pylint: disable=too-many-statements
             section_platform_comparison(rolling_scores, scores, prev_rolling_scores)
         )
         sections.append(
-            section_tool_comparison(rolling_scores, scores, prev_rolling_scores)
+            section_tool_comparison(
+                rolling_scores, scores, prev_rolling_scores, active_tools=active_tools
+            )
         )
         # Tool × Category — the reviewer asked for both the current-window
         # ranking table AND the historical comparison, so render the two
         # in sequence.
         sections.append(
             _relabel_heading(
-                section_tool_category(rolling_scores),
+                section_tool_category(rolling_scores, active_tools=active_tools),
                 f" (Current {ROLLING_WINDOW_DAYS}d)",
             )
         )
         sections.append(
             _relabel_heading(
-                section_tool_category_diagnostics(rolling_scores),
+                section_tool_category_diagnostics(
+                    rolling_scores, active_tools=active_tools
+                ),
                 f" (Current {ROLLING_WINDOW_DAYS}d)",
             )
         )
         sections.append(
             section_tool_category_comparison(
-                rolling_scores, scores, prev_rolling_scores
+                rolling_scores,
+                scores,
+                prev_rolling_scores,
+                active_tools=active_tools,
             )
         )
         sections.append(
-            section_diagnostics_comparison(rolling_scores, scores, prev_rolling_scores)
+            section_diagnostics_comparison(
+                rolling_scores,
+                scores,
+                prev_rolling_scores,
+                active_tools=active_tools,
+            )
         )
-        sections.append(section_reliability_comparison(rolling_scores, scores))
+        sections.append(
+            section_reliability_comparison(
+                rolling_scores, scores, active_tools=active_tools
+            )
+        )
 
     sections.append(
         section_tool_deployment_status(

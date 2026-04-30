@@ -27,6 +27,10 @@ on:
         required: false
         type: boolean
         default: false
+      rolling_window_days:
+        description: 'Trailing-window length (days) for the Current/Prev rolling comparison sections'
+        required: false
+        default: '7'
 
 jobs:
   # -----------------------------------------------------------------------
@@ -39,6 +43,11 @@ jobs:
     timeout-minutes: 30
     needs: [tournament-run]
     if: always() && !cancelled()
+    # Drives both the Python ROLLING_WINDOW_DAYS constant (read at import
+    # time in benchmark/analyze.py) and the --period-days flag passed to
+    # the scorer below, keeping the report and the scoring step in sync.
+    env:
+      BENCHMARK_ROLLING_WINDOW_DAYS: ${{ github.event.inputs.rolling_window_days || '7' }}
 
     steps:
       # fetch-depth: 0 so `git show <tag>:packages/packages.json` works for
@@ -144,32 +153,36 @@ jobs:
             --update benchmark/results/tournament_scored.jsonl
         continue-on-error: true
 
-      # Score recent periods for diff reporting
-      # Keep the "3" in the step name and --period-days flag in sync with
-      # ROLLING_WINDOW_DAYS in benchmark/analyze.py. YAML can't import the
-      # Python constant; a bump to ROLLING_WINDOW_DAYS must be mirrored here.
-      - name: Score last 3 days
+      # Score recent periods for diff reporting. The window length
+      # (--period-days, --period-offset-days) is driven by the
+      # BENCHMARK_ROLLING_WINDOW_DAYS env var declared at the job level
+      # so the scorer and the Python ROLLING_WINDOW_DAYS constant stay in
+      # sync from a single source.
+      - name: Score current rolling window
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          python -m benchmark.scorer --period-days 3 \
+          python -m benchmark.scorer \
+            --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
             $TOURNAMENT_FLAG
         continue-on-error: true
 
-      # Score the preceding non-overlapping window (days 4-6 ago for a
-      # 3-day rolling window). Feeds the "Δ vs Prev 3d" columns in the
-      # three-window comparison tables.
-      - name: Score previous 3 days (non-overlapping)
+      # Score the preceding non-overlapping window (offset by the same
+      # window length so Current and Prev never overlap). Feeds the
+      # "Δ vs Prev Nd" columns in the three-window comparison tables.
+      - name: Score previous rolling window (non-overlapping)
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          python -m benchmark.scorer --period-days 3 --period-offset-days 3 \
+          python -m benchmark.scorer \
+            --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+            --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/prev_rolling_scores.json \
             $TOURNAMENT_FLAG

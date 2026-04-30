@@ -194,7 +194,8 @@ def build_output_row(
         "resolved_at": dataset_row.get("resolved_at"),
         "latency_s": run_result["latency_s"],
         "prediction_lead_time_days": None,
-        "category": dataset_row.get("category") or classify_category(question_text),
+        "category": dataset_row.get("category")
+        or classify_category(question_text, dataset_row.get("platform")),
         "match_confidence": 1.0,
     }
 

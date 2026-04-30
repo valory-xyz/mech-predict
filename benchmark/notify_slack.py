@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from types import MappingProxyType
@@ -31,23 +32,50 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
+from benchmark.scorer import MIN_SAMPLE_SIZE
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
-SUMMARY_SYSTEM_PROMPT_TEMPLATE = f"""\
+_PROMPT_HEADER = f"""\
 Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `All-Time` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix numbers across windows; if you cite a value, state which window it came from. Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
 
 *Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Lead with the Current-{ROLLING_WINDOW_DAYS}d platform Brier (from the "Platform Snapshot" section). Then name the direction of change: "Δ vs All-Time" from the "Platform Historical Comparison" row for Brier, and "Δ vs Prev {ROLLING_WINDOW_DAYS}d" from the same row. If either delta shows `insufficient data`, say so plainly instead of guessing.
 
+*Eligibility for the tool ranking section below:* a row is eligible only if its Current {ROLLING_WINDOW_DAYS}d n is at least {MIN_SAMPLE_SIZE} AND the row carries no ⚠ low sample / ⚠ all malformed flag."""
+
+
+_PROMPT_RANKING_NONE = f"""\
+*Tool performance:*
+• _no eligible tools — every row in the Tool Historical Comparison table is below n={MIN_SAMPLE_SIZE} or flagged_"""
+
+
+_PROMPT_RANKING_ALL = f"""\
+*Tool performance:*
+• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
+(list ALL eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)"""
+
+
+def _prompt_ranking_split(top_k: int) -> str:
+    """Top-K + Worst-K ranking block for ``top_k`` ≥ 1.
+
+    :param top_k: number of rows in each of the Top tools and Worst tools
+        bullets. Caller must guarantee the eligible set has strictly more
+        than ``2 * top_k`` rows so the two slices are non-overlapping.
+    :return: ranking block as a string suitable for inserting between
+        the prompt header and footer.
+    """
+    return f"""\
 *Top tools:*
 • `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list top 3 from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
+(list top {top_k} eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
 
 *Worst tools:*
 • `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list bottom 3 from the same table, ignore rows with ⚠ low sample / all malformed flags.)
+(list bottom {top_k} eligible rows from the same table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier descending.)"""
 
+
+_PROMPT_FOOTER = f"""\
 *Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
 
 *Tool × Category:* from the "Tool × Category (Current {ROLLING_WINDOW_DAYS}d)" section, list every cell that clears the sample-size threshold. Use format: • `tool` × `category` — Brier `X.XXXX` (n=X, Current {ROLLING_WINDOW_DAYS}d), DirAcc X%, Always-majority X%, DA lift `±X.XXXX`. If DA lift is ≤ 0 say " — no lift over always-majority" inline so the reader isn't misled by a low Brier on a homogeneous-outcome cell. Never cite rows from the "below n=X threshold omitted" list. FALLBACK: if fewer than 2 rows clear the threshold, write exactly "insufficient tool × category data" as the only bullet in this section.
@@ -93,14 +121,76 @@ Rules:
 _VALID_PLATFORM_LABELS: frozenset[str] = frozenset(PLATFORM_LABELS.values())
 
 
-def _build_system_prompt(platform_label: str) -> str:
-    """Fill in the platform label on the system prompt template.
+def _count_eligible_tools(report_text: str) -> int:
+    """Count tools in the Tool Historical Comparison table that pass the eligibility floor.
 
-    :param platform_label: deployment name to reference throughout the
-        summary. Must match one of the labels defined in
-        ``benchmark.analyze.PLATFORM_LABELS`` so a typo at the workflow
-        level (e.g. ``--platform-label Omenstrap``) surfaces loudly instead
-        of reaching the LLM.
+    A row is eligible when its Current-window n is at least
+    ``MIN_SAMPLE_SIZE`` and the tool name carries no ⚠ flag from
+    ``_sample_label`` (``⚠ low sample`` or ``⚠ all malformed``).
+
+    :param report_text: full markdown report for one platform.
+    :return: count of eligible rows; ``0`` when the section is absent.
+    """
+    # The block terminates on the next ``^## `` heading OR at end-of-report
+    # so this helper is robust to Tool Historical Comparison being the
+    # final section.
+    block_match = re.search(
+        r"^## Tool Historical Comparison\n(.*?)(?=^## |\Z)",
+        report_text,
+        re.S | re.M,
+    )
+    if block_match is None:
+        return 0
+
+    eligible = 0
+    for line in block_match.group(1).splitlines():
+        if not line.startswith("| **"):
+            continue
+        if "⚠" in line:
+            continue
+        n_match = re.search(r"\(n=(\d+)\)", line)
+        if n_match and int(n_match.group(1)) >= MIN_SAMPLE_SIZE:
+            eligible += 1
+    return eligible
+
+
+def _compute_top_k(eligible_count: int) -> int:
+    """Return the per-side bullet count for the Top/Worst split.
+
+    Constraint: Top K and Worst K must be disjoint, so ``K + K < N``,
+    i.e. ``K <= floor((N - 1) / 2)``. Capped at 3 so the message stays
+    scannable on large deployments.
+
+    A return of ``0`` is the "render a single ranked list" signal —
+    used when ``N`` is too small to support a non-overlapping split
+    (``N`` is 0, 1, or 2).
+
+    :param eligible_count: number of tools that clear the eligibility
+        floor in the Tool Historical Comparison table.
+    :return: ``K`` for the Top/Worst split, or ``0`` to switch to a
+        combined "Tool performance" listing.
+    """
+    if eligible_count <= 2:
+        return 0
+    return min(3, (eligible_count - 1) // 2)
+
+
+def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
+    """Assemble the system prompt with the right tool-ranking block.
+
+    The ranking block dispatches on ``eligible_count`` so the LLM
+    only ever sees one section convention per request:
+
+    - ``0`` eligible tools → placeholder bullet under ``*Tool performance:*``
+    - ``1-2`` eligible → all eligible rows under ``*Tool performance:*``
+    - ``3+`` eligible → ``*Top tools:*`` / ``*Worst tools:*`` with K bullets
+      each, where K = ``min(3, floor((N-1)/2))``
+
+    :param platform_label: deployment name to thread into the prompt.
+        Must be one of ``benchmark.analyze.PLATFORM_LABELS`` values.
+    :param eligible_count: number of tools that clear the eligibility
+        floor in the markdown report's Tool Historical Comparison table.
+        Drives the ranking-block dispatch.
     :return: fully formatted system prompt string.
     :raises ValueError: when ``platform_label`` is empty or unknown.
     """
@@ -111,7 +201,17 @@ def _build_system_prompt(platform_label: str) -> str:
             f"platform_label must be one of {sorted(_VALID_PLATFORM_LABELS)},"
             f" got {platform_label!r}"
         )
-    return SUMMARY_SYSTEM_PROMPT_TEMPLATE.format(platform_label=platform_label)
+
+    top_k = _compute_top_k(eligible_count)
+    if eligible_count == 0:
+        ranking_block = _PROMPT_RANKING_NONE
+    elif top_k == 0:
+        ranking_block = _PROMPT_RANKING_ALL
+    else:
+        ranking_block = _prompt_ranking_split(top_k)
+
+    template = "\n\n".join([_PROMPT_HEADER, ranking_block, _PROMPT_FOOTER])
+    return template.format(platform_label=platform_label)
 
 
 MODEL = "gpt-4.1-mini"
@@ -151,13 +251,14 @@ def summarize_report(report_text: str, api_key: str, platform_label: str) -> str
     user_content = report_text
     if ownership:
         user_content = f"{ownership}\n\n{report_text}"
+    eligible_count = _count_eligible_tools(report_text)
     payload = json.dumps(
         {
             "model": MODEL,
             "messages": [
                 {
                     "role": "system",
-                    "content": _build_system_prompt(platform_label),
+                    "content": _build_system_prompt(platform_label, eligible_count),
                 },
                 {"role": "user", "content": user_content},
             ],

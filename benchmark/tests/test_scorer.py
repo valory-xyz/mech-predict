@@ -28,7 +28,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,

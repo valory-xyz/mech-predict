@@ -25,8 +25,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from dotenv import load_dotenv  # type: ignore[import-not-found]
-
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 from benchmark.io import load_jsonl as load_markets
 from benchmark.tools import (
@@ -36,6 +34,13 @@ from benchmark.tools import (
     alarm_handler,
     build_keychain,
     load_tool_run,
+)
+
+# isort treats `benchmark` as third-party (not in known_first_party=autonomy);
+# pylint treats it as first-party. The two views disagree on import order.
+# isort wins — silence pylint's complaint on the import that follows.
+from dotenv import (  # type: ignore[import-not-found]  # pylint: disable=wrong-import-order
+    load_dotenv,
 )
 
 from packages.valory.skills.task_execution.utils.apis import KeyChain

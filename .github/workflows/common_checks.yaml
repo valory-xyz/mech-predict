@@ -17,8 +17,8 @@ jobs:
 
     strategy:
       matrix:
-        os: [ ubuntu-22.04, macos-15, windows-2025 ]
-        python-version: [ "3.10" ]
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ["3.10"]
 
     defaults:
       run:
@@ -27,16 +27,16 @@ jobs:
     timeout-minutes: 10
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install uv
-      uses: astral-sh/setup-uv@v6
-    - name: Check if dependencies can be locked
-      run: uv lock --check
-    - name: Install dependencies
-      run: uv sync --all-groups -v
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Check if dependencies can be locked
+        run: uv lock --check
+      - name: Install dependencies
+        run: uv sync --all-groups -v
 
   copyright_and_dependencies_check:
     continue-on-error: False
@@ -44,32 +44,30 @@ jobs:
 
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
-        python-version: [ "3.10" ]
+        os: [ubuntu-24.04]
+        python-version: ["3.10"]
 
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v3
-      with:
-        fetch-depth: 0
-    - uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: pip install tomte[tox,cli]==0.6.5 tox-uv
-    - name: Check copyright headers
-      run: tomte check-copyright --author valory --exclude-part abci --exclude-part http_client --exclude-part ipfs --exclude-part ledger --exclude-part p2p_libp2p_client --exclude-part gnosis_safe --exclude-part gnosis_safe_proxy_factory --exclude-part multisend --exclude-part service_registry --exclude-part contracts --exclude-part skills --exclude-part protocols --exclude-part abstract_abci --exclude-part abstract_round_abci --exclude-part registration_abci --exclude-part reset_pause_abci --exclude-part termination_abci --exclude-part transaction_settlement_abci --exclude-part websocket_client --exclude-part contract_subscription --exclude-part mech --exclude-part mech_interact_abci  --exclude-part http_server
-    - name: License compatibility check
-      run: tox -e liccheck
-    - name: Check dependencies
-      run: tox -e check-dependencies
-    - name: Check third-party package hashes match upstream
-      run: tox -e check-third-party-hashes
-    - name: Check doc links
-      run: tomte check-doc-links
-    - name: Check doc IPFS hashes
-      run: tox -e check-doc-hashes
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
+      - name: Check copyright headers
+        run: tomte check-copyright --author valory
+      - name: License compatibility check
+        run: tomte tox -e liccheck
+      - name: Check dependencies
+        run: tomte tox -e check-dependencies
+      - name: Check third-party package hashes match upstream
+        run: tomte tox -e check-third-party-hashes
+      - name: Check doc IPFS hashes
+        run: tomte tox -e check-doc-hashes
 
   linter_checks:
     continue-on-error: False
@@ -77,56 +75,50 @@ jobs:
 
     strategy:
       matrix:
-        os: [ ubuntu-22.04 ]
-        python-version: [ "3.10" ]
+        os: [ubuntu-24.04]
+        python-version: ["3.10"]
 
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run:  |
-        pip install tomte[tox,cli]==0.6.5 tox-uv
-
-        # Install `mdspell` for spelling checks
-        sudo npm install -g markdown-spellcheck
-
-    - name: Security checks
-       # TODO: tomte check-security
-      run: echo "Skipped until service is bumped"
-    - name: Check packages
-      run: tox -e check-packages
-    - name: Check hash
-      run: tox -e check-hash
-    - name: Code checks
-      run: tomte check-code
-    - name: Check spelling
-      run: tomte check-spelling
-    - name: AbciApp consistency checks
-    # analyse-service checks do not work properly as it is checking task execution skill which is not an ABCI skill
-      run: |
-        tox -e check-abci-docstrings
-        tox -e check-abciapp-specs
-        tox -e check-handlers
-        # tox -e analyse-service 
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
+      - name: Security checks
+        run: tomte tox -p -e safety -e bandit
+      - name: Check packages
+        run: tomte tox -e check-packages
+      - name: Check hash
+        run: tomte tox -e check-hash
+      - name: Code checks
+        run: tomte tox -p -e black-check -e isort-check -e flake8 -e mypy -e pylint -e darglint
+      - name: AbciApp consistency checks
+        run: |
+          tomte tox -e check-abci-docstrings
+          tomte tox -e check-abciapp-specs
+          tomte tox -e check-handlers
 
   scan:
     name: gitleaks
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
       - run: |
-          wget https://github.com/zricethezav/gitleaks/releases/download/v8.10.1/gitleaks_8.10.1_linux_x64.tar.gz && \
-          tar -xzf gitleaks_8.10.1_linux_x64.tar.gz && \
-          sudo install gitleaks /usr/bin && \
-          gitleaks detect --report-format json --report-path leak_report -v
+          wget https://github.com/zricethezav/gitleaks/releases/download/v8.10.1/gitleaks_8.10.1_linux_x64.tar.gz
+          tar -xzf gitleaks_8.10.1_linux_x64.tar.gz
+          sudo install gitleaks /usr/bin
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
+          tomte tox -e gitleaks
 
-  unit_tests:
+  test:
     continue-on-error: False
     needs:
       - lock_check
@@ -136,120 +128,76 @@ jobs:
 
     strategy:
       matrix:
-        os: [ ubuntu-22.04, macos-15, windows-2025 ]
-        python-version: [ "3.10", "3.14" ]
-        include:
-          - os: ubuntu-22.04
-            python-version: "3.11"
-          - os: ubuntu-22.04
-            python-version: "3.12"
-          - os: ubuntu-22.04
-            python-version: "3.13"
+        os: [ubuntu-24.04, macos-15, windows-2025]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
-    timeout-minutes: 30
-
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v4
+          submodules: recursive
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - if: matrix.os == 'ubuntu-22.04'
-        name: Install dependencies (ubuntu-22.04)
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Install dependencies (ubuntu-24.04)
         run: |
           sudo apt-get update --fix-missing
           sudo apt-get autoremove
           sudo apt-get autoclean
-          pip install tomte[tox,cli]==0.6.5 tox-uv
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
           pip install --user --upgrade setuptools
-      - if: matrix.os == 'ubuntu-22.04'
-        name: Unit tests ubuntu-22.04
-        run: tox -e py${{ matrix.python-version }}-linux
+
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Packages unit tests ubuntu-24.04
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-linux
+
       - if: matrix.os == 'macos-15'
         name: Install dependencies (macos-15)
         run: |
-          pip install tomte[tox,cli]==0.6.5 tox-uv
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
           pip install --user --upgrade setuptools
+
       - if: matrix.os == 'macos-15'
-        name: Unit tests macos-15
-        run: tox -e py${{ matrix.python-version }}-darwin
+        name: Packages unit tests macos-15
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-darwin
+
       - if: matrix.os == 'windows-2025'
         name: Install dependencies (windows-2025)
         run: |
           python -m pip install -U pip
-          pip install tomte[tox,cli]==0.6.5 tox-uv
+          pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@01ecfd5b2b68021bc94b76d9581eb3944bbd41b2' tox-uv
           pip install --upgrade setuptools
+
       - if: matrix.os == 'windows-2025'
-        name: Unit tests windows-2025
-        run: tox -e py${{ matrix.python-version }}-win
+        name: Packages unit tests windows-2025
+        run: |
+          tomte tox -e py${{ matrix.python-version }}-win
+
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
 
   all_checks_passed:
     name: All checks passed
-    runs-on: ubuntu-22.04
     if: always()
     needs:
       - lock_check
       - copyright_and_dependencies_check
       - linter_checks
       - scan
-      - unit_tests
-      - integration_tests
+      - test
+    runs-on: ubuntu-24.04
     steps:
-      - name: Verify all required checks succeeded
-        run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}" == "true" ]]; then
-            echo "One or more required checks failed, were cancelled, or were skipped."
-            echo "Results: ${{ toJSON(needs) }}"
-            exit 1
-          fi
-          echo "All required checks passed."
-
-  integration_tests:
-    continue-on-error: False
-    needs:
-      - unit_tests
-    runs-on: ubuntu-22.04
-
-    timeout-minutes: 120
-
-    env:
-      OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
-      OPENAI_SECRET_KEYS: ${{ secrets.OPENAI_SECRET_KEYS }}
-      STABILITY_API_KEY: ${{ secrets.STABILITY_API_KEY }}
-      STABILITY_API_KEYS: ${{ secrets.STABILITY_API_KEYS }}
-      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-      GOOGLE_API_KEYS: ${{ secrets.GOOGLE_API_KEYS }}
-      GOOGLE_ENGINE_ID: ${{ secrets.GOOGLE_ENGINE_ID }}
-      GOOGLE_ENGINE_IDS: ${{ secrets.GOOGLE_ENGINE_IDS }}
-      CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-      CLAUDE_API_KEYS: ${{ secrets.CLAUDE_API_KEYS }}
-      REPLICATE_API_KEY: ${{ secrets.REPLICATE_API_KEY }}
-      REPLICATE_API_KEYS: ${{ secrets.REPLICATE_API_KEYS }}
-      NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-      NEWS_API_KEYS: ${{ secrets.NEWS_API_KEYS }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
-      GNOSIS_RPC_URL: ${{ secrets.GNOSIS_RPC_URL }}
-      GNOSIS_RPC_URLS: ${{ secrets.GNOSIS_RPC_URLS }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-      GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
-      GRAPH_API_KEYS: ${{ secrets.GRAPH_API_KEYS }}
-
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          sudo apt-get update --fix-missing
-          sudo apt-get autoremove
-          sudo apt-get autoclean
-          pip install tomte[tox,cli]==0.6.5 tox-uv
-          pip install --user --upgrade setuptools
-      - name: Integration tests
-        run: tox -e py3.12-integration-linux
+      - name: Fail if any required job failed or was cancelled
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
+      - run: echo "All required checks passed."

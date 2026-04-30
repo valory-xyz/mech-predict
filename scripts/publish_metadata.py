@@ -24,7 +24,6 @@ import sys
 from aea.helpers.cid import to_v1
 from aea.helpers.multiformat import multibase_decode, multicodec_remove_prefix
 from aea_cli_ipfs.ipfs_utils import IPFSTool
-
 from scripts.generate_metadata import METADATA_FILE_PATH
 
 PREFIX = "f01701220"

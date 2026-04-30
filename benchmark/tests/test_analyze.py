@@ -21,7 +21,6 @@
 from typing import Any
 
 import pytest
-
 from benchmark.analyze import (
     ACTIVE_CATEGORIES,
     BRIER_RANDOM,

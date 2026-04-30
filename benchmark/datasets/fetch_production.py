@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
 from benchmark.io import append_jsonl
 

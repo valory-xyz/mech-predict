@@ -45,7 +45,6 @@ from typing import Any, Dict, Optional, Tuple
 
 import openai
 import requests
-
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
     IPFS_FETCH_DELAY,
@@ -1251,7 +1250,7 @@ def _replay_reasoning_tool(
 # ---------------------------------------------------------------------------
 
 
-def replay(  # pylint: disable=too-many-statements
+def replay(  # pylint: disable=too-many-statements,too-many-locals
     dataset: Path,
     output_dir: Path,
     model: str,

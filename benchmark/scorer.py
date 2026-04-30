@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.optimize import minimize  # type: ignore[import-untyped]
 
-from benchmark.io import load_jsonl as load_rows
+# isort treats `benchmark` as third-party (not in known_first_party=autonomy);
+# pylint treats it as first-party. The two views disagree on import order.
+# isort wins; silence pylint's complaint about the resulting block.
+from benchmark.io import load_jsonl as load_rows  # pylint: disable=wrong-import-order
+from scipy.optimize import minimize  # type: ignore[import-untyped]
 
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
@@ -927,7 +930,7 @@ def _score_extreme_predictions(
     return worst[:WORST_BEST_SIZE], best[:WORST_BEST_SIZE]
 
 
-def score(  # pylint: disable=too-many-statements
+def score(  # pylint: disable=too-many-statements,too-many-locals
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Compute all scores from production log rows."""

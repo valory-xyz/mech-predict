@@ -133,7 +133,9 @@ def _partition_rows_by_platform(
 
 LATENCY_RESERVOIR_SIZE = 200
 CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
-_RESERVOIR_RNG = random.Random(42)
+_RESERVOIR_RNG = random.Random(
+    42
+)  # nosec B311 — reservoir sampling for reproducible scoring
 WORST_BEST_SIZE = 10
 
 RELIABILITY_GATE = 0.80

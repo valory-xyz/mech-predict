@@ -1320,7 +1320,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -2700,7 +2700,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "tomte", extras = ["cli", "tests"], git = "https://github.com/valory-xyz/tomte.git?rev=01ecfd5b2b68021bc94b76d9581eb3944bbd41b2" },
+    { name = "tomte", extras = ["cli", "tests"], git = "https://github.com/valory-xyz/tomte.git?rev=92cb14f4696bf3eba3ceec36e1a915961d5c7992" },
     { name = "types-beautifulsoup4", specifier = ">=4.12.0.20250516,<5" },
     { name = "types-python-dateutil", specifier = ">=2.9.0.20250516,<3" },
     { name = "types-tqdm", specifier = ">=4.67.0.20250516,<5" },
@@ -5025,7 +5025,7 @@ wheels = [
 [[package]]
 name = "tomte"
 version = "0.7.0"
-source = { git = "https://github.com/valory-xyz/tomte.git?rev=01ecfd5b2b68021bc94b76d9581eb3944bbd41b2#01ecfd5b2b68021bc94b76d9581eb3944bbd41b2" }
+source = { git = "https://github.com/valory-xyz/tomte.git?rev=92cb14f4696bf3eba3ceec36e1a915961d5c7992#92cb14f4696bf3eba3ceec36e1a915961d5c7992" }
 
 [package.optional-dependencies]
 cli = [

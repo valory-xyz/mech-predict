@@ -670,7 +670,9 @@ def stratified_sample(
     :param seed: random seed for reproducibility.
     :return: list of sampled row dicts.
     """
-    rng = random.Random(seed)
+    rng = random.Random(
+        seed
+    )  # nosec B311 — reproducible benchmark sampling, not security
 
     # Group by platform
     by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)

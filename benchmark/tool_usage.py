@@ -117,7 +117,9 @@ def _http_get(url: str) -> str:
     :return: response body decoded as UTF-8.
     """
     req = Request(url, headers={"User-Agent": "mech-predict-benchmark"})
-    with urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+    with urlopen(
+        req, timeout=FETCH_TIMEOUT
+    ) as resp:  # nosec B310 — fixed mech-tool registry URL
         return resp.read().decode("utf-8")
 
 

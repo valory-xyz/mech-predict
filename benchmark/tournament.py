@@ -29,8 +29,8 @@ from dotenv import load_dotenv  # type: ignore[import-not-found]
 
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 from benchmark.io import load_jsonl as load_markets
+from benchmark.ipfs_loader import IpfsFetchError
 from benchmark.tools import (
-    TOOL_REGISTRY,
     ToolTimeout,
     _can_use_sigalrm,
     alarm_handler,
@@ -41,10 +41,10 @@ from benchmark.tools import (
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 
 # ---------------------------------------------------------------------------
-# Package hash lookup (for tool version audit trail)
+# Tournament tools — single source of truth (TOURNAMENT_IPFS_LOADER_SPEC §3.1)
 # ---------------------------------------------------------------------------
 
-PACKAGES_JSON = Path(__file__).resolve().parent.parent / "packages" / "packages.json"
+TOURNAMENT_TOOLS_JSON = Path(__file__).resolve().parent / "tournament_tools.json"
 
 # Patterns that look like API keys / tokens (long hex, base64, sk-... etc.)
 _SECRET_RE = re.compile(
@@ -57,51 +57,40 @@ def _sanitize_error(error: str) -> str:
     return _SECRET_RE.sub("REDACTED", error)
 
 
-def _load_package_hashes() -> dict[str, str]:
-    """Build a map from tool module path to IPFS hash.
+def load_tournament_tools(path: Path = TOURNAMENT_TOOLS_JSON) -> dict[str, str]:
+    """Load the tournament tool→CID map from JSON.
 
-    Reads packages/packages.json and maps the full module path used in
-    TOOL_REGISTRY to its IPFS hash. For example, a packages.json entry
-    ``"custom/valory/prediction_request/0.1.0": "bafybei..."`` becomes
-    ``"packages.valory.customs.prediction_request.prediction_request": "bafybei..."``.
-
-    :return: dict mapping full module path to IPFS hash, empty on error.
+    :param path: path to tournament_tools.json. Defaults to the file shipped
+        alongside this module.
+    :return: dict mapping tool_name → IPFS CID.
+    :raises FileNotFoundError: if the file is missing.
+    :raises ValueError: if the file is malformed (not a dict[str, str]).
     """
-    if not PACKAGES_JSON.exists():
-        return {}
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Tournament tools config not found: {path}. "
+            "Tournament cannot run without it."
+        )
     try:
-        data = json.loads(PACKAGES_JSON.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-    result: dict[str, str] = {}
-    for key, ipfs_hash in data.get("dev", {}).items():
-        if not key.startswith("custom/"):
-            continue
-        # key format: custom/{author}/{package_name}/{version}
-        parts = key.split("/")
-        if len(parts) < 3:
-            continue
-        author, pkg = parts[1], parts[2]
-        # tools use module path: packages.{author}.customs.{pkg}.{pkg}
-        module_path = f"packages.{author}.customs.{pkg}.{pkg}"
-        result[module_path] = ipfs_hash
-    return result
-
-
-_PACKAGE_HASHES: dict[str, str] = _load_package_hashes()
-
-
-def get_tool_ipfs_hash(tool_name: str) -> Optional[str]:
-    """Look up the IPFS package hash for a registered tool.
-
-    :param tool_name: tool name from TOOL_REGISTRY.
-    :return: IPFS hash string, or None if not found.
-    """
-    spec = TOOL_REGISTRY.get(tool_name)
-    if spec is None:
-        return None
-    return _PACKAGE_HASHES.get(spec.module)
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Tournament tools config is not valid JSON: {path}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Tournament tools config must be a JSON object, got {type(data).__name__}: {path}"
+        )
+    for tool_name, cid in data.items():
+        if not isinstance(tool_name, str) or not isinstance(cid, str):
+            raise ValueError(
+                f"Tournament tools config must map str→str; "
+                f"got {tool_name!r}→{cid!r} in {path}"
+            )
+        if not tool_name or not cid:
+            raise ValueError(
+                f"Tournament tools config has empty tool_name or CID: "
+                f"{tool_name!r}→{cid!r} in {path}"
+            )
+    return data
 
 
 load_dotenv()
@@ -152,19 +141,38 @@ def run_single(
     question_text: str,
     model: str,
     api_keys: KeyChain,
+    cid: str,
     timeout: int = TASK_DEADLINE,
+    cache_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
     """Run one tool on one question with live web search.
 
-    :param tool_name: registered tool name.
+    :param tool_name: tournament tool name (key in tournament_tools.json).
     :param question_text: the prediction question.
     :param model: LLM model identifier.
     :param api_keys: KeyChain with API credentials.
+    :param cid: IPFS CID of the tool package to fetch and exec.
     :param timeout: per-tool timeout in seconds.
+    :param cache_dir: optional override for the IPFS source cache directory.
     :return: dict with p_yes, p_no, confidence, prediction_parse_status,
-        latency_s, error, source_content.
+        latency_s, error, source_content. ``prediction_parse_status`` is
+        ``"ipfs_fetch_error"`` when the tool source can't be fetched/exec'd
+        from IPFS; the row is recorded and the tournament continues so one
+        bad CID doesn't poison the rest of the run.
     """
-    run_fn = load_tool_run(tool_name)
+    try:
+        run_fn = load_tool_run(tool_name, cid=cid, cache_dir=cache_dir)
+    except IpfsFetchError as exc:
+        log.warning("IPFS fetch failed: tool=%s cid=%s err=%s", tool_name, cid, exc)
+        return {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": None,
+            "prediction_parse_status": "ipfs_fetch_error",
+            "latency_s": 0,
+            "error": _sanitize_error(str(exc)),
+            "source_content": None,
+        }
 
     kwargs: dict[str, Any] = {
         "tool": tool_name,
@@ -242,8 +250,18 @@ def build_output_row(
     tool_name: str,
     model: str,
     run_result: dict[str, Any],
+    cid: str,
 ) -> dict[str, Any]:
-    """Build a tournament prediction row."""
+    """Build a tournament prediction row.
+
+    :param market: market dict (id, platform, question_text, etc.).
+    :param tool_name: tournament tool name.
+    :param model: LLM model identifier used by the tool.
+    :param run_result: dict returned by ``run_single``.
+    :param cid: IPFS CID of the tool package that produced ``run_result``;
+        recorded as ``tool_ipfs_hash`` for the audit trail.
+    :return: dict ready to serialize as a JSONL row.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     question_text = market["question_text"]
 
@@ -259,7 +277,7 @@ def build_output_row(
         "question_text": question_text,
         "tool_name": tool_name,
         "tool_version": None,
-        "tool_ipfs_hash": get_tool_ipfs_hash(tool_name),
+        "tool_ipfs_hash": cid,
         "model": model,
         "p_yes": run_result["p_yes"],
         "p_no": run_result["p_no"],
@@ -307,31 +325,96 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _skipped_global_timeout_row(
+    market: dict[str, Any], tool_name: str, model: str, cid: str
+) -> dict[str, Any]:
+    """Build a row recording that we ran out of wall-clock budget."""
+    return build_output_row(
+        market,
+        tool_name,
+        model,
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": None,
+            "prediction_parse_status": "skipped_global_timeout",
+            "latency_s": 0,
+            "error": "skipped_global_timeout",
+            "source_content": None,
+        },
+        cid,
+    )
+
+
+def _select_markets(
+    markets: list[dict[str, Any]], max_markets: Optional[int]
+) -> list[dict[str, Any]]:
+    """Bucket markets by platform, sort newest-first, take the top ``max_markets`` per platform.
+
+    :param markets: full list loaded from the JSONL file.
+    :param max_markets: max markets to keep per platform (None = keep all).
+    :return: the filtered, ordered list.
+    """
+    if max_markets is None:
+        return markets
+    by_platform: dict[str, list[dict[str, Any]]] = {}
+    for market in markets:
+        by_platform.setdefault(market.get("platform", "unknown"), []).append(market)
+    out: list[dict[str, Any]] = []
+    for plat_markets in by_platform.values():
+        missing = [m.get("id") for m in plat_markets if not m.get("fetched_at")]
+        if missing:
+            log.warning(
+                "%d markets missing fetched_at (will sort last): %s",
+                len(missing),
+                missing[:5],
+            )
+        plat_markets.sort(key=lambda m: m.get("fetched_at", ""), reverse=True)
+        out.extend(plat_markets[:max_markets])
+    return out
+
+
+def _log_result(result: dict[str, Any]) -> None:
+    """Log the outcome of a single run_single call."""
+    status = result["prediction_parse_status"]
+    if status == "valid":
+        log.info(
+            "  -> p_yes=%.2f, latency=%ds",
+            result["p_yes"],
+            result["latency_s"],
+        )
+    else:
+        log.warning("  -> %s (error=%s)", status, result.get("error"))
+
+
 def run_tournament(
     markets_path: Path,
     output_path: Path,
-    tools: list[str],
+    tools_to_cid: dict[str, str],
     model: str,
     max_markets: Optional[int] = None,
     timeout: int = TASK_DEADLINE,
+    cache_dir: Optional[Path] = None,
+    global_timeout: Optional[int] = None,
 ) -> None:
-    """Run all tool x market combos and append predictions."""
-    markets = load_markets(markets_path)
-    if max_markets is not None:
-        by_platform: dict[str, list[dict[str, Any]]] = {}
-        for m in markets:
-            by_platform.setdefault(m.get("platform", "unknown"), []).append(m)
-        markets = []
-        for plat_markets in by_platform.values():
-            missing = [m.get("id") for m in plat_markets if not m.get("fetched_at")]
-            if missing:
-                log.warning(
-                    "%d markets missing fetched_at (will sort last): %s",
-                    len(missing),
-                    missing[:5],
-                )
-            plat_markets.sort(key=lambda m: m.get("fetched_at", ""), reverse=True)
-            markets.extend(plat_markets[:max_markets])
+    """Run all tool x market combos and append predictions.
+
+    :param markets_path: path to ``open_markets.jsonl``.
+    :param output_path: JSONL path to append predictions to.
+    :param tools_to_cid: ordered map ``{tool_name: ipfs_cid}`` defining which
+        tools run and at which IPFS CID. Iteration order is preserved for the
+        per-market inner loop, so ``--tools`` ordering controls execution
+        order.
+    :param model: LLM model identifier passed to each tool.
+    :param max_markets: keep this many markets per platform (None = all).
+    :param timeout: per-tool wall-clock timeout in seconds.
+    :param cache_dir: optional override for the IPFS source cache directory.
+    :param global_timeout: optional wall-clock budget (seconds) for the whole
+        run. When set, unprocessed combos after the budget is exceeded are
+        recorded as ``skipped_global_timeout`` rows.
+    """
+    tools = list(tools_to_cid.keys())
+    markets = _select_markets(load_markets(markets_path), max_markets)
 
     log.info(
         "Tournament: %d markets x %d tools = %d combos",
@@ -353,6 +436,8 @@ def run_tournament(
     skipped = 0
     errors = 0
     total = len(markets) * len(tools)
+    started_at = time.monotonic()
+    out_of_budget = False
 
     with open(output_path, "a", encoding="utf-8") as out:
         for market in markets:
@@ -362,56 +447,59 @@ def run_tournament(
                 continue
 
             for tool_name in tools:
-                market_id = market.get("id", "")
-                market_platform = market.get("platform", "")
-                row_id = _make_row_id(tool_name, market_id, market_platform, model)
+                cid = tools_to_cid[tool_name]
+                row_id = _make_row_id(
+                    tool_name,
+                    market.get("id", ""),
+                    market.get("platform", ""),
+                    model,
+                )
                 if row_id in existing_ids:
                     skipped += 1
                     done += 1
                     continue
 
-                log.info(
-                    "[%d/%d] %s | %s",
-                    done + 1,
-                    total,
-                    tool_name,
-                    question[:80],
-                )
+                if (
+                    global_timeout is not None
+                    and time.monotonic() - started_at > global_timeout
+                ):
+                    out_of_budget = True
+                    log.warning(
+                        "Global timeout %ds exceeded; recording remaining "
+                        "combos as skipped_global_timeout",
+                        global_timeout,
+                    )
+                    row = _skipped_global_timeout_row(market, tool_name, model, cid)
+                    out.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    out.flush()
+                    errors += 1
+                    done += 1
+                    continue
 
+                log.info("[%d/%d] %s | %s", done + 1, total, tool_name, question[:80])
                 result = run_single(
                     tool_name=tool_name,
                     question_text=question,
                     model=model,
                     api_keys=api_keys,
+                    cid=cid,
                     timeout=timeout,
+                    cache_dir=cache_dir,
                 )
-
-                output_row = build_output_row(market, tool_name, model, result)
+                output_row = build_output_row(market, tool_name, model, result, cid)
                 out.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 out.flush()
-
-                status = result["prediction_parse_status"]
-                if status != "valid":
+                _log_result(result)
+                if result["prediction_parse_status"] != "valid":
                     errors += 1
-                    log.warning(
-                        "  -> %s (error=%s)",
-                        status,
-                        result.get("error"),
-                    )
-                else:
-                    log.info(
-                        "  -> p_yes=%.2f, latency=%ds",
-                        result["p_yes"],
-                        result["latency_s"],
-                    )
-
                 done += 1
 
     log.info(
-        "Done: %d processed, %d skipped, %d errors. Output: %s",
+        "Done: %d processed, %d skipped, %d errors%s. Output: %s",
         done - skipped,
         skipped,
         errors,
+        " (global-timeout fired)" if out_of_budget else "",
         output_path,
     )
 
@@ -435,8 +523,11 @@ def main() -> None:
     parser.add_argument(
         "--tools",
         type=str,
-        default=",".join(sorted(TOOL_REGISTRY)),
-        help="Comma-separated tool names (default: all registered tools)",
+        default=None,
+        help=(
+            "Comma-separated subset of tools to run "
+            "(default: every key in tournament_tools.json)"
+        ),
     )
     parser.add_argument(
         "--model",
@@ -462,22 +553,53 @@ def main() -> None:
         default=TASK_DEADLINE,
         help=f"Per-tool timeout in seconds (default: {TASK_DEADLINE})",
     )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help=(
+            "Override IPFS source cache directory "
+            "(default: ~/.cache/mech-predict/tournament-tools)"
+        ),
+    )
+    parser.add_argument(
+        "--global-timeout",
+        type=int,
+        default=None,
+        help=(
+            "Wall-clock budget (seconds) for the whole run; remaining combos "
+            "are recorded as skipped_global_timeout (default: unset)"
+        ),
+    )
     args = parser.parse_args()
 
-    tool_list = [t.strip() for t in args.tools.split(",") if t.strip()]
+    try:
+        tournament_tools = load_tournament_tools()
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
 
-    # Validate tools
-    for t in tool_list:
-        if t not in TOOL_REGISTRY:
-            parser.error(f"Unknown tool: {t}. Available: {sorted(TOOL_REGISTRY)}")
+    if args.tools is None:
+        tool_list = list(tournament_tools.keys())
+    else:
+        tool_list = [t.strip() for t in args.tools.split(",") if t.strip()]
+        for t in tool_list:
+            if t not in tournament_tools:
+                parser.error(
+                    f"Unknown tool: {t}. "
+                    f"Available in tournament_tools.json: {sorted(tournament_tools)}"
+                )
+
+    tools_to_cid: dict[str, str] = {t: tournament_tools[t] for t in tool_list}
 
     run_tournament(
         markets_path=Path(args.markets),
         output_path=Path(args.output),
-        tools=tool_list,
+        tools_to_cid=tools_to_cid,
         model=args.model,
         max_markets=args.max_markets,
         timeout=args.timeout,
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        global_timeout=args.global_timeout,
     )
 
 

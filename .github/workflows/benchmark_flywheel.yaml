@@ -1,5 +1,12 @@
 name: benchmark-flywheel
 
+# Queue overlapping runs (cron + workflow_dispatch) so they don't race the
+# rolling tournament-predictions / benchmark-data artifacts. cancel-in-progress
+# is false because each run produces real data we want to keep.
+concurrency:
+  group: benchmark-flywheel
+  cancel-in-progress: false
+
 on:
   schedule:
     - cron: '30 2 * * *'  # daily at 02:30 UTC (aims for Slack post before 11:00 IST)
@@ -14,9 +21,9 @@ on:
         required: false
         default: '10'
       tools:
-        description: 'Comma-separated tool names for tournament'
+        description: 'Comma-separated subset of tools (default: every key in benchmark/tournament_tools.json)'
         required: false
-        default: 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research'
+        default: ''
       notify_slack:
         description: 'Post summary to Slack'
         required: false
@@ -354,10 +361,13 @@ jobs:
       - name: Install project dependencies
         run: uv sync
 
-      - name: Sync autonomy packages
-        run: |
-          uv run autonomy init --reset --author ci --remote --ipfs --ipfs-node "/dns/registry.autonolas.tech/tcp/443/https"
-          uv run autonomy packages sync
+      # Cache IPFS-fetched tool sources between runs. Key on
+      # tournament_tools.json so a CID bump triggers a fresh fetch but
+      # unchanged runs reuse cached bytes.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mech-predict/tournament-tools
+          key: ipfs-tools-${{ hashFiles('benchmark/tournament_tools.json') }}
 
       - name: Download tournament markets
         uses: actions/download-artifact@v4
@@ -384,12 +394,19 @@ jobs:
           SEARCH_PROVIDER: ${{ secrets.BENCHMARK_SEARCH_PROVIDER }}
           GOOGLE_API_KEY: ${{ secrets.BENCHMARK_GOOGLE_API_KEY }}
           GOOGLE_ENGINE_ID: ${{ secrets.BENCHMARK_GOOGLE_ENGINE_ID }}
-          INPUT_TOOLS: ${{ github.event.inputs.tools || 'prediction-online,prediction-offline,claude-prediction-online,claude-prediction-offline,superforcaster,prediction-request-reasoning,prediction-request-reasoning-claude,prediction-request-rag,prediction-request-rag-claude,prediction-url-cot,prediction-url-cot-claude,prediction-offline-sme,prediction-online-sme,factual_research' }}
+          INPUT_TOOLS: ${{ github.event.inputs.tools }}
           INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '10' }}
         run: |
+          # When INPUT_TOOLS is empty (cron run, or dispatch with the
+          # default), omit --tools so tournament.py runs every tool listed
+          # in tournament_tools.json — the single source of truth.
+          TOOLS_FLAG=""
+          if [ -n "$INPUT_TOOLS" ]; then
+            TOOLS_FLAG="--tools $INPUT_TOOLS"
+          fi
           uv run python -m benchmark.tournament \
             --markets benchmark/datasets/open_markets.jsonl \
-            --tools "$INPUT_TOOLS" \
+            $TOOLS_FLAG \
             --max-markets "$INPUT_MAX_MARKETS"
 
       - name: Score resolved predictions

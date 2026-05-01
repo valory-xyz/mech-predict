@@ -85,14 +85,30 @@ Repository = "https://github.com/valory-xyz/mech"
 
 [dependency-groups]
 dev = [
-    "tomte[cli, tests]==0.6.5",
     "types-beautifulsoup4>=4.12.0.20250516,<5",
     "types-python-dateutil>=2.9.0.20250516,<3",
     "types-tqdm>=4.67.0.20250516,<5",
+    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@54780e1e34d4a5bd908f4ece1fae86437bded2c1",
 ]
 
 [tool.uv]
 default-groups = "all"
+
+[tool.tomte]
+# mech-predict has dev customs spanning multiple author dirs
+# (valory + dvilela + napthaai + nickcom007 + victorpolisetty);
+# pin packages_paths to the primary first-party author so the env vars
+# the canonical envs export resolve sensibly.
+packages_paths = "packages/valory"
+# benchmark/ and scripts/ live at repo root and are first-party Python
+# that needs linting alongside the auto-discovered dev customs.
+service_specific_packages_extra = ["benchmark", "scripts"]
+pytest_targets_extra = ["benchmark/tests"]
+# Third-party skills/contracts on disk are synced from mech upstream;
+# tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
+# from pyproject pins, so only the non-PyPI mech upstream needs listing.
+upstream_pins = ["valory-xyz/mech@v0.31.2"]
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@54780e1e34d4a5bd908f4ece1fae86437bded2c1"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

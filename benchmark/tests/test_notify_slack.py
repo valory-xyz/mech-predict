@@ -21,7 +21,6 @@
 from pathlib import Path
 
 import pytest
-
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _build_system_prompt,

@@ -23,7 +23,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from benchmark import release_map
 from benchmark.release_map import (
     UNTAGGED_PREFIX,

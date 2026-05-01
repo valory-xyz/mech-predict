@@ -12,7 +12,8 @@ import os
 import platform
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -120,10 +121,45 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
 # ---------------------------------------------------------------------------
 
 _tool_cache: dict[str, Callable[..., Any]] = {}
+_ipfs_cache: dict[str, Callable[..., Any]] = {}
 
 
-def load_tool_run(tool_name: str) -> Callable[..., Any]:
-    """Import and cache a tool's run() function."""
+def load_tool_run(
+    tool_name: str,
+    *,
+    cid: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+) -> Callable[..., Any]:
+    """Resolve a tool's run() callable.
+
+    Two modes:
+
+    - ``cid`` is set (tournament): fetch the tool source from IPFS by CID,
+      ``exec`` it, return the run callable. Cached in-process by CID — two
+      runs in the same process resolving the same name to different CIDs
+      get distinct callables.
+    - ``cid`` is None (replay scripts): import via ``TOOL_REGISTRY`` from
+      on-disk packages. Cached by tool name.
+
+    :param tool_name: tool identifier (only used for error messages and the
+        importlib cache key).
+    :param cid: when provided, fetch from IPFS instead of importing.
+    :param cache_dir: optional override for the IPFS source cache location.
+    :return: the tool's run callable.
+    """
+    if cid is not None:
+        cached = _ipfs_cache.get(cid)
+        if cached is not None:
+            return cached
+        from benchmark.ipfs_loader import (  # pylint: disable=import-outside-toplevel
+            DEFAULT_CACHE_DIR,
+            load_tool_from_ipfs,
+        )
+
+        run_fn = load_tool_from_ipfs(cid, cache_dir or DEFAULT_CACHE_DIR)
+        _ipfs_cache[cid] = run_fn
+        return run_fn
+
     if tool_name in _tool_cache:
         return _tool_cache[tool_name]
 
@@ -134,7 +170,7 @@ def load_tool_run(tool_name: str) -> Callable[..., Any]:
         )
 
     module = importlib.import_module(spec.module)
-    run_fn: Callable[..., Any] = module.run
+    run_fn = module.run
     _tool_cache[tool_name] = run_fn
     return run_fn
 

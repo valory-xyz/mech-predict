@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from benchmark.ipfs_loader import IpfsFetchError
 from benchmark.tournament import (
     _make_row_id,
     build_output_row,
@@ -126,7 +127,9 @@ class TestBuildOutputRow:
         """Test basic row construction with valid inputs."""
         market = _market()
         result = _run_result()
-        row = build_output_row(market, "prediction-online", "gpt-4.1", result)
+        row = build_output_row(
+            market, "prediction-online", "gpt-4.1", result, "bafycid1"
+        )
 
         assert row["mode"] == "tournament"
         assert row["final_outcome"] is None
@@ -134,6 +137,7 @@ class TestBuildOutputRow:
         assert row["market_prob_at_prediction"] == 0.65
         assert row["platform"] == "omen"
         assert row["tool_name"] == "prediction-online"
+        assert row["tool_ipfs_hash"] == "bafycid1"
         assert row["schema_version"] == "1.0"
 
     def test_stores_source_content(self) -> None:
@@ -141,21 +145,21 @@ class TestBuildOutputRow:
         market = _market()
         sc = {"pages": {"http://example.com": "<html>...</html>"}}
         result = _run_result(source_content=sc)
-        row = build_output_row(market, "tool", "model", result)
+        row = build_output_row(market, "tool", "model", result, "bafycid1")
         assert row["source_content"] == sc
 
     def test_none_source_content(self) -> None:
         """Test that None source content is stored as None."""
         market = _market()
         result = _run_result(source_content=None)
-        row = build_output_row(market, "tool", "model", result)
+        row = build_output_row(market, "tool", "model", result, "bafycid1")
         assert row["source_content"] is None
 
     def test_error_result(self) -> None:
         """Test row construction with error result."""
         market = _market()
         result = _run_result(p_yes=None, p_no=None, status="error")  # type: ignore[arg-type]
-        row = build_output_row(market, "tool", "model", result)
+        row = build_output_row(market, "tool", "model", result, "bafycid1")
         assert row["prediction_parse_status"] == "error"
         assert row["p_yes"] is None
         assert row["final_outcome"] is None
@@ -229,7 +233,7 @@ class TestRunSingle:
         mock_load.return_value = mock_fn
 
         keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
-        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys, "bafycid1")
 
         assert result["prediction_parse_status"] == "valid"
         assert result["p_yes"] == 0.7
@@ -243,7 +247,7 @@ class TestRunSingle:
         mock_load.return_value = mock_fn
 
         keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
-        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys, "bafycid1")
 
         assert result["prediction_parse_status"] == "error"
         assert result["p_yes"] is None
@@ -257,9 +261,26 @@ class TestRunSingle:
         mock_load.return_value = mock_fn
 
         keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
-        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys)
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys, "bafycid1")
 
         assert result["prediction_parse_status"] != "valid"
+
+    @patch("benchmark.tournament.load_tool_run")
+    def test_ipfs_fetch_error_yields_row(self, mock_load: MagicMock) -> None:
+        """A bad CID is recorded as ipfs_fetch_error, not raised."""
+        mock_load.side_effect = IpfsFetchError(
+            "IPFS fetch failed: cid=bafybadcid status=404"
+        )
+
+        keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
+        result = run_single(
+            "prediction-online", "Will X?", "gpt-4.1", keys, "bafybadcid"
+        )
+
+        assert result["prediction_parse_status"] == "ipfs_fetch_error"
+        assert result["p_yes"] is None
+        assert result["source_content"] is None
+        assert "bafybadcid" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +313,12 @@ class TestRunTournament:
             + "\n"
         )
 
-        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        run_tournament(
+            markets_path,
+            output_path,
+            {"prediction-online": "bafycid1"},
+            "gpt-4.1",
+        )
 
         lines = output_path.read_text().strip().split("\n")
         assert len(lines) == 2
@@ -319,12 +345,22 @@ class TestRunTournament:
         markets_path.write_text(json.dumps(_market("omen_0x1")) + "\n")
 
         # First run
-        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        run_tournament(
+            markets_path,
+            output_path,
+            {"prediction-online": "bafycid1"},
+            "gpt-4.1",
+        )
         assert mock_run.call_count == 1
 
         # Second run — should skip (valid prediction exists)
         mock_run.reset_mock()
-        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        run_tournament(
+            markets_path,
+            output_path,
+            {"prediction-online": "bafycid1"},
+            "gpt-4.1",
+        )
         assert mock_run.call_count == 0
 
     @patch("benchmark.tournament.build_keychain")
@@ -345,11 +381,21 @@ class TestRunTournament:
 
         # First run — malformed result
         mock_run.return_value = _run_result(p_yes=None, p_no=None, status="malformed")  # type: ignore[arg-type]
-        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        run_tournament(
+            markets_path,
+            output_path,
+            {"prediction-online": "bafycid1"},
+            "gpt-4.1",
+        )
         assert mock_run.call_count == 1
 
         # Second run — should retry (malformed not skipped)
         mock_run.reset_mock()
         mock_run.return_value = _run_result()
-        run_tournament(markets_path, output_path, ["prediction-online"], "gpt-4.1")
+        run_tournament(
+            markets_path,
+            output_path,
+            {"prediction-online": "bafycid1"},
+            "gpt-4.1",
+        )
         assert mock_run.call_count == 1

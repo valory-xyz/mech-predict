@@ -102,13 +102,37 @@ Runs predictions on **currently open markets** with live web search. Evidence is
 and stored for future cached replay. Markets are scored later when they resolve.
 
 ```bash
-python benchmark/tournament.py --tools superforcaster --model gpt-4.1-2025-04-14
+python benchmark/tournament.py --markets benchmark/datasets/open_markets.jsonl
 # ... wait for markets to resolve ...
 python benchmark/score_tournament.py
 ```
 
 Tournament mode is useful for building replay datasets with `source_content` for future
 sweep comparisons.
+
+**Tool sources are fetched from IPFS, not imported from `packages/`.** The set of tools
+that run in tournament — and the exact CID for each — lives in
+[`benchmark/tournament_tools.json`](tournament_tools.json). To tournament a candidate
+version of a tool:
+
+1. Edit the tool source under `packages/{author}/customs/{tool}/`.
+2. `autonomy packages lock` to compute the new CID.
+3. `autonomy push-all` to publish the bytes to IPFS.
+4. Bump the entry in `benchmark/tournament_tools.json` to the new CID and merge.
+
+The next daily flywheel run reads `tournament_tools.json` from `main`, IPFS-fetches each
+CID into `~/.cache/mech-predict/tournament-tools/`, and runs predictions. No `autonomy
+packages sync` step is needed for tournament. See `TOURNAMENT_IPFS_LOADER_SPEC.md` for
+the full design.
+
+To run a subset locally:
+
+```bash
+python benchmark/tournament.py \
+  --markets benchmark/datasets/open_markets.jsonl \
+  --tools superforcaster,factual_research \
+  --max-markets 5
+```
 
 ## source_content: cached web evidence
 

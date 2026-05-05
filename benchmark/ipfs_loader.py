@@ -45,6 +45,34 @@ class IpfsFetchError(Exception):
     """Raised when fetching a tool package from IPFS fails irrecoverably."""
 
 
+def _validate_entry_point_name(name: str, cid: str) -> None:
+    """Reject entry_point values that aren't a single safe filename.
+
+    ``component.yaml``'s ``entry_point`` is used as a filename under
+    ``cache_dir/{cid}/``. ``pathlib`` joins literally:
+    ``cache_dir/{cid}/../../foo`` escapes the cache root,
+    ``/tmp/foo`` replaces it. Both are blocked here.
+
+    :param name: the raw ``entry_point`` value from component.yaml.
+    :param cid: CID being processed (for error messages).
+    :raises IpfsFetchError: if ``name`` is not a single safe path component.
+    """
+    has_separator = "/" in name or "\\" in name
+    is_dot_path = name in (".", "..")
+    is_absolute = bool(name) and Path(name).is_absolute()
+    if (
+        not name
+        or has_separator
+        or is_dot_path
+        or is_absolute
+        or Path(name).name != name
+    ):
+        raise IpfsFetchError(
+            f"IPFS fetch failed: cid={cid} entry_point {name!r} "
+            f"is not a single safe filename"
+        )
+
+
 def _get_tar_with_retries(url: str, *, cid: str) -> bytes:
     """GET ``url`` as a tar archive with retries on 5xx / connection errors.
 
@@ -148,6 +176,7 @@ def _extract_files_from_tar(tar_bytes: bytes, cid: str) -> tuple[str, str, str]:
             f"IPFS fetch failed: cid={cid} component.yaml missing 'entry_point'"
         )
     entry_point_name: str = component_yaml["entry_point"]
+    _validate_entry_point_name(entry_point_name, cid)
 
     wrapper_dir = component_key.split("/", 1)[0]
     entry_key = f"{wrapper_dir}/{entry_point_name}"
@@ -181,6 +210,7 @@ def fetch_tool_package(cid: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[st
         component_yaml = yaml.safe_load(component_yaml_text)
         if isinstance(component_yaml, dict) and "entry_point" in component_yaml:
             entry_point_name = component_yaml["entry_point"]
+            _validate_entry_point_name(entry_point_name, cid)
             entry_cache = _cache_path(cache_dir, cid, entry_point_name)
             if entry_cache.exists():
                 entry_text = entry_cache.read_text(encoding="utf-8")
@@ -218,11 +248,25 @@ def load_tool_from_ipfs(
         package's ``component.yaml`` does not point at the named callable.
     """
     package = fetch_tool_package(cid, cache_dir=cache_dir)
-    _component_yaml, entry_point_source, callable_name = ComponentPackageLoader.load(
-        package
-    )
+    try:
+        (
+            _component_yaml,
+            entry_point_source,
+            callable_name,
+        ) = ComponentPackageLoader.load(package)
+    except Exception as exc:  # pylint: disable=broad-except
+        raise IpfsFetchError(
+            f"IPFS fetch failed: cid={cid} component package load failed: {exc!r}"
+        ) from exc
+
     namespace: dict[str, Any] = {}
-    exec(entry_point_source, namespace)  # nosec B102 # pylint: disable=exec-used
+    try:
+        exec(entry_point_source, namespace)  # nosec B102 # pylint: disable=exec-used
+    except Exception as exc:  # pylint: disable=broad-except
+        raise IpfsFetchError(
+            f"IPFS fetch failed: cid={cid} entry_point exec failed: {exc!r}"
+        ) from exc
+
     if callable_name not in namespace:
         raise IpfsFetchError(
             f"IPFS fetch failed: cid={cid} callable '{callable_name}' "

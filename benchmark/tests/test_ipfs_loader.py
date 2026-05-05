@@ -30,6 +30,7 @@ import requests
 from benchmark.ipfs_loader import (
     IPFS_GATEWAY,
     IpfsFetchError,
+    _validate_entry_point_name,
     fetch_tool_package,
     load_tool_from_ipfs,
 )
@@ -234,6 +235,82 @@ class TestFetchToolPackage:
             fetch_tool_package(CID, cache_dir=tmp_path)
         assert "testtool.py" in str(exc_info.value)
 
+    @pytest.mark.parametrize(
+        "bad_entry",
+        [
+            "../escape.py",
+            "../../escape.py",
+            "/tmp/absolute.py",
+            "sub/dir.py",
+            "back\\slash.py",
+            "..",
+            ".",
+            "",
+        ],
+    )
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_path_traversal_entry_point_rejected(
+        self, mock_get: MagicMock, tmp_path: Path, bad_entry: str
+    ) -> None:
+        """Malicious entry_point values are rejected before any disk write."""
+        bad_yaml = COMPONENT_YAML.replace(
+            "entry_point: testtool.py", f"entry_point: {bad_entry!r}"
+        )
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(files={"component.yaml": bad_yaml, "testtool.py": ENTRY_PY}),
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            fetch_tool_package(CID, cache_dir=tmp_path)
+        assert "entry_point" in str(exc_info.value)
+        # Nothing was written outside cache_dir/{cid}/
+        # No .py files anywhere except (possibly) inside the cid dir itself.
+        for p in tmp_path.rglob("*.py"):
+            assert p.parent == tmp_path / CID, f"file escaped cache: {p}"
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_cache_hit_with_traversal_entry_point_rejected(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """Cache-hit path validates entry_point even when yaml is already on disk."""
+        cache_root = tmp_path / CID
+        cache_root.mkdir(parents=True)
+        bad_yaml = COMPONENT_YAML.replace(
+            "entry_point: testtool.py", "entry_point: '../escape.py'"
+        )
+        (cache_root / "component.yaml").write_text(bad_yaml)
+        with pytest.raises(IpfsFetchError) as exc_info:
+            fetch_tool_package(CID, cache_dir=tmp_path)
+        assert "entry_point" in str(exc_info.value)
+        assert mock_get.call_count == 0
+
+
+class TestValidateEntryPointName:
+    """Direct unit tests for the entry_point validator."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            ".",
+            "..",
+            "../foo.py",
+            "foo/bar.py",
+            "foo\\bar.py",
+            "/abs/path.py",
+            "trailing/",
+        ],
+    )
+    def test_rejects(self, bad: str) -> None:
+        """Each malicious form raises IpfsFetchError."""
+        with pytest.raises(IpfsFetchError):
+            _validate_entry_point_name(bad, CID)
+
+    @pytest.mark.parametrize("good", ["tool.py", "my_tool.py", "x.py", "tool"])
+    def test_accepts(self, good: str) -> None:
+        """Plain filenames pass through."""
+        _validate_entry_point_name(good, CID)
+
 
 class TestLoadToolFromIpfs:
     """End-to-end tests: fetch + exec returns a callable."""
@@ -258,3 +335,70 @@ class TestLoadToolFromIpfs:
         with pytest.raises(IpfsFetchError) as exc_info:
             load_tool_from_ipfs(CID, cache_dir=tmp_path)
         assert "not_defined" in str(exc_info.value)
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_syntax_error_in_entry_point_raises_ipfs_fetch_error(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """A SyntaxError in the entry-point source surfaces as IpfsFetchError."""
+        bad_py = "def run(:\n    pass\n"
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(files={"component.yaml": COMPONENT_YAML, "testtool.py": bad_py}),
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            load_tool_from_ipfs(CID, cache_dir=tmp_path)
+        assert "exec failed" in str(exc_info.value)
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_import_error_at_module_level_raises_ipfs_fetch_error(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """A failing top-level import surfaces as IpfsFetchError, not ImportError."""
+        bad_py = (
+            "import nonexistent_module_xyz_qqq\n"
+            + "def run(**kwargs):\n"
+            + "    return ('ok',)\n"
+        )
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(files={"component.yaml": COMPONENT_YAML, "testtool.py": bad_py}),
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            load_tool_from_ipfs(CID, cache_dir=tmp_path)
+        assert "exec failed" in str(exc_info.value)
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_module_level_runtime_error_raises_ipfs_fetch_error(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """An exception thrown by module-level code surfaces as IpfsFetchError."""
+        bad_py = (
+            "raise RuntimeError('boom')\n"
+            + "def run(**kwargs):\n"
+            + "    return ('ok',)\n"
+        )
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(files={"component.yaml": COMPONENT_YAML, "testtool.py": bad_py}),
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            load_tool_from_ipfs(CID, cache_dir=tmp_path)
+        assert "exec failed" in str(exc_info.value)
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_component_loader_value_error_surfaces_as_ipfs_fetch_error(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """A ValueError from ComponentPackageLoader surfaces as IpfsFetchError."""
+        # Yaml is missing 'callable' → ComponentPackageLoader.load raises ValueError.
+        bad_yaml = "name: x\nentry_point: testtool.py\n"
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(files={"component.yaml": bad_yaml, "testtool.py": ENTRY_PY}),
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            load_tool_from_ipfs(CID, cache_dir=tmp_path)
+        # Either "load failed" (if it gets to ComponentPackageLoader) or earlier
+        # parse-time rejection — either way the wrapper contained the error.
+        assert "IPFS fetch failed" in str(exc_info.value)

@@ -1284,7 +1284,10 @@ class TestEdgeIncremental:
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        # Write old-format scores.json (no edge fields)
+        # Write old-format scores.json (no edge fields). Pin scorer time to
+        # the same month as ``current_month`` so update() doesn't trigger a
+        # month-rollover reset of accumulators on the 1st of any later
+        # month — the test exercises edge backfill, not month rollover.
         old_scores = {
             "current_month": "2026-04",
             "generated_at": "2026-04-08T00:00:00Z",
@@ -1318,7 +1321,10 @@ class TestEdgeIncremental:
 
         # Add a new row with market_prob
         rows = [_row(p_yes=0.8, outcome=True, market_prob=0.5)]
-        result = update(rows, scores_path, history_path)
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            result = update(rows, scores_path, history_path)
 
         # Old rows didn't have edge, new one does
         assert result["overall"]["edge_n"] == 1
@@ -1465,7 +1471,10 @@ class TestUpdateDedup:
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
 
-        # Write rows spanning two months to a log file
+        # Write rows spanning two months to a log file. Times pinned via
+        # mock_dt below so "current month" is April 2026, regardless of
+        # when the test actually runs — the assertion depends on april_r1
+        # being in-month and march_r1 being out-of-month.
         rows = [
             _row(
                 p_yes=0.7,
@@ -1485,21 +1494,24 @@ class TestUpdateDedup:
             for r in rows:
                 f.write(json.dumps(r) + "\n")
 
-        # Rebuild from log files
-        rebuild(
-            logs_dir=logs_dir,
-            scores_path=scores_path,
-            history_path=history_path,
-            dedup_path=dedup_path,
-        )
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            # Rebuild from log files
+            rebuild(
+                logs_dir=logs_dir,
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+            )
 
-        # Verify rebuild tracked both row_ids in the dedup file
-        saved_ids = json.loads(dedup_path.read_text())
-        assert "march_r1" in saved_ids
-        assert "april_r1" in saved_ids
+            # Verify rebuild tracked both row_ids in the dedup file
+            saved_ids = json.loads(dedup_path.read_text())
+            assert "march_r1" in saved_ids
+            assert "april_r1" in saved_ids
 
-        # Now call update() with the same rows — should all be skipped
-        result = update(rows, scores_path, history_path, dedup_path)
+            # Now call update() with the same rows — should all be skipped
+            result = update(rows, scores_path, history_path, dedup_path)
         # n should still be 1 (only april_r1 in current month accumulators)
         # because rebuild() only accumulates the last month into scores.json
         # but dedup file contains both months' IDs

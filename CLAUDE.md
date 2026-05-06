@@ -94,9 +94,11 @@ make clean
 ### Testing
 
 ```bash
-# Run all tests
-tox -e check-tools
-# Or: pytest tests
+# Run unit tests for the current platform (auto-discovered customs + benchmark/tests)
+tomte tox -e py3.10-linux        # or -darwin / -win
+
+# Live-tool integration suite (requires API key secrets)
+tomte tox -e integration-tests
 
 # Test a specific tool
 python scripts/test_tool.py

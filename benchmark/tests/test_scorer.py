@@ -1283,7 +1283,10 @@ class TestEdgeIncremental:
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
 
-        # Write old-format scores.json (no edge fields)
+        # Write old-format scores.json (no edge fields). Pin scorer time to
+        # the same month as ``current_month`` so update() doesn't trigger a
+        # month-rollover reset of accumulators on the 1st of any later
+        # month — the test exercises edge backfill, not month rollover.
         old_scores = {
             "current_month": "2026-04",
             "generated_at": "2026-04-08T00:00:00Z",
@@ -1319,7 +1322,7 @@ class TestEdgeIncremental:
         # stored scores so accumulators don't reset on month rollover.
         rows = [_row(p_yes=0.8, outcome=True, market_prob=0.5)]
         with patch("benchmark.scorer.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 4, 15, tzinfo=timezone.utc)
+            mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
             mock_dt.side_effect = datetime
             result = update(rows, scores_path, history_path)
 
@@ -1468,7 +1471,10 @@ class TestUpdateDedup:
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
 
-        # Write rows spanning two months to a log file
+        # Write rows spanning two months to a log file. Times pinned via
+        # mock_dt below so "current month" is April 2026, regardless of
+        # when the test actually runs — the assertion depends on april_r1
+        # being in-month and march_r1 being out-of-month.
         rows = [
             _row(
                 p_yes=0.7,
@@ -1488,10 +1494,8 @@ class TestUpdateDedup:
             for r in rows:
                 f.write(json.dumps(r) + "\n")
 
-        # Pin clock to April so rebuild's "last month" matches the row dates
-        # and update() doesn't reset accumulators on month rollover.
         with patch("benchmark.scorer.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 4, 15, tzinfo=timezone.utc)
+            mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
             mock_dt.side_effect = datetime
             rebuild(
                 logs_dir=logs_dir,

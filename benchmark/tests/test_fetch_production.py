@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
     PENDING_MAX_AGE_DAYS,

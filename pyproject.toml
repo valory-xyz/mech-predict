@@ -11,12 +11,12 @@ readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
     # OA / open-aea / plugins — pinned exactly (framework contract).
-    "open-autonomy[all]==0.21.19",
-    "open-aea-ledger-ethereum==2.2.1",
-    "open-aea-ledger-cosmos==2.2.1",
-    "open-aea-test-autonomy==0.21.19",
-    "open-aea-cli-ipfs==2.2.1",
-    "open-aea-helpers==0.21.19",
+    "open-autonomy[all]==0.21.20",
+    "open-aea-ledger-ethereum==2.2.3",
+    "open-aea-ledger-cosmos==2.2.3",
+    "open-aea-test-autonomy==0.21.20",
+    "open-aea-cli-ipfs==2.2.3",
+    "open-aea-helpers==0.21.20",
     # Agent-repo (app) deps — exact pins per David's #436 rule.
     # Ranges are reserved for framework/lib repos; agent repos pin
     # everything non-OA throughout.
@@ -85,14 +85,30 @@ Repository = "https://github.com/valory-xyz/mech"
 
 [dependency-groups]
 dev = [
-    "tomte[cli, tests]==0.6.5",
     "types-beautifulsoup4>=4.12.0.20250516,<5",
     "types-python-dateutil>=2.9.0.20250516,<3",
     "types-tqdm>=4.67.0.20250516,<5",
+    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
 ]
 
 [tool.uv]
 default-groups = "all"
+
+[tool.tomte]
+# mech-predict has dev customs spanning multiple author dirs
+# (valory + dvilela + napthaai + nickcom007 + victorpolisetty);
+# pin packages_paths to the primary first-party author so the env vars
+# the canonical envs export resolve sensibly.
+packages_paths = "packages/valory"
+# benchmark/ and scripts/ live at repo root and are first-party Python
+# that needs linting alongside the auto-discovered dev customs.
+service_specific_packages_extra = ["benchmark", "scripts"]
+pytest_targets_extra = ["benchmark/tests"]
+# Third-party skills/contracts on disk are synced from mech upstream;
+# tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
+# from pyproject pins, so only the non-PyPI mech upstream needs listing.
+upstream_pins = ["valory-xyz/mech@v0.32.0"]
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

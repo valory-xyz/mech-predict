@@ -53,7 +53,7 @@ def _run_gh_release_list(repo: str, limit: int) -> list[dict[str, str]]:
         ``createdAt`` ascending. Empty list on failure.
     """
     try:
-        out = subprocess.check_output(
+        out = subprocess.check_output(  # nosec B607 — `gh` resolves via PATH on CI runners
             [
                 "gh",
                 "release",
@@ -100,7 +100,7 @@ def _run_git_show_packages_json(tag: str) -> dict[str, Any] | None:
         that tag or git/json parsing fails. Never raises.
     """
     try:
-        out = subprocess.check_output(
+        out = subprocess.check_output(  # nosec B607 — `git` resolves via PATH on CI runners
             ["git", "show", f"refs/tags/{tag}:packages/packages.json"],
             text=True,
             stderr=subprocess.PIPE,

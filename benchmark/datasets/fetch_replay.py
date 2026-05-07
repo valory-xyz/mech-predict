@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.datasets.fetch_production import (
     IPFS_FETCH_DELAY,
     MECH_MARKETPLACE_GNOSIS_URL,

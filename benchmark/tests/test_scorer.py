@@ -28,7 +28,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from benchmark.scorer import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
@@ -1319,7 +1318,8 @@ class TestEdgeIncremental:
         }
         scores_path.write_text(json.dumps(old_scores))
 
-        # Add a new row with market_prob
+        # Add a new row with market_prob; pin clock to the same month as the
+        # stored scores so accumulators don't reset on month rollover.
         rows = [_row(p_yes=0.8, outcome=True, market_prob=0.5)]
         with patch("benchmark.scorer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
@@ -1497,7 +1497,6 @@ class TestUpdateDedup:
         with patch("benchmark.scorer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 8, tzinfo=timezone.utc)
             mock_dt.side_effect = datetime
-            # Rebuild from log files
             rebuild(
                 logs_dir=logs_dir,
                 scores_path=scores_path,

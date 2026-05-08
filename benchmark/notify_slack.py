@@ -275,7 +275,9 @@ def summarize_report(report_text: str, api_key: str, platform_label: str) -> str
             "Content-Type": "application/json",
         },
     )
-    with urlopen(req, timeout=30) as resp:
+    with urlopen(
+        req, timeout=30
+    ) as resp:  # nosec B310 — fixed https URL, not user-controlled
         body = json.loads(resp.read())
 
     return body["choices"][0]["message"]["content"].strip()
@@ -309,7 +311,9 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(req, timeout=15) as resp:
+    with urlopen(
+        req, timeout=15
+    ) as resp:  # nosec B310 — webhook URL from secret, not user input
         resp.read()
 
 

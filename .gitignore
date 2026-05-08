@@ -44,3 +44,6 @@ benchmark/datasets/.fetch_state.json
 benchmark/datasets/snapshots/
 benchmark/results/
 PR_DESCRIPTION_METRICS.md
+.tomte-tox.ini
+.darglint
+.gitleaks-merged.toml

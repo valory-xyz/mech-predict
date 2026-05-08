@@ -22,7 +22,6 @@ import json
 from urllib.error import URLError
 
 import pytest
-
 from benchmark import tool_usage
 from benchmark.analyze import section_tool_deployment_status
 from benchmark.tool_usage import DEPLOYMENTS, DEPLOYMENT_TO_PLATFORM

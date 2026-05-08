@@ -1038,7 +1038,7 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
     return len(enc.encode(text))
 
 
-def fetch_additional_information(  # pylint: disable=too-many-statements
+def fetch_additional_information(  # pylint: disable=too-many-statements,too-many-locals
     client: "LLMClient",
     client_embedding: Optional["LLMClient"],
     prompt: str,

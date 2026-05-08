@@ -428,7 +428,7 @@ def post_comment(report: str, pr_number: int, repo: str) -> None:
     :param pr_number: PR number.
     :param repo: owner/repo string.
     """
-    subprocess.run(
+    subprocess.run(  # nosec B607 — `gh` resolves via PATH on CI runners; absolute path would be brittle
         [
             "gh",
             "api",

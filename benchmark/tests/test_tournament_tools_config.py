@@ -22,7 +22,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from benchmark.tournament import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 

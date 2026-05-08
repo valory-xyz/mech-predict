@@ -26,7 +26,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-
 from benchmark.ipfs_loader import (
     IPFS_GATEWAY,
     IpfsFetchError,

@@ -262,16 +262,18 @@ class TestMatchDelivery:
 
 
 class TestFetchPolymarketResolvedUsesQuestions:
-    """Regression: fetch_polymarket_resolved must discover via the ``questions``
-    entity using the ``resolution_.blockTimestamp_gt`` server-side filter, not
-    via bets. A question that has resolution but no bet fixture must still be
-    discovered.
+    """Regression: fetch_polymarket_resolved must discover via questions.
+
+    Uses the ``resolution_.blockTimestamp_gt`` server-side filter on the
+    ``questions`` entity, not the legacy bets path. A question that has a
+    resolution but no bet fixture must still be discovered.
     """
 
     def test_uses_questions_entity_and_skips_invalid_rows(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Discovers via ``questions``, encodes outcome, skips malformed rows."""
+        # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp
 
         captured: dict[str, Any] = {}
@@ -335,6 +337,7 @@ class TestFetchPolymarketResolvedUsesQuestions:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """winningIndex=1 maps to outcome=False."""
+        # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp
 
         def fake_paginated(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:

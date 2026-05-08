@@ -720,39 +720,31 @@ OMEN_BETS_QUERY = """
 }
 """
 
-# Polymarket: bulk fetch bets from a wide window, post-filter for resolved.
-# The subgraph doesn't support filtering by resolution timestamp directly,
-# so we fetch a broad candidate window and filter in Python.
-POLYMARKET_BETS_QUERY = """
+# Polymarket: discover resolved markets directly from the questions entity.
+# The prediction subgraph supports filtering by resolution.blockTimestamp via
+# the nested-filter syntax `resolution_: { blockTimestamp_gt: ... }`, so we
+# paginate questions server-side instead of going through bets.
+POLYMARKET_RESOLVED_QUESTIONS_QUERY = """
 {
-  bets(
+  questions(
     first: %(first)s
     skip: %(skip)s
-    orderBy: blockTimestamp
-    orderDirection: desc
-    where: { blockTimestamp_gt: %(timestamp_gt)s }
+    orderBy: id
+    orderDirection: asc
+    where: { resolution_: { blockTimestamp_gt: %(resolved_after)s } }
   ) {
     id
-    blockTimestamp
-    outcomeIndex
-    question {
-      id
-      metadata {
-        title
-        outcomes
-      }
-      resolution {
-        winningIndex
-        blockTimestamp
-      }
+    metadata {
+      title
+      outcomes
+    }
+    resolution {
+      winningIndex
+      blockTimestamp
     }
   }
 }
 """
-
-# How far back to fetch Polymarket bets to find recently resolved markets.
-# Bets may have been placed months before the market resolves.
-POLYMARKET_CANDIDATE_WINDOW_DAYS = 30
 
 # ---------------------------------------------------------------------------
 # Subgraph helpers
@@ -1084,37 +1076,27 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
 def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
     """Bulk fetch Polymarket markets that resolved after the given timestamp.
 
-    The subgraph doesn't support filtering bets by resolution time, so we:
-    1. Fetch a wide candidate window (POLYMARKET_CANDIDATE_WINDOW_DAYS) of bets
-    2. Post-filter to resolved questions only
-    3. Only include markets where resolution.blockTimestamp > resolved_after
-    4. Deduplicate by question ID
+    Discovers resolved markets directly from the ``questions`` entity using
+    ``resolution_.blockTimestamp_gt`` as the server-side filter. This avoids
+    the previous bet-based proxy, which missed resolved questions whose
+    bets fell outside a candidate window.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
     :return: ResolvedMarkets indexed by ID and title.
     """
-    candidate_window = int(time.time()) - (POLYMARKET_CANDIDATE_WINDOW_DAYS * 86400)
     raw = _paginated_fetch(
         PREDICT_POLYMARKET_SUBGRAPH_URL,
-        POLYMARKET_BETS_QUERY,
-        "bets",
-        {"timestamp_gt": candidate_window},
+        POLYMARKET_RESOLVED_QUESTIONS_QUERY,
+        "questions",
+        {"resolved_after": resolved_after},
     )
 
     markets = ResolvedMarkets()
-    for bet in raw:
-        question = bet.get("question") or {}
-        resolution = question.get("resolution")
-        if resolution is None:
-            continue
-
+    for question in raw:
+        resolution = question.get("resolution") or {}
         resolved_at_ts = resolution.get("blockTimestamp")
-        if not resolved_at_ts:
-            continue
-
-        # Only include markets that resolved after our cutoff
-        resolved_at_int = int(resolved_at_ts)
-        if resolved_at_int <= resolved_after:
+        winning_index_raw = resolution.get("winningIndex")
+        if not resolved_at_ts or winning_index_raw is None:
             continue
 
         metadata = question.get("metadata") or {}
@@ -1122,20 +1104,24 @@ def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
         if not title:
             continue
 
-        winning_index = int(resolution["winningIndex"])
+        market_id = question.get("id")
+        if not market_id:
+            continue
+
         # winningIndex follows CLOB token order: 0 = Yes, 1 = No.
         # The subgraph outcomes array is unreliable (often ["No", "Yes"]),
         # so we ignore it and use the index directly.
+        winning_index = int(winning_index_raw)
         outcome = winning_index == 0
 
-        data = {
-            "outcome": outcome,
-            "resolved_at_ts": resolved_at_int,
-        }
-
-        # Polymarket question ID matches request_context.market_id
-        market_id = question.get("id")
-        markets.add(market_id, title, data)
+        markets.add(
+            market_id,
+            title,
+            {
+                "outcome": outcome,
+                "resolved_at_ts": int(resolved_at_ts),
+            },
+        )
 
     return markets
 

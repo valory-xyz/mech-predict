@@ -257,48 +257,101 @@ class TestMatchDelivery:
 
 
 # ---------------------------------------------------------------------------
-# Polymarket resolution time filter
+# fetch_polymarket_resolved (regression: questions-entity discovery)
 # ---------------------------------------------------------------------------
 
 
-class TestPolymarketResolutionFilter:
-    """Tests that the resolution time cutoff logic works correctly.
+class TestFetchPolymarketResolvedUsesQuestions:
+    """Regression: fetch_polymarket_resolved must discover via questions.
 
-    Replicates the post-filter from fetch_polymarket_resolved:
-    a bet with resolved_at <= cutoff must be excluded.
+    Uses the ``resolution_.blockTimestamp_gt`` server-side filter on the
+    ``questions`` entity, not the legacy bets path. A question that has a
+    resolution but no bet fixture must still be discovered.
     """
 
-    @staticmethod
-    def _filter_bet(bet: dict[str, Any], resolved_after: int) -> bool:
-        """Replicate the resolution filter from fetch_polymarket_resolved."""
-        question = bet.get("question") or {}
-        resolution = question.get("resolution")
-        if resolution is None:
-            return False
-        resolved_at_ts = resolution.get("blockTimestamp")
-        if not resolved_at_ts:
-            return False
-        return int(resolved_at_ts) > resolved_after
+    def test_uses_questions_entity_and_skips_invalid_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Discovers via ``questions``, encodes outcome, skips malformed rows."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
 
-    def test_resolved_after_cutoff_included(self) -> None:
-        """Test resolved after cutoff is included."""
-        bet = {"question": {"resolution": {"blockTimestamp": "1000"}}}
-        assert self._filter_bet(bet, 999) is True
+        captured: dict[str, Any] = {}
 
-    def test_resolved_at_cutoff_excluded(self) -> None:
-        """Test resolved at cutoff is excluded."""
-        bet = {"question": {"resolution": {"blockTimestamp": "1000"}}}
-        assert self._filter_bet(bet, 1000) is False
+        def fake_paginated(
+            url: str,
+            query: str,
+            entity_key: str,
+            template_vars: dict[str, Any],
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["url"] = url
+            captured["query"] = query
+            captured["entity_key"] = entity_key
+            captured["template_vars"] = template_vars
+            return [
+                {
+                    "id": "0xqid_resolved",
+                    "metadata": {
+                        "title": "Will X happen by date Y?",
+                        "outcomes": ["No", "Yes"],
+                    },
+                    "resolution": {"winningIndex": 0, "blockTimestamp": "1700000000"},
+                },
+                # Edge case: missing winningIndex — must be skipped.
+                {
+                    "id": "0xqid_partial",
+                    "metadata": {"title": "Partial"},
+                    "resolution": {"blockTimestamp": "1700000000"},
+                },
+                # Edge case: missing title — must be skipped.
+                {
+                    "id": "0xqid_no_title",
+                    "metadata": {"title": ""},
+                    "resolution": {"winningIndex": 1, "blockTimestamp": "1700000000"},
+                },
+                # Edge case: null resolution — must be skipped.
+                {
+                    "id": "0xqid_null_res",
+                    "metadata": {"title": "Null resolution"},
+                    "resolution": None,
+                },
+            ]
 
-    def test_resolved_before_cutoff_excluded(self) -> None:
-        """Test resolved before cutoff is excluded."""
-        bet = {"question": {"resolution": {"blockTimestamp": "500"}}}
-        assert self._filter_bet(bet, 999) is False
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+        markets = fp.fetch_polymarket_resolved(resolved_after=1_600_000_000)
 
-    def test_unresolved_excluded(self) -> None:
-        """Test unresolved bet is excluded."""
-        bet = {"question": {"resolution": None}}
-        assert self._filter_bet(bet, 0) is False
+        assert captured["entity_key"] == "questions"
+        assert "questions(" in captured["query"]
+        assert "bets(" not in captured["query"]
+        assert captured["template_vars"] == {"resolved_after": 1_600_000_000}
+
+        assert "0xqid_resolved" in markets.by_id
+        assert markets.by_id["0xqid_resolved"]["outcome"] is True
+        assert markets.by_id["0xqid_resolved"]["resolved_at_ts"] == 1_700_000_000
+        assert "0xqid_partial" not in markets.by_id
+        assert "0xqid_no_title" not in markets.by_id
+        assert "0xqid_null_res" not in markets.by_id
+
+    def test_winning_index_one_maps_to_no(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """winningIndex=1 maps to outcome=False."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        def fake_paginated(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "0xqid_no",
+                    "metadata": {"title": "Will it not happen?"},
+                    "resolution": {"winningIndex": 1, "blockTimestamp": "1700000000"},
+                },
+            ]
+
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+        markets = fp.fetch_polymarket_resolved(resolved_after=0)
+        assert markets.by_id["0xqid_no"]["outcome"] is False
 
 
 # ---------------------------------------------------------------------------

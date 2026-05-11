@@ -37,6 +37,9 @@ _READ_TIMEOUT = 30
 _MAX_ATTEMPTS = 3
 _BACKOFF_BASE_SEC = 1.0
 _TAR_ACCEPT_HEADER = {"Accept": "application/x-tar"}
+# Refuse tarballs over 32 MiB — real tool packages are <1 MiB. Caps heap
+# blow-up from a bad CID before resp.content materializes the body.
+_MAX_PACKAGE_BYTES = 32 * 1024 * 1024
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +107,17 @@ def _get_tar_with_retries(url: str, *, cid: str) -> bytes:
 
         last_status = resp.status_code
         if resp.status_code == 200:
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    declared = int(content_length)
+                except ValueError:
+                    declared = -1
+                if declared > _MAX_PACKAGE_BYTES:
+                    raise IpfsFetchError(
+                        f"IPFS fetch failed: cid={cid} response too large "
+                        f"({declared} bytes > {_MAX_PACKAGE_BYTES} byte cap)"
+                    )
             return resp.content
         if 400 <= resp.status_code < 500:
             # Client errors are fatal: no point retrying a 404 / 410.
@@ -207,7 +221,15 @@ def fetch_tool_package(cid: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[st
 
     if component_cache.exists():
         component_yaml_text = component_cache.read_text(encoding="utf-8")
-        component_yaml = yaml.safe_load(component_yaml_text)
+        try:
+            component_yaml = yaml.safe_load(component_yaml_text)
+        except yaml.YAMLError:
+            # Corrupt on-disk yaml (e.g. disk full, SIGKILL mid-write).
+            # Evict and fall through to re-fetch rather than crashing the
+            # tournament loop with a YAMLError that escapes IpfsFetchError.
+            log.warning("[ipfs] cid=%s cache=corrupt evicting", cid)
+            component_cache.unlink(missing_ok=True)
+            component_yaml = None
         if isinstance(component_yaml, dict) and "entry_point" in component_yaml:
             entry_point_name = component_yaml["entry_point"]
             _validate_entry_point_name(entry_point_name, cid)

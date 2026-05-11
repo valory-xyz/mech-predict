@@ -84,10 +84,17 @@ def _build_tar(
     return buf.getvalue()
 
 
-def _mock_response(status: int, content: bytes = b"") -> MagicMock:
+def _mock_response(
+    status: int,
+    content: bytes = b"",
+    headers: dict[str, str] | None = None,
+) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
     resp.content = content
+    # Real requests responses expose `headers` as a dict-like. Default to
+    # empty so headers.get(...) returns None rather than a MagicMock.
+    resp.headers = headers or {}
     return resp
 
 
@@ -282,6 +289,65 @@ class TestFetchToolPackage:
             fetch_tool_package(CID, cache_dir=tmp_path)
         assert "entry_point" in str(exc_info.value)
         assert mock_get.call_count == 0
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_content_length_over_cap_rejected(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """Content-Length exceeding the cap aborts before reading the body."""
+        mock_get.return_value = _mock_response(
+            200,
+            content=_build_tar(),
+            headers={"Content-Length": str(64 * 1024 * 1024)},
+        )
+        with pytest.raises(IpfsFetchError) as exc_info:
+            fetch_tool_package(CID, cache_dir=tmp_path)
+        assert "too large" in str(exc_info.value)
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_content_length_under_cap_accepted(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """A small, declared Content-Length passes the guard cleanly."""
+        tar_bytes = _build_tar()
+        mock_get.return_value = _mock_response(
+            200,
+            content=tar_bytes,
+            headers={"Content-Length": str(len(tar_bytes))},
+        )
+        result = fetch_tool_package(CID, cache_dir=tmp_path)
+        assert result["component.yaml"] == COMPONENT_YAML
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_content_length_unparseable_treated_as_unknown(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """A non-numeric Content-Length doesn't raise — body still served."""
+        mock_get.return_value = _mock_response(
+            200,
+            content=_build_tar(),
+            headers={"Content-Length": "not-a-number"},
+        )
+        result = fetch_tool_package(CID, cache_dir=tmp_path)
+        assert result["component.yaml"] == COMPONENT_YAML
+
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_corrupt_cached_yaml_evicts_and_refetches(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """Unparseable cached component.yaml is evicted; we re-fetch from gateway."""
+        cache_root = tmp_path / CID
+        cache_root.mkdir(parents=True)
+        # YAML that fails safe_load: unclosed flow mapping.
+        (cache_root / "component.yaml").write_text("entry_point: [unclosed\n")
+        mock_get.return_value = _mock_response(200, _build_tar())
+
+        result = fetch_tool_package(CID, cache_dir=tmp_path)
+
+        assert mock_get.call_count == 1
+        assert result["component.yaml"] == COMPONENT_YAML
+        # Cache repopulated with the fresh yaml.
+        assert (cache_root / "component.yaml").read_text() == COMPONENT_YAML
 
 
 class TestValidateEntryPointName:

@@ -400,14 +400,18 @@ jobs:
           # When INPUT_TOOLS is empty (cron run, or dispatch with the
           # default), omit --tools so tournament.py runs every tool listed
           # in tournament_tools.json — the single source of truth.
-          TOOLS_FLAG=""
+          # The two-branch form keeps "$INPUT_TOOLS" quoted at expansion
+          # time so a crafted workflow_dispatch input can't shell-inject.
           if [ -n "$INPUT_TOOLS" ]; then
-            TOOLS_FLAG="--tools $INPUT_TOOLS"
+            uv run python -m benchmark.tournament \
+              --markets benchmark/datasets/open_markets.jsonl \
+              --tools "$INPUT_TOOLS" \
+              --max-markets "$INPUT_MAX_MARKETS"
+          else
+            uv run python -m benchmark.tournament \
+              --markets benchmark/datasets/open_markets.jsonl \
+              --max-markets "$INPUT_MAX_MARKETS"
           fi
-          uv run python -m benchmark.tournament \
-            --markets benchmark/datasets/open_markets.jsonl \
-            $TOOLS_FLAG \
-            --max-markets "$INPUT_MAX_MARKETS"
 
       - name: Score resolved predictions
         run: uv run python -m benchmark.score_tournament

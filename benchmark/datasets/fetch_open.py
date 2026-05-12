@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.datasets.fetch_production import classify_category
 from benchmark.io import append_jsonl, load_existing_ids
 

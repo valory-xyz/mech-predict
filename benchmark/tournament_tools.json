@@ -1,0 +1,16 @@
+{
+  "prediction-online": "bafybeigbcls6rcqjtjrq3duo3obzpxu2ayj7vsjofixn7qvljhdmc75pky",
+  "prediction-offline": "bafybeigbcls6rcqjtjrq3duo3obzpxu2ayj7vsjofixn7qvljhdmc75pky",
+  "claude-prediction-online": "bafybeigbcls6rcqjtjrq3duo3obzpxu2ayj7vsjofixn7qvljhdmc75pky",
+  "claude-prediction-offline": "bafybeigbcls6rcqjtjrq3duo3obzpxu2ayj7vsjofixn7qvljhdmc75pky",
+  "superforcaster": "bafybeiduissprwj2shvd4peyibvgzvlzo4ob4hy2awij6yjgsala3cmuei",
+  "prediction-request-reasoning": "bafybeied5ljgwnpkmigy3duc3fltkwfdwyykkdo6a7l2kcx77aceka44em",
+  "prediction-request-reasoning-claude": "bafybeied5ljgwnpkmigy3duc3fltkwfdwyykkdo6a7l2kcx77aceka44em",
+  "prediction-request-rag": "bafybeiasyiowjgwaadzmqp5hekg77bfpj22vv4abjwho2vrobhvlutfs4e",
+  "prediction-request-rag-claude": "bafybeiasyiowjgwaadzmqp5hekg77bfpj22vv4abjwho2vrobhvlutfs4e",
+  "prediction-url-cot": "bafybeifxd5c3khhjrvhjmfspqiuxbm2arvnl6kyjclbyw67fb36gyh6b6u",
+  "prediction-url-cot-claude": "bafybeifxd5c3khhjrvhjmfspqiuxbm2arvnl6kyjclbyw67fb36gyh6b6u",
+  "prediction-offline-sme": "bafybeicurisaz4gay6r4ycq74fmxuqz6ssrfkrqoyjb5k4gc56db6kyiyu",
+  "prediction-online-sme": "bafybeicurisaz4gay6r4ycq74fmxuqz6ssrfkrqoyjb5k4gc56db6kyiyu",
+  "factual_research": "bafybeieczrqsgnozknopbzedcgvmnou6i7f3g4jx5qvpz6nbedqsmkdt2m"
+}

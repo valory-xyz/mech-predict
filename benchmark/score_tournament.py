@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import requests
-
 from benchmark.io import load_existing_ids, load_jsonl
 
 # ---------------------------------------------------------------------------

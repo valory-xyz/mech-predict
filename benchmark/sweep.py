@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.compare import compare, format_markdown
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,

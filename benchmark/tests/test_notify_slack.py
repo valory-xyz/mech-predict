@@ -139,7 +139,7 @@ class TestBuildSystemPrompt:
         prompt = _default_prompt()
         assert "list the top 3 cells by sample size" in prompt
         assert "n-descending order" in prompt
-        assert "re-select by n, not take the first 3 you see" in prompt
+        assert "re-rank by n, not take the first 3 you see" in prompt
         assert "insufficient tool × category data" in prompt
 
 

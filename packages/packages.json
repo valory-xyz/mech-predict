@@ -15,9 +15,9 @@
         "custom/victorpolisetty/dalle_request/0.1.0": "bafybeiadatvfc6opcsmhpxxzmsqpwgbckblciqypx2iwe5uwove6nmki3e",
         "custom/victorpolisetty/gemini_request/0.1.0": "bafybeiamjk5mfycjqkstkzymggako2jt7yjros2zx4l54zyuei2xkj4gqu",
         "custom/valory/factual_research/0.1.0": "bafybeieczrqsgnozknopbzedcgvmnou6i7f3g4jx5qvpz6nbedqsmkdt2m",
-        "custom/valory/resolve_market_jury/0.1.0": "bafybeiefjqbjdb473kmzo5dduod3fiunvhsqjzt5opby7n3ilhlbhxyt6e",
-        "agent/valory/mech_predict/0.1.0": "bafybeifxhraspkypetfbpizrpjqcc2phzpkl6jtsnins3uiolkr3wy4gk4",
-        "service/valory/mech_predict/0.1.0": "bafybeifos4c664giqubog25l4exgsfigcq4ylktyqmmcpdxrmkv4oriooe"
+        "custom/valory/resolve_market_jury/0.1.0": "bafybeieybrd4zoa5ff62nvf3rjjjbusbwpw6ggrtkqajzq2zmjhxjx3jpq",
+        "agent/valory/mech_predict/0.1.0": "bafybeic6dtegiv6pinelnha7pyjkhsjynyulxywqm3xw43buajoyf4xghm",
+        "service/valory/mech_predict/0.1.0": "bafybeiclmac7t4okey3wccls5cc7nq7eku3qq2s4jgdil6bg73yo6yg7n4"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

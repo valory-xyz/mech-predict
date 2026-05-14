@@ -166,6 +166,31 @@ class TestParseVote:
         assert result.has_occurred is None
         assert result.confidence == 0.5
 
+    def test_non_numeric_confidence_string_does_not_crash(self) -> None:
+        """Non-numeric ``confidence`` strings default to 0.0, don't crash.
+
+        LLMs sometimes emit ``confidence: "high"`` or ``"~0.75"`` against
+        the prompt schema. ``float("high")`` would raise ValueError and
+        silently turn a real vote into an error stub -- if all 4 voters
+        emit the same style, the all-voters-failed branch fires and the
+        question retries indefinitely.
+        """
+        for bad in ("high", "0.8 (high)", "~0.75", "very confident"):
+            raw = json.dumps(
+                {
+                    "is_valid": True,
+                    "is_determinable": True,
+                    "has_occurred": True,
+                    "confidence": bad,
+                }
+            )
+            result = _parse_vote(raw, "test", "model")
+            assert result.error is None, f"non-numeric '{bad}' should not error"
+            assert result.confidence == 0.0
+            # Verdict fields still extracted correctly.
+            assert result.is_valid is True
+            assert result.has_occurred is True
+
     def test_null_confidence_does_not_crash(self) -> None:
         """``confidence: null`` is tolerated (LLMs emit it for Case A).
 
@@ -241,7 +266,18 @@ class TestDecidedVotes:
     ) -> None:
         """Undet + errored are filtered; INVALID and YES/NO are kept."""
         votes = [bad_vote, _vote()]
-        assert len(_decided_votes(votes)) == expected_count
+        kept = _decided_votes(votes)
+        assert len(kept) == expected_count
+        if expected_kept == "both":
+            # The critical case: ``is_valid=False`` (INVALID) MUST be among
+            # the kept voters, not just "the count happens to be 2".
+            assert any(
+                v.is_valid is False for v in kept
+            ), "INVALID voter must be retained as a decided verdict"
+        else:
+            # The "bad" voter (undet or errored) MUST be filtered out;
+            # only the good YES voter survives.
+            assert all(v is not bad_vote for v in kept)
 
     def test_all_valid(self) -> None:
         """All YES/NO votes pass through."""
@@ -376,9 +412,9 @@ class TestBuildConsensusResult:
         verdict, so all 4 voters count as "decided". Only undeterminable
         (Case B) and errored voters fail to contribute to ``n_decided``.
 
-        Regression: previously this would crash on ``decided[0]`` (empty
-        list) and/or emit the wrong ``is_valid=True, is_determinable=True``
-        hardcoded shape.
+        Regression from the old YES/NO-only consensus path: unanimous
+        INVALID used to crash (empty YES/NO list) or emit a wrong
+        ``is_valid=True, is_determinable=True`` hardcoded shape.
         """
         votes = [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4
         result = _build_consensus_result(votes)
@@ -395,6 +431,18 @@ class TestBuildConsensusResult:
         assert result["n_decided"] == 4
         assert "INVALID" in result["judge_reasoning"]
         assert "judge skipped" in result["judge_reasoning"]
+
+    def test_raises_when_called_without_consensus(self) -> None:
+        """Bypassing the ``_has_consensus`` precondition raises ValueError.
+
+        If a future caller forgets the gate (or a refactor breaks it),
+        we want a loud error instead of an opaque ``IndexError`` deep in
+        ``Counter.most_common``.
+        """
+        # All voters undeterminable -> no decided votes -> no consensus.
+        votes = [_vote(is_determinable=False)] * 4
+        with pytest.raises(ValueError, match="without consensus"):
+            _build_consensus_result(votes)
 
     def test_builds_result_invalid_consensus_with_one_dissenter(self) -> None:
         """3/4 invalid + 1 yes -> still consensus on INVALID.
@@ -921,6 +969,43 @@ class TestRun:
             assert parsed["has_occurred"] is False
             assert parsed["judge_reasoning"] == "majority wins"
 
+    def test_judge_unparseable_propagates_through_canonicalizer(self) -> None:
+        """``judge_unparseable`` error from ``_run_judge`` survives ``run()``.
+
+        Regression: the canonicalizer's else-branch used to hardcode
+        ``error="malformed_verdict"``, silently overwriting any upstream
+        error discriminator. Downstream operators chasing stuck markets
+        could not distinguish "judge LLM returned garbage" from "judge
+        returned a verdict outside the 4-case contract".
+        """
+        keys = _mock_api_keys()
+        mixed_votes = [_vote(has_occurred=True), _vote(has_occurred=False)]
+        # _run_judge's contract on unparseable judge output: (None, None,
+        # None) + error="judge_unparseable". Canonicalizer must NOT replace
+        # this discriminator with "malformed_verdict".
+        judge_verdict = {
+            "is_valid": None,
+            "is_determinable": None,
+            "has_occurred": None,
+            "judge_reasoning": "Unparseable JSON: ...",
+            "error": "judge_unparseable",
+        }
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=mixed_votes),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            parsed = json.loads(result[0])
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "judge_unparseable"
+
     def test_no_votes_returns_failure(self) -> None:
         """No successful votes returns failure result.
 
@@ -1260,3 +1345,10 @@ class TestQuotaExhaustionIntegration:
         assert len(errored) == 3
         for v in errored:
             assert "402" in v["error"]
+        # The judge's Case C1 verdict must propagate through the
+        # canonicalizer in ``run()`` to the top-level fields. Without
+        # these assertions, the test would pass even if the C1
+        # canonicalization branch broke.
+        assert parsed["is_valid"] is True
+        assert parsed["is_determinable"] is True
+        assert parsed["has_occurred"] is True

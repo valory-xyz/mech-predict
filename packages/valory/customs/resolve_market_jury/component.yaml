@@ -8,9 +8,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeifrz7qan24aum3xyaavvl437rdffrposlcmobujzqwyb34e5d5ule
-  resolve_market_jury.py: bafybeicqb674e5yyvlkwv4bq2pup6zgyeszqhoidamc4w3b3yjhdabp62i
+  resolve_market_jury.py: bafybeihwdatxvho64bvjdmvj4mhban3pcbrh3uomxyn5uzsn6f5xdsnqfm
   tests/__init__.py: bafybeicxwzllyegjmuqjdilqfjdvskya5w5nc44nc6cb2ytvcgsldmivza
-  tests/test_resolve_market_jury.py: bafybeifuyywlw3x5tmksus7i7xkqz5l6lbu7zprqdjqpf6eau3nvvp6hj4
+  tests/test_resolve_market_jury.py: bafybeie6slhrr6roehfjdg6ass4udsb5pukf4fkkt4gl4fkwdckiehxnia
 fingerprint_ignore_patterns: []
 entry_point: resolve_market_jury.py
 callable: run

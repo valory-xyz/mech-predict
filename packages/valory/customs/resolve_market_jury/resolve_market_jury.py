@@ -337,11 +337,16 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
     is_valid = data.get("is_valid")
     has_occurred = data.get("has_occurred")
     is_determinable = data.get("is_determinable")
-    # ``confidence`` may be omitted OR explicitly ``null`` (the prompt now
-    # allows null for is_determinable / has_occurred under Case A, and LLMs
-    # often null out confidence too); ``float(None)`` would crash.
+    # The prompt schema asks for ``confidence: 0.0 to 1.0`` (no null) but
+    # LLMs sometimes emit ``null`` under Case A, or strings like ``"high"``
+    # / ``"0.8 (high)"`` / ``"~0.75"`` against the schema. Defensively
+    # default to 0.0 instead of crashing -- ``float("high")`` would raise
+    # ValueError and silently turn a real vote into an error stub.
     raw_conf = data.get("confidence")
-    confidence = float(raw_conf) if raw_conf is not None else 0.0
+    try:
+        confidence = float(raw_conf) if raw_conf is not None else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
 
     # Canonicalize to the 4 downstream contract cases.
     # Case A (INVALID): is_valid=False  -> is_determinable=None, has_occurred=None
@@ -660,8 +665,15 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
 
     :param votes: all voter results.
     :return: top-level result dict matching the judge-path output schema.
+    :raises ValueError: if no decided votes exist (caller skipped the
+        ``_has_consensus`` check).
     """
     counts = _label_counts(votes)
+    if not counts:
+        raise ValueError(
+            "_build_consensus_result called without consensus -- "
+            "no decided votes. Caller must verify _has_consensus() first."
+        )
     winner, _ = counts.most_common(1)[0]
     is_valid, is_determinable, has_occurred = _LABEL_OUTPUT[winner]
     reason = (
@@ -795,7 +807,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             "n_successful": 0,
             "n_decided": 0,
         }
-        return json.dumps(result), "All voters failed.", None, counter_callback, None
+        return (
+            json.dumps(result),
+            result["judge_reasoning"],
+            None,
+            counter_callback,
+            None,
+        )
 
     used_params: Dict[str, Any] = {
         "model": JUDGE_MODEL_CLAUDE,
@@ -860,10 +878,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # after partial parse, is_determinable=True with has_occurred=None,
         # etc.). Route through the error discriminator so downstream
         # consumers retry instead of acting on an ambiguous verdict.
+        # Preserve the upstream error (e.g. ``judge_unparseable``) when
+        # present so the operator can tell parser failures apart from
+        # off-contract verdicts; default to ``malformed_verdict`` otherwise.
         canon_is_valid = None
         canon_is_det = None
         canon_has_occ = None
-        canon_error = "malformed_verdict"
+        canon_error = verdict.get("error") or "malformed_verdict"
 
     result = {
         "is_valid": canon_is_valid,

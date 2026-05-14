@@ -615,8 +615,7 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     return [
         v
         for v in votes
-        if v.error is None
-        and (v.is_valid is False or v.is_determinable is True)
+        if v.error is None and (v.is_valid is False or v.is_determinable is True)
     ]
 
 
@@ -624,9 +623,9 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
 # to exactly one of these; the (is_valid, is_determinable, has_occurred)
 # tuple in the public output is derived from the label.
 _LABEL_OUTPUT: Dict[str, Tuple[Optional[bool], Optional[bool], Optional[bool]]] = {
-    "yes":     (True,  True,  True),   # Case C1
-    "no":      (True,  True,  False),  # Case C2
-    "invalid": (False, None,  None),   # Case A
+    "yes": (True, True, True),  # Case C1
+    "no": (True, True, False),  # Case C2
+    "invalid": (False, None, None),  # Case A
 }
 
 

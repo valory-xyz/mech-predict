@@ -307,7 +307,10 @@ class TestAllAgree:
         "votes, expected",
         [
             # Unanimous invalid -- strict majority (4/4 > 2)
-            ([_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4, True),
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4,
+                True,
+            ),
             # 3/4 invalid -- strict majority (3 > 2)
             (
                 [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3
@@ -377,9 +380,7 @@ class TestBuildConsensusResult:
         list) and/or emit the wrong ``is_valid=True, is_determinable=True``
         hardcoded shape.
         """
-        votes = [
-            _vote(is_valid=False, is_determinable=None, has_occurred=None)
-        ] * 4
+        votes = [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False
         assert result["is_determinable"] is None
@@ -404,9 +405,9 @@ class TestBuildConsensusResult:
         ``n_decided`` here is 4: 3 INVALID voters + 1 YES voter all reached
         a definitive verdict.
         """
-        votes = [
-            _vote(is_valid=False, is_determinable=None, has_occurred=None)
-        ] * 3 + [_vote(has_occurred=True)]
+        votes = [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3 + [
+            _vote(has_occurred=True)
+        ]
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False
         assert result["is_determinable"] is None
@@ -1171,18 +1172,18 @@ class TestQuotaExhaustionIntegration:
             assert vote["has_occurred"] is None
             assert vote["confidence"] == 0.0
             assert vote["error"] is not None
-            assert "402" in vote["error"], (
-                f"voter error should mention HTTP 402, got: {vote['error']!r}"
-            )
+            assert (
+                "402" in vote["error"]
+            ), f"voter error should mention HTTP 402, got: {vote['error']!r}"
 
         # === Filter behaviour ===
         # Reconstruct VoterResult objects from the parsed output and confirm
         # _successful_votes filters them ALL out -- this is the gate that
         # routes into the all-voters-failed branch in run().
         votes = [VoterResult(**v) for v in parsed["votes"]]
-        assert _successful_votes(votes) == [], (
-            "_successful_votes should drop all error-stubbed voters"
-        )
+        assert (
+            _successful_votes(votes) == []
+        ), "_successful_votes should drop all error-stubbed voters"
         assert len(votes) == 4
         assert all(v.error is not None for v in votes)
 
@@ -1222,7 +1223,10 @@ class TestQuotaExhaustionIntegration:
         # exactly 1 of the 4 voters will get the success and the other 3
         # will get errors regardless of scheduling.
         mock_client.chat.completions.create.side_effect = [
-            good_response, bad_err, bad_err, bad_err,
+            good_response,
+            bad_err,
+            bad_err,
+            bad_err,
         ]
 
         # Mock the judge too -- with only 1 successful vote there is no

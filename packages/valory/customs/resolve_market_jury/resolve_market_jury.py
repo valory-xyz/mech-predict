@@ -531,39 +531,92 @@ def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
     ]
 
 
-def _has_consensus(votes: List[VoterResult]) -> bool:
-    """Check whether decided voters form a strict majority and all agree.
+def _invalid_votes(votes: List[VoterResult]) -> List[VoterResult]:
+    """Filter to votes where the voter explicitly marked the question invalid.
 
-    Undecided / failed / invalid voters count against the threshold: a strict
-    majority of *all* voters (not just decided ones) must have produced a
-    determinate verdict, AND those decided voters must unanimously agree on
-    ``has_occurred``. This prevents 2-of-4 minority agreement from short-
-    circuiting the judge.
+    :param votes: all voter results.
+    :return: voter results with ``is_valid is False`` and no error.
+    """
+    return [v for v in votes if v.is_valid is False and v.error is None]
+
+
+def _has_consensus(votes: List[VoterResult]) -> bool:
+    """Check whether voters form a strict majority on a definitive verdict.
+
+    Two consensus paths skip the judge:
+
+    1. **INVALID consensus** -- a strict majority of all voters explicitly
+       voted ``is_valid=False``. The other two fields lose semantic meaning
+       when the question itself is invalid; output is ``(False, False, None)``.
+    2. **DECIDED consensus** -- a strict majority of all voters are decided
+       (``is_valid=True``, ``is_determinable=True``, ``has_occurred`` set)
+       AND unanimously agree on ``has_occurred``.
+
+    Undecided / failed voters count against both thresholds: a strict
+    majority of *all* voters (not just successful ones) must reach one of
+    the two verdicts. This prevents 2-of-4 minority agreement from
+    short-circuiting the judge.
 
     :param votes: all voter results (including undecided / failed / invalid).
-    :return: True if decided voters form a strict majority and unanimously agree.
+    :return: True if either consensus type holds.
     """
+    half = len(votes) / 2
+
+    # 1. INVALID consensus -- strict majority of all voters said is_valid=False
+    invalid = _invalid_votes(votes)
+    if len(invalid) > half:
+        return True
+
+    # 2. DECIDED consensus -- strict majority decided AND unanimous on has_occurred
     decided = _decided_votes(votes)
-    # Need at least a strict majority of all voters to have decided.
-    if len(decided) < 2 or len(decided) <= len(votes) / 2:
+    if len(decided) < 2 or len(decided) <= half:
         return False
     return all(v.has_occurred == decided[0].has_occurred for v in decided)
 
 
 def _build_consensus_result(votes: List[VoterResult]) -> dict:
-    """Build result from unanimous votes (skip judge)."""
+    """Build result from consensus votes (skip judge).
+
+    Handles both consensus types -- INVALID (strict majority say
+    ``is_valid=False``) and DECIDED (strict majority decided and agree on
+    ``has_occurred``). Caller MUST have already verified ``_has_consensus``
+    returns True.
+
+    :param votes: all voter results.
+    :return: top-level result dict matching the judge-path output schema.
+    """
     successful = _successful_votes(votes)
     decided = _decided_votes(votes)
-    return {
-        "is_valid": True,
-        "is_determinable": True,
-        "has_occurred": decided[0].has_occurred,
+    invalid = _invalid_votes(votes)
+
+    base = {
         "votes": [asdict(v) for v in votes],
-        "judge_reasoning": "Voter majority consensus -- judge skipped.",
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
         "n_successful": len(successful),
         "n_decided": len(decided),
+    }
+
+    # INVALID consensus takes priority over DECIDED -- a voter saying
+    # ``is_valid=False`` is excluded from ``_decided_votes`` so the two
+    # populations are disjoint, but if the invalid majority threshold is
+    # met we always report invalid.
+    if len(invalid) > len(votes) / 2:
+        return {
+            "is_valid": False,
+            "is_determinable": False,
+            "has_occurred": None,
+            "judge_reasoning": "Voter majority consensus on INVALID -- judge skipped.",
+            **base,
+        }
+
+    # DECIDED consensus
+    return {
+        "is_valid": True,
+        "is_determinable": True,
+        "has_occurred": decided[0].has_occurred,
+        "judge_reasoning": "Voter majority consensus -- judge skipped.",
+        **base,
     }
 
 

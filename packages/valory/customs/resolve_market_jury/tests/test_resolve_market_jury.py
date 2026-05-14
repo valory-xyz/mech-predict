@@ -248,18 +248,99 @@ class TestAllAgree:
         """Check consensus detection."""
         assert _has_consensus(votes) is expected
 
+    @pytest.mark.parametrize(
+        "votes, expected",
+        [
+            # Unanimous invalid -- strict majority (4/4 > 2)
+            ([_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 4, True),
+            # 3/4 invalid -- strict majority (3 > 2)
+            (
+                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 3
+                + [_vote(has_occurred=True)],
+                True,
+            ),
+            # 2/4 invalid -- not a strict majority
+            (
+                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 2
+                + [_vote(has_occurred=True)] * 2,
+                False,
+            ),
+            # 3/4 invalid, 1 errored -- 3 > 2 still strict majority of 4
+            (
+                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 3
+                + [_vote(error="boom")],
+                True,
+            ),
+            # 2/4 invalid, 2 errored -- only 2/4 are invalid, not strict majority
+            (
+                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 2
+                + [_vote(error="boom")] * 2,
+                False,
+            ),
+        ],
+        ids=[
+            "unanimous_invalid",
+            "majority_invalid_one_yes",
+            "half_invalid_half_yes",
+            "majority_invalid_one_errored",
+            "minority_invalid_half_errored",
+        ],
+    )
+    def test_invalid_consensus(self, votes: list, expected: bool) -> None:
+        """``is_valid=False`` strict majority counts as consensus."""
+        assert _has_consensus(votes) is expected
+
 
 class TestBuildConsensusResult:
     """Tests for _build_consensus_result."""
 
-    def test_builds_result(self) -> None:
-        """Consensus result has correct fields."""
+    def test_builds_result_decided(self) -> None:
+        """Decided consensus result has correct fields."""
         votes = [_vote(has_occurred=True), _vote(has_occurred=True)]
         result = _build_consensus_result(votes)
         assert result["has_occurred"] is True
         assert result["is_valid"] is True
+        assert result["is_determinable"] is True
         assert result["agreement_ratio"] == 1.0
         assert "judge skipped" in result["judge_reasoning"]
+        assert "INVALID" not in result["judge_reasoning"]
+
+    def test_builds_result_invalid_consensus(self) -> None:
+        """All voters say is_valid=False -> consensus on INVALID.
+
+        Regression: previously this would crash on ``decided[0]`` (empty
+        list) and/or emit the wrong ``is_valid=True, is_determinable=True``
+        hardcoded shape. Post-fix it must emit ``(False, False, None)`` with
+        a judge_reasoning that flags INVALID consensus.
+        """
+        votes = [
+            _vote(is_valid=False, is_determinable=False, has_occurred=None)
+        ] * 4
+        result = _build_consensus_result(votes)
+        assert result["is_valid"] is False
+        assert result["is_determinable"] is False
+        assert result["has_occurred"] is None
+        assert result["agreement_ratio"] == 1.0
+        assert result["n_voters"] == 4
+        # All 4 voters returned successfully -- this is the key assertion the
+        # production catalog calls out: n_successful must be 4, not 0.
+        assert result["n_successful"] == 4
+        assert result["n_decided"] == 0
+        assert "INVALID" in result["judge_reasoning"]
+        assert "judge skipped" in result["judge_reasoning"]
+
+    def test_builds_result_invalid_consensus_with_one_dissenter(self) -> None:
+        """3/4 invalid + 1 yes -> still consensus on INVALID."""
+        votes = [
+            _vote(is_valid=False, is_determinable=False, has_occurred=None)
+        ] * 3 + [_vote(has_occurred=True)]
+        result = _build_consensus_result(votes)
+        assert result["is_valid"] is False
+        assert result["is_determinable"] is False
+        assert result["has_occurred"] is None
+        assert result["n_voters"] == 4
+        assert result["n_successful"] == 4  # all returned, none errored
+        assert "INVALID" in result["judge_reasoning"]
 
 
 class TestComputeAgreement:

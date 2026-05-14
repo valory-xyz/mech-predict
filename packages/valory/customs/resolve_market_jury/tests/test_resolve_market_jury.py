@@ -314,6 +314,10 @@ class TestBuildConsensusResult:
         ``None`` because they lose semantic meaning when the question is
         invalid.
 
+        ``n_decided`` must be 4 (NOT 0): INVALID is itself a definitive
+        verdict, so all 4 voters count as "decided". Only undeterminable
+        (Case B) and errored voters fail to contribute to ``n_decided``.
+
         Regression: previously this would crash on ``decided[0]`` (empty
         list) and/or emit the wrong ``is_valid=True, is_determinable=True``
         hardcoded shape.
@@ -330,7 +334,9 @@ class TestBuildConsensusResult:
         # All 4 voters returned successfully -- this is the key assertion the
         # production catalog calls out: n_successful must be 4, not 0.
         assert result["n_successful"] == 4
-        assert result["n_decided"] == 0
+        # All 4 voters reached a definitive verdict (INVALID) -- "invalid"
+        # is a decided option, so n_decided is 4, not 0.
+        assert result["n_decided"] == 4
         assert "INVALID" in result["judge_reasoning"]
         assert "judge skipped" in result["judge_reasoning"]
 
@@ -339,6 +345,9 @@ class TestBuildConsensusResult:
 
         Voter shapes vary (the dissenter has different fields), but the
         canonical output is the same Case A ``(False, None, None)`` regardless.
+
+        ``n_decided`` here is 4: 3 INVALID voters + 1 YES voter all reached
+        a definitive verdict.
         """
         votes = [
             _vote(is_valid=False, is_determinable=False, has_occurred=None)
@@ -349,6 +358,7 @@ class TestBuildConsensusResult:
         assert result["has_occurred"] is None
         assert result["n_voters"] == 4
         assert result["n_successful"] == 4  # all returned, none errored
+        assert result["n_decided"] == 4  # 3 INVALID + 1 YES, all definitive
         assert "INVALID" in result["judge_reasoning"]
 
 

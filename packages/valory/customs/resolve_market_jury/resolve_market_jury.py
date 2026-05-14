@@ -540,6 +540,26 @@ def _invalid_votes(votes: List[VoterResult]) -> List[VoterResult]:
     return [v for v in votes if v.is_valid is False and v.error is None]
 
 
+def _definitive_votes(votes: List[VoterResult]) -> List[VoterResult]:
+    """Filter to votes that reached a definitive verdict.
+
+    A definitive verdict is YES, NO, **or INVALID** -- anything except
+    undeterminable (Case B) or an error stub. INVALID counts because
+    saying "this question is invalid" is itself a decision; the only
+    "non-decided" outcome is undeterminable.
+
+    Used for the ``n_decided`` field in the tool's result output. Distinct
+    from ``_decided_votes`` (which is YES/NO-only and used by the
+    has_occurred-unanimity consensus check).
+    """
+    return [
+        v
+        for v in votes
+        if v.error is None
+        and (v.is_valid is False or v.is_determinable is True)
+    ]
+
+
 def _has_consensus(votes: List[VoterResult]) -> bool:
     """Check whether voters form a strict majority on a definitive verdict.
 
@@ -588,13 +608,19 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
     successful = _successful_votes(votes)
     decided = _decided_votes(votes)
     invalid = _invalid_votes(votes)
+    definitive = _definitive_votes(votes)
 
+    # ``n_decided`` reports voters that reached a definitive verdict
+    # (YES, NO, or INVALID) -- so e.g. for unanimous-INVALID with 4 voters,
+    # ``n_decided`` is 4, not 0. ``_decided_votes`` keeps its narrower
+    # YES/NO-only semantic because it's used for has_occurred-unanimity
+    # checks; the broader ``_definitive_votes`` is for the output field.
     base = {
         "votes": [asdict(v) for v in votes],
         "agreement_ratio": 1.0,
         "n_voters": len(votes),
         "n_successful": len(successful),
-        "n_decided": len(decided),
+        "n_decided": len(definitive),
     }
 
     # INVALID consensus takes priority over DECIDED -- a voter saying
@@ -820,7 +846,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "agreement_ratio": _compute_agreement(votes),
         "n_voters": len(voters),
         "n_successful": len(successful),
-        "n_decided": len(_decided_votes(votes)),
+        "n_decided": len(_definitive_votes(votes)),
     }
     if canon_error is not None:
         result["error"] = canon_error

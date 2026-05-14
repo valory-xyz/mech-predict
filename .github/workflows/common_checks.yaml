@@ -195,26 +195,18 @@ jobs:
     env:
       OPENAI_SECRET_KEY: ${{ secrets.OPENAI_SECRET_KEY }}
       OPENAI_SECRET_KEYS: ${{ secrets.OPENAI_SECRET_KEYS }}
-      STABILITY_API_KEY: ${{ secrets.STABILITY_API_KEY }}
-      STABILITY_API_KEYS: ${{ secrets.STABILITY_API_KEYS }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GOOGLE_API_KEYS: ${{ secrets.GOOGLE_API_KEYS }}
       GOOGLE_ENGINE_ID: ${{ secrets.GOOGLE_ENGINE_ID }}
       GOOGLE_ENGINE_IDS: ${{ secrets.GOOGLE_ENGINE_IDS }}
       CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
       CLAUDE_API_KEYS: ${{ secrets.CLAUDE_API_KEYS }}
-      REPLICATE_API_KEY: ${{ secrets.REPLICATE_API_KEY }}
-      REPLICATE_API_KEYS: ${{ secrets.REPLICATE_API_KEYS }}
       NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
       NEWS_API_KEYS: ${{ secrets.NEWS_API_KEYS }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
-      GNOSIS_RPC_URL: ${{ secrets.GNOSIS_RPC_URL }}
-      GNOSIS_RPC_URLS: ${{ secrets.GNOSIS_RPC_URLS }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-      GRAPH_API_KEY: ${{ secrets.GRAPH_API_KEY }}
-      GRAPH_API_KEYS: ${{ secrets.GRAPH_API_KEYS }}
     steps:
       - uses: actions/checkout@v6
         with:

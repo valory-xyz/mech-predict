@@ -48,9 +48,9 @@ MODULE = "packages.valory.customs.resolve_market_jury.resolve_market_jury"
 
 def _vote(
     voter: str = "v1",
-    has_occurred: bool = True,
-    is_determinable: bool = True,
-    is_valid: bool = True,
+    has_occurred: Optional[bool] = True,
+    is_determinable: Optional[bool] = True,
+    is_valid: Optional[bool] = True,
     confidence: float = 0.9,
     reasoning: str = "test",
     error: Optional[str] = None,

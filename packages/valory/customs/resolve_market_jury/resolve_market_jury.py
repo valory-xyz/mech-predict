@@ -29,6 +29,7 @@ import functools
 import json
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -104,11 +105,20 @@ discussing whether it WILL happen suggests it did not.
   4. Consider the intent and spirit of the question, not just literal keywords. \
 For example, legislation "addressing AI's impact on the workforce" reasonably \
 covers white-collar employment even without that exact phrase.
-* There are only two possible outcomes: the event happened (true) or it did not \
-(false). If your confidence is below 0.7, set is_determinable to false -- do \
-NOT guess when evidence is insufficient.
 
-VALIDITY RULES:
+There are ONLY FOUR valid output shapes (mapped to the downstream
+resolver's contract). Pick exactly one:
+
+  (A) INVALID -- the question is malformed (relative date, opinion, etc.):
+        is_valid=false, is_determinable=null, has_occurred=null
+  (B) UNDETERMINABLE -- valid question, but evidence is insufficient:
+        is_valid=true, is_determinable=false, has_occurred=null, confidence<0.7
+  (C1) YES -- the event occurred:
+        is_valid=true, is_determinable=true, has_occurred=true, confidence>=0.7
+  (C2) NO -- the event did NOT occur:
+        is_valid=true, is_determinable=true, has_occurred=false, confidence>=0.7
+
+VALIDITY RULES (when to choose A -- INVALID):
 * Questions with relative dates ("in 6 months") are invalid.
 * Questions about opinions rather than facts are invalid.
 
@@ -116,15 +126,16 @@ Question: "{question}"
 
 CRITICAL: Respond with ONLY valid JSON. No markdown, no text before or after.
 CONSISTENCY RULES:
-- If has_occurred is true or false, then is_determinable MUST be true and confidence \
-should be >= 0.7.
-- If has_occurred is null, then is_determinable MUST be false and confidence should \
-be < 0.7.
+- If is_valid is false  -> is_determinable AND has_occurred MUST both be null.
+- If is_valid is true and is_determinable is true -> has_occurred MUST be true \
+or false (never null), confidence >= 0.7.
+- If is_valid is true and is_determinable is false -> has_occurred MUST be null, \
+confidence < 0.7.
 - confidence reflects how sure you are of your answer (0.0 = no idea, 1.0 = certain).
 {{
-    "is_valid": true,
-    "is_determinable": true or false,
-    "has_occurred": true or false or null,
+    "is_valid": true or false,
+    "is_determinable": true, false, or null,
+    "has_occurred": true, false, or null,
     "confidence": 0.0 to 1.0,
     "reasoning": "Step-by-step explanation, 200 words max. What you found, why you reached this verdict.",
     "sources": ["url1", "url2"]
@@ -139,6 +150,18 @@ Question: "{question}"
 Voter assessments:
 {votes}
 
+There are ONLY FOUR valid output shapes (mapped to the downstream
+resolver's contract). Pick exactly one:
+
+  (A) INVALID -- the question is malformed (relative date, opinion, etc.):
+        is_valid=false, is_determinable=null, has_occurred=null
+  (B) UNDETERMINABLE -- valid question, but evidence is insufficient:
+        is_valid=true, is_determinable=false, has_occurred=null
+  (C1) YES -- the event occurred:
+        is_valid=true, is_determinable=true, has_occurred=true
+  (C2) NO -- the event did NOT occur:
+        is_valid=true, is_determinable=true, has_occurred=false
+
 DECISION PROCESS:
 1. Review each voter's evidence and sources, not just their verdict.
 2. If all voters with a definitive answer agree, follow their consensus.
@@ -148,15 +171,19 @@ DECISION PROCESS:
    c. Follow the majority UNLESS your own research or the minority's sources \
 show a clear factual error in the majority's reasoning.
    d. When evidence quality is similar on both sides, follow the majority.
-4. If no clear majority exists, or evidence is too weak, set is_determinable \
-to false.
-5. If a voter flags the question as invalid with sound reasoning, mark invalid.
+4. If no clear majority exists, or evidence is too weak, pick (B) UNDETERMINABLE.
+5. If a voter flags the question as invalid with sound reasoning, pick (A) INVALID.
+
+CONSISTENCY RULES:
+- If is_valid is false  -> is_determinable AND has_occurred MUST both be null.
+- If is_valid is true and is_determinable is true -> has_occurred MUST be true or false (never null).
+- If is_valid is true and is_determinable is false -> has_occurred MUST be null.
 
 Respond in JSON only (no markdown fences, no text before or after):
 {{
     "is_valid": true or false,
-    "is_determinable": true or false,
-    "has_occurred": true or false or null,
+    "is_determinable": true, false, or null,
+    "has_occurred": true, false, or null,
     "judge_reasoning": "Which voters you agreed with and why. Cite evidence."
 }}"""
 
@@ -263,22 +290,35 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
             model=model,
             error=f"Unparseable JSON: {raw[:200]}",
         )
+    is_valid = data.get("is_valid")
     has_occurred = data.get("has_occurred")
     is_determinable = data.get("is_determinable")
-    confidence = float(data.get("confidence", 0.0))
+    # ``confidence`` may be omitted OR explicitly ``null`` (the prompt now
+    # allows null for is_determinable / has_occurred under Case A, and LLMs
+    # often null out confidence too); ``float(None)`` would crash.
+    raw_conf = data.get("confidence")
+    confidence = float(raw_conf) if raw_conf is not None else 0.0
 
-    # Enforce consistency between fields
-    if has_occurred is None:
-        is_determinable = False
-        confidence = min(confidence, 0.5)
-    if is_determinable is False:
+    # Canonicalize to the 4 downstream contract cases.
+    # Case A (INVALID): is_valid=False  -> is_determinable=None, has_occurred=None
+    # Case B (UNDET):   is_valid=True, is_determinable=False -> has_occurred=None
+    # Case C1/C2 (YES/NO): is_valid=True, is_determinable=True, has_occurred=True/False
+    if is_valid is False:
+        is_determinable = None
         has_occurred = None
         confidence = min(confidence, 0.5)
+    else:
+        if has_occurred is None:
+            is_determinable = False
+            confidence = min(confidence, 0.5)
+        if is_determinable is False:
+            has_occurred = None
+            confidence = min(confidence, 0.5)
 
     return VoterResult(
         voter=voter,
         model=model,
-        is_valid=data.get("is_valid"),
+        is_valid=is_valid,
         is_determinable=is_determinable,
         has_occurred=has_occurred,
         confidence=confidence,
@@ -521,36 +561,12 @@ def _successful_votes(votes: List[VoterResult]) -> List[VoterResult]:
 
 
 def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
-    """Filter to votes that are valid and determinable."""
-    return [
-        v
-        for v in votes
-        if v.is_determinable is not False
-        and v.is_valid is not False
-        and v.error is None
-    ]
+    """Filter to votes that reached a decided verdict.
 
-
-def _invalid_votes(votes: List[VoterResult]) -> List[VoterResult]:
-    """Filter to votes where the voter explicitly marked the question invalid.
-
-    :param votes: all voter results.
-    :return: voter results with ``is_valid is False`` and no error.
-    """
-    return [v for v in votes if v.is_valid is False and v.error is None]
-
-
-def _definitive_votes(votes: List[VoterResult]) -> List[VoterResult]:
-    """Filter to votes that reached a definitive verdict.
-
-    A definitive verdict is YES, NO, **or INVALID** -- anything except
-    undeterminable (Case B) or an error stub. INVALID counts because
-    saying "this question is invalid" is itself a decision; the only
-    "non-decided" outcome is undeterminable.
-
-    Used for the ``n_decided`` field in the tool's result output. Distinct
-    from ``_decided_votes`` (which is YES/NO-only and used by the
-    has_occurred-unanimity consensus check).
+    A decided verdict is one of the three valid actionable options:
+    YES, NO, or INVALID. Undeterminable (Case B) and errored voters are
+    excluded. Used to populate the public ``n_decided`` field, drive
+    consensus, and compute ``agreement_ratio``.
     """
     return [
         v
@@ -560,107 +576,97 @@ def _definitive_votes(votes: List[VoterResult]) -> List[VoterResult]:
     ]
 
 
-def _has_consensus(votes: List[VoterResult]) -> bool:
-    """Check whether voters form a strict majority on a definitive verdict.
+# The three valid actionable verdict labels. A decided vote always maps
+# to exactly one of these; the (is_valid, is_determinable, has_occurred)
+# tuple in the public output is derived from the label.
+_LABEL_OUTPUT: Dict[str, Tuple[Optional[bool], Optional[bool], Optional[bool]]] = {
+    "yes":     (True,  True,  True),   # Case C1
+    "no":      (True,  True,  False),  # Case C2
+    "invalid": (False, None,  None),   # Case A
+}
 
-    Two consensus paths skip the judge:
 
-    1. **INVALID consensus** -- a strict majority of all voters explicitly
-       voted ``is_valid=False``. The other two fields lose semantic meaning
-       when the question itself is invalid; output is ``(False, False, None)``.
-    2. **DECIDED consensus** -- a strict majority of all voters are decided
-       (``is_valid=True``, ``is_determinable=True``, ``has_occurred`` set)
-       AND unanimously agree on ``has_occurred``.
+def _verdict_label(v: VoterResult) -> Optional[str]:
+    """Return the verdict label for a vote, or None if not decided.
 
-    Undecided / failed voters count against both thresholds: a strict
-    majority of *all* voters (not just successful ones) must reach one of
-    the two verdicts. This prevents 2-of-4 minority agreement from
-    short-circuiting the judge.
-
-    :param votes: all voter results (including undecided / failed / invalid).
-    :return: True if either consensus type holds.
+    Mirrors ``_LABEL_OUTPUT`` -- a vote is "yes", "no", or "invalid" if
+    its canonical shape matches one of the three actionable cases.
     """
-    half = len(votes) / 2
+    if v.error is not None:
+        return None
+    if v.is_valid is False:
+        return "invalid"
+    if v.is_determinable is True and v.has_occurred is True:
+        return "yes"
+    if v.is_determinable is True and v.has_occurred is False:
+        return "no"
+    return None
 
-    # 1. INVALID consensus -- strict majority of all voters said is_valid=False
-    invalid = _invalid_votes(votes)
-    if len(invalid) > half:
-        return True
 
-    # 2. DECIDED consensus -- strict majority decided AND unanimous on has_occurred
-    decided = _decided_votes(votes)
-    if len(decided) < 2 or len(decided) <= half:
+def _label_counts(votes: List[VoterResult]) -> Counter:
+    """Tally votes per verdict label (yes / no / invalid)."""
+    return Counter(
+        label for label in (_verdict_label(v) for v in votes) if label is not None
+    )
+
+
+def _has_consensus(votes: List[VoterResult]) -> bool:
+    """Check whether voters form a strict majority on one actionable verdict.
+
+    Consensus fires when **strictly more than 50% of TOTAL voters** voted
+    the same actionable option -- YES, NO, or INVALID. Undeterminable and
+    failed voters count against the threshold but cannot be the winning
+    option (the resolver has no actionable verdict to submit for them).
+    """
+    counts = _label_counts(votes)
+    if not counts:
         return False
-    return all(v.has_occurred == decided[0].has_occurred for v in decided)
+    return counts.most_common(1)[0][1] > len(votes) / 2
 
 
 def _build_consensus_result(votes: List[VoterResult]) -> dict:
     """Build result from consensus votes (skip judge).
 
-    Handles both consensus types -- INVALID (strict majority say
-    ``is_valid=False``) and DECIDED (strict majority decided and agree on
-    ``has_occurred``). Caller MUST have already verified ``_has_consensus``
-    returns True.
+    Caller MUST have verified ``_has_consensus`` returns True. The
+    winning label's canonical shape (see ``_LABEL_OUTPUT``) is emitted
+    directly -- no separate code paths for INVALID vs YES/NO.
 
     :param votes: all voter results.
     :return: top-level result dict matching the judge-path output schema.
     """
-    successful = _successful_votes(votes)
-    decided = _decided_votes(votes)
-    invalid = _invalid_votes(votes)
-    definitive = _definitive_votes(votes)
-
-    # ``n_decided`` reports voters that reached a definitive verdict
-    # (YES, NO, or INVALID) -- so e.g. for unanimous-INVALID with 4 voters,
-    # ``n_decided`` is 4, not 0. ``_decided_votes`` keeps its narrower
-    # YES/NO-only semantic because it's used for has_occurred-unanimity
-    # checks; the broader ``_definitive_votes`` is for the output field.
-    base = {
-        "votes": [asdict(v) for v in votes],
-        "agreement_ratio": 1.0,
-        "n_voters": len(votes),
-        "n_successful": len(successful),
-        "n_decided": len(definitive),
-    }
-
-    # INVALID consensus takes priority over DECIDED -- a voter saying
-    # ``is_valid=False`` is excluded from ``_decided_votes`` so the two
-    # populations are disjoint, but if the invalid majority threshold is
-    # met we always report invalid.
-    #
-    # Output is the canonical Case A shape ``(False, None, None)`` per
-    # the ``parse_mech_response`` contract in market-resolver's
-    # ``behaviours/base.py``. ``is_determinable`` and ``has_occurred``
-    # are ``None`` because they lose semantic meaning when the question
-    # itself is invalid.
-    if len(invalid) > len(votes) / 2:
-        return {
-            "is_valid": False,
-            "is_determinable": None,
-            "has_occurred": None,
-            "judge_reasoning": "Voter majority consensus on INVALID -- judge skipped.",
-            **base,
-        }
-
-    # DECIDED consensus -- canonical Case C1 ``(True, True, True)`` or
-    # Case C2 ``(True, True, False)``.
+    counts = _label_counts(votes)
+    winner, _ = counts.most_common(1)[0]
+    is_valid, is_determinable, has_occurred = _LABEL_OUTPUT[winner]
+    reason = (
+        "Voter majority consensus on INVALID -- judge skipped."
+        if winner == "invalid"
+        else "Voter majority consensus -- judge skipped."
+    )
     return {
-        "is_valid": True,
-        "is_determinable": True,
-        "has_occurred": decided[0].has_occurred,
-        "judge_reasoning": "Voter majority consensus -- judge skipped.",
-        **base,
+        "is_valid": is_valid,
+        "is_determinable": is_determinable,
+        "has_occurred": has_occurred,
+        "judge_reasoning": reason,
+        "votes": [asdict(v) for v in votes],
+        "agreement_ratio": _compute_agreement(votes),
+        "n_voters": len(votes),
+        "n_successful": len(_successful_votes(votes)),
+        "n_decided": len(_decided_votes(votes)),
     }
 
 
 def _compute_agreement(votes: List[VoterResult]) -> float:
-    """Compute agreement ratio among decided votes."""
-    decided = _decided_votes(votes)
-    if not decided:
+    """Compute agreement ratio among decided votes.
+
+    Treats YES, NO, and INVALID as three symmetric options: the ratio is
+    the share of decided voters that picked whichever option got the
+    most votes. Returns 0.0 if no voter reached a decided verdict.
+    """
+    counts = _label_counts(votes)
+    n_decided = sum(counts.values())
+    if n_decided == 0:
         return 0.0
-    yes_count = sum(1 for v in decided if v.has_occurred is True)
-    no_count = sum(1 for v in decided if v.has_occurred is False)
-    return max(yes_count, no_count) / len(decided)
+    return counts.most_common(1)[0][1] / n_decided
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +852,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "agreement_ratio": _compute_agreement(votes),
         "n_voters": len(voters),
         "n_successful": len(successful),
-        "n_decided": len(_definitive_votes(votes)),
+        "n_decided": len(_decided_votes(votes)),
     }
     if canon_error is not None:
         result["error"] = canon_error

@@ -166,6 +166,47 @@ class TestParseVote:
         assert result.has_occurred is None
         assert result.confidence == 0.5
 
+    def test_null_confidence_does_not_crash(self) -> None:
+        """``confidence: null`` is tolerated (LLMs emit it for Case A).
+
+        Regression: surfaced from a live scenario run where Gemini/Claude
+        emitted ``{"is_valid": false, ..., "confidence": null}``; the parser
+        used to do ``float(None)`` and crash, dropping the vote.
+        """
+        raw = json.dumps(
+            {
+                "is_valid": False,
+                "is_determinable": None,
+                "has_occurred": None,
+                "confidence": None,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.error is None
+        assert result.is_valid is False
+        assert result.confidence == 0.0
+
+    def test_invalid_canonicalizes_to_case_a(self) -> None:
+        """``is_valid=False`` forces ``(False, None, None)`` per the parser contract.
+
+        Even if the LLM emits contradictory fields (is_determinable=true,
+        has_occurred=true) alongside is_valid=false, the parser canonicalizes
+        the output to the Case A shape ``(False, None, None)``.
+        """
+        raw = json.dumps(
+            {
+                "is_valid": False,
+                "is_determinable": True,
+                "has_occurred": True,
+                "confidence": 0.9,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.is_valid is False
+        assert result.is_determinable is None
+        assert result.has_occurred is None
+        assert result.confidence == 0.5
+
 
 # ---------------------------------------------------------------------------
 # Consensus helpers
@@ -173,26 +214,37 @@ class TestParseVote:
 
 
 class TestDecidedVotes:
-    """Tests for _decided_votes filtering."""
+    """Tests for ``_decided_votes`` (broad: YES/NO/INVALID, used by ``n_decided``).
+
+    Decided = the voter reached a verdict the resolver can act on. INVALID
+    counts because "this question is invalid" is itself a decision. Only
+    undeterminable and errored voters are filtered out.
+    """
 
     @pytest.mark.parametrize(
-        "bad_vote, expected_count",
+        "bad_vote, expected_count, expected_kept",
         [
-            (_vote(is_determinable=False), 1),
-            (_vote(is_valid=False), 1),
-            (_vote(error="failed"), 1),
+            # Undeterminable -- not decided.
+            (_vote(is_determinable=False), 1, "good_vote_only"),
+            # INVALID is itself a decided verdict -- kept.
+            (_vote(is_valid=False), 2, "both"),
+            # Errored stub -- not decided.
+            (_vote(error="failed"), 1, "good_vote_only"),
         ],
-        ids=["indeterminate", "invalid", "error"],
+        ids=["indeterminate", "invalid_kept", "error"],
     )
-    def test_filters_bad_votes(
-        self, bad_vote: VoterResult, expected_count: int
+    def test_filter(
+        self,
+        bad_vote: VoterResult,
+        expected_count: int,
+        expected_kept: str,
     ) -> None:
-        """Bad votes are excluded, good ones kept."""
+        """Undet + errored are filtered; INVALID and YES/NO are kept."""
         votes = [bad_vote, _vote()]
         assert len(_decided_votes(votes)) == expected_count
 
     def test_all_valid(self) -> None:
-        """All valid votes pass through."""
+        """All YES/NO votes pass through."""
         votes = [_vote(), _vote(), _vote()]
         assert len(_decided_votes(votes)) == 3
 
@@ -206,7 +258,10 @@ class TestAllAgree:
             ([_vote(has_occurred=True), _vote(has_occurred=True)], True),
             ([_vote(has_occurred=False), _vote(has_occurred=False)], True),
             ([_vote(has_occurred=True), _vote(has_occurred=False)], False),
-            ([_vote()], False),
+            # Single voter: 1/1 > 0.5 -> trivial consensus. Degenerate in
+            # production (always 4 voters) but the symmetric rule treats it
+            # consistently with all other strict-majority cases.
+            ([_vote()], True),
             (
                 [
                     _vote(has_occurred=True),
@@ -252,28 +307,28 @@ class TestAllAgree:
         "votes, expected",
         [
             # Unanimous invalid -- strict majority (4/4 > 2)
-            ([_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 4, True),
+            ([_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4, True),
             # 3/4 invalid -- strict majority (3 > 2)
             (
-                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 3
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3
                 + [_vote(has_occurred=True)],
                 True,
             ),
             # 2/4 invalid -- not a strict majority
             (
-                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 2
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 2
                 + [_vote(has_occurred=True)] * 2,
                 False,
             ),
             # 3/4 invalid, 1 errored -- 3 > 2 still strict majority of 4
             (
-                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 3
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3
                 + [_vote(error="boom")],
                 True,
             ),
             # 2/4 invalid, 2 errored -- only 2/4 are invalid, not strict majority
             (
-                [_vote(is_valid=False, is_determinable=False, has_occurred=None)] * 2
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 2
                 + [_vote(error="boom")] * 2,
                 False,
             ),
@@ -323,7 +378,7 @@ class TestBuildConsensusResult:
         hardcoded shape.
         """
         votes = [
-            _vote(is_valid=False, is_determinable=False, has_occurred=None)
+            _vote(is_valid=False, is_determinable=None, has_occurred=None)
         ] * 4
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False
@@ -350,7 +405,7 @@ class TestBuildConsensusResult:
         a definitive verdict.
         """
         votes = [
-            _vote(is_valid=False, is_determinable=False, has_occurred=None)
+            _vote(is_valid=False, is_determinable=None, has_occurred=None)
         ] * 3 + [_vote(has_occurred=True)]
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False

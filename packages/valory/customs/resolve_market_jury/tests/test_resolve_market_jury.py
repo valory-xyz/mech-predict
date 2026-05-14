@@ -34,6 +34,7 @@ from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     _has_consensus,
     _noop_token_counter,
     _parse_vote,
+    _successful_votes,
     run,
 )
 
@@ -926,3 +927,175 @@ class TestCounterCallbackConcurrency:
             )
 
         assert held_during_call["value"] is True
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: OpenRouter HTTP 402 ("Insufficient credits") propagates
+# correctly through collect_votes -> _successful_votes -> run().
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaExhaustionIntegration:
+    """End-to-end integration tests for the OpenRouter quota-exhaustion path.
+
+    Replicates the production-observed scenario from market-resolver Safe
+    ``0xa592085e...c7433a9d`` on the Gnosis Mech subgraph: every OpenRouter
+    voter call returns ``Error code: 402 - {'error': {'message': 'Insufficient
+    credits. Add more using https://openrouter.ai/settings/credits',
+    'code': 402}}``. Verifies:
+
+    1. ``collect_votes`` records the error on each voter's ``VoterResult``.
+    2. ``_successful_votes`` filters them all out (empty list).
+    3. ``run()`` takes the all-voters-failed branch and emits
+       ``is_valid=None`` -- NOT ``is_valid=False`` -- so downstream
+       consumers don't mistake a billing-quota outage for a "market is
+       invalid" verdict.
+    """
+
+    def _make_402_error(self) -> Any:
+        """Construct an ``openai.APIStatusError`` matching production shape."""
+        import openai
+
+        err_response = MagicMock()
+        err_response.status_code = 402
+        body = {
+            "error": {
+                "message": (
+                    "Insufficient credits. Add more using "
+                    "https://openrouter.ai/settings/credits"
+                ),
+                "code": 402,
+            }
+        }
+        return openai.APIStatusError(
+            message=f"Error code: 402 - {body}",
+            response=err_response,
+            body=body,
+        )
+
+    def test_all_voters_402_emits_is_valid_none(self) -> None:
+        """All 4 voters get HTTP 402; pipeline emits is_valid=None."""
+        keys = _mock_api_keys()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = self._make_402_error()
+
+        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
+            result = run(
+                prompt="Will the number of immigration hearings be above 500?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+
+        parsed = json.loads(result[0])
+
+        # === Pipeline-level assertions ===
+        assert parsed["n_voters"] == 4, "should attempt all 4 default voters"
+        assert parsed["n_successful"] == 0, "0 voters succeeded"
+
+        # The critical assertion: top-level is_valid is None, NOT False.
+        # If this regresses to False, downstream parse_mech_response could
+        # interpret the result as a genuine 'market is invalid' verdict and
+        # submit ANSWER_INVALID (0xff...ff) to Realitio -- burning bonds on
+        # what is really just an API quota outage.
+        assert parsed["is_valid"] is None
+        assert parsed["is_determinable"] is None
+        assert parsed["has_occurred"] is None
+        assert parsed["error"] == "all_voters_failed"
+        assert "All voters failed" in parsed["judge_reasoning"]
+        assert parsed["agreement_ratio"] == 0.0
+        assert parsed["n_decided"] == 0
+
+        # === Per-voter assertions ===
+        # collect_votes must have produced one VoterResult per attempted
+        # voter, each with the 402 error recorded and is_valid=None.
+        assert len(parsed["votes"]) == 4
+        for vote in parsed["votes"]:
+            assert vote["is_valid"] is None
+            assert vote["is_determinable"] is None
+            assert vote["has_occurred"] is None
+            assert vote["confidence"] == 0.0
+            assert vote["error"] is not None
+            assert "402" in vote["error"], (
+                f"voter error should mention HTTP 402, got: {vote['error']!r}"
+            )
+
+        # === Filter behaviour ===
+        # Reconstruct VoterResult objects from the parsed output and confirm
+        # _successful_votes filters them ALL out -- this is the gate that
+        # routes into the all-voters-failed branch in run().
+        votes = [VoterResult(**v) for v in parsed["votes"]]
+        assert _successful_votes(votes) == [], (
+            "_successful_votes should drop all error-stubbed voters"
+        )
+        assert len(votes) == 4
+        assert all(v.error is not None for v in votes)
+
+    def test_partial_quota_exhaustion_one_voter_survives(self) -> None:
+        """3 voters fail with 402, 1 succeeds -- run() must NOT take the
+        all-voters-failed branch; the surviving voter should drive the verdict
+        (judge or consensus path)."""
+        keys = _mock_api_keys()
+
+        # 1st call (whichever voter pool item runs first) succeeds; the
+        # remaining 3 fail with 402.
+        good_response = MagicMock()
+        good_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps(
+                        {
+                            "is_valid": True,
+                            "is_determinable": True,
+                            "has_occurred": True,
+                            "confidence": 0.8,
+                            "reasoning": "verified via search",
+                            "sources": ["http://example.com"],
+                        }
+                    )
+                )
+            )
+        ]
+        good_response.usage = None
+
+        bad_err = self._make_402_error()
+
+        mock_client = MagicMock()
+        # side_effect: first call returns the good response, subsequent
+        # calls raise 402. Note: thread ordering in collect_votes is
+        # non-deterministic but the side_effect queue is process-global, so
+        # exactly 1 of the 4 voters will get the success and the other 3
+        # will get errors regardless of scheduling.
+        mock_client.chat.completions.create.side_effect = [
+            good_response, bad_err, bad_err, bad_err,
+        ]
+
+        # Mock the judge too -- with only 1 successful vote there is no
+        # consensus, so _run_judge will be called. We short-circuit it.
+        judge_verdict = {
+            "is_valid": True,
+            "is_determinable": True,
+            "has_occurred": True,
+            "judge_reasoning": "Single surviving voter said YES; agreed.",
+        }
+        with (
+            patch(f"{MODULE}.openai.OpenAI", return_value=mock_client),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="Will X happen?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+
+        parsed = json.loads(result[0])
+
+        # NOT all-voters-failed -- one survived, so we DO get a verdict.
+        assert parsed.get("error") != "all_voters_failed"
+        assert parsed["n_successful"] == 1
+        assert len(parsed["votes"]) == 4
+        # Three voters errored
+        errored = [v for v in parsed["votes"] if v.get("error") is not None]
+        assert len(errored) == 3
+        for v in errored:
+            assert "402" in v["error"]

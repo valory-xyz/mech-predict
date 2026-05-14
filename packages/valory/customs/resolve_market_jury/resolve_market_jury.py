@@ -601,16 +601,23 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
     # ``is_valid=False`` is excluded from ``_decided_votes`` so the two
     # populations are disjoint, but if the invalid majority threshold is
     # met we always report invalid.
+    #
+    # Output is the canonical Case A shape ``(False, None, None)`` per
+    # the ``parse_mech_response`` contract in market-resolver's
+    # ``behaviours/base.py``. ``is_determinable`` and ``has_occurred``
+    # are ``None`` because they lose semantic meaning when the question
+    # itself is invalid.
     if len(invalid) > len(votes) / 2:
         return {
             "is_valid": False,
-            "is_determinable": False,
+            "is_determinable": None,
             "has_occurred": None,
             "judge_reasoning": "Voter majority consensus on INVALID -- judge skipped.",
             **base,
         }
 
-    # DECIDED consensus
+    # DECIDED consensus -- canonical Case C1 ``(True, True, True)`` or
+    # Case C2 ``(True, True, False)``.
     return {
         "is_valid": True,
         "is_determinable": True,
@@ -761,12 +768,53 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     print("  Voters disagree -- running judge...")
     verdict = _run_judge(prompt, votes, api_keys["openrouter"], counter_callback)
 
-    # 5. Build result with vote metadata
+    # 5. Canonicalize judge verdict to one of the four contract cases.
+    #
+    # Contract (parse_mech_response docstring, market-resolver
+    # ``behaviours/base.py``):
+    #   Case A:  (False, None, None)   -> INVALID
+    #   Case B:  (True,  False, None)  -> undeterminable
+    #   Case C1: (True,  True,  True)  -> YES
+    #   Case C2: (True,  True,  False) -> NO
+    #
+    # Anything outside these four shapes is consolidated to the error
+    # discriminator ``(None, None, None) + error="malformed_verdict"``,
+    # which downstream parsers reject as garbage and retry.
+    iv = verdict.get("is_valid")
+    id_ = verdict.get("is_determinable")
+    ho = verdict.get("has_occurred")
     judge_reasoning = verdict.get("judge_reasoning", "")
+
+    canon_is_valid: Optional[bool]
+    canon_is_det: Optional[bool]
+    canon_has_occ: Optional[bool]
+    canon_error: Optional[str] = None
+    if iv is False:
+        # Case A
+        canon_is_valid, canon_is_det, canon_has_occ = False, None, None
+    elif iv is True and id_ is False:
+        # Case B
+        canon_is_valid, canon_is_det, canon_has_occ = True, False, None
+    elif iv is True and id_ is True and ho is True:
+        # Case C1
+        canon_is_valid, canon_is_det, canon_has_occ = True, True, True
+    elif iv is True and id_ is True and ho is False:
+        # Case C2
+        canon_is_valid, canon_is_det, canon_has_occ = True, True, False
+    else:
+        # Judge returned a shape outside the contract (e.g. is_valid=None
+        # after partial parse, is_determinable=True with has_occurred=None,
+        # etc.). Route through the error discriminator so downstream
+        # consumers retry instead of acting on an ambiguous verdict.
+        canon_is_valid = None
+        canon_is_det = None
+        canon_has_occ = None
+        canon_error = "malformed_verdict"
+
     result = {
-        "is_valid": verdict.get("is_valid", True),
-        "is_determinable": verdict.get("is_determinable", True),
-        "has_occurred": verdict.get("has_occurred"),
+        "is_valid": canon_is_valid,
+        "is_determinable": canon_is_det,
+        "has_occurred": canon_has_occ,
         "votes": [asdict(v) for v in votes],
         "judge_reasoning": judge_reasoning,
         "agreement_ratio": _compute_agreement(votes),
@@ -774,5 +822,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "n_successful": len(successful),
         "n_decided": len(_decided_votes(votes)),
     }
+    if canon_error is not None:
+        result["error"] = canon_error
 
     return json.dumps(result), judge_reasoning, None, counter_callback, used_params

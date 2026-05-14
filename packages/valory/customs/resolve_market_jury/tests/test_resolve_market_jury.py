@@ -308,17 +308,22 @@ class TestBuildConsensusResult:
     def test_builds_result_invalid_consensus(self) -> None:
         """All voters say is_valid=False -> consensus on INVALID.
 
+        Output MUST match the canonical Case A shape ``(False, None, None)``
+        per the ``parse_mech_response`` docstring contract in market-resolver's
+        ``behaviours/base.py``. ``is_determinable`` and ``has_occurred`` are
+        ``None`` because they lose semantic meaning when the question is
+        invalid.
+
         Regression: previously this would crash on ``decided[0]`` (empty
         list) and/or emit the wrong ``is_valid=True, is_determinable=True``
-        hardcoded shape. Post-fix it must emit ``(False, False, None)`` with
-        a judge_reasoning that flags INVALID consensus.
+        hardcoded shape.
         """
         votes = [
             _vote(is_valid=False, is_determinable=False, has_occurred=None)
         ] * 4
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False
-        assert result["is_determinable"] is False
+        assert result["is_determinable"] is None
         assert result["has_occurred"] is None
         assert result["agreement_ratio"] == 1.0
         assert result["n_voters"] == 4
@@ -330,13 +335,17 @@ class TestBuildConsensusResult:
         assert "judge skipped" in result["judge_reasoning"]
 
     def test_builds_result_invalid_consensus_with_one_dissenter(self) -> None:
-        """3/4 invalid + 1 yes -> still consensus on INVALID."""
+        """3/4 invalid + 1 yes -> still consensus on INVALID.
+
+        Voter shapes vary (the dissenter has different fields), but the
+        canonical output is the same Case A ``(False, None, None)`` regardless.
+        """
         votes = [
             _vote(is_valid=False, is_determinable=False, has_occurred=None)
         ] * 3 + [_vote(has_occurred=True)]
         result = _build_consensus_result(votes)
         assert result["is_valid"] is False
-        assert result["is_determinable"] is False
+        assert result["is_determinable"] is None
         assert result["has_occurred"] is None
         assert result["n_voters"] == 4
         assert result["n_successful"] == 4  # all returned, none errored

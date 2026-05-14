@@ -134,10 +134,12 @@ class TestBuildSystemPrompt:
         assert "do NOT enumerate the tool names" in prompt
         assert "`⚠️ unavailable`" in prompt
 
-    def test_tool_category_prompt_lists_every_qualifying_cell(self) -> None:
-        """Tool × Category bullet instructs the LLM to list every qualifying cell."""
+    def test_tool_category_prompt_caps_at_top_3_by_sample_size(self) -> None:
+        """Tool × Category bullet caps at top 3 cells, selected by Current-window n."""
         prompt = _default_prompt()
-        assert "list every cell that clears the sample-size threshold" in prompt
+        assert "list the top 3 cells by sample size" in prompt
+        assert "n-descending order" in prompt
+        assert "re-rank by n, not take the first 3 you see" in prompt
         assert "insufficient tool × category data" in prompt
 
 

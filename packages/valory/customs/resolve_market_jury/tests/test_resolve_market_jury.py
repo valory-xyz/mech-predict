@@ -1188,9 +1188,11 @@ class TestQuotaExhaustionIntegration:
         assert all(v.error is not None for v in votes)
 
     def test_partial_quota_exhaustion_one_voter_survives(self) -> None:
-        """3 voters fail with 402, 1 succeeds -- run() must NOT take the
-        all-voters-failed branch; the surviving voter should drive the verdict
-        (judge or consensus path)."""
+        """3 voters fail with 402, 1 succeeds -- partial-failure path runs.
+
+        ``run()`` must NOT take the all-voters-failed branch; the surviving
+        voter drives the verdict (judge or consensus path).
+        """
         keys = _mock_api_keys()
 
         # 1st call (whichever voter pool item runs first) succeeds; the

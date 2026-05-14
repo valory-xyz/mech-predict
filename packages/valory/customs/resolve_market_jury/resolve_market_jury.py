@@ -605,13 +605,7 @@ def _successful_votes(votes: List[VoterResult]) -> List[VoterResult]:
 
 
 def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
-    """Filter to votes that reached a decided verdict.
-
-    A decided verdict is one of the three valid actionable options:
-    YES, NO, or INVALID. Undeterminable (Case B) and errored voters are
-    excluded. Used to populate the public ``n_decided`` field, drive
-    consensus, and compute ``agreement_ratio``.
-    """
+    """Voters that reached YES / NO / INVALID (excludes undet + errored)."""
     return [
         v
         for v in votes
@@ -630,11 +624,7 @@ _LABEL_OUTPUT: Dict[str, Tuple[Optional[bool], Optional[bool], Optional[bool]]] 
 
 
 def _verdict_label(v: VoterResult) -> Optional[str]:
-    """Return the verdict label for a vote, or None if not decided.
-
-    Mirrors ``_LABEL_OUTPUT`` -- a vote is "yes", "no", or "invalid" if
-    its canonical shape matches one of the three actionable cases.
-    """
+    """``"yes"`` / ``"no"`` / ``"invalid"`` for decided votes; else ``None``."""
     if v.error is not None:
         return None
     if v.is_valid is False:
@@ -647,20 +637,14 @@ def _verdict_label(v: VoterResult) -> Optional[str]:
 
 
 def _label_counts(votes: List[VoterResult]) -> Counter:
-    """Tally votes per verdict label (yes / no / invalid)."""
+    """Tally of decided votes per verdict label (undet/errored skipped)."""
     return Counter(
         label for label in (_verdict_label(v) for v in votes) if label is not None
     )
 
 
 def _has_consensus(votes: List[VoterResult]) -> bool:
-    """Check whether voters form a strict majority on one actionable verdict.
-
-    Consensus fires when **strictly more than 50% of TOTAL voters** voted
-    the same actionable option -- YES, NO, or INVALID. Undeterminable and
-    failed voters count against the threshold but cannot be the winning
-    option (the resolver has no actionable verdict to submit for them).
-    """
+    """True iff strictly >50% of TOTAL voters back one actionable verdict."""
     counts = _label_counts(votes)
     if not counts:
         return False
@@ -699,12 +683,7 @@ def _build_consensus_result(votes: List[VoterResult]) -> dict:
 
 
 def _compute_agreement(votes: List[VoterResult]) -> float:
-    """Compute agreement ratio among decided votes.
-
-    Treats YES, NO, and INVALID as three symmetric options: the ratio is
-    the share of decided voters that picked whichever option got the
-    most votes. Returns 0.0 if no voter reached a decided verdict.
-    """
+    """Most-voted label's share over decided votes (0.0 if none)."""
     counts = _label_counts(votes)
     n_decided = sum(counts.values())
     if n_decided == 0:

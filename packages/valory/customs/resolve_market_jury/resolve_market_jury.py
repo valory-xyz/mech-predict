@@ -105,6 +105,24 @@ discussing whether it WILL happen suggests it did not.
   4. Consider the intent and spirit of the question, not just literal keywords. \
 For example, legislation "addressing AI's impact on the workforce" reasonably \
 covers white-collar employment even without that exact phrase.
+  5. SEMANTIC CHECKS before setting has_occurred:
+     (a) NEGATION TRAP -- if the question uses negative framing ("still pending", \
+"still in effect", "remain at", "not yet"), first answer it in plain English \
+("Is X still pending? Yes/No"), then set has_occurred to the plain-English answer. \
+"Still pending = true" means YES, the pending state holds. Cross-check that your \
+final boolean matches your reasoning text.
+     (b) NUMERIC RANGE -- for "at or above X" / "below X", a guidance RANGE \
+[A, B] satisfies "at or above X" only if A >= X or a confirmed value >= X. A range \
+whose upper bound merely touches X does NOT satisfy "at or above X". Symmetric \
+rule for "below X" (requires B < X).
+     (c) VERB MATCH -- announce != complete != deploy != ratify. Evidence of an \
+ANNOUNCEMENT OF INTENT to do X does not count as evidence that X has been \
+COMPLETED. Match the verb in the question precisely.
+     (d) NAMED SOURCE -- if the question names a specific publisher (e.g. NWS, \
+AAA, SWAA, GasBuddy, Baker Hughes, Moneyfacts, OECD, IMF, NASA, NCAA), your \
+"sources" list MUST include at least one direct URL or document from that \
+publisher. If no such source is available, return is_determinable=false rather \
+than guessing from secondary citations or forecasts.
 
 There are ONLY FOUR valid output shapes (mapped to the downstream
 resolver's contract). Pick exactly one:
@@ -173,6 +191,32 @@ show a clear factual error in the majority's reasoning.
    d. When evidence quality is similar on both sides, follow the majority.
 4. If no clear majority exists, or evidence is too weak, pick (B) UNDETERMINABLE.
 5. If a voter flags the question as invalid with sound reasoning, pick (A) INVALID.
+6. If the majority of decided voters say UNDETERMINABLE or INVALID, do NOT \
+override them with your own affirmative answer -- pick (B) or (A) respectively. \
+Reserve C1/C2 for cases where decided voters actually support that verdict. \
+The same rule applies when two or more decided voters with confidence >= 0.9 \
+agree on YES or NO: you MUST follow them unless you can cite a specific \
+factual error in their reasoning text -- a different INTERPRETATION of the \
+question (e.g. of VERB MATCH, NUMERIC RANGE, NEGATION) is NOT a factual error \
+and does not justify override.
+
+SEMANTIC CHECKS (apply before producing has_occurred):
+(a) NEGATION TRAP -- "still pending", "still in effect", "remain at", "not yet" \
+frame the QUESTION negatively. Restate it positively in your judge_reasoning \
+("Has X been completed?") and answer that, then map: "X has happened" -> \
+has_occurred=false (the pending state is over) / "X has not happened" -> \
+has_occurred=true (the pending state holds). Cross-check that your has_occurred \
+matches the plain-English reading of your reasoning text.
+(b) NUMERIC RANGE -- "at or above X" requires confirmed value >= X or a range \
+lower bound >= X. A range [A, B] whose upper bound B merely touches X does NOT \
+satisfy "at or above X". Symmetric for "below X".
+(c) VERB MATCH -- announce != complete != deploy != ratify. An announcement of \
+intent does NOT satisfy a question asking for completion. Match the verb in the \
+question literally.
+(d) NAMED SOURCE -- if the question names a specific publisher (NWS, AAA, SWAA, \
+GasBuddy, Baker Hughes, Moneyfacts, OECD, IMF, NASA, NCAA, etc.), your verdict \
+must be backed by a citation from that publisher in at least one voter's sources \
+or your own search. If no such source is available, pick (B) UNDETERMINABLE.
 
 CONSISTENCY RULES:
 - If is_valid is false  -> is_determinable AND has_occurred MUST both be null.

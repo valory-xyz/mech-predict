@@ -449,7 +449,12 @@ class TestRunJudge:
             assert result["has_occurred"] is False
 
     def test_judge_unparseable(self) -> None:
-        """Judge returns fallback on garbage response."""
+        """Judge returns fallback on garbage response.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) so downstream
+        consumers don't mistake a judge-side LLM failure for a real
+        "question is invalid" verdict.
+        """
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
             MagicMock(message=MagicMock(content="not json at all"))
@@ -461,7 +466,10 @@ class TestRunJudge:
             )
 
             result = _run_judge("q?", [_vote()], "key")
-            assert result["is_valid"] is False
+            assert result["is_valid"] is None
+            assert result["is_determinable"] is None
+            assert result["has_occurred"] is None
+            assert result["error"] == "judge_unparseable"
             assert "Unparseable" in result["judge_reasoning"]
 
     def test_judge_retries_on_529(self) -> None:
@@ -757,7 +765,12 @@ class TestRun:
             assert parsed["judge_reasoning"] == "majority wins"
 
     def test_no_votes_returns_failure(self) -> None:
-        """No successful votes returns failure result."""
+        """No successful votes returns failure result.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) so downstream consumers
+        can distinguish an API outage from a real "the question is invalid"
+        verdict. ``is_valid=False`` is reserved for genuine invalid verdicts.
+        """
         keys = _mock_api_keys()
 
         with patch(f"{MODULE}.collect_votes", return_value=[]):
@@ -767,11 +780,18 @@ class TestRun:
                 api_keys=keys,
             )
             parsed = json.loads(result[0])
-            assert parsed["is_valid"] is False
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "all_voters_failed"
             assert parsed["n_successful"] == 0
 
     def test_all_error_stubs_trigger_failure(self) -> None:
-        """If every voter errors, the failure path is taken and the judge is skipped."""
+        """If every voter errors, the failure path is taken and the judge is skipped.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) -- see
+        ``test_no_successful_votes_returns_failure`` for rationale.
+        """
         keys = _mock_api_keys()
         all_errored = [
             _vote(voter="v1", error="boom"),
@@ -789,9 +809,14 @@ class TestRun:
             )
             mock_judge.assert_not_called()
             parsed = json.loads(result[0])
-            assert parsed["is_valid"] is False
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "all_voters_failed"
             assert parsed["n_successful"] == 0
-            assert parsed["judge_reasoning"] == "All voters failed."
+            assert parsed["judge_reasoning"] == (
+                "All voters failed (API errors / empty responses)."
+            )
             # Error stubs are preserved in the response for debuggability.
             assert len(parsed["votes"]) == 2
 

@@ -490,10 +490,17 @@ def _run_judge(
     )
     data = _extract_json(raw)
     if data is None:
+        # Judge LLM produced unparseable output. Mark verdict as unknown
+        # (``is_valid=None``) rather than ``False`` so downstream consumers
+        # don't mistake a judge-side LLM failure for a genuine "the
+        # question is invalid" verdict and submit ANSWER_INVALID
+        # (0xff...ff) on Realitio. See the all-voters-failed branch in
+        # ``run()`` for the same rationale.
         return {
-            "is_valid": False,
-            "is_determinable": False,
+            "is_valid": None,
+            "is_determinable": None,
             "has_occurred": None,
+            "error": "judge_unparseable",
             "judge_reasoning": f"Unparseable judge response: {raw[:200]}",
         }
     return data
@@ -648,14 +655,27 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     votes = collect_votes(prompt, voters, api_keys, counter_callback)
     successful = _successful_votes(votes)
 
-    # 2. Early exit: no successful votes
+    # 2. Early exit: no successful votes.
+    #
+    # IMPORTANT: ``is_valid`` MUST be ``None`` here (not ``False``). Emitting
+    # ``is_valid=False`` is reserved for the case where the jury actually
+    # determines the question is invalid. Conflating "all voter APIs errored"
+    # with "the question is invalid" causes downstream consumers (e.g.
+    # market-resolver's ``parse_mech_response``) to submit
+    # ``ANSWER_INVALID`` (0xff...ff) to Realitio for what is really an API
+    # outage -- burning bonds on a meaningless verdict.
+    #
+    # ``is_valid=None`` is the natural "we couldn't determine validity"
+    # marker; downstream strict parsers already reject it as garbage and
+    # retry with cooldown.
     if not successful:
         result: Dict[str, Any] = {
-            "is_valid": False,
-            "is_determinable": False,
+            "is_valid": None,
+            "is_determinable": None,
             "has_occurred": None,
             "votes": [asdict(v) for v in votes],
-            "judge_reasoning": "All voters failed.",
+            "judge_reasoning": "All voters failed (API errors / empty responses).",
+            "error": "all_voters_failed",
             "agreement_ratio": 0.0,
             "n_voters": len(voters),
             "n_successful": 0,

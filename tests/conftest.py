@@ -68,7 +68,6 @@ DEPENDENCY_TO_SERVICES = {
     "google-api-python-client": ["google_api_key", "google_engine_id"],
     "googlesearch-python": ["google_api_key", "google_engine_id"],
     "google-generativeai": ["gemini"],
-    "replicate": ["replicate"],
 }
 
 

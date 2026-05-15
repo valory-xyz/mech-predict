@@ -361,6 +361,17 @@ jobs:
       - name: Install project dependencies
         run: uv sync
 
+      # tournament.py + benchmark.ipfs_loader import from
+      # packages.valory.skills.task_execution.utils.{apis,ipfs}. Those
+      # files live in the open-autonomy `mech` upstream registry and are
+      # gitignored (.gitignore: packages/valory/*), so they only land on
+      # the runner after `autonomy packages sync` reads packages.json
+      # and pulls them from IPFS.
+      - name: Sync autonomy packages
+        run: |
+          uv run autonomy init --reset --author ci --remote --ipfs --ipfs-node "/dns/registry.autonolas.tech/tcp/443/https"
+          uv run autonomy packages sync
+
       # Cache IPFS-fetched tool sources between runs. Key on
       # tournament_tools.json so a CID bump triggers a fresh fetch but
       # unchanged runs reuse cached bytes.

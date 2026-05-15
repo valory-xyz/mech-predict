@@ -30,14 +30,11 @@ import sys
 # which env vars a tool requires based on its dependencies.
 SERVICE_TO_ENV_VAR = {
     "openai": "OPENAI_SECRET_KEY",
-    "stabilityai": "STABILITY_API_KEY",
     "google_api_key": "GOOGLE_API_KEY",
     "google_engine_id": "GOOGLE_ENGINE_ID",
     "anthropic": "CLAUDE_API_KEY",
-    "replicate": "REPLICATE_API_KEY",
     "newsapi": "NEWS_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
-    "gnosis_rpc_url": "GNOSIS_RPC_URL",
     "gemini": "GEMINI_API_KEY",
     "serperapi": "SERPER_API_KEY",
 }

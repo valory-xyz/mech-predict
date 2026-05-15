@@ -272,10 +272,12 @@ def _active_tools_for_platform(
     whose config fetch succeeded. A tool is "active" if any deployment
     allows it.
 
-    Tool-name normalization mirrors ``section_tool_deployment_status``:
-    underscores and hyphens are treated as interchangeable when comparing
-    against the allow-list. The returned set uses the names as they
-    appear in ``by_tool`` keys.
+    Tool names are matched **exactly** against the allow-list — the
+    ``_``/``-`` separator is part of a tool's identity (e.g.
+    ``prediction_request_reasoning`` and
+    ``prediction-request-reasoning-claude`` are distinct tools), so no
+    separator normalization is applied. The returned set uses the names
+    as they appear in ``by_tool`` keys.
 
     :param valid: ``{deployment: [tool_names] | None}`` map, where
         ``None`` indicates a fetch/parse failure for that deployment.
@@ -297,8 +299,8 @@ def _active_tools_for_platform(
         return None
 
     deployments = deployments_for_platform(platform)
-    relevant = {name: valid.get(name) for name in deployments}
-    if all(valid_tools is None for valid_tools in relevant.values()):
+    relevant = [valid.get(name) for name in deployments]
+    if all(valid_tools is None for valid_tools in relevant):
         # Every deployment for this platform failed — caller renders the
         # warning and shows all tools rather than blanking the report.
         return None
@@ -308,13 +310,10 @@ def _active_tools_for_platform(
         benchmarked |= set((rolling_scores.get("by_tool") or {}).keys())
 
     active: set[str] = set()
-    for valid_tools in relevant.values():
+    for valid_tools in relevant:
         if valid_tools is None:
             continue
-        valid_set = {t.replace("_", "-") for t in valid_tools}
-        for tool in benchmarked:
-            if tool.replace("_", "-") in valid_set:
-                active.add(tool)
+        active |= benchmarked & set(valid_tools)
 
     return frozenset(active)
 
@@ -404,8 +403,8 @@ def section_tool_deployment_status(
         if valid_tools is None:
             lines.append(f"- **{deployment}** — ⚠️ unavailable")
             continue
-        valid_set = {t.replace("_", "-") for t in valid_tools}
-        active = [t for t in benchmarked if t.replace("_", "-") in valid_set]
+        valid_set = set(valid_tools)
+        active = [t for t in benchmarked if t in valid_set]
         if not active:
             lines.append(f"- **{deployment}** — no benchmarked tools active")
             continue

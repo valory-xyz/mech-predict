@@ -71,6 +71,45 @@ _DEPLOYMENT_CONFIG: Mapping[str, tuple[str, str]] = MappingProxyType(
     }
 )
 
+# Git ref / tag charset. operate-app is trusted, but a parsed
+# ``service_version`` flows unmodified into a fetch URL path, so anything
+# outside this set (notably ``/`` or ``..`` segments that could traverse
+# outside ``valory-xyz/trader/<ref>/``) is rejected (defense in depth).
+_GIT_REF_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _compile_service_version_re(template_name: str) -> "re.Pattern[str]":
+    """Build the ``service_version`` extraction regex for one template.
+
+    The lazy gap before ``service_version`` may not cross a *line-start*
+    ``export const`` (the start of the next template declaration), so a
+    template missing its own ``service_version`` raises rather than
+    silently borrowing the following template's. The boundary is anchored
+    to the start of a line (``re.MULTILINE``) so an ``export const``
+    appearing inside a comment or string mid-line does not abort the
+    match.
+
+    :param template_name: exported template identifier.
+    :return: compiled pattern exposing a ``ver`` group.
+    """
+    return re.compile(
+        rf"{re.escape(template_name)}\b(?:(?!^[ \t]*export const)[\s\S])*?"
+        r"service_version\s*:\s*'(?P<ver>[^']+)'",
+        re.MULTILINE,
+    )
+
+
+# Pre-compiled per-template patterns for the deployments we resolve, so
+# the regex is built once at import rather than per report run.
+# ``parse_service_version`` compiles on demand for any other template
+# name, keeping the function general for tests and ad-hoc callers.
+_SERVICE_VERSION_RE: Mapping[str, "re.Pattern[str]"] = MappingProxyType(
+    {
+        template: _compile_service_version_re(template)
+        for template, _service in _DEPLOYMENT_CONFIG.values()
+    }
+)
+
 
 def deployments_for_platform(platform: str) -> tuple[str, ...]:
     """Return the deployment names belonging to ``platform``, in declared order.
@@ -105,20 +144,6 @@ FETCH_TIMEOUT = 10
 _VALID_TOOLS_RE = re.compile(
     r"valid_tools\s*:\s*\$\{VALID_TOOLS:list:(?P<list>\[[^\]]*\])\}"
 )
-
-
-def _normalize_tool_name(name: str) -> str:
-    """Return a canonical form for cross-convention tool-name matching.
-
-    operate-app/trader lists sometimes use ``prediction_request_X`` while
-    the benchmark logs use ``prediction-request-X`` for the same tool;
-    config authors defensively list both variants.  Treat underscores and
-    hyphens as interchangeable so we don't under-report.
-
-    :param name: raw tool name.
-    :return: canonical form with ``_`` replaced by ``-``.
-    """
-    return name.replace("_", "-")
 
 
 def _http_get(url: str) -> str:
@@ -156,25 +181,34 @@ def parse_service_version(ts_source: str, template_name: str) -> str:
     Anchored to the exported identifier with a word boundary so a reorder
     of the template declarations cannot silently swap versions, and so
     ``PREDICT_SERVICE_TEMPLATE`` does not match inside
-    ``PREDICT_POLYMARKET_SERVICE_TEMPLATE``. The gap before
-    ``service_version`` is forbidden from crossing the next
-    ``export const`` so a template missing its own ``service_version``
-    raises rather than silently borrowing the following template's.
+    ``PREDICT_POLYMARKET_SERVICE_TEMPLATE``. See
+    ``_compile_service_version_re`` for the line-start boundary semantics.
+
+    The captured version flows unmodified into the trader ``service.yaml``
+    fetch URL, so it is constrained to a git-ref charset
+    (``[A-Za-z0-9._-]``); anything else (e.g. a ``/`` enabling path
+    traversal) is rejected as a parse failure.
 
     :param ts_source: full text of operate-app ``trader.ts``.
     :param template_name: exported template identifier
         (e.g. ``PREDICT_SERVICE_TEMPLATE``).
     :return: the pinned trader tag (e.g. ``v0.38.0-rc1``).
-    :raises ValueError: when the template or its ``service_version`` is absent.
+    :raises ValueError: when the template or its ``service_version`` is
+        absent, or the captured value is not a valid git ref.
     """
-    pattern = re.compile(
-        rf"{re.escape(template_name)}\b(?:(?!export const)[\s\S])*?"
-        r"service_version\s*:\s*'(?P<ver>[^']+)'"
-    )
+    pattern = _SERVICE_VERSION_RE.get(template_name)
+    if pattern is None:
+        pattern = _compile_service_version_re(template_name)
     match = pattern.search(ts_source)
     if match is None:
         raise ValueError(f"no service_version found for template {template_name}")
-    return match.group("ver")
+    ref = match.group("ver")
+    if _GIT_REF_RE.fullmatch(ref) is None:
+        raise ValueError(
+            f"service_version {ref!r} for template {template_name} "
+            "is not a valid git ref"
+        )
+    return ref
 
 
 def parse_valid_tools(yaml_source: str) -> list[str]:
@@ -219,13 +253,20 @@ def fetch_valid_tools() -> dict[str, list[str] | None]:
         return valid
 
     for deployment, (template, service) in _DEPLOYMENT_CONFIG.items():
+        # Stays "<unresolved>" if we fail before building the URL (i.e. in
+        # trader.ts parsing), which itself tells the operator where it broke.
+        yaml_url = "<unresolved>"
         try:
             ref = parse_service_version(ts_source, template)
-            yaml_source = _http_get(
-                TRADER_SERVICE_YAML_URL.format(ref=ref, service=service)
-            )
+            yaml_url = TRADER_SERVICE_YAML_URL.format(ref=ref, service=service)
+            yaml_source = _http_get(yaml_url)
             valid[deployment] = parse_valid_tools(yaml_source)
         except (URLError, ValueError, OSError) as exc:
-            log.warning("%s valid_tools resolution failed: %s", deployment, exc)
+            log.warning(
+                "%s valid_tools resolution failed (url=%s): %s",
+                deployment,
+                yaml_url,
+                exc,
+            )
 
     return valid

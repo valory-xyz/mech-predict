@@ -182,6 +182,38 @@ class TestParseServiceVersion:
         with pytest.raises(ValueError, match="no service_version found for template"):
             tool_usage.parse_service_version(broken, "PREDICT_SERVICE_TEMPLATE")
 
+    def test_export_const_in_comment_is_not_a_boundary(self) -> None:
+        """Only a line-start ``export const`` ends a template.
+
+        A comment that merely mentions ``export const`` between the
+        template name and its ``service_version`` must not make the
+        boundary-guard abort and raise. Regression lock for the
+        line-start anchor.
+        """
+        commented = OPERATE_APP_TS_SAMPLE.replace(
+            "  name: 'Predict Agent',\n",
+            "  name: 'Predict Agent',\n"
+            "  // historically aliased, see export const LEGACY_TEMPLATE\n",
+        )
+        assert (
+            tool_usage.parse_service_version(commented, "PREDICT_SERVICE_TEMPLATE")
+            == OMEN_TRADER_REF
+        )
+
+    def test_path_traversal_ref_is_rejected(self) -> None:
+        """A ``service_version`` with path-traversal chars is a parse failure.
+
+        The value flows into the trader yaml fetch URL, so a ``/`` (or any
+        non git-ref char) must raise rather than build a URL escaping
+        ``valory-xyz/trader/<ref>/``.
+        """
+        evil = OPERATE_APP_TS_SAMPLE.replace(
+            f"service_version: '{OMEN_TRADER_REF}'",
+            "service_version: 'v0.38.0/../../evil'",
+        )
+        with pytest.raises(ValueError, match="not a valid git ref"):
+            tool_usage.parse_service_version(evil, "PREDICT_SERVICE_TEMPLATE")
+
 
 # ---------------------------------------------------------------------------
 # parse_valid_tools
@@ -361,8 +393,14 @@ class TestSectionToolDeploymentStatus:
         )
         assert "`prediction-online`" in pearl_line
 
-    def test_underscore_hyphen_equivalence(self) -> None:
-        """Allow-list may use underscores where by_tool uses hyphens."""
+    def test_underscore_hyphen_are_distinct_tools(self) -> None:
+        """The ``_``/``-`` separator is part of tool identity, not noise.
+
+        ``prediction_request_reasoning_claude`` and
+        ``prediction-request-reasoning-claude`` are different tools; an
+        allow-list entry for the underscore form must NOT activate the
+        benchmarked hyphen form.
+        """
         scores = _scores_with_tools(["prediction-request-reasoning-claude"])
         valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["prediction_request_reasoning_claude"],
@@ -372,7 +410,8 @@ class TestSectionToolDeploymentStatus:
         pearl_line = next(
             line for line in result.splitlines() if "omenstrat Pearl" in line
         )
-        assert "`prediction-request-reasoning-claude`" in pearl_line
+        assert "`prediction-request-reasoning-claude`" not in pearl_line
+        assert "no benchmarked tools active" in pearl_line
 
     def test_full_allow_list_means_all_tools_active(self) -> None:
         """When the allow-list covers every benchmarked tool, all render."""

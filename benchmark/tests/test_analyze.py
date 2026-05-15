@@ -1807,8 +1807,12 @@ class TestSectionToolDeploymentStatusInverted:
         assert "`tool-c`" in pearl_line
         assert "`tool-b`" not in pearl_line
 
-    def test_normalizes_underscores_in_allow_list(self) -> None:
-        """Config files sometimes list prediction_request_X; treat as equivalent."""
+    def test_underscore_hyphen_are_distinct_tools(self) -> None:
+        """``_`` vs ``-`` is part of tool identity; matching is exact.
+
+        An allow-list entry ``prediction_request_reasoning`` must not
+        activate a benchmarked ``prediction-request-reasoning``.
+        """
         scores = self._scores_with_tools("prediction-request-reasoning")
         valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["prediction_request_reasoning"],
@@ -1818,7 +1822,8 @@ class TestSectionToolDeploymentStatusInverted:
         pearl_line = [
             line for line in rendered.splitlines() if "omenstrat Pearl" in line
         ][0]
-        assert "`prediction-request-reasoning`" in pearl_line
+        assert "`prediction-request-reasoning`" not in pearl_line
+        assert "no benchmarked tools active" in pearl_line
 
     def test_failed_fetch_renders_unavailable_banner(self) -> None:
         """Deployment whose fetch returned None is not claimed as empty."""
@@ -2715,13 +2720,17 @@ class TestActiveToolsForPlatform:
         assert _active_tools_for_platform({}, "omen", self._SCORES) is None
         assert _active_tools_for_platform(None, "omen", self._SCORES) is None
 
-    def test_underscore_hyphen_normalization(self) -> None:
-        """Allow-list with underscores still matches the hyphenated benchmark name."""
+    def test_underscore_hyphen_are_distinct_tools(self) -> None:
+        """``tool_a`` must not match benchmarked ``tool-a`` — exact only.
+
+        The ``_``/``-`` separator is part of tool identity, so an
+        allow-list entry that differs only by separator activates nothing.
+        """
         valid: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["tool_a"]  # underscore variant of "tool-a"
+            "omenstrat Pearl": ["tool_a"]  # NOT the same tool as "tool-a"
         }
         active = _active_tools_for_platform(valid, "omen", self._SCORES)
-        assert active == frozenset({"tool-a"})
+        assert active == frozenset()
 
     def test_benchmarked_universe_unions_rolling_and_alltime(self) -> None:
         """Tool with rolling rows but no all-time entry is still considered.

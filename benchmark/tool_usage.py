@@ -16,13 +16,19 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Fetch per-deployment IRRELEVANT_TOOLS lists so the daily report can annotate them.
+"""Resolve each Pearl deployment's VALID_TOOLS allow-list so the report can annotate it.
 
-Each consumer (olas-operate-app Pearl, quickstart QS) stores the list as a
-JSON-encoded string in a public config on GitHub ``main``.  We return a
-``{deployment: [tool_names] | None}`` map; ``None`` signals a fetch or parse
-failure for that deployment so consumers can render "unavailable" rather
-than falsely claiming "no tools disabled".
+Each Pearl deployment ships a pinned ``valory-xyz/trader`` release. We
+read the operate-app ``main`` ``trader.ts`` to learn that pin
+(``service_version`` per template), then read ``VALID_TOOLS`` from the
+trader release's ``service.yaml``. We return a
+``{deployment: [tool_names] | None}`` map; ``None`` signals a fetch or
+parse failure for that deployment so consumers can render "unavailable"
+rather than falsely claiming an allow-list.
+
+operate-app is read from ``main`` (not a release tag) because operate-app
+release publishing is unreliable; trader is read from the exact tag
+operate-app pins.
 """
 
 from __future__ import annotations
@@ -40,7 +46,6 @@ log = logging.getLogger(__name__)
 # Deployments we report on. Order is the column order in the rendered line.
 DEPLOYMENTS: tuple[str, ...] = (
     "omenstrat Pearl",
-    "omenstrat QS",
     "polystrat Pearl",
 )
 
@@ -49,8 +54,20 @@ DEPLOYMENTS: tuple[str, ...] = (
 DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
     {
         "omenstrat Pearl": "omen",
-        "omenstrat QS": "omen",
         "polystrat Pearl": "polymarket",
+    }
+)
+
+# Per-deployment resolution config: the operate-app exported template
+# identifier whose ``service_version`` pins the trader release, and the
+# trader service directory whose ``service.yaml`` carries ``VALID_TOOLS``.
+_DEPLOYMENT_CONFIG: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "omenstrat Pearl": ("PREDICT_SERVICE_TEMPLATE", "trader_pearl"),
+        "polystrat Pearl": (
+            "PREDICT_POLYMARKET_SERVICE_TEMPLATE",
+            "polymarket_trader",
+        ),
     }
 )
 
@@ -66,40 +83,37 @@ def deployments_for_platform(platform: str) -> tuple[str, ...]:
     )
 
 
-# Source URLs (GitHub raw, ``main`` branch).
+# Source URLs. operate-app is pinned to ``main`` (release publishing is
+# unreliable upstream); trader is pinned to the tag operate-app declares.
 OPERATE_APP_TRADER_TS_URL = (
     "https://raw.githubusercontent.com/valory-xyz/olas-operate-app/"
     "main/frontend/constants/serviceTemplates/service/trader.ts"
 )
-QUICKSTART_CONFIG_URL = (
-    "https://raw.githubusercontent.com/valory-xyz/quickstart/"
-    "main/configs/config_predict_trader.json"
+TRADER_SERVICE_YAML_URL = (
+    "https://raw.githubusercontent.com/valory-xyz/trader/"
+    "{ref}/packages/valory/services/{service}/service.yaml"
 )
 
 # Fetch timeout (seconds). Short so a stalled GitHub never blocks the
 # daily report pipeline.
 FETCH_TIMEOUT = 10
 
-# Matches an ``IRRELEVANT_TOOLS`` block anchored to a specific exported
-# template name (e.g. ``PREDICT_SERVICE_TEMPLATE``).  The capture group is
-# the JSON-array-of-strings payload under ``value:``.  Anchoring to the
-# template name protects us against silent relabel if the two template
-# declarations are ever reordered in ``trader.ts``.
-_TS_TEMPLATE_BLOCK_TEMPLATE = (
-    r"{template_name}\b[\s\S]*?"
-    r"IRRELEVANT_TOOLS\s*:\s*\{{[^}}]*?value\s*:\s*'(?P<value>\[[^']*\])'"
+# Captures the ``VALID_TOOLS`` env-override default from a trader
+# ``service.yaml``. The payload is a JSON array of double-quoted
+# strings; tool names never contain ``]`` so ``[^\]]*`` is a safe,
+# newline-tolerant body match.
+_VALID_TOOLS_RE = re.compile(
+    r"valid_tools\s*:\s*\$\{VALID_TOOLS:list:(?P<list>\[[^\]]*\])\}"
 )
-_OMENSTRAT_PEARL_TEMPLATE = "PREDICT_SERVICE_TEMPLATE"
-_POLYSTRAT_PEARL_TEMPLATE = "PREDICT_POLYMARKET_SERVICE_TEMPLATE"
 
 
 def _normalize_tool_name(name: str) -> str:
     """Return a canonical form for cross-convention tool-name matching.
 
-    Operate-app and quickstart lists sometimes use ``prediction_request_X``
-    while the benchmark logs use ``prediction-request-X`` for the same tool;
-    the config authors defensively list both variants.  Treat underscores
-    and hyphens as interchangeable so we don't under-report.
+    operate-app/trader lists sometimes use ``prediction_request_X`` while
+    the benchmark logs use ``prediction-request-X`` for the same tool;
+    config authors defensively list both variants.  Treat underscores and
+    hyphens as interchangeable so we don't under-report.
 
     :param name: raw tool name.
     :return: canonical form with ``_`` replaced by ``-``.
@@ -123,27 +137,6 @@ def _http_get(url: str) -> str:
         return resp.read().decode("utf-8")
 
 
-def _extract_template_irrelevant_tools(source: str, template_name: str) -> list[str]:
-    """Extract the IRRELEVANT_TOOLS list for one named template.
-
-    :param source: full text of ``trader.ts``.
-    :param template_name: exported template identifier
-        (e.g. ``PREDICT_SERVICE_TEMPLATE``).
-    :return: parsed list of tool names.
-    :raises ValueError: when no IRRELEVANT_TOOLS block is found for this template.
-    """
-    pattern = re.compile(
-        _TS_TEMPLATE_BLOCK_TEMPLATE.format(template_name=template_name),
-        re.DOTALL,
-    )
-    match = pattern.search(source)
-    if match is None:
-        raise ValueError(
-            f"no IRRELEVANT_TOOLS block found for template {template_name}"
-        )
-    return _parse_json_string_list(match.group("value"))
-
-
 def _parse_json_string_list(raw: str) -> list[str]:
     """Parse a JSON-encoded array-of-strings.
 
@@ -153,73 +146,86 @@ def _parse_json_string_list(raw: str) -> list[str]:
     """
     parsed = json.loads(raw)
     if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-        raise ValueError("IRRELEVANT_TOOLS value must be a JSON array of strings")
+        raise ValueError("VALID_TOOLS value must be a JSON array of strings")
     return parsed
 
 
-def parse_operate_app_ts(source: str) -> dict[str, list[str]]:
-    """Parse IRRELEVANT_TOOLS for each exported template in ``trader.ts``.
+def parse_service_version(ts_source: str, template_name: str) -> str:
+    """Extract ``service_version`` for one named operate-app template.
 
-    Template identity is anchored to the exported identifier
-    (``PREDICT_SERVICE_TEMPLATE`` for omenstrat Pearl and
-    ``PREDICT_POLYMARKET_SERVICE_TEMPLATE`` for polystrat Pearl), not file
-    order, so silent relabel is impossible if the two declarations are
-    ever reordered.  Propagates ``ValueError`` from
-    ``_extract_template_irrelevant_tools`` when either template's block
-    is missing.
+    Anchored to the exported identifier with a word boundary so a reorder
+    of the template declarations cannot silently swap versions, and so
+    ``PREDICT_SERVICE_TEMPLATE`` does not match inside
+    ``PREDICT_POLYMARKET_SERVICE_TEMPLATE``. The gap before
+    ``service_version`` is forbidden from crossing the next
+    ``export const`` so a template missing its own ``service_version``
+    raises rather than silently borrowing the following template's.
 
-    :param source: full text of ``trader.ts``.
-    :return: ``{"omenstrat Pearl": [...], "polystrat Pearl": [...]}``.
+    :param ts_source: full text of operate-app ``trader.ts``.
+    :param template_name: exported template identifier
+        (e.g. ``PREDICT_SERVICE_TEMPLATE``).
+    :return: the pinned trader tag (e.g. ``v0.38.0-rc1``).
+    :raises ValueError: when the template or its ``service_version`` is absent.
     """
-    return {
-        "omenstrat Pearl": _extract_template_irrelevant_tools(
-            source, _OMENSTRAT_PEARL_TEMPLATE
-        ),
-        "polystrat Pearl": _extract_template_irrelevant_tools(
-            source, _POLYSTRAT_PEARL_TEMPLATE
-        ),
-    }
+    pattern = re.compile(
+        rf"{re.escape(template_name)}\b(?:(?!export const)[\s\S])*?"
+        r"service_version\s*:\s*'(?P<ver>[^']+)'"
+    )
+    match = pattern.search(ts_source)
+    if match is None:
+        raise ValueError(f"no service_version found for template {template_name}")
+    return match.group("ver")
 
 
-def parse_quickstart_config(source: str) -> list[str]:
-    """Parse ``env_variables.IRRELEVANT_TOOLS.value`` from the quickstart JSON.
+def parse_valid_tools(yaml_source: str) -> list[str]:
+    """Extract the ``VALID_TOOLS`` allow-list from a trader ``service.yaml``.
 
-    Propagates ``KeyError`` when the expected path is missing, and
-    ``ValueError`` (from ``_parse_json_string_list`` or ``json.loads``)
-    when the value is not a JSON array of strings.
+    There is intentionally no ``irrelevant_tools`` fallback: a missing
+    ``valid_tools`` env default is treated as a parse failure so the
+    caller renders "unavailable" rather than silently inverting
+    semantics.
 
-    :param source: full text of the quickstart ``config_predict_trader.json``.
-    :return: the parsed list of irrelevant tool names.
+    :param yaml_source: full text of the trader ``service.yaml``.
+    :return: the parsed allow-list (possibly empty — an empty allow-list
+        is a legitimate "no tools allowed" state, distinct from a failure).
+    :raises ValueError: when the ``valid_tools`` env default is absent or
+        its payload is not a JSON array of strings.
     """
-    data = json.loads(source)
-    raw = data["env_variables"]["IRRELEVANT_TOOLS"]["value"]
-    return _parse_json_string_list(raw)
+    match = _VALID_TOOLS_RE.search(yaml_source)
+    if match is None:
+        raise ValueError("no valid_tools env default found in service.yaml")
+    return _parse_json_string_list(match.group("list"))
 
 
-def fetch_disabled_tools() -> dict[str, list[str] | None]:
-    """Return ``{deployment: [tool_names] | None}`` for all deployments.
+def fetch_valid_tools() -> dict[str, list[str] | None]:
+    """Return ``{deployment: [valid_tool_names] | None}`` for all deployments.
 
-    ``None`` signals a fetch or parse failure for that deployment so the
-    renderer can say "unavailable" instead of falsely claiming nothing is
-    disabled.  Failures are logged but never raised — the daily report
-    must never be blocked by a flaky GitHub fetch.
+    For each deployment: read operate-app ``main`` ``trader.ts`` once,
+    resolve that deployment's trader ``service_version``, fetch the trader
+    ``service.yaml`` at that tag, and parse ``VALID_TOOLS``. ``None``
+    signals a fetch or parse failure for that deployment so the renderer
+    can say "unavailable" instead of falsely claiming an allow-list.
+    Failures are logged but never raised — the daily report must never be
+    blocked by a flaky GitHub fetch.
 
-    :return: disabled-tools map keyed by deployment name.
+    :return: valid-tools map keyed by deployment name.
     """
-    disabled: dict[str, list[str] | None] = {name: None for name in DEPLOYMENTS}
+    valid: dict[str, list[str] | None] = {name: None for name in DEPLOYMENTS}
 
     try:
         ts_source = _http_get(OPERATE_APP_TRADER_TS_URL)
-        pearl = parse_operate_app_ts(ts_source)
-        disabled["omenstrat Pearl"] = pearl["omenstrat Pearl"]
-        disabled["polystrat Pearl"] = pearl["polystrat Pearl"]
-    except (URLError, ValueError, OSError) as exc:
-        log.warning("operate-app fetch/parse failed: %s", exc)
+    except (URLError, OSError) as exc:
+        log.warning("operate-app trader.ts fetch failed: %s", exc)
+        return valid
 
-    try:
-        qs_source = _http_get(QUICKSTART_CONFIG_URL)
-        disabled["omenstrat QS"] = parse_quickstart_config(qs_source)
-    except (URLError, ValueError, KeyError, OSError) as exc:
-        log.warning("quickstart fetch/parse failed: %s", exc)
+    for deployment, (template, service) in _DEPLOYMENT_CONFIG.items():
+        try:
+            ref = parse_service_version(ts_source, template)
+            yaml_source = _http_get(
+                TRADER_SERVICE_YAML_URL.format(ref=ref, service=service)
+            )
+            valid[deployment] = parse_valid_tools(yaml_source)
+        except (URLError, ValueError, OSError) as exc:
+            log.warning("%s valid_tools resolution failed: %s", deployment, exc)
 
-    return disabled
+    return valid

@@ -677,6 +677,31 @@ class TestRunJudge:
             assert result["error"] == "judge_unparseable"
             assert "Unparseable" in result["judge_reasoning"]
 
+    def test_judge_api_error_emits_discriminator(self) -> None:
+        """Adapter-level exception inside ``_run_judge`` -> proper JSON stub.
+
+        Regression: a 402 / network error / timeout raised by
+        ``_adapter_openrouter`` used to bubble all the way up to
+        ``with_key_rotation``'s broad-except, which returned a raw
+        ``str(exc)`` in tuple[0] -- violating the JSON-shape contract
+        every other failure path obeys. ``_run_judge`` now catches and
+        emits ``error="judge_api_error"`` instead.
+        """
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _run_judge,
+        )
+
+        def _raises_402(**kwargs: Any) -> str:
+            raise RuntimeError("Error code: 402 - Insufficient credits")
+
+        with patch(f"{MODULE}._adapter_openrouter", side_effect=_raises_402):
+            result = _run_judge("q?", [_vote()], "key")
+        assert result["is_valid"] is None
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["error"] == "judge_api_error"
+        assert "402" in result["judge_reasoning"]
+
     def test_judge_retries_on_529(self) -> None:
         """Judge retries on 529 overloaded error."""
         mock_client = MagicMock()
@@ -708,8 +733,18 @@ class TestRunJudge:
             result = _run_judge("q?", [_vote()], "key")
             assert result["has_occurred"] is True
 
-    def test_judge_retries_exhausted_raises(self) -> None:
-        """Judge raises when all retries are exhausted."""
+    def test_judge_retries_exhausted_returns_api_error_discriminator(
+        self,
+    ) -> None:
+        """Exhausted retries no longer propagate -- emit discriminator.
+
+        Used to raise the underlying ``APIStatusError`` out of
+        ``_run_judge`` (and out of ``run()`` via the decorator's broad
+        except, which returned a raw ``str(exc)`` in tuple[0]).
+        ``_run_judge`` now catches adapter-level exceptions and returns
+        the canonical ``error="judge_api_error"`` JSON stub so the whole
+        result tuple stays JSON-shaped.
+        """
         mock_client = MagicMock()
         err = MagicMock()
         err.status_code = 529
@@ -718,16 +753,20 @@ class TestRunJudge:
         )
         mock_client.chat.completions.create.side_effect = api_err
 
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _run_judge,
+        )
+
         with (
             patch(f"{MODULE}.openai.OpenAI", return_value=mock_client),
             patch(f"{MODULE}.time.sleep"),
-            pytest.raises(__import__("openai").APIStatusError),
         ):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _run_judge,
-            )
-
-            _run_judge("q?", [_vote()], "key")
+            result = _run_judge("q?", [_vote()], "key")
+        assert result["is_valid"] is None
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["error"] == "judge_api_error"
+        assert "overloaded" in result["judge_reasoning"]
 
 
 # ---------------------------------------------------------------------------

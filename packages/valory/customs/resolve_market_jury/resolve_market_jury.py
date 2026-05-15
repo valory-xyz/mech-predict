@@ -567,16 +567,33 @@ def _run_judge(
         formatted_votes += f"\nVoter {i}:\n{json.dumps(vote_data, indent=2)}\n"
 
     prompt = JUDGE_PROMPT.format(question=question, votes=formatted_votes)
-    raw = _adapter_openrouter(
-        model=JUDGE_MODEL_CLAUDE,
-        prompt=prompt,
-        api_key=api_key,
-        max_tokens=JUDGE_MAX_TOKENS,
-        timeout=JUDGE_TIMEOUT,
-        max_attempts=JUDGE_MAX_ATTEMPTS,
-        retry_delay=JUDGE_RETRY_DELAY,
-        counter_callback=counter_callback,
-    )
+    try:
+        raw = _adapter_openrouter(
+            model=JUDGE_MODEL_CLAUDE,
+            prompt=prompt,
+            api_key=api_key,
+            max_tokens=JUDGE_MAX_TOKENS,
+            timeout=JUDGE_TIMEOUT,
+            max_attempts=JUDGE_MAX_ATTEMPTS,
+            retry_delay=JUDGE_RETRY_DELAY,
+            counter_callback=counter_callback,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        # Adapter-level failure (402 credit-exhausted, network error,
+        # timeout, etc.). Without this catch the exception bubbles up
+        # to ``with_key_rotation``'s broad-except, which returns a raw
+        # ``str(e)`` in tuple[0] -- violating the JSON-shape contract
+        # every other failure path obeys. Emit a proper discriminator
+        # here so downstream parsers + operator logs see a consistent
+        # ``error="judge_api_error"`` payload alongside
+        # ``judge_unparseable`` and ``all_voters_failed``.
+        return {
+            "is_valid": None,
+            "is_determinable": None,
+            "has_occurred": None,
+            "error": "judge_api_error",
+            "judge_reasoning": f"Judge adapter raised: {exc!r}"[:300],
+        }
     data = _extract_json(raw)
     if data is None:
         # Judge LLM produced unparseable output. Mark verdict as unknown

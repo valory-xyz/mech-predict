@@ -34,6 +34,7 @@ from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
     _has_consensus,
     _noop_token_counter,
     _parse_vote,
+    _successful_votes,
     run,
 )
 
@@ -47,9 +48,9 @@ MODULE = "packages.valory.customs.resolve_market_jury.resolve_market_jury"
 
 def _vote(
     voter: str = "v1",
-    has_occurred: bool = True,
-    is_determinable: bool = True,
-    is_valid: bool = True,
+    has_occurred: Optional[bool] = True,
+    is_determinable: Optional[bool] = True,
+    is_valid: Optional[bool] = True,
     confidence: float = 0.9,
     reasoning: str = "test",
     error: Optional[str] = None,
@@ -165,6 +166,72 @@ class TestParseVote:
         assert result.has_occurred is None
         assert result.confidence == 0.5
 
+    def test_non_numeric_confidence_string_does_not_crash(self) -> None:
+        """Non-numeric ``confidence`` strings default to 0.0, don't crash.
+
+        LLMs sometimes emit ``confidence: "high"`` or ``"~0.75"`` against
+        the prompt schema. ``float("high")`` would raise ValueError and
+        silently turn a real vote into an error stub -- if all 4 voters
+        emit the same style, the all-voters-failed branch fires and the
+        question retries indefinitely.
+        """
+        for bad in ("high", "0.8 (high)", "~0.75", "very confident"):
+            raw = json.dumps(
+                {
+                    "is_valid": True,
+                    "is_determinable": True,
+                    "has_occurred": True,
+                    "confidence": bad,
+                }
+            )
+            result = _parse_vote(raw, "test", "model")
+            assert result.error is None, f"non-numeric '{bad}' should not error"
+            assert result.confidence == 0.0
+            # Verdict fields still extracted correctly.
+            assert result.is_valid is True
+            assert result.has_occurred is True
+
+    def test_null_confidence_does_not_crash(self) -> None:
+        """``confidence: null`` is tolerated (LLMs emit it for Case A).
+
+        Regression: surfaced from a live scenario run where Gemini/Claude
+        emitted ``{"is_valid": false, ..., "confidence": null}``; the parser
+        used to do ``float(None)`` and crash, dropping the vote.
+        """
+        raw = json.dumps(
+            {
+                "is_valid": False,
+                "is_determinable": None,
+                "has_occurred": None,
+                "confidence": None,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.error is None
+        assert result.is_valid is False
+        assert result.confidence == 0.0
+
+    def test_invalid_canonicalizes_to_case_a(self) -> None:
+        """``is_valid=False`` forces ``(False, None, None)`` per the parser contract.
+
+        Even if the LLM emits contradictory fields (is_determinable=true,
+        has_occurred=true) alongside is_valid=false, the parser canonicalizes
+        the output to the Case A shape ``(False, None, None)``.
+        """
+        raw = json.dumps(
+            {
+                "is_valid": False,
+                "is_determinable": True,
+                "has_occurred": True,
+                "confidence": 0.9,
+            }
+        )
+        result = _parse_vote(raw, "test", "model")
+        assert result.is_valid is False
+        assert result.is_determinable is None
+        assert result.has_occurred is None
+        assert result.confidence == 0.5
+
 
 # ---------------------------------------------------------------------------
 # Consensus helpers
@@ -172,26 +239,48 @@ class TestParseVote:
 
 
 class TestDecidedVotes:
-    """Tests for _decided_votes filtering."""
+    """Tests for ``_decided_votes`` (broad: YES/NO/INVALID, used by ``n_decided``).
+
+    Decided = the voter reached a verdict the resolver can act on. INVALID
+    counts because "this question is invalid" is itself a decision. Only
+    undeterminable and errored voters are filtered out.
+    """
 
     @pytest.mark.parametrize(
-        "bad_vote, expected_count",
+        "bad_vote, expected_count, expected_kept",
         [
-            (_vote(is_determinable=False), 1),
-            (_vote(is_valid=False), 1),
-            (_vote(error="failed"), 1),
+            # Undeterminable -- not decided.
+            (_vote(is_determinable=False), 1, "good_vote_only"),
+            # INVALID is itself a decided verdict -- kept.
+            (_vote(is_valid=False), 2, "both"),
+            # Errored stub -- not decided.
+            (_vote(error="failed"), 1, "good_vote_only"),
         ],
-        ids=["indeterminate", "invalid", "error"],
+        ids=["indeterminate", "invalid_kept", "error"],
     )
-    def test_filters_bad_votes(
-        self, bad_vote: VoterResult, expected_count: int
+    def test_filter(
+        self,
+        bad_vote: VoterResult,
+        expected_count: int,
+        expected_kept: str,
     ) -> None:
-        """Bad votes are excluded, good ones kept."""
+        """Undet + errored are filtered; INVALID and YES/NO are kept."""
         votes = [bad_vote, _vote()]
-        assert len(_decided_votes(votes)) == expected_count
+        kept = _decided_votes(votes)
+        assert len(kept) == expected_count
+        if expected_kept == "both":
+            # The critical case: ``is_valid=False`` (INVALID) MUST be among
+            # the kept voters, not just "the count happens to be 2".
+            assert any(
+                v.is_valid is False for v in kept
+            ), "INVALID voter must be retained as a decided verdict"
+        else:
+            # The "bad" voter (undet or errored) MUST be filtered out;
+            # only the good YES voter survives.
+            assert all(v is not bad_vote for v in kept)
 
     def test_all_valid(self) -> None:
-        """All valid votes pass through."""
+        """All YES/NO votes pass through."""
         votes = [_vote(), _vote(), _vote()]
         assert len(_decided_votes(votes)) == 3
 
@@ -205,7 +294,10 @@ class TestAllAgree:
             ([_vote(has_occurred=True), _vote(has_occurred=True)], True),
             ([_vote(has_occurred=False), _vote(has_occurred=False)], True),
             ([_vote(has_occurred=True), _vote(has_occurred=False)], False),
-            ([_vote()], False),
+            # Single voter: 1/1 > 0.5 -> trivial consensus. Degenerate in
+            # production (always 4 voters) but the symmetric rule treats it
+            # consistently with all other strict-majority cases.
+            ([_vote()], True),
             (
                 [
                     _vote(has_occurred=True),
@@ -247,18 +339,131 @@ class TestAllAgree:
         """Check consensus detection."""
         assert _has_consensus(votes) is expected
 
+    @pytest.mark.parametrize(
+        "votes, expected",
+        [
+            # Unanimous invalid -- strict majority (4/4 > 2)
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4,
+                True,
+            ),
+            # 3/4 invalid -- strict majority (3 > 2)
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3
+                + [_vote(has_occurred=True)],
+                True,
+            ),
+            # 2/4 invalid -- not a strict majority
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 2
+                + [_vote(has_occurred=True)] * 2,
+                False,
+            ),
+            # 3/4 invalid, 1 errored -- 3 > 2 still strict majority of 4
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3
+                + [_vote(error="boom")],
+                True,
+            ),
+            # 2/4 invalid, 2 errored -- only 2/4 are invalid, not strict majority
+            (
+                [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 2
+                + [_vote(error="boom")] * 2,
+                False,
+            ),
+        ],
+        ids=[
+            "unanimous_invalid",
+            "majority_invalid_one_yes",
+            "half_invalid_half_yes",
+            "majority_invalid_one_errored",
+            "minority_invalid_half_errored",
+        ],
+    )
+    def test_invalid_consensus(self, votes: list, expected: bool) -> None:
+        """``is_valid=False`` strict majority counts as consensus."""
+        assert _has_consensus(votes) is expected
+
 
 class TestBuildConsensusResult:
     """Tests for _build_consensus_result."""
 
-    def test_builds_result(self) -> None:
-        """Consensus result has correct fields."""
+    def test_builds_result_decided(self) -> None:
+        """Decided consensus result has correct fields."""
         votes = [_vote(has_occurred=True), _vote(has_occurred=True)]
         result = _build_consensus_result(votes)
         assert result["has_occurred"] is True
         assert result["is_valid"] is True
+        assert result["is_determinable"] is True
         assert result["agreement_ratio"] == 1.0
         assert "judge skipped" in result["judge_reasoning"]
+        assert "INVALID" not in result["judge_reasoning"]
+
+    def test_builds_result_invalid_consensus(self) -> None:
+        """All voters say is_valid=False -> consensus on INVALID.
+
+        Output MUST match the canonical Case A shape ``(False, None, None)``
+        per the ``parse_mech_response`` docstring contract in market-resolver's
+        ``behaviours/base.py``. ``is_determinable`` and ``has_occurred`` are
+        ``None`` because they lose semantic meaning when the question is
+        invalid.
+
+        ``n_decided`` must be 4 (NOT 0): INVALID is itself a definitive
+        verdict, so all 4 voters count as "decided". Only undeterminable
+        (Case B) and errored voters fail to contribute to ``n_decided``.
+
+        Regression from the old YES/NO-only consensus path: unanimous
+        INVALID used to crash (empty YES/NO list) or emit a wrong
+        ``is_valid=True, is_determinable=True`` hardcoded shape.
+        """
+        votes = [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 4
+        result = _build_consensus_result(votes)
+        assert result["is_valid"] is False
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["agreement_ratio"] == 1.0
+        assert result["n_voters"] == 4
+        # All 4 voters returned successfully -- this is the key assertion the
+        # production catalog calls out: n_successful must be 4, not 0.
+        assert result["n_successful"] == 4
+        # All 4 voters reached a definitive verdict (INVALID) -- "invalid"
+        # is a decided option, so n_decided is 4, not 0.
+        assert result["n_decided"] == 4
+        assert "INVALID" in result["judge_reasoning"]
+        assert "judge skipped" in result["judge_reasoning"]
+
+    def test_raises_when_called_without_consensus(self) -> None:
+        """Bypassing the ``_has_consensus`` precondition raises ValueError.
+
+        If a future caller forgets the gate (or a refactor breaks it),
+        we want a loud error instead of an opaque ``IndexError`` deep in
+        ``Counter.most_common``.
+        """
+        # All voters undeterminable -> no decided votes -> no consensus.
+        votes = [_vote(is_determinable=False)] * 4
+        with pytest.raises(ValueError, match="without consensus"):
+            _build_consensus_result(votes)
+
+    def test_builds_result_invalid_consensus_with_one_dissenter(self) -> None:
+        """3/4 invalid + 1 yes -> still consensus on INVALID.
+
+        Voter shapes vary (the dissenter has different fields), but the
+        canonical output is the same Case A ``(False, None, None)`` regardless.
+
+        ``n_decided`` here is 4: 3 INVALID voters + 1 YES voter all reached
+        a definitive verdict.
+        """
+        votes = [_vote(is_valid=False, is_determinable=None, has_occurred=None)] * 3 + [
+            _vote(has_occurred=True)
+        ]
+        result = _build_consensus_result(votes)
+        assert result["is_valid"] is False
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["n_voters"] == 4
+        assert result["n_successful"] == 4  # all returned, none errored
+        assert result["n_decided"] == 4  # 3 INVALID + 1 YES, all definitive
+        assert "INVALID" in result["judge_reasoning"]
 
 
 class TestComputeAgreement:
@@ -449,7 +654,12 @@ class TestRunJudge:
             assert result["has_occurred"] is False
 
     def test_judge_unparseable(self) -> None:
-        """Judge returns fallback on garbage response."""
+        """Judge returns fallback on garbage response.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) so downstream
+        consumers don't mistake a judge-side LLM failure for a real
+        "question is invalid" verdict.
+        """
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices = [
             MagicMock(message=MagicMock(content="not json at all"))
@@ -461,8 +671,36 @@ class TestRunJudge:
             )
 
             result = _run_judge("q?", [_vote()], "key")
-            assert result["is_valid"] is False
+            assert result["is_valid"] is None
+            assert result["is_determinable"] is None
+            assert result["has_occurred"] is None
+            assert result["error"] == "judge_unparseable"
             assert "Unparseable" in result["judge_reasoning"]
+
+    def test_judge_api_error_emits_discriminator(self) -> None:
+        """Adapter-level exception inside ``_run_judge`` -> proper JSON stub.
+
+        Regression: a 402 / network error / timeout raised by
+        ``_adapter_openrouter`` used to bubble all the way up to
+        ``with_key_rotation``'s broad-except, which returned a raw
+        ``str(exc)`` in tuple[0] -- violating the JSON-shape contract
+        every other failure path obeys. ``_run_judge`` now catches and
+        emits ``error="judge_api_error"`` instead.
+        """
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _run_judge,
+        )
+
+        def _raises_402(**kwargs: Any) -> str:
+            raise RuntimeError("Error code: 402 - Insufficient credits")
+
+        with patch(f"{MODULE}._adapter_openrouter", side_effect=_raises_402):
+            result = _run_judge("q?", [_vote()], "key")
+        assert result["is_valid"] is None
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["error"] == "judge_api_error"
+        assert "402" in result["judge_reasoning"]
 
     def test_judge_retries_on_529(self) -> None:
         """Judge retries on 529 overloaded error."""
@@ -495,8 +733,18 @@ class TestRunJudge:
             result = _run_judge("q?", [_vote()], "key")
             assert result["has_occurred"] is True
 
-    def test_judge_retries_exhausted_raises(self) -> None:
-        """Judge raises when all retries are exhausted."""
+    def test_judge_retries_exhausted_returns_api_error_discriminator(
+        self,
+    ) -> None:
+        """Exhausted retries no longer propagate -- emit discriminator.
+
+        Used to raise the underlying ``APIStatusError`` out of
+        ``_run_judge`` (and out of ``run()`` via the decorator's broad
+        except, which returned a raw ``str(exc)`` in tuple[0]).
+        ``_run_judge`` now catches adapter-level exceptions and returns
+        the canonical ``error="judge_api_error"`` JSON stub so the whole
+        result tuple stays JSON-shaped.
+        """
         mock_client = MagicMock()
         err = MagicMock()
         err.status_code = 529
@@ -505,16 +753,20 @@ class TestRunJudge:
         )
         mock_client.chat.completions.create.side_effect = api_err
 
+        from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
+            _run_judge,
+        )
+
         with (
             patch(f"{MODULE}.openai.OpenAI", return_value=mock_client),
             patch(f"{MODULE}.time.sleep"),
-            pytest.raises(__import__("openai").APIStatusError),
         ):
-            from packages.valory.customs.resolve_market_jury.resolve_market_jury import (
-                _run_judge,
-            )
-
-            _run_judge("q?", [_vote()], "key")
+            result = _run_judge("q?", [_vote()], "key")
+        assert result["is_valid"] is None
+        assert result["is_determinable"] is None
+        assert result["has_occurred"] is None
+        assert result["error"] == "judge_api_error"
+        assert "overloaded" in result["judge_reasoning"]
 
 
 # ---------------------------------------------------------------------------
@@ -756,8 +1008,50 @@ class TestRun:
             assert parsed["has_occurred"] is False
             assert parsed["judge_reasoning"] == "majority wins"
 
+    def test_judge_unparseable_propagates_through_canonicalizer(self) -> None:
+        """``judge_unparseable`` error from ``_run_judge`` survives ``run()``.
+
+        Regression: the canonicalizer's else-branch used to hardcode
+        ``error="malformed_verdict"``, silently overwriting any upstream
+        error discriminator. Downstream operators chasing stuck markets
+        could not distinguish "judge LLM returned garbage" from "judge
+        returned a verdict outside the 4-case contract".
+        """
+        keys = _mock_api_keys()
+        mixed_votes = [_vote(has_occurred=True), _vote(has_occurred=False)]
+        # _run_judge's contract on unparseable judge output: (None, None,
+        # None) + error="judge_unparseable". Canonicalizer must NOT replace
+        # this discriminator with "malformed_verdict".
+        judge_verdict = {
+            "is_valid": None,
+            "is_determinable": None,
+            "has_occurred": None,
+            "judge_reasoning": "Unparseable JSON: ...",
+            "error": "judge_unparseable",
+        }
+
+        with (
+            patch(f"{MODULE}.collect_votes", return_value=mixed_votes),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="q?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+            parsed = json.loads(result[0])
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "judge_unparseable"
+
     def test_no_votes_returns_failure(self) -> None:
-        """No successful votes returns failure result."""
+        """No successful votes returns failure result.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) so downstream consumers
+        can distinguish an API outage from a real "the question is invalid"
+        verdict. ``is_valid=False`` is reserved for genuine invalid verdicts.
+        """
         keys = _mock_api_keys()
 
         with patch(f"{MODULE}.collect_votes", return_value=[]):
@@ -767,11 +1061,18 @@ class TestRun:
                 api_keys=keys,
             )
             parsed = json.loads(result[0])
-            assert parsed["is_valid"] is False
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "all_voters_failed"
             assert parsed["n_successful"] == 0
 
     def test_all_error_stubs_trigger_failure(self) -> None:
-        """If every voter errors, the failure path is taken and the judge is skipped."""
+        """If every voter errors, the failure path is taken and the judge is skipped.
+
+        ``is_valid`` MUST be ``None`` (not ``False``) -- see
+        ``test_no_successful_votes_returns_failure`` for rationale.
+        """
         keys = _mock_api_keys()
         all_errored = [
             _vote(voter="v1", error="boom"),
@@ -789,9 +1090,14 @@ class TestRun:
             )
             mock_judge.assert_not_called()
             parsed = json.loads(result[0])
-            assert parsed["is_valid"] is False
+            assert parsed["is_valid"] is None
+            assert parsed["is_determinable"] is None
+            assert parsed["has_occurred"] is None
+            assert parsed["error"] == "all_voters_failed"
             assert parsed["n_successful"] == 0
-            assert parsed["judge_reasoning"] == "All voters failed."
+            assert parsed["judge_reasoning"] == (
+                "All voters failed (API errors / empty responses)."
+            )
             # Error stubs are preserved in the response for debuggability.
             assert len(parsed["votes"]) == 2
 
@@ -901,3 +1207,187 @@ class TestCounterCallbackConcurrency:
             )
 
         assert held_during_call["value"] is True
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: OpenRouter HTTP 402 ("Insufficient credits") propagates
+# correctly through collect_votes -> _successful_votes -> run().
+# ---------------------------------------------------------------------------
+
+
+class TestQuotaExhaustionIntegration:
+    """End-to-end integration tests for the OpenRouter quota-exhaustion path.
+
+    Replicates the production-observed scenario from market-resolver Safe
+    ``0xa592085e...c7433a9d`` on the Gnosis Mech subgraph: every OpenRouter
+    voter call returns ``Error code: 402 - {'error': {'message': 'Insufficient
+    credits. Add more using https://openrouter.ai/settings/credits',
+    'code': 402}}``. Verifies:
+
+    1. ``collect_votes`` records the error on each voter's ``VoterResult``.
+    2. ``_successful_votes`` filters them all out (empty list).
+    3. ``run()`` takes the all-voters-failed branch and emits
+       ``is_valid=None`` -- NOT ``is_valid=False`` -- so downstream
+       consumers don't mistake a billing-quota outage for a "market is
+       invalid" verdict.
+    """
+
+    def _make_402_error(self) -> Any:
+        """Construct an ``openai.APIStatusError`` matching production shape."""
+        import openai
+
+        err_response = MagicMock()
+        err_response.status_code = 402
+        body = {
+            "error": {
+                "message": (
+                    "Insufficient credits. Add more using "
+                    "https://openrouter.ai/settings/credits"
+                ),
+                "code": 402,
+            }
+        }
+        return openai.APIStatusError(
+            message=f"Error code: 402 - {body}",
+            response=err_response,
+            body=body,
+        )
+
+    def test_all_voters_402_emits_is_valid_none(self) -> None:
+        """All 4 voters get HTTP 402; pipeline emits is_valid=None."""
+        keys = _mock_api_keys()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = self._make_402_error()
+
+        with patch(f"{MODULE}.openai.OpenAI", return_value=mock_client):
+            result = run(
+                prompt="Will the number of immigration hearings be above 500?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+
+        parsed = json.loads(result[0])
+
+        # === Pipeline-level assertions ===
+        assert parsed["n_voters"] == 4, "should attempt all 4 default voters"
+        assert parsed["n_successful"] == 0, "0 voters succeeded"
+
+        # The critical assertion: top-level is_valid is None, NOT False.
+        # If this regresses to False, downstream parse_mech_response could
+        # interpret the result as a genuine 'market is invalid' verdict and
+        # submit ANSWER_INVALID (0xff...ff) to Realitio -- burning bonds on
+        # what is really just an API quota outage.
+        assert parsed["is_valid"] is None
+        assert parsed["is_determinable"] is None
+        assert parsed["has_occurred"] is None
+        assert parsed["error"] == "all_voters_failed"
+        assert "All voters failed" in parsed["judge_reasoning"]
+        assert parsed["agreement_ratio"] == 0.0
+        assert parsed["n_decided"] == 0
+
+        # === Per-voter assertions ===
+        # collect_votes must have produced one VoterResult per attempted
+        # voter, each with the 402 error recorded and is_valid=None.
+        assert len(parsed["votes"]) == 4
+        for vote in parsed["votes"]:
+            assert vote["is_valid"] is None
+            assert vote["is_determinable"] is None
+            assert vote["has_occurred"] is None
+            assert vote["confidence"] == 0.0
+            assert vote["error"] is not None
+            assert (
+                "402" in vote["error"]
+            ), f"voter error should mention HTTP 402, got: {vote['error']!r}"
+
+        # === Filter behaviour ===
+        # Reconstruct VoterResult objects from the parsed output and confirm
+        # _successful_votes filters them ALL out -- this is the gate that
+        # routes into the all-voters-failed branch in run().
+        votes = [VoterResult(**v) for v in parsed["votes"]]
+        assert (
+            _successful_votes(votes) == []
+        ), "_successful_votes should drop all error-stubbed voters"
+        assert len(votes) == 4
+        assert all(v.error is not None for v in votes)
+
+    def test_partial_quota_exhaustion_one_voter_survives(self) -> None:
+        """3 voters fail with 402, 1 succeeds -- partial-failure path runs.
+
+        ``run()`` must NOT take the all-voters-failed branch; the surviving
+        voter drives the verdict (judge or consensus path).
+        """
+        keys = _mock_api_keys()
+
+        # 1st call (whichever voter pool item runs first) succeeds; the
+        # remaining 3 fail with 402.
+        good_response = MagicMock()
+        good_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps(
+                        {
+                            "is_valid": True,
+                            "is_determinable": True,
+                            "has_occurred": True,
+                            "confidence": 0.8,
+                            "reasoning": "verified via search",
+                            "sources": ["http://example.com"],
+                        }
+                    )
+                )
+            )
+        ]
+        good_response.usage = None
+
+        bad_err = self._make_402_error()
+
+        mock_client = MagicMock()
+        # side_effect: first call returns the good response, subsequent
+        # calls raise 402. Note: thread ordering in collect_votes is
+        # non-deterministic but the side_effect queue is process-global, so
+        # exactly 1 of the 4 voters will get the success and the other 3
+        # will get errors regardless of scheduling.
+        mock_client.chat.completions.create.side_effect = [
+            good_response,
+            bad_err,
+            bad_err,
+            bad_err,
+        ]
+
+        # Mock the judge too -- with only 1 successful vote there is no
+        # consensus, so _run_judge will be called. We short-circuit it.
+        judge_verdict = {
+            "is_valid": True,
+            "is_determinable": True,
+            "has_occurred": True,
+            "judge_reasoning": "Single surviving voter said YES; agreed.",
+        }
+        with (
+            patch(f"{MODULE}.openai.OpenAI", return_value=mock_client),
+            patch(f"{MODULE}._run_judge", return_value=judge_verdict),
+        ):
+            result = run(
+                prompt="Will X happen?",
+                tool="resolve-market-jury-v1",
+                api_keys=keys,
+            )
+
+        parsed = json.loads(result[0])
+
+        # NOT all-voters-failed -- one survived, so we DO get a verdict.
+        assert parsed.get("error") != "all_voters_failed"
+        assert parsed["n_successful"] == 1
+        assert len(parsed["votes"]) == 4
+        # Three voters errored
+        errored = [v for v in parsed["votes"] if v.get("error") is not None]
+        assert len(errored) == 3
+        for v in errored:
+            assert "402" in v["error"]
+        # The judge's Case C1 verdict must propagate through the
+        # canonicalizer in ``run()`` to the top-level fields. Without
+        # these assertions, the test would pass even if the C1
+        # canonicalization branch broke.
+        assert parsed["is_valid"] is True
+        assert parsed["is_determinable"] is True
+        assert parsed["has_occurred"] is True

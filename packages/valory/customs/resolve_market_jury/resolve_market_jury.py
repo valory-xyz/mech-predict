@@ -29,6 +29,7 @@ import functools
 import json
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -104,11 +105,38 @@ discussing whether it WILL happen suggests it did not.
   4. Consider the intent and spirit of the question, not just literal keywords. \
 For example, legislation "addressing AI's impact on the workforce" reasonably \
 covers white-collar employment even without that exact phrase.
-* There are only two possible outcomes: the event happened (true) or it did not \
-(false). If your confidence is below 0.7, set is_determinable to false -- do \
-NOT guess when evidence is insufficient.
+  5. SEMANTIC CHECKS before setting has_occurred:
+     (a) NEGATION TRAP -- if the question uses negative framing ("still pending", \
+"still in effect", "remain at", "not yet"), first answer it in plain English \
+("Is X still pending? Yes/No"), then set has_occurred to the plain-English answer. \
+"Still pending = true" means YES, the pending state holds. Cross-check that your \
+final boolean matches your reasoning text.
+     (b) NUMERIC RANGE -- for "at or above X" / "below X", a guidance \
+RANGE [A, B] satisfies "at or above X" if A >= X (the lower endpoint \
+already reaches the threshold) OR a confirmed point value >= X. \
+Equality at the lower bound COUNTS as satisfying: a "2.5% to 5%" \
+range satisfies "at or above 2.5%" because A == X == 2.5%. \
+The rule only FAILS when the upper bound *alone* equals X with the \
+lower bound strictly below it (e.g. a "1.5% to 2.5%" range does NOT \
+reliably satisfy "at or above 2.5%" because most of the range is below). \
+Symmetric rule for "below X" (B < X, or A < X with the whole range \
+beneath the threshold).
+     (c) VERB MATCH -- announce != complete != deploy != ratify. Evidence of an \
+ANNOUNCEMENT OF INTENT to do X does not count as evidence that X has been \
+COMPLETED. Match the verb in the question precisely.
+There are ONLY FOUR valid output shapes (mapped to the downstream
+resolver's contract). Pick exactly one:
 
-VALIDITY RULES:
+  (A) INVALID -- the question is malformed (relative date, opinion, etc.):
+        is_valid=false, is_determinable=null, has_occurred=null
+  (B) UNDETERMINABLE -- valid question, but evidence is insufficient:
+        is_valid=true, is_determinable=false, has_occurred=null, confidence<0.7
+  (C1) YES -- the event occurred:
+        is_valid=true, is_determinable=true, has_occurred=true, confidence>=0.7
+  (C2) NO -- the event did NOT occur:
+        is_valid=true, is_determinable=true, has_occurred=false, confidence>=0.7
+
+VALIDITY RULES (when to choose A -- INVALID):
 * Questions with relative dates ("in 6 months") are invalid.
 * Questions about opinions rather than facts are invalid.
 
@@ -116,15 +144,16 @@ Question: "{question}"
 
 CRITICAL: Respond with ONLY valid JSON. No markdown, no text before or after.
 CONSISTENCY RULES:
-- If has_occurred is true or false, then is_determinable MUST be true and confidence \
-should be >= 0.7.
-- If has_occurred is null, then is_determinable MUST be false and confidence should \
-be < 0.7.
+- If is_valid is false  -> is_determinable AND has_occurred MUST both be null.
+- If is_valid is true and is_determinable is true -> has_occurred MUST be true \
+or false (never null), confidence >= 0.7.
+- If is_valid is true and is_determinable is false -> has_occurred MUST be null, \
+confidence < 0.7.
 - confidence reflects how sure you are of your answer (0.0 = no idea, 1.0 = certain).
 {{
-    "is_valid": true,
-    "is_determinable": true or false,
-    "has_occurred": true or false or null,
+    "is_valid": true or false,
+    "is_determinable": true, false, or null,
+    "has_occurred": true, false, or null,
     "confidence": 0.0 to 1.0,
     "reasoning": "Step-by-step explanation, 200 words max. What you found, why you reached this verdict.",
     "sources": ["url1", "url2"]
@@ -139,6 +168,18 @@ Question: "{question}"
 Voter assessments:
 {votes}
 
+There are ONLY FOUR valid output shapes (mapped to the downstream
+resolver's contract). Pick exactly one:
+
+  (A) INVALID -- the question is malformed (relative date, opinion, etc.):
+        is_valid=false, is_determinable=null, has_occurred=null
+  (B) UNDETERMINABLE -- valid question, but evidence is insufficient:
+        is_valid=true, is_determinable=false, has_occurred=null
+  (C1) YES -- the event occurred:
+        is_valid=true, is_determinable=true, has_occurred=true
+  (C2) NO -- the event did NOT occur:
+        is_valid=true, is_determinable=true, has_occurred=false
+
 DECISION PROCESS:
 1. Review each voter's evidence and sources, not just their verdict.
 2. If all voters with a definitive answer agree, follow their consensus.
@@ -148,15 +189,43 @@ DECISION PROCESS:
    c. Follow the majority UNLESS your own research or the minority's sources \
 show a clear factual error in the majority's reasoning.
    d. When evidence quality is similar on both sides, follow the majority.
-4. If no clear majority exists, or evidence is too weak, set is_determinable \
-to false.
-5. If a voter flags the question as invalid with sound reasoning, mark invalid.
+4. If no clear majority exists, or evidence is too weak, pick (B) UNDETERMINABLE.
+5. If a voter flags the question as invalid with sound reasoning, pick (A) INVALID.
+6. If the majority of decided voters say UNDETERMINABLE or INVALID, do NOT \
+override them with your own affirmative answer -- pick (B) or (A) respectively. \
+Reserve C1/C2 for cases where decided voters actually support that verdict. \
+The same rule applies when two or more decided voters with confidence >= 0.9 \
+agree on YES or NO: you MUST follow them unless you can cite a specific \
+factual error in their reasoning text -- a different INTERPRETATION of the \
+question (e.g. of VERB MATCH, NUMERIC RANGE, NEGATION) is NOT a factual error \
+and does not justify override.
+
+SEMANTIC CHECKS (apply before producing has_occurred):
+(a) NEGATION TRAP -- "still pending", "still in effect", "remain at", "not yet" \
+frame the QUESTION negatively. Restate it positively in your judge_reasoning \
+("Has X been completed?") and answer that, then map: "X has happened" -> \
+has_occurred=false (the pending state is over) / "X has not happened" -> \
+has_occurred=true (the pending state holds). Cross-check that your has_occurred \
+matches the plain-English reading of your reasoning text.
+(b) NUMERIC RANGE -- "at or above X" is satisfied if A >= X (lower endpoint \
+reaches the threshold) OR a confirmed point value >= X. Equality at the lower \
+bound COUNTS: a "2.5% to 5%" range satisfies "at or above 2.5%" because the \
+lower endpoint already equals X. The rule only fails when only the upper bound \
+equals X with the lower bound strictly below (e.g. "1.5% to 2.5%" does NOT \
+reliably satisfy "at or above 2.5%"). Symmetric for "below X".
+(c) VERB MATCH -- announce != complete != deploy != ratify. An announcement of \
+intent does NOT satisfy a question asking for completion. Match the verb in the \
+question literally.
+CONSISTENCY RULES:
+- If is_valid is false  -> is_determinable AND has_occurred MUST both be null.
+- If is_valid is true and is_determinable is true -> has_occurred MUST be true or false (never null).
+- If is_valid is true and is_determinable is false -> has_occurred MUST be null.
 
 Respond in JSON only (no markdown fences, no text before or after):
 {{
     "is_valid": true or false,
-    "is_determinable": true or false,
-    "has_occurred": true or false or null,
+    "is_determinable": true, false, or null,
+    "has_occurred": true, false, or null,
     "judge_reasoning": "Which voters you agreed with and why. Cite evidence."
 }}"""
 
@@ -263,22 +332,40 @@ def _parse_vote(raw: str, voter: str, model: str) -> VoterResult:
             model=model,
             error=f"Unparseable JSON: {raw[:200]}",
         )
+    is_valid = data.get("is_valid")
     has_occurred = data.get("has_occurred")
     is_determinable = data.get("is_determinable")
-    confidence = float(data.get("confidence", 0.0))
+    # The prompt schema asks for ``confidence: 0.0 to 1.0`` (no null) but
+    # LLMs sometimes emit ``null`` under Case A, or strings like ``"high"``
+    # / ``"0.8 (high)"`` / ``"~0.75"`` against the schema. Defensively
+    # default to 0.0 instead of crashing -- ``float("high")`` would raise
+    # ValueError and silently turn a real vote into an error stub.
+    raw_conf = data.get("confidence")
+    try:
+        confidence = float(raw_conf) if raw_conf is not None else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
 
-    # Enforce consistency between fields
-    if has_occurred is None:
-        is_determinable = False
-        confidence = min(confidence, 0.5)
-    if is_determinable is False:
+    # Canonicalize to the 4 downstream contract cases.
+    # Case A (INVALID): is_valid=False  -> is_determinable=None, has_occurred=None
+    # Case B (UNDET):   is_valid=True, is_determinable=False -> has_occurred=None
+    # Case C1/C2 (YES/NO): is_valid=True, is_determinable=True, has_occurred=True/False
+    if is_valid is False:
+        is_determinable = None
         has_occurred = None
         confidence = min(confidence, 0.5)
+    else:
+        if has_occurred is None:
+            is_determinable = False
+            confidence = min(confidence, 0.5)
+        if is_determinable is False:
+            has_occurred = None
+            confidence = min(confidence, 0.5)
 
     return VoterResult(
         voter=voter,
         model=model,
-        is_valid=data.get("is_valid"),
+        is_valid=is_valid,
         is_determinable=is_determinable,
         has_occurred=has_occurred,
         confidence=confidence,
@@ -478,22 +565,46 @@ def _run_judge(
         formatted_votes += f"\nVoter {i}:\n{json.dumps(vote_data, indent=2)}\n"
 
     prompt = JUDGE_PROMPT.format(question=question, votes=formatted_votes)
-    raw = _adapter_openrouter(
-        model=JUDGE_MODEL_CLAUDE,
-        prompt=prompt,
-        api_key=api_key,
-        max_tokens=JUDGE_MAX_TOKENS,
-        timeout=JUDGE_TIMEOUT,
-        max_attempts=JUDGE_MAX_ATTEMPTS,
-        retry_delay=JUDGE_RETRY_DELAY,
-        counter_callback=counter_callback,
-    )
+    try:
+        raw = _adapter_openrouter(
+            model=JUDGE_MODEL_CLAUDE,
+            prompt=prompt,
+            api_key=api_key,
+            max_tokens=JUDGE_MAX_TOKENS,
+            timeout=JUDGE_TIMEOUT,
+            max_attempts=JUDGE_MAX_ATTEMPTS,
+            retry_delay=JUDGE_RETRY_DELAY,
+            counter_callback=counter_callback,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        # Adapter-level failure (402 credit-exhausted, network error,
+        # timeout, etc.). Without this catch the exception bubbles up
+        # to ``with_key_rotation``'s broad-except, which returns a raw
+        # ``str(e)`` in tuple[0] -- violating the JSON-shape contract
+        # every other failure path obeys. Emit a proper discriminator
+        # here so downstream parsers + operator logs see a consistent
+        # ``error="judge_api_error"`` payload alongside
+        # ``judge_unparseable`` and ``all_voters_failed``.
+        return {
+            "is_valid": None,
+            "is_determinable": None,
+            "has_occurred": None,
+            "error": "judge_api_error",
+            "judge_reasoning": f"Judge adapter raised: {exc!r}"[:300],
+        }
     data = _extract_json(raw)
     if data is None:
+        # Judge LLM produced unparseable output. Mark verdict as unknown
+        # (``is_valid=None``) rather than ``False`` so downstream consumers
+        # don't mistake a judge-side LLM failure for a genuine "the
+        # question is invalid" verdict and submit ANSWER_INVALID
+        # (0xff...ff) on Realitio. See the all-voters-failed branch in
+        # ``run()`` for the same rationale.
         return {
-            "is_valid": False,
-            "is_determinable": False,
+            "is_valid": None,
+            "is_determinable": None,
             "has_occurred": None,
+            "error": "judge_unparseable",
             "judge_reasoning": f"Unparseable judge response: {raw[:200]}",
         }
     return data
@@ -514,60 +625,97 @@ def _successful_votes(votes: List[VoterResult]) -> List[VoterResult]:
 
 
 def _decided_votes(votes: List[VoterResult]) -> List[VoterResult]:
-    """Filter to votes that are valid and determinable."""
+    """Voters that reached YES / NO / INVALID (excludes undet + errored)."""
     return [
         v
         for v in votes
-        if v.is_determinable is not False
-        and v.is_valid is not False
-        and v.error is None
+        if v.error is None and (v.is_valid is False or v.is_determinable is True)
     ]
 
 
+# The three valid actionable verdict labels. A decided vote always maps
+# to exactly one of these; the (is_valid, is_determinable, has_occurred)
+# tuple in the public output is derived from the label.
+_LABEL_OUTPUT: Dict[str, Tuple[Optional[bool], Optional[bool], Optional[bool]]] = {
+    "yes": (True, True, True),  # Case C1
+    "no": (True, True, False),  # Case C2
+    "invalid": (False, None, None),  # Case A
+}
+
+
+def _verdict_label(v: VoterResult) -> Optional[str]:
+    """``"yes"`` / ``"no"`` / ``"invalid"`` for decided votes; else ``None``."""
+    if v.error is not None:
+        return None
+    if v.is_valid is False:
+        return "invalid"
+    if v.is_determinable is True and v.has_occurred is True:
+        return "yes"
+    if v.is_determinable is True and v.has_occurred is False:
+        return "no"
+    return None
+
+
+def _label_counts(votes: List[VoterResult]) -> Counter:
+    """Tally of decided votes per verdict label (undet/errored skipped)."""
+    return Counter(
+        label for label in (_verdict_label(v) for v in votes) if label is not None
+    )
+
+
 def _has_consensus(votes: List[VoterResult]) -> bool:
-    """Check whether decided voters form a strict majority and all agree.
-
-    Undecided / failed / invalid voters count against the threshold: a strict
-    majority of *all* voters (not just decided ones) must have produced a
-    determinate verdict, AND those decided voters must unanimously agree on
-    ``has_occurred``. This prevents 2-of-4 minority agreement from short-
-    circuiting the judge.
-
-    :param votes: all voter results (including undecided / failed / invalid).
-    :return: True if decided voters form a strict majority and unanimously agree.
-    """
-    decided = _decided_votes(votes)
-    # Need at least a strict majority of all voters to have decided.
-    if len(decided) < 2 or len(decided) <= len(votes) / 2:
+    """True iff strictly >50% of TOTAL voters back one actionable verdict."""
+    counts = _label_counts(votes)
+    if not counts:
         return False
-    return all(v.has_occurred == decided[0].has_occurred for v in decided)
+    return counts.most_common(1)[0][1] > len(votes) / 2
 
 
 def _build_consensus_result(votes: List[VoterResult]) -> dict:
-    """Build result from unanimous votes (skip judge)."""
-    successful = _successful_votes(votes)
-    decided = _decided_votes(votes)
+    """Build result from consensus votes (skip judge).
+
+    Caller MUST have verified ``_has_consensus`` returns True. The
+    winning label's canonical shape (see ``_LABEL_OUTPUT``) is emitted
+    directly -- no separate code paths for INVALID vs YES/NO.
+
+    :param votes: all voter results.
+    :return: top-level result dict matching the judge-path output schema.
+    :raises ValueError: if no decided votes exist (caller skipped the
+        ``_has_consensus`` check).
+    """
+    counts = _label_counts(votes)
+    if not counts:
+        raise ValueError(
+            "_build_consensus_result called without consensus -- "
+            "no decided votes. Caller must verify _has_consensus() first."
+        )
+    winner, _ = counts.most_common(1)[0]
+    is_valid, is_determinable, has_occurred = _LABEL_OUTPUT[winner]
+    reason = (
+        "Voter majority consensus on INVALID -- judge skipped."
+        if winner == "invalid"
+        else "Voter majority consensus -- judge skipped."
+    )
     return {
-        "is_valid": True,
-        "is_determinable": True,
-        "has_occurred": decided[0].has_occurred,
+        "is_valid": is_valid,
+        "is_determinable": is_determinable,
+        "has_occurred": has_occurred,
+        "judge_reasoning": reason,
         "votes": [asdict(v) for v in votes],
-        "judge_reasoning": "Voter majority consensus -- judge skipped.",
-        "agreement_ratio": 1.0,
+        "agreement_ratio": _compute_agreement(votes),
         "n_voters": len(votes),
-        "n_successful": len(successful),
-        "n_decided": len(decided),
+        "n_successful": len(_successful_votes(votes)),
+        "n_decided": len(_decided_votes(votes)),
     }
 
 
 def _compute_agreement(votes: List[VoterResult]) -> float:
-    """Compute agreement ratio among decided votes."""
-    decided = _decided_votes(votes)
-    if not decided:
+    """Most-voted label's share over decided votes (0.0 if none)."""
+    counts = _label_counts(votes)
+    n_decided = sum(counts.values())
+    if n_decided == 0:
         return 0.0
-    yes_count = sum(1 for v in decided if v.has_occurred is True)
-    no_count = sum(1 for v in decided if v.has_occurred is False)
-    return max(yes_count, no_count) / len(decided)
+    return counts.most_common(1)[0][1] / n_decided
 
 
 # ---------------------------------------------------------------------------
@@ -648,20 +796,39 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     votes = collect_votes(prompt, voters, api_keys, counter_callback)
     successful = _successful_votes(votes)
 
-    # 2. Early exit: no successful votes
+    # 2. Early exit: no successful votes.
+    #
+    # IMPORTANT: ``is_valid`` MUST be ``None`` here (not ``False``). Emitting
+    # ``is_valid=False`` is reserved for the case where the jury actually
+    # determines the question is invalid. Conflating "all voter APIs errored"
+    # with "the question is invalid" causes downstream consumers (e.g.
+    # market-resolver's ``parse_mech_response``) to submit
+    # ``ANSWER_INVALID`` (0xff...ff) to Realitio for what is really an API
+    # outage -- burning bonds on a meaningless verdict.
+    #
+    # ``is_valid=None`` is the natural "we couldn't determine validity"
+    # marker; downstream strict parsers already reject it as garbage and
+    # retry with cooldown.
     if not successful:
         result: Dict[str, Any] = {
-            "is_valid": False,
-            "is_determinable": False,
+            "is_valid": None,
+            "is_determinable": None,
             "has_occurred": None,
             "votes": [asdict(v) for v in votes],
-            "judge_reasoning": "All voters failed.",
+            "judge_reasoning": "All voters failed (API errors / empty responses).",
+            "error": "all_voters_failed",
             "agreement_ratio": 0.0,
             "n_voters": len(voters),
             "n_successful": 0,
             "n_decided": 0,
         }
-        return json.dumps(result), "All voters failed.", None, counter_callback, None
+        return (
+            json.dumps(result),
+            result["judge_reasoning"],
+            None,
+            counter_callback,
+            None,
+        )
 
     used_params: Dict[str, Any] = {
         "model": JUDGE_MODEL_CLAUDE,
@@ -688,12 +855,56 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     print("  Voters disagree -- running judge...")
     verdict = _run_judge(prompt, votes, api_keys["openrouter"], counter_callback)
 
-    # 5. Build result with vote metadata
+    # 5. Canonicalize judge verdict to one of the four contract cases.
+    #
+    # Contract (parse_mech_response docstring, market-resolver
+    # ``behaviours/base.py``):
+    #   Case A:  (False, None, None)   -> INVALID
+    #   Case B:  (True,  False, None)  -> undeterminable
+    #   Case C1: (True,  True,  True)  -> YES
+    #   Case C2: (True,  True,  False) -> NO
+    #
+    # Anything outside these four shapes is consolidated to the error
+    # discriminator ``(None, None, None) + error="malformed_verdict"``,
+    # which downstream parsers reject as garbage and retry.
+    iv = verdict.get("is_valid")
+    id_ = verdict.get("is_determinable")
+    ho = verdict.get("has_occurred")
     judge_reasoning = verdict.get("judge_reasoning", "")
+
+    canon_is_valid: Optional[bool]
+    canon_is_det: Optional[bool]
+    canon_has_occ: Optional[bool]
+    canon_error: Optional[str] = None
+    if iv is False:
+        # Case A
+        canon_is_valid, canon_is_det, canon_has_occ = False, None, None
+    elif iv is True and id_ is False:
+        # Case B
+        canon_is_valid, canon_is_det, canon_has_occ = True, False, None
+    elif iv is True and id_ is True and ho is True:
+        # Case C1
+        canon_is_valid, canon_is_det, canon_has_occ = True, True, True
+    elif iv is True and id_ is True and ho is False:
+        # Case C2
+        canon_is_valid, canon_is_det, canon_has_occ = True, True, False
+    else:
+        # Judge returned a shape outside the contract (e.g. is_valid=None
+        # after partial parse, is_determinable=True with has_occurred=None,
+        # etc.). Route through the error discriminator so downstream
+        # consumers retry instead of acting on an ambiguous verdict.
+        # Preserve the upstream error (e.g. ``judge_unparseable``) when
+        # present so the operator can tell parser failures apart from
+        # off-contract verdicts; default to ``malformed_verdict`` otherwise.
+        canon_is_valid = None
+        canon_is_det = None
+        canon_has_occ = None
+        canon_error = verdict.get("error") or "malformed_verdict"
+
     result = {
-        "is_valid": verdict.get("is_valid", True),
-        "is_determinable": verdict.get("is_determinable", True),
-        "has_occurred": verdict.get("has_occurred"),
+        "is_valid": canon_is_valid,
+        "is_determinable": canon_is_det,
+        "has_occurred": canon_has_occ,
         "votes": [asdict(v) for v in votes],
         "judge_reasoning": judge_reasoning,
         "agreement_ratio": _compute_agreement(votes),
@@ -701,5 +912,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         "n_successful": len(successful),
         "n_decided": len(_decided_votes(votes)),
     }
+    if canon_error is not None:
+        result["error"] = canon_error
 
     return json.dumps(result), judge_reasoning, None, counter_callback, used_params

@@ -111,10 +111,16 @@ covers white-collar employment even without that exact phrase.
 ("Is X still pending? Yes/No"), then set has_occurred to the plain-English answer. \
 "Still pending = true" means YES, the pending state holds. Cross-check that your \
 final boolean matches your reasoning text.
-     (b) NUMERIC RANGE -- for "at or above X" / "below X", a guidance RANGE \
-[A, B] satisfies "at or above X" only if A >= X or a confirmed value >= X. A range \
-whose upper bound merely touches X does NOT satisfy "at or above X". Symmetric \
-rule for "below X" (requires B < X).
+     (b) NUMERIC RANGE -- for "at or above X" / "below X", a guidance \
+RANGE [A, B] satisfies "at or above X" if A >= X (the lower endpoint \
+already reaches the threshold) OR a confirmed point value >= X. \
+Equality at the lower bound COUNTS as satisfying: a "2.5% to 5%" \
+range satisfies "at or above 2.5%" because A == X == 2.5%. \
+The rule only FAILS when the upper bound *alone* equals X with the \
+lower bound strictly below it (e.g. a "1.5% to 2.5%" range does NOT \
+reliably satisfy "at or above 2.5%" because most of the range is below). \
+Symmetric rule for "below X" (B < X, or A < X with the whole range \
+beneath the threshold).
      (c) VERB MATCH -- announce != complete != deploy != ratify. Evidence of an \
 ANNOUNCEMENT OF INTENT to do X does not count as evidence that X has been \
 COMPLETED. Match the verb in the question precisely.
@@ -207,9 +213,12 @@ frame the QUESTION negatively. Restate it positively in your judge_reasoning \
 has_occurred=false (the pending state is over) / "X has not happened" -> \
 has_occurred=true (the pending state holds). Cross-check that your has_occurred \
 matches the plain-English reading of your reasoning text.
-(b) NUMERIC RANGE -- "at or above X" requires confirmed value >= X or a range \
-lower bound >= X. A range [A, B] whose upper bound B merely touches X does NOT \
-satisfy "at or above X". Symmetric for "below X".
+(b) NUMERIC RANGE -- "at or above X" is satisfied if A >= X (lower endpoint \
+reaches the threshold) OR a confirmed point value >= X. Equality at the lower \
+bound COUNTS: a "2.5% to 5%" range satisfies "at or above 2.5%" because the \
+lower endpoint already equals X. The rule only fails when only the upper bound \
+equals X with the lower bound strictly below (e.g. "1.5% to 2.5%" does NOT \
+reliably satisfy "at or above 2.5%"). Symmetric for "below X".
 (c) VERB MATCH -- announce != complete != deploy != ratify. An announcement of \
 intent does NOT satisfy a question asking for completion. Match the verb in the \
 question literally.

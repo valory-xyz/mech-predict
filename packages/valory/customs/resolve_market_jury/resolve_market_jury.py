@@ -124,12 +124,6 @@ beneath the threshold).
      (c) VERB MATCH -- announce != complete != deploy != ratify. Evidence of an \
 ANNOUNCEMENT OF INTENT to do X does not count as evidence that X has been \
 COMPLETED. Match the verb in the question precisely.
-     (d) NAMED SOURCE -- if the question names a specific publisher (e.g. NWS, \
-AAA, SWAA, GasBuddy, Baker Hughes, Moneyfacts, OECD, IMF, NASA, NCAA), your \
-"sources" list MUST include at least one direct URL or document from that \
-publisher. If no such source is available, return is_determinable=false rather \
-than guessing from secondary citations or forecasts.
-
 There are ONLY FOUR valid output shapes (mapped to the downstream
 resolver's contract). Pick exactly one:
 
@@ -222,11 +216,6 @@ reliably satisfy "at or above 2.5%"). Symmetric for "below X".
 (c) VERB MATCH -- announce != complete != deploy != ratify. An announcement of \
 intent does NOT satisfy a question asking for completion. Match the verb in the \
 question literally.
-(d) NAMED SOURCE -- if the question names a specific publisher (NWS, AAA, SWAA, \
-GasBuddy, Baker Hughes, Moneyfacts, OECD, IMF, NASA, NCAA, etc.), your verdict \
-must be backed by a citation from that publisher in at least one voter's sources \
-or your own search. If no such source is available, pick (B) UNDETERMINABLE.
-
 CONSISTENCY RULES:
 - If is_valid is false  -> is_determinable AND has_occurred MUST both be null.
 - If is_valid is true and is_determinable is true -> has_occurred MUST be true or false (never null).

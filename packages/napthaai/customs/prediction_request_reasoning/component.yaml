@@ -7,7 +7,7 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeib36ew6vbztldut5xayk5553rylrq7yv4cpqyhwc5ktvd4cx67vwu
-  prediction_request_reasoning.py: bafybeieexoto7vpkopj4dqyqkxmva34h46flhwyrnxta4svgsfbrxizzwi
+  prediction_request_reasoning.py: bafybeib3422icio62o6dbun2qfljdkdsruurtk3yt7rp4w6e24tmae2cmi
   tests/__init__.py: bafybeieu3toasuyaehkqounrtylk5bjer7qgvnt6ccjcsi6jlfig7wfrka
   tests/test_prediction_request_reasoning.py: bafybeiclefskba2fa4rt4tohvxiepm3uevqul5zwqo6zk6v3e5mpbrysaq
 fingerprint_ignore_patterns: []
@@ -25,7 +25,7 @@ dependencies:
   httpx:
     version: ==0.25.2
   markdownify:
-    version: ==0.11.6
+    version: '>=0.14.1'
   readability-lxml:
     version: ==0.8.1
   lxml_html_clean:
@@ -34,8 +34,8 @@ dependencies:
     version: ==1.93.0
   tiktoken:
     version: ==0.12.0
-  pypdf2:
-    version: ==3.0.1
+  pypdf:
+    version: '>=3.9.0'
   numpy:
     version: '>=1.19.0'
   pydantic:

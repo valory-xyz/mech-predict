@@ -58,7 +58,7 @@ DEFAULT_DELIVERY_RATE = 100
 # ---------------------------------------------------------------------------
 
 VOTER_MODEL_OPENAI = "openai/gpt-4.1:online"
-VOTER_MODEL_GROK = "x-ai/grok-4.1-fast:online"
+VOTER_MODEL_GROK = "x-ai/grok-4.3:online"
 VOTER_MODEL_GEMINI = "google/gemini-2.5-flash:online"
 VOTER_MODEL_CLAUDE = "anthropic/claude-haiku-4.5:online"
 JUDGE_MODEL_CLAUDE = "anthropic/claude-sonnet-4:online"

@@ -32,7 +32,7 @@ dependencies:
   lxml_html_clean:
     version: ==0.4.4
   markdownify:
-    version: ==0.11.6
+    version: ==1.2.2
   openai:
     version: ==1.93.0
   anthropic:

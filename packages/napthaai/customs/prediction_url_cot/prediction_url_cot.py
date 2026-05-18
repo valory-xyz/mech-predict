@@ -26,10 +26,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
-import PyPDF2
 import anthropic
 import googleapiclient
 import openai
+import pypdf
 import requests
 from googleapiclient.discovery import build
 from markdownify import markdownify as md
@@ -568,7 +568,7 @@ def extract_text_from_pdf(
             raise ValueError("URL does not point to a PDF document")
 
         with BytesIO(response.content) as pdf_file:
-            reader = PyPDF2.PdfReader(pdf_file)
+            reader = pypdf.PdfReader(pdf_file)
             text = ""
             for page in reader.pages:
                 text += page.extract_text()

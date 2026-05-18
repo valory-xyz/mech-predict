@@ -31,4 +31,4 @@ dependencies:
   lxml_html_clean:
     version: ==0.4.4
   markdownify:
-    version: '>=0.14.1'
+    version: ==1.2.2

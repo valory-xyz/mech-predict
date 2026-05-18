@@ -23,7 +23,7 @@ dependencies:
   requests:
     version: ==2.32.5
   markdownify:
-    version: '>=0.14.1'
+    version: ==1.2.2
   readability-lxml:
     version: ==0.8.1
   httpx:
@@ -43,6 +43,6 @@ dependencies:
   docstring-parser:
     version: ==0.17.0
   pypdf:
-    version: '>=3.9.0'
+    version: ==6.11.0
   numpy:
     version: '>=1.19.0'

@@ -2,9 +2,12 @@ name: factual_research
 author: valory
 version: 0.1.0
 type: custom
-description: "A tool that answers narrow factual questions by gathering and citing\
-  \ verifiable evidence. Produces state-of-the-world facts only \u2014 never predictions,\
-  \ probabilities, or market opinions."
+description: 'A tool for making binary predictions on markets. Returns the standard
+  mech prediction output (p_yes, p_no, confidence, info_utility). Its edge comes from
+  grounding the estimate in cited, verifiable facts: the tool reframes the market
+  question into narrow factual sub-questions, gathers web evidence with citations,
+  synthesises a factual briefing, and only then converts the briefing into the prediction
+  output.'
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

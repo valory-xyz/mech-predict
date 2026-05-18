@@ -2,7 +2,7 @@ name: prediction_request_rag
 author: napthaai
 version: 0.1.0
 type: custom
-description: A tool for making binary predictions on markets.
+description: A tool for making binary predictions on markets using RAG.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

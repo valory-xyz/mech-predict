@@ -2,8 +2,8 @@ name: prediction_request_sme
 author: nickcom007
 version: 0.1.0
 type: custom
-description: A tool to establish Subject Matter Expert (SME) roles for specific market-related
-  questions.
+description: A tool for making binary predictions on markets that establishes a Subject
+  Matter Expert (SME) role tailored to the market question to improve reasoning quality.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

@@ -2,7 +2,8 @@ name: superforcaster
 author: valory
 version: 0.1.0
 type: custom
-description: A tool that runs superforcaster prompt.
+description: A tool for making binary predictions on markets using the Serper API
+  and LLMs.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

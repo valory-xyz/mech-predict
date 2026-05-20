@@ -265,6 +265,33 @@ class TestRunSingle:
 
         assert result["prediction_parse_status"] != "valid"
 
+    # When a tool's `with_key_rotation` bare-except returns an error-JSON
+    # (p_yes=null, error="<msg>"), the embedded error must be surfaced on
+    # the result so the prediction row carries a diagnostic instead of
+    # just `malformed` with no context.
+    @patch("benchmark.tournament.load_tool_run")
+    def test_error_json_from_tool_is_captured(self, mock_load: MagicMock) -> None:
+        """Tool error-JSON has its `error` field captured on the result."""
+        mock_fn = MagicMock(
+            return_value=(
+                '{"p_yes": null, "p_no": null, "confidence": 0.0, '
+                '"info_utility": 0.0, '
+                '"error": "SubQuestions is not fully defined"}',
+                None,
+                None,
+                None,
+                {},
+            )
+        )
+        mock_load.return_value = mock_fn
+
+        keys = KeyChain({"openai": ["fake"], "search_provider": ["google"]})
+        result = run_single("prediction-online", "Will X?", "gpt-4.1", keys, "bafycid1")
+
+        assert result["prediction_parse_status"] == "malformed"
+        assert result["p_yes"] is None
+        assert result["error"] == "SubQuestions is not fully defined"
+
     @patch("benchmark.tournament.load_tool_run")
     def test_ipfs_fetch_error_yields_row(self, mock_load: MagicMock) -> None:
         """A bad CID is recorded as ipfs_fetch_error, not raised."""

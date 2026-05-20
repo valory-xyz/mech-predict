@@ -2,9 +2,9 @@
 IPFS-backed tool loader for tournament mode.
 
 Fetches tool source from a public IPFS gateway by CID, caches on disk,
-execs the entry_point, and returns the run callable. Used by tournament
-mode so candidate tool versions can be benchmarked without merging them
-to packages.json.
+imports the entry-point as a proper module, and returns the run callable.
+Used by tournament mode so candidate tool versions can be benchmarked
+without merging them to packages.json.
 
 One TAR GET per tool: ``Accept: application/x-tar`` on the CID returns a
 tarball whose top-level entry is a wrapper directory (named after the
@@ -12,12 +12,23 @@ package, e.g. ``superforcaster/``) containing ``component.yaml``, the
 entry-point ``.py``, and noise we ignore (``__init__.py``, ``tests/``).
 We extract just the two files we need into ``cache_dir/{cid}/`` and
 hand them to ``ComponentPackageLoader.load``.
+
+The entry-point is loaded via ``importlib.util.spec_from_file_location``
+so classes defined in it get a real ``__module__`` registered in
+``sys.modules``. ``exec(source, namespace)`` is unsafe for tool code
+that uses pydantic ``BaseModel`` with forward references (e.g.
+``List[str]``) — pydantic resolves forward refs by looking up
+``cls.__module__`` in ``sys.modules`` and falls over with
+``class-not-fully-defined`` when the class was exec'd into a bare dict
+namespace whose ``__module__`` resolves to ``'builtins'``.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import logging
+import sys
 import tarfile
 import time
 from pathlib import Path
@@ -261,19 +272,26 @@ def fetch_tool_package(cid: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[st
 def load_tool_from_ipfs(
     cid: str, cache_dir: Path = DEFAULT_CACHE_DIR
 ) -> Callable[..., Any]:
-    """Fetch a tool package from IPFS, exec it, return its run callable.
+    """Fetch a tool package from IPFS, import it, return its run callable.
+
+    The entry-point file on disk (written by ``fetch_tool_package``) is
+    loaded via ``importlib.util.spec_from_file_location`` under a
+    CID-derived module name. The module is registered in ``sys.modules``
+    so introspection-based libraries (pydantic forward refs, dataclasses,
+    typing.get_type_hints) can resolve names from the module's namespace.
 
     :param cid: IPFS CID of the tool package.
     :param cache_dir: on-disk cache location.
     :return: the tool's run callable (``component.yaml:callable``).
-    :raises IpfsFetchError: on gateway / network failures, or if the
-        package's ``component.yaml`` does not point at the named callable.
+    :raises IpfsFetchError: on gateway / network failures, on
+        ``component.yaml`` problems, or if the entry-point module can't
+        be imported or doesn't expose the named callable.
     """
     package = fetch_tool_package(cid, cache_dir=cache_dir)
     try:
         (
             _component_yaml,
-            entry_point_source,
+            _entry_point_source,
             callable_name,
         ) = ComponentPackageLoader.load(package)
     except Exception as exc:  # pylint: disable=broad-except
@@ -281,17 +299,39 @@ def load_tool_from_ipfs(
             f"IPFS fetch failed: cid={cid} component package load failed: {exc!r}"
         ) from exc
 
-    namespace: dict[str, Any] = {}
-    try:
-        exec(entry_point_source, namespace)  # nosec B102 # pylint: disable=exec-used
-    except Exception as exc:  # pylint: disable=broad-except
+    # The entry-point name is the only non-yaml key in the package dict;
+    # `fetch_tool_package` wrote that file to `cache_dir/{cid}/{name}`.
+    entry_point_name = next(k for k in package if k != "component.yaml")
+    entry_path = _cache_path(cache_dir, cid, entry_point_name)
+
+    # Unique module name per CID — lets a candidate CID and the
+    # production CID for the same tool coexist in one process.
+    module_name = f"mech_predict_tournament_tool_{cid}"
+
+    cached_mod = sys.modules.get(module_name)
+    if cached_mod is not None and hasattr(cached_mod, callable_name):
+        return getattr(cached_mod, callable_name)
+
+    spec = importlib.util.spec_from_file_location(module_name, entry_path)
+    if spec is None or spec.loader is None:
         raise IpfsFetchError(
-            f"IPFS fetch failed: cid={cid} entry_point exec failed: {exc!r}"
+            f"IPFS fetch failed: cid={cid} could not build import spec "
+            f"for {entry_path}"
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # pylint: disable=broad-except
+        sys.modules.pop(module_name, None)
+        raise IpfsFetchError(
+            f"IPFS fetch failed: cid={cid} entry_point module load failed: {exc!r}"
         ) from exc
 
-    if callable_name not in namespace:
+    if not hasattr(module, callable_name):
+        sys.modules.pop(module_name, None)
         raise IpfsFetchError(
             f"IPFS fetch failed: cid={cid} callable '{callable_name}' "
-            f"not found in entry_point after exec"
+            f"not found in entry_point module"
         )
-    return namespace[callable_name]
+    return getattr(module, callable_name)

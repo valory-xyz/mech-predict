@@ -19,9 +19,11 @@
 """Tests for benchmark/ipfs_loader.py — network mocked."""
 
 import io
+import sys
 import tarfile
 import time
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -35,6 +37,22 @@ from benchmark.ipfs_loader import (
 )
 
 CID = "bafybeitestcid"
+
+
+# Tests share a fixed `CID` constant while swapping out the on-disk
+# source per case, so without this teardown a later test would hit a
+# previous test's module cached under that CID in `sys.modules`.
+@pytest.fixture(autouse=True)
+def _clear_tournament_tool_modules() -> Iterator[None]:
+    """Evict cached tournament-tool modules between tests.
+
+    :yield: control to the test, then evict on teardown.
+    """
+    yield
+    stale = [k for k in sys.modules if k.startswith("mech_predict_tournament_tool_")]
+    for k in stale:
+        sys.modules.pop(k, None)
+
 
 COMPONENT_YAML = """\
 name: testtool
@@ -378,17 +396,50 @@ class TestValidateEntryPointName:
 
 
 class TestLoadToolFromIpfs:
-    """End-to-end tests: fetch + exec returns a callable."""
+    """End-to-end tests: fetch + import returns a callable."""
 
     @patch("benchmark.ipfs_loader.requests.get")
     def test_returns_callable(self, mock_get: MagicMock, tmp_path: Path) -> None:
-        """A successful fetch + exec returns the named callable."""
+        """A successful fetch + import returns the named callable."""
         mock_get.return_value = _mock_response(200, _build_tar())
         run_fn = load_tool_from_ipfs(CID, cache_dir=tmp_path)
         assert callable(run_fn)
         # Call it to confirm it's the run we wrote, not something else
         result = run_fn()
         assert result == ("ok", None, None, None, None)
+
+    # Regression test for the loader's original `exec(src, {})` path:
+    # classes got `__module__ = 'builtins'` and pydantic 2.13 couldn't
+    # resolve forward refs like `List[str]` when the OpenAI SDK validated
+    # a `response_format=SomeModel` argument. Latent on PR #251 because
+    # the smoke test ran superforcaster, which doesn't use pydantic.
+    @patch("benchmark.ipfs_loader.requests.get")
+    def test_pydantic_forward_refs_resolve(
+        self, mock_get: MagicMock, tmp_path: Path
+    ) -> None:
+        """Loaded tools whose classes use forward refs (`List[str]`) must work."""
+        pydantic_py = (
+            "from typing import List\n"
+            "from pydantic import BaseModel, Field\n"
+            "\n"
+            "class SubQuestions(BaseModel):\n"
+            "    sub_questions: List[str] = Field(...)\n"
+            "\n"
+            "def run(**kwargs):\n"
+            "    parsed = SubQuestions.model_validate(\n"
+            "        {'sub_questions': ['q1']}\n"
+            "    )\n"
+            "    return (parsed.model_dump_json(), None, None, None, None)\n"
+        )
+        mock_get.return_value = _mock_response(
+            200,
+            _build_tar(
+                files={"component.yaml": COMPONENT_YAML, "testtool.py": pydantic_py}
+            ),
+        )
+        run_fn = load_tool_from_ipfs(CID, cache_dir=tmp_path)
+        result_str, *_ = run_fn()
+        assert "q1" in result_str
 
     @patch("benchmark.ipfs_loader.requests.get")
     def test_missing_callable_raises(self, mock_get: MagicMock, tmp_path: Path) -> None:
@@ -413,7 +464,7 @@ class TestLoadToolFromIpfs:
         )
         with pytest.raises(IpfsFetchError) as exc_info:
             load_tool_from_ipfs(CID, cache_dir=tmp_path)
-        assert "exec failed" in str(exc_info.value)
+        assert "module load failed" in str(exc_info.value)
 
     @patch("benchmark.ipfs_loader.requests.get")
     def test_import_error_at_module_level_raises_ipfs_fetch_error(
@@ -431,7 +482,7 @@ class TestLoadToolFromIpfs:
         )
         with pytest.raises(IpfsFetchError) as exc_info:
             load_tool_from_ipfs(CID, cache_dir=tmp_path)
-        assert "exec failed" in str(exc_info.value)
+        assert "module load failed" in str(exc_info.value)
 
     @patch("benchmark.ipfs_loader.requests.get")
     def test_module_level_runtime_error_raises_ipfs_fetch_error(
@@ -449,7 +500,7 @@ class TestLoadToolFromIpfs:
         )
         with pytest.raises(IpfsFetchError) as exc_info:
             load_tool_from_ipfs(CID, cache_dir=tmp_path)
-        assert "exec failed" in str(exc_info.value)
+        assert "module load failed" in str(exc_info.value)
 
     @patch("benchmark.ipfs_loader.requests.get")
     def test_component_loader_value_error_surfaces_as_ipfs_fetch_error(

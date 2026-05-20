@@ -210,9 +210,23 @@ def run_single(
         if len(result_tuple) > 4 and isinstance(result_tuple[4], dict):
             source_content = result_tuple[4].get("source_content")
 
+        # When the tool returns a non-valid status, surface any `error`
+        # field the tool itself wrote into its JSON response (e.g. the
+        # bare-except path in `with_key_rotation`). Without this, the
+        # row only carries `prediction_parse_status` and the real cause
+        # is unrecoverable from the JSONL after the fact.
+        tool_error: Optional[str] = None
+        if parsed["prediction_parse_status"] != "valid" and result_str:
+            try:
+                data = json.loads(result_str)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                data = None
+            if isinstance(data, dict) and data.get("error") is not None:
+                tool_error = str(data["error"])
+
         return {
             "latency_s": round(elapsed, 1),
-            "error": None,
+            "error": tool_error,
             "source_content": source_content,
             **parsed,
         }
@@ -287,6 +301,7 @@ def build_output_row(
         "p_yes": run_result["p_yes"],
         "p_no": run_result["p_no"],
         "prediction_parse_status": run_result["prediction_parse_status"],
+        "error": run_result.get("error"),
         "confidence": run_result.get("confidence"),
         "market_prob_at_prediction": market.get("current_prob"),
         "market_close_at": market.get("close_date"),

@@ -276,7 +276,7 @@ def summarize_report(report_text: str, api_key: str, platform_label: str) -> str
         },
     )
     with urlopen(
-        req, timeout=30
+        req, timeout=120
     ) as resp:  # nosec B310 — fixed https URL, not user-controlled
         body = json.loads(resp.read())
 

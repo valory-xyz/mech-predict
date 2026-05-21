@@ -10,7 +10,7 @@ description: A sibling of superforcaster that fetches full search-result pages (
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeihuzu7qr7hybftlj6vg53twugvgy643g5qs3gcinehusdrfe2nysi
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
   superforcaster_full_search.py: bafybeiedzygbnfr7gwmxf2wnt3e7hlw7k6brhfsoohvelkbyxdbrzbkwwq
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
   tests/test_superforcaster_full_search.py: bafybeihevc4tgsrl2ecu2cufpvhqteljsd6gj52wuowqbo7uzbrjgfdhvq

@@ -190,6 +190,15 @@ _SCRIPT_STYLE_PATTERN = re.compile(
     r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
 )
 
+# Cap on the rendered <background> evidence block to bound prompt size and
+# avoid lost-in-the-middle degradation when an outlier page returns a very
+# long body. Trailing organic items are dropped (Serper orders by relevance)
+# until the rendered block fits. Mirrors factual_research and the calibrated
+# sibling. Sized to fit empirical evidence-block p90 (~3,500 tokens) with
+# headroom; not load-bearing for gpt-4.1's 1M context but bounds cost and
+# guards against outlier pages.
+MAX_EVIDENCE_TOKENS = 4000
+
 
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
@@ -482,6 +491,40 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
     return sources
 
 
+def _cap_evidence_block(
+    organic_data: List[Dict[str, Any]],
+    misc_data: List[Dict[str, Any]],
+    model: str,
+    max_tokens: int = MAX_EVIDENCE_TOKENS,
+) -> str:
+    """Render the evidence block, dropping trailing organic items until it fits.
+
+    Mirrors factual_research's overflow handling: Serper orders organic
+    results by relevance so trailing drops are cheapest. If the block still
+    exceeds the budget once all organic items are gone, the result is
+    returned as-is (peopleAlsoAsk is small and not separately trimmed).
+
+    :param organic_data: Serper organic results (already capped to MAX_SOURCES).
+    :param misc_data: Serper peopleAlsoAsk items.
+    :param model: model name for tokeniser selection.
+    :param max_tokens: target ceiling on the rendered block.
+    :return: rendered evidence string, with a truncation marker if items were dropped.
+    """
+    rendered = format_sources_data(organic_data, misc_data)
+    if count_tokens(rendered, model) <= max_tokens or not organic_data:
+        return rendered
+
+    trimmed = list(organic_data)
+    while (
+        trimmed
+        and count_tokens(format_sources_data(trimmed, misc_data), model) > max_tokens
+    ):
+        trimmed.pop()
+    rendered = format_sources_data(trimmed, misc_data)
+    rendered += "\n[… evidence truncated …]\n"
+    return rendered
+
+
 def extract_question(prompt: str) -> str:
     """Uses regexp to extract question from the prompt"""
     # Match from 'question "' to '" and the `yes`' to handle nested quotes
@@ -554,7 +597,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
-            sources = format_sources_data(organic_data, misc_data)
+            sources = _cap_evidence_block(organic_data, misc_data, model)
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
@@ -577,8 +620,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "serper_response": sources_data,
                 "pages": captured_pages,
             }
-            print("Formating sources...")
-            sources = format_sources_data(organic_data, misc_data)
+            print("Formatting sources...")
+            sources = _cap_evidence_block(organic_data, misc_data, model)
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(

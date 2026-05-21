@@ -335,3 +335,43 @@ class TestScrapePages:
         captured = _scrape_pages(organic, mode="cleaned")
         assert "content" not in organic[0]
         assert captured == {}
+
+
+class TestEvidenceBlockCap:
+    """The cap drops trailing organic items until the rendered block fits."""
+
+    def test_small_evidence_unchanged(self) -> None:
+        """Below-budget evidence is returned without truncation marker."""
+        from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
+            _cap_evidence_block,
+        )
+
+        organic = [
+            {"title": "T", "link": "http://x", "snippet": "s", "position": 1},
+        ]
+        rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
+        assert "[… evidence truncated …]" not in rendered
+        assert "T" in rendered
+
+    def test_oversize_evidence_is_trimmed_with_marker(self) -> None:
+        """When over budget, trailing items are dropped and a marker is appended."""
+        from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
+            MAX_EVIDENCE_TOKENS,
+            _cap_evidence_block,
+            count_tokens,
+        )
+
+        huge = "lorem ipsum " * 800  # ~1600 tokens per item
+        organic = [
+            {
+                "title": f"T{i}",
+                "link": f"http://x/{i}",
+                "snippet": f"s{i}",
+                "position": i + 1,
+                "content": huge,
+            }
+            for i in range(5)
+        ]
+        rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
+        assert "[… evidence truncated …]" in rendered
+        assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100

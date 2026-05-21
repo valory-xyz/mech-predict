@@ -22,7 +22,6 @@
 import inspect
 import json
 from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -81,32 +80,11 @@ FAKE_SERPER_RESPONSE = {
             "snippet": "Test snippet content",
             "position": 1,
         },
-        {
-            "title": "Second Result",
-            "link": "http://example.com/second",
-            "snippet": "Second snippet",
-            "position": 2,
-        },
     ],
     "peopleAlsoAsk": [
         {"question": "What is test?", "snippet": "A test answer."},
     ],
 }
-
-# (cleaned_text, capture_payload) tuples — matches _fetch_page_content's return
-FAKE_PAGE_CONTENT = "Extracted main article body about the test topic."
-FAKE_FETCH_RESULTS = {
-    "http://example.com/result": (FAKE_PAGE_CONTENT, FAKE_PAGE_CONTENT),
-    "http://example.com/second": ("Second page body.", "Second page body."),
-}
-
-
-def _fake_fetch(
-    url: str, mode: str = "cleaned", **_: object
-) -> tuple[Optional[str], Optional[str]]:
-    """Stand-in for _fetch_page_content that never touches the network."""
-    return FAKE_FETCH_RESULTS.get(url, (None, None))
-
 
 PREDICTION_JSON = json.dumps(
     {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.5, "info_utility": 0.5}
@@ -132,35 +110,26 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
     return mock
 
 
-def _stub_openai(mock_client_mgr: MagicMock) -> MagicMock:
-    """Wire OpenAIClientManager to a stub that returns PREDICTION_JSON once."""
-    mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = MagicMock(
-        choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
-        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
-    )
-    mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-    mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
-    return mock_client
-
-
 class TestSuperforcasterSourceContent:
     """Verify superforcaster captures and replays source_content correctly."""
 
-    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_live_capture_includes_serper_and_pages(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        _mock_page_fetch: MagicMock,
+    def test_live_capture_wraps_serper_json(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
-        """Live run captures Serper response AND scraped page texts."""
+        """Live run wraps Serper response in {'serper_response': ...}."""
         mock_response = MagicMock()
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
-        _stub_openai(mock_client_mgr)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
         result = run(
             tool="superforcaster",
@@ -170,85 +139,25 @@ class TestSuperforcasterSourceContent:
             counter_callback=None,
         )
 
-        captured = result[4]["source_content"]
-        assert captured["mode"] == "cleaned"
-        assert captured["serper_response"] == FAKE_SERPER_RESPONSE
-        # Both organic URLs were scraped → both in pages capture
-        assert captured["pages"] == {
-            "http://example.com/result": FAKE_PAGE_CONTENT,
-            "http://example.com/second": "Second page body.",
-        }
-        # Scraped page text reaches the prediction prompt under "Content:"
-        prediction_prompt = result[1]
-        assert FAKE_PAGE_CONTENT in prediction_prompt
-        assert "**Content:**" in prediction_prompt
-
-    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_live_scrape_failure_falls_back_to_snippet(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        mock_page_fetch: MagicMock,
-    ) -> None:
-        """Scrape returning (None, None) for every URL is non-fatal."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = FAKE_SERPER_RESPONSE
-        mock_fetch.return_value = mock_response
-        mock_page_fetch.side_effect = lambda *a, **kw: (None, None)
-        _stub_openai(mock_client_mgr)
-
-        result = run(
-            tool="superforcaster",
-            model="gpt-4o",
-            prompt=PREDICTION_PROMPT,
-            api_keys=_make_mock_api_keys("true"),
-            counter_callback=None,
-        )
-
-        captured = result[4]["source_content"]
-        assert captured["pages"] == {}
-        prediction_prompt = result[1]
-        # Still has Serper-tier evidence; no Content line was rendered
-        assert "Test snippet content" in prediction_prompt
-        assert "**Content:**" not in prediction_prompt
+        used_params = result[4]
+        assert "source_content" in used_params
+        assert "mode" in used_params["source_content"]
+        assert "serper_response" in used_params["source_content"]
+        assert used_params["source_content"]["serper_response"] == FAKE_SERPER_RESPONSE
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_replay_with_pages_hydrates_content_into_prompt(
+    def test_replay_with_serper_response_format(
         self, mock_client_mgr: MagicMock
     ) -> None:
-        """Replay format with `pages` injects cached content into the prompt."""
-        _stub_openai(mock_client_mgr)
-
-        source_content = {
-            "mode": "cleaned",
-            "serper_response": FAKE_SERPER_RESPONSE,
-            "pages": {
-                "http://example.com/result": "Cached cleaned article text.",
-            },
-        }
-        result = run(
-            tool="superforcaster",
-            model="gpt-4o",
-            prompt=PREDICTION_PROMPT,
-            api_keys=_make_mock_api_keys("true"),
-            counter_callback=None,
-            source_content=source_content,
+        """Replay with {'serper_response': ...} uses organic and peopleAlsoAsk."""
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
-        prediction_prompt = result[1]
-        assert "Cached cleaned article text." in prediction_prompt
-        assert "Test snippet content" in prediction_prompt  # snippet preserved
-
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_replay_legacy_format_without_pages_still_works(
-        self, mock_client_mgr: MagicMock
-    ) -> None:
-        """Captures produced before evidence-gathering replay cleanly."""
-        _stub_openai(mock_client_mgr)
-
-        # Old format: no `pages` key, no `mode` key.
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
             tool="superforcaster",
@@ -259,27 +168,29 @@ class TestSuperforcasterSourceContent:
             source_content=source_content,
         )
 
+        # Verify the prompt contains the organic result
         prediction_prompt = result[1]
         assert "Test Result" in prediction_prompt
         assert "Test snippet content" in prediction_prompt
         assert "What is test?" in prediction_prompt
-        # No Content line because there were no cached pages
-        assert "**Content:**" not in prediction_prompt
 
-    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_flag_off_no_source_content(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        _mock_page_fetch: MagicMock,
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
         """When return_source_content is false, source_content is not in used_params."""
         mock_response = MagicMock()
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
-        _stub_openai(mock_client_mgr)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
         result = run(
             tool="superforcaster",
@@ -291,41 +202,3 @@ class TestSuperforcasterSourceContent:
 
         used_params = result[4]
         assert "source_content" not in used_params
-
-
-class TestScrapePages:
-    """Unit-level coverage for the scrape helper that runs in-process."""
-
-    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
-    def test_scrape_pages_attaches_content_and_captures(
-        self, _mock_page_fetch: MagicMock
-    ) -> None:
-        """Successful scrapes mutate items and return the capture dict."""
-        from packages.valory.customs.superforcaster.superforcaster import _scrape_pages
-
-        organic = [
-            {"link": "http://example.com/result", "title": "T1", "snippet": "s1"},
-            {"link": "http://example.com/second", "title": "T2", "snippet": "s2"},
-        ]
-        captured = _scrape_pages(organic, mode="cleaned")
-        assert organic[0]["content"] == FAKE_PAGE_CONTENT
-        assert organic[1]["content"] == "Second page body."
-        assert captured == {
-            "http://example.com/result": FAKE_PAGE_CONTENT,
-            "http://example.com/second": "Second page body.",
-        }
-
-    @patch(
-        f"{SF_MODULE}._fetch_page_content",
-        side_effect=lambda *a, **kw: (None, None),
-    )
-    def test_scrape_pages_failure_returns_empty(
-        self, _mock_page_fetch: MagicMock
-    ) -> None:
-        """When every fetch fails, items are untouched and capture is empty."""
-        from packages.valory.customs.superforcaster.superforcaster import _scrape_pages
-
-        organic = [{"link": "http://example.com/x", "title": "T", "snippet": "s"}]
-        captured = _scrape_pages(organic, mode="cleaned")
-        assert "content" not in organic[0]
-        assert captured == {}

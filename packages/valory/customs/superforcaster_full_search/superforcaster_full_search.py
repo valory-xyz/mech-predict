@@ -22,11 +22,14 @@ import functools
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import openai
 import requests
+from markdownify import markdownify as md
+from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
 MechResponseWithKeys = Tuple[
@@ -170,11 +173,22 @@ DEFAULT_OPENAI_SETTINGS = {
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
-ALLOWED_TOOLS = ["superforcaster"]
+ALLOWED_TOOLS = ["superforcaster_full_search"]
 ALLOWED_MODELS = [DEFAULT_OPENAI_MODEL]
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
+
+# Evidence-gathering: fetch full page content for the top organic results so
+# the forecaster reasons over article text, not just Serper snippets.
+MAX_PAGES_TO_SCRAPE = 5
+_MAX_PAGE_WORDS = 400
+_PAGE_FETCH_TIMEOUT_S = 10
+_SCRAPE_POOL_WORKERS = 6
+_IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
+_SCRIPT_STYLE_PATTERN = re.compile(
+    r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
 
 
 PREDICTION_PROMPT = """
@@ -300,6 +314,124 @@ def generate_prediction_with_retry(
     raise Exception("Failed to generate prediction after retries")
 
 
+def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
+    """Extract main article text from HTML via readability + markdownify."""
+    cleaned = _SCRIPT_STYLE_PATTERN.sub("", html)
+    cleaned = _IMG_TAG_PATTERN.sub("", cleaned)
+    article_html = ReadabilityDocument(cleaned).summary()
+    text = md(article_html, heading_style="ATX", strip=["img", "figure"])
+    if not text or not text.strip():
+        return None
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]) + " […]"
+    return text.strip()
+
+
+def _fetch_page_content(
+    url: str,
+    mode: str = "cleaned",
+    max_words: int = _MAX_PAGE_WORDS,
+    timeout: int = _PAGE_FETCH_TIMEOUT_S,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch a URL and return (cleaned_text, capture_payload).
+
+    `capture_payload` is the raw HTML when mode=="raw" (for full-fidelity
+    replay) and the cleaned text otherwise. Returns (None, None) on any
+    fetch / parse failure — the caller falls back to the Serper snippet.
+
+    :param url: The URL to fetch.
+    :param mode: ``"cleaned"`` stores extracted text; ``"raw"`` stores HTML.
+    :param max_words: Maximum number of words to keep in the cleaned text.
+    :param timeout: Request timeout in seconds.
+    :return: Tuple of (cleaned text for the LLM prompt, payload to store
+        for replay).
+    """
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MechBot/1.0)"},
+        )
+        if resp.status_code != 200:
+            return None, None
+        if "text/html" not in resp.headers.get("Content-Type", ""):
+            return None, None
+        text = _clean_html(resp.text, max_words=max_words)
+        if not text:
+            return None, None
+        capture = resp.text if mode == "raw" else text
+        return text, capture
+    except Exception as e:  # noqa: BLE001 -- best-effort scrape, never raise
+        print(f"[superforcaster_full_search] Failed to fetch {url}: {e}")
+        return None, None
+
+
+def _scrape_pages(
+    organic_data: List[Dict[str, Any]],
+    mode: str,
+    max_pages: int = MAX_PAGES_TO_SCRAPE,
+) -> Dict[str, str]:
+    """Concurrently scrape the top organic links and attach `content` in place.
+
+    Returns the capture dict {url: cleaned_text_or_raw_html} for replay. The
+    organic items themselves are mutated to add a `content` key when the
+    scrape succeeds, so format_sources_data() can render it alongside the
+    snippet without other plumbing.
+
+    :param organic_data: Serper organic-result dicts (mutated in place to
+        add a ``content`` key on successful scrapes).
+    :param mode: ``"cleaned"`` stores extracted text in the capture dict;
+        ``"raw"`` stores raw HTML.
+    :param max_pages: Cap on how many top results to scrape.
+    :return: Capture dict ``{url: cleaned_text_or_raw_html}`` for replay.
+    """
+    captured: Dict[str, str] = {}
+    items_to_scrape = [it for it in organic_data[:max_pages] if it.get("link")]
+    if not items_to_scrape:
+        return captured
+
+    with ThreadPoolExecutor(max_workers=_SCRAPE_POOL_WORKERS) as pool:
+        future_to_item = {
+            pool.submit(_fetch_page_content, item["link"], mode): item
+            for item in items_to_scrape
+        }
+        for fut in as_completed(future_to_item):
+            item = future_to_item[fut]
+            try:
+                text, capture = fut.result()
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[superforcaster_full_search] Scrape error for {item['link']}: {e}"
+                )
+                continue
+            if text:
+                item["content"] = text
+            if capture:
+                captured[item["link"]] = capture
+    return captured
+
+
+def _hydrate_organic_from_pages(
+    organic_data: List[Dict[str, Any]],
+    pages: Dict[str, str],
+    mode: str,
+) -> None:
+    """Replay path: re-attach cached page content to organic items in place."""
+    if not pages:
+        return
+    for item in organic_data:
+        cached = pages.get(item.get("link", ""))
+        if cached is None:
+            continue
+        if mode == "raw":
+            text = _clean_html(cached)
+            if text:
+                item["content"] = text
+        else:
+            item["content"] = cached
+
+
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:
     """Fetches additional sources for the given question using the Serper API."""
     url = "https://google.serper.dev/search"
@@ -330,6 +462,9 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
             - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
             - **Snippet:** {item.get("snippet", 'N/A')}
             """
+            content = item.get("content")
+            if content:
+                sources += f"            - **Content:** {content}\n"
 
     if len(misc_data) > 0:
         print("Adding misc data...")
@@ -410,23 +545,38 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print("Using provided source content (cached replay)...")
             captured_source_content = source_content
             serper_data = source_content.get("serper_response", source_content)
-            organic_data = serper_data.get("organic", [])[:MAX_SOURCES]
+            # Shallow-copy each organic item so attaching `content` does not
+            # mutate the caller's cached source_content payload.
+            organic_data = [
+                dict(it) for it in serper_data.get("organic", [])[:MAX_SOURCES]
+            ]
             misc_data = serper_data.get("peopleAlsoAsk", [])
+            cached_pages = source_content.get("pages", {})
+            cached_mode = source_content.get("mode", source_content_mode)
+            _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
             sources = format_sources_data(organic_data, misc_data)
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
             serper_response = fetch_additional_sources(question, serper_api_key)
             sources_data = serper_response.json()
-            # mode tag included for consistency across tools; content is identical
-            # regardless of mode since Serper returns structured JSON, not HTML
+            print(f"Additional sources fetched: {sources_data}")
+            # Shallow-copy organic items: _scrape_pages attaches `content`,
+            # and we don't want that leaking into the captured serper_response.
+            organic_data = [
+                dict(it) for it in sources_data.get("organic", [])[:MAX_SOURCES]
+            ]
+            misc_data = sources_data.get("peopleAlsoAsk", [])
+            print("Scraping page content for top organic results...")
+            captured_pages = _scrape_pages(organic_data, source_content_mode)
+            print(
+                f"Scraped {len(captured_pages)}/{min(MAX_SOURCES, len(organic_data))} pages."
+            )
             captured_source_content = {
                 "mode": source_content_mode,
                 "serper_response": sources_data,
+                "pages": captured_pages,
             }
-            print(f"Additional sources fetched: {sources_data}")
-            organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
-            misc_data = sources_data.get("peopleAlsoAsk", [])
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)
 

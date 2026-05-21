@@ -3,16 +3,14 @@ author: valory
 version: 0.1.0
 type: custom
 description: A tool for making binary predictions on markets using the Serper API
-  and LLMs. Beyond Serper snippets, the tool fetches the top organic results, extracts
-  the main article text via readability + markdownify, and feeds the cleaned page
-  content into the forecasting prompt for richer evidence.
+  and LLMs.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeifvbuxt54l5jsxextf6ru5yvimkfdg4gfkcsnmyvsyqcsgclg7vey
-  superforcaster.py: bafybeicdle45r5n6jslo4uj6jmhun4oraypzpisi67p5hbcmfnpz26lhzu
+  superforcaster.py: bafybeibfat4z2tdqvrjz6dukdz34oyb36j7bi5rqtgat42vxncai5hw6im
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster.py: bafybeialt2erw5vc2be5fpbgmosddfc5nhw64jienqtsyfdx2d2kx3xv4e
+  tests/test_superforcaster.py: bafybeigscr6ayqdkgchxxvygp25yzqlu6g6rkwg3fcbflxx2sbfpymgdqa
 fingerprint_ignore_patterns: []
 entry_point: superforcaster.py
 callable: run
@@ -27,9 +25,3 @@ dependencies:
     version: ==0.12.0
   requests:
     version: ==2.32.5
-  readability-lxml:
-    version: ==0.8.1
-  lxml_html_clean:
-    version: ==0.4.4
-  markdownify:
-    version: ==1.2.2

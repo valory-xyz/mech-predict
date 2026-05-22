@@ -26,10 +26,12 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 import packages.valory.customs.superforcaster_full_search.superforcaster_full_search as module
 from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
     OpenAIClientManager,
+    fetch_additional_sources,
     generate_prediction_with_retry,
     run,
 )
@@ -401,3 +403,41 @@ class TestErrorHandling:
         assert payload["p_yes"] is None
         assert payload["p_no"] is None
         assert payload["error"] == "boom"
+
+
+class TestSerperRequest:
+    """Serper call carries a timeout and surfaces HTTP errors."""
+
+    @patch(f"{SF_MODULE}.requests.request")
+    def test_fetch_additional_sources_passes_timeout(
+        self, mock_request: MagicMock
+    ) -> None:
+        """The Serper request forwards timeout=30 (fleet standard)."""
+        fetch_additional_sources("question?", "serper-key")
+        _, kwargs = mock_request.call_args
+        assert kwargs["timeout"] == 30
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_serper_http_error_surfaces_as_error_json(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A 4xx/5xx Serper response raises via raise_for_status → error JSON."""
+        _stub_openai(mock_client_mgr)
+        bad_response = MagicMock()
+        bad_response.raise_for_status.side_effect = requests.HTTPError("429 Too Many")
+        mock_fetch.return_value = bad_response
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+
+        bad_response.raise_for_status.assert_called_once()
+        bad_response.json.assert_not_called()  # never reached on HTTP error
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert "429" in payload["error"]

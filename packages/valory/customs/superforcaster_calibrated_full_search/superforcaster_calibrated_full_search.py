@@ -435,7 +435,9 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "X-API-KEY": serper_api_key,
         "Content-Type": "application/json",
     }
-    return requests.request("POST", url, headers=headers, data=payload)
+    # timeout matches the fleet's other Serper callers (factual_research,
+    # prediction_request, …); without it a hung connection blocks the run.
+    return requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
 
 # ---------------------------------------------------------------------------
@@ -704,6 +706,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
             serper_response = fetch_additional_sources(question, serper_api_key)
+            # Surface HTTP errors with a real status code instead of crashing
+            # .json() on a non-JSON 4xx/5xx body (matches the fleet pattern).
+            serper_response.raise_for_status()
             sources_data = serper_response.json()
             print(f"Additional sources fetched: {sources_data}")
             organic_data = [

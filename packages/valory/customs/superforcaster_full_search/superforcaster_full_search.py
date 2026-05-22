@@ -141,7 +141,7 @@ class OpenAIResponse:
     def __init__(self, content: Optional[str] = None, usage: Optional[Usage] = None):
         """Initializes with content and usage class."""
         self.content = content
-        self.usage = Usage()
+        self.usage = usage if usage is not None else Usage()
 
 
 class OpenAIClient:
@@ -217,10 +217,10 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # Cap on the rendered <background> evidence block to bound prompt size and
 # avoid lost-in-the-middle degradation when an outlier page returns a very
 # long body. Trailing organic items are dropped (Serper orders by relevance)
-# until the rendered block fits. Mirrors factual_research and the calibrated
-# sibling. Sized to fit empirical evidence-block p90 (~3,500 tokens) with
-# headroom; not load-bearing for gpt-4.1's 1M context but bounds cost and
-# guards against outlier pages.
+# until the rendered block fits. Same trailing-drop pattern as
+# factual_research (which caps at 3000); budget set to 4000 here to fit
+# observed evidence sizes with headroom. Not load-bearing for gpt-4.1's
+# 1M context but bounds cost and guards against outlier pages.
 MAX_EVIDENCE_TOKENS = 4000
 
 
@@ -554,7 +554,7 @@ def extract_question(prompt: str) -> str:
     pattern = r'question\s+"(.+?)"\s+and\s+the\s+`yes`'
     try:
         question = re.findall(pattern, prompt, re.DOTALL)[0]
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error extracting question: {e}")
         question = prompt
     return question

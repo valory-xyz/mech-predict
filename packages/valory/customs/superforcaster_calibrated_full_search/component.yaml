@@ -7,12 +7,13 @@ description: Sibling of the calibration-ON superforcaster build live on Omen pro
   COUPLING / NUMERIC QUESTIONS checks). Adds an evidence layer that fetches the top
   organic results, extracts the main article text via readability + markdownify, and
   feeds the cleaned page body into the forecasting prompt alongside the Serper snippet.
-  The prediction prompt and architecture are otherwise unchanged from v0.18.1.
+  The prediction prompt and architecture are otherwise unchanged from that calibration-ON
+  build.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeieq4xpwneven7y2bzw5pifhjwrv77ahw4qa6srksz4w7lwydydj7e
-  superforcaster_calibrated_full_search.py: bafybeifjg6oeyaops2jfvby3cnnvni7v6nmahscdlvb7mf34irfg4urqym
+  __init__.py: bafybeif65opovmxvdk2yg56jsgauiuhjppuzrk4zvvruzklko3nmk5tjfm
+  superforcaster_calibrated_full_search.py: bafybeiencx7detntawv37gtrorsei7vkyqwcrxnfimodocur5riblfbf3q
   tests/__init__.py: bafybeigjdbprffbvsm6xzzuuzlk7kme5pl7bfib5ce72h35vq4sajfu5hi
   tests/test_superforcaster_calibrated_full_search.py: bafybeiammtpjebes2etrbqrajrujligdurifssxehltwht3knqcpjwnlem
 fingerprint_ignore_patterns: []

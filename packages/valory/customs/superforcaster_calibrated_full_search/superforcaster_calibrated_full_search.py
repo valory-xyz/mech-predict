@@ -18,7 +18,7 @@
 # ------------------------------------------------------------------------------
 """Superforcaster Calibrated Full Search.
 
-Built on the v0.18.1 calibration-ON superforcaster (Structured Outputs,
+Built on the calibration-ON superforcaster prompt (Structured Outputs,
 max_tokens=4096, CALIBRATION block + three pre-answer checks). Adds an
 evidence layer: scrape the top Serper organic results, extract main
 article text via readability + markdownify, render the cleaned body
@@ -258,7 +258,10 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # Cap on the rendered <background> evidence block to bound prompt size and
 # avoid lost-in-the-middle degradation when an outlier page returns a very
 # long body. Trailing organic items are dropped (Serper orders by relevance)
-# until the rendered block fits.
+# until the rendered block fits. Same trailing-drop pattern as
+# factual_research (which caps at 3000); budget set to 4000 here to fit
+# observed evidence sizes with headroom. Not load-bearing for gpt-4.1's
+# 1M context but bounds cost and guards against outlier pages.
 MAX_EVIDENCE_TOKENS = 4000
 
 
@@ -638,7 +641,8 @@ def extract_question(prompt: str) -> str:
     pattern = r'question\s+"(.+?)"\s+and\s+the\s+`yes`'
     try:
         question = re.findall(pattern, prompt, re.DOTALL)[0]
-    except (IndexError, TypeError):
+    except Exception as e:  # noqa: BLE001
+        print(f"Error extracting question: {e}")
         question = prompt
     return question
 

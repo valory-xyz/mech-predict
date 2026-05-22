@@ -26,9 +26,11 @@ the prompt). Augments evidence-gathering: after the Serper search, the
 top organic results are scraped, the main article text is extracted via
 readability + markdownify, and the cleaned page body is rendered into
 the forecasting prompt alongside the Serper snippet. The prediction
-architecture and prompt are otherwise unchanged from the v0.18.1 build.
+architecture and prompt are otherwise unchanged from that calibration-ON
+build.
 
-The non-calibrated sibling (`superforcaster_full_search`) mirrors the
-v0.16.5 reverted build that is live on Polymarket; the two are intended
-to be scored in tournament mode against their respective live incumbents.
+The non-calibrated sibling (`superforcaster_full_search`) carries the
+same evidence layer on the calibration-OFF build that is live on
+Polymarket; the two are intended to be scored in tournament mode against
+their respective live incumbents.
 """

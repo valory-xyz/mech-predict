@@ -29,6 +29,9 @@ import json
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import openai
+import pytest
+
 from packages.valory.customs.superforcaster_calibrated_full_search.superforcaster_calibrated_full_search import (
     MAX_EVIDENCE_TOKENS,
     OpenAIClientManager,
@@ -386,3 +389,65 @@ class TestEvidenceBlockCap:
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
         assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
+
+
+def _rate_limit_error() -> openai.RateLimitError:
+    """Build a RateLimitError with a stub response (no network, no httpx dep)."""
+    return openai.RateLimitError(
+        "rate limited", response=MagicMock(status_code=429), body=None
+    )
+
+
+class TestKeyRotationAndErrors:
+    """Rate-limit propagation + parseable error-JSON catch-all."""
+
+    def test_parse_completion_propagates_rate_limit_error(self) -> None:
+        """Rate-limit errors are NOT caught in _parse_completion (decorator rotates)."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.side_effect = _rate_limit_error()
+
+        with pytest.raises(openai.RateLimitError):
+            _parse_completion(
+                client=client,
+                model="gpt-4o",
+                messages=[],
+                response_format=PredictionResult,
+            )
+
+    def test_parse_completion_retries_value_error_then_raises_runtime(self) -> None:
+        """Non-rate-limit transient errors retry in place, then RuntimeError."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.side_effect = ValueError("transient")
+
+        with pytest.raises(RuntimeError, match="Failed to get structured LLM"):
+            _parse_completion(
+                client=client,
+                model="gpt-4o",
+                messages=[],
+                response_format=PredictionResult,
+                retries=2,
+                delay=0,
+            )
+        assert client.beta.chat.completions.parse.call_count == 2
+
+    @patch(f"{SFC_MODULE}.OpenAIClientManager")
+    @patch(f"{SFC_MODULE}.fetch_additional_sources")
+    def test_unexpected_error_returns_parseable_error_json(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """An unexpected exception yields {p_yes:None,...,error:...}, not a raw string."""
+        _stub_openai(mock_client_mgr)
+        mock_fetch.side_effect = RuntimeError("boom")
+
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+
+        payload = json.loads(result[0])  # must be valid JSON, not a bare str
+        assert payload["p_yes"] is None
+        assert payload["p_no"] is None
+        assert payload["error"] == "boom"

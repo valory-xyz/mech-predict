@@ -176,7 +176,21 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:  # noqa: BLE001
-                return str(e), "", None, None, None, api_keys
+                # Return a parseable null-prediction JSON (matches
+                # factual_research) so downstream tournament scoring sees
+                # an explicit error rather than treating a raw exception
+                # string (e.g. _parse_completion's RuntimeError) as a
+                # prediction.
+                error_json = json.dumps(
+                    {
+                        "p_yes": None,
+                        "p_no": None,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                        "error": str(e),
+                    }
+                )
+                return error_json, "", None, None, None, api_keys
 
         return execute()
 
@@ -395,10 +409,15 @@ def _parse_completion(
             return parsed, counter_callback
         except (
             openai.APIConnectionError,
-            openai.RateLimitError,
             openai.InternalServerError,
             ValueError,
         ) as e:
+            # NB: openai.RateLimitError is deliberately NOT caught here.
+            # Letting it propagate to the with_key_rotation decorator lets
+            # the decorator rotate API keys on a rate-limit hit — retrying
+            # in-place on the same key (as factual_research does) never
+            # rotates. Transient connection / server / validation failures
+            # stay here and retry on the same key.
             print(
                 f"[superforcaster_calibrated_full_search] Attempt {attempt + 1} failed: {e}"
             )

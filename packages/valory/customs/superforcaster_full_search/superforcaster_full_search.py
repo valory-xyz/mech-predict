@@ -74,8 +74,21 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openai")
                 api_keys.rotate("openrouter")
                 return execute()
-            except Exception as e:
-                return str(e), "", None, None, None, api_keys
+            except Exception as e:  # noqa: BLE001
+                # Return a parseable null-prediction JSON (matches
+                # factual_research) so downstream tournament scoring sees
+                # an explicit error rather than treating a raw exception
+                # string as a prediction.
+                error_json = json.dumps(
+                    {
+                        "p_yes": None,
+                        "p_no": None,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                        "error": str(e),
+                    }
+                )
+                return error_json, "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response

@@ -375,3 +375,29 @@ class TestEvidenceBlockCap:
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
         assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
+
+
+class TestErrorHandling:
+    """with_key_rotation's catch-all returns parseable null-prediction JSON."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_unexpected_error_returns_parseable_error_json(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """An unexpected exception yields {p_yes:None,...,error:...}, not a raw string."""
+        _stub_openai(mock_client_mgr)
+        mock_fetch.side_effect = RuntimeError("boom")
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+
+        payload = json.loads(result[0])  # must be valid JSON, not a bare str
+        assert payload["p_yes"] is None
+        assert payload["p_no"] is None
+        assert payload["error"] == "boom"

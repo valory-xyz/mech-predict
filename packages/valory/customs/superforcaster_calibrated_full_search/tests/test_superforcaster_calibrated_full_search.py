@@ -32,12 +32,14 @@ from unittest.mock import MagicMock, patch
 import openai
 import pytest
 import requests
+from pydantic import ValidationError
 
 from packages.valory.customs.superforcaster_calibrated_full_search.superforcaster_calibrated_full_search import (
     MAX_EVIDENCE_TOKENS,
     OpenAIClientManager,
     PredictionResult,
     _cap_evidence_block,
+    _fetch_page_content,
     _parse_completion,
     _scrape_pages,
     count_tokens,
@@ -77,6 +79,19 @@ FAKE_FETCH_RESULTS = {
     "http://example.com/result": (FAKE_PAGE_CONTENT, FAKE_PAGE_CONTENT),
     "http://example.com/second": ("Second page body.", "Second page body."),
 }
+
+# Real HTML that readability + markdownify extract into non-empty article text.
+_HTML_PAGE = (
+    "<html><head><title>Fed decision</title></head><body><article>"
+    "<h1>Federal Reserve holds rates</h1>"
+    "<p>The Federal Reserve held interest rates steady on Wednesday, citing "
+    "persistent inflation concerns and a resilient labor market. Officials "
+    "signaled they expect two more cuts before the end of the year.</p>"
+    "<p>The decision was widely expected by economists surveyed beforehand. "
+    "Markets moved modestly higher following the announcement as investors "
+    "digested the updated projections.</p>"
+    "</article></body></html>"
+)
 
 
 def _fake_fetch(
@@ -259,6 +274,31 @@ class TestSourceContentCaptureReplay:
         assert "Test snippet content" in prediction_prompt
 
     @patch(f"{SFC_MODULE}.OpenAIClientManager")
+    def test_replay_raw_mode_runs_clean_html_on_cached_html(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """mode='raw' replay re-extracts cleaned text from cached HTML."""
+        _stub_openai(mock_client_mgr)
+
+        source_content = {
+            "mode": "raw",
+            "serper_response": FAKE_SERPER_RESPONSE,
+            "pages": {"http://example.com/result": _HTML_PAGE},
+        }
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("true"),
+            counter_callback=None,
+            source_content=source_content,
+        )
+
+        prediction_prompt = result[1]
+        assert "Federal Reserve" in prediction_prompt
+        assert "<html>" not in prediction_prompt
+
+    @patch(f"{SFC_MODULE}.OpenAIClientManager")
     def test_replay_legacy_format_without_pages_still_works(
         self, mock_client_mgr: MagicMock
     ) -> None:
@@ -394,6 +434,114 @@ class TestEvidenceBlockCap:
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
         assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
+        # Trailing items are dropped, leading (most-relevant) kept: a
+        # leading-drop mutation would keep T4 and drop T0, failing this.
+        assert "T0" in rendered
+        assert "T4" not in rendered
+
+    def test_paa_only_overflow_returns_without_loop(self) -> None:
+        """With no organic items the cap returns as-is (no marker, no infinite loop)."""
+        huge_paa = [
+            {"question": "lorem ipsum " * 800, "link": "http://x", "snippet": "s"}
+        ]
+        rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1")
+        assert "[… evidence truncated …]" not in rendered
+        assert "lorem ipsum" in rendered
+
+
+class TestPredictionResultValidator:
+    """The p_yes + p_no ≈ 1 model validator rejects inconsistent pairs."""
+
+    def test_mismatched_p_yes_p_no_raises(self) -> None:
+        """|p_yes + p_no - 1| > 0.01 raises a validation error."""
+        with pytest.raises(ValidationError, match="p_yes \\+ p_no must equal 1"):
+            PredictionResult(
+                facts="f",
+                reasons_no="n",
+                reasons_yes="y",
+                aggregation="a",
+                reflection="r",
+                p_yes=0.3,
+                p_no=0.3,  # sums to 0.6, not 1
+                confidence=0.5,
+                info_utility=0.5,
+            )
+
+    def test_valid_pair_accepted(self) -> None:
+        """A consistent p_yes + p_no = 1 pair constructs fine."""
+        result = PredictionResult(
+            facts="f",
+            reasons_no="n",
+            reasons_yes="y",
+            aggregation="a",
+            reflection="r",
+            p_yes=0.7,
+            p_no=0.3,
+            confidence=0.5,
+            info_utility=0.5,
+        )
+        assert result.p_yes == 0.7
+
+
+class TestFetchPageContent:
+    """Direct coverage of _fetch_page_content's four early-return paths."""
+
+    @staticmethod
+    def _resp(
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+        text: str = "",
+    ) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.headers = {"Content-Type": content_type}
+        resp.text = text
+        return resp
+
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_happy_path_cleaned(self, mock_get: MagicMock) -> None:
+        """200 + HTML → (cleaned_text, cleaned_text) in cleaned mode."""
+        mock_get.return_value = self._resp(text=_HTML_PAGE)
+        text, capture = _fetch_page_content("http://x", mode="cleaned")
+        assert text is not None and "Federal Reserve" in text
+        assert capture == text
+
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_happy_path_raw_stores_html(self, mock_get: MagicMock) -> None:
+        """200 + HTML → capture is the raw HTML in raw mode."""
+        mock_get.return_value = self._resp(text=_HTML_PAGE)
+        text, capture = _fetch_page_content("http://x", mode="raw")
+        assert text is not None and "Federal Reserve" in text
+        assert capture == _HTML_PAGE
+
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_non_200_returns_none(self, mock_get: MagicMock) -> None:
+        """A 404 yields (None, None)."""
+        mock_get.return_value = self._resp(status=404, text=_HTML_PAGE)
+        assert _fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_non_html_content_type_returns_none(self, mock_get: MagicMock) -> None:
+        """A non-HTML content-type (JSON) yields (None, None)."""
+        mock_get.return_value = self._resp(
+            content_type="application/json", text='{"a": 1}'
+        )
+        assert _fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_request_exception_returns_none(self, mock_get: MagicMock) -> None:
+        """A network exception is swallowed → (None, None)."""
+        mock_get.side_effect = requests.Timeout("slow")
+        assert _fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SFC_MODULE}._clean_html", return_value=None)
+    @patch(f"{SFC_MODULE}.requests.get")
+    def test_unextractable_html_returns_none(
+        self, mock_get: MagicMock, _mock_clean: MagicMock
+    ) -> None:
+        """200 + HTML but readability extracts nothing → (None, None)."""
+        mock_get.return_value = self._resp(text="<html></html>")
+        assert _fetch_page_content("http://x") == (None, None)
 
 
 def _rate_limit_error() -> openai.RateLimitError:

@@ -104,6 +104,19 @@ FAKE_FETCH_RESULTS = {
     "http://example.com/second": ("Second page body.", "Second page body."),
 }
 
+# Real HTML that readability + markdownify extract into non-empty article text.
+_HTML_PAGE = (
+    "<html><head><title>Fed decision</title></head><body><article>"
+    "<h1>Federal Reserve holds rates</h1>"
+    "<p>The Federal Reserve held interest rates steady on Wednesday, citing "
+    "persistent inflation concerns and a resilient labor market. Officials "
+    "signaled they expect two more cuts before the end of the year.</p>"
+    "<p>The decision was widely expected by economists surveyed beforehand. "
+    "Markets moved modestly higher following the announcement as investors "
+    "digested the updated projections.</p>"
+    "</article></body></html>"
+)
+
 
 def _fake_fetch(
     url: str, mode: str = "cleaned", **_: object
@@ -249,6 +262,32 @@ class TestSuperforcasterSourceContent:
         assert "Test snippet content" in prediction_prompt  # snippet preserved
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_replay_raw_mode_runs_clean_html_on_cached_html(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """mode='raw' replay re-extracts cleaned text from cached HTML."""
+        _stub_openai(mock_client_mgr)
+
+        source_content = {
+            "mode": "raw",
+            "serper_response": FAKE_SERPER_RESPONSE,
+            "pages": {"http://example.com/result": _HTML_PAGE},
+        }
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("true"),
+            counter_callback=None,
+            source_content=source_content,
+        )
+
+        prediction_prompt = result[1]
+        # raw HTML was run back through _clean_html → extracted article text
+        assert "Federal Reserve" in prediction_prompt
+        assert "<html>" not in prediction_prompt  # raw markup not dumped verbatim
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_replay_legacy_format_without_pages_still_works(
         self, mock_client_mgr: MagicMock
     ) -> None:
@@ -380,6 +419,85 @@ class TestEvidenceBlockCap:
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
         assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
+        # Trailing items are dropped, leading (most-relevant) kept: a
+        # leading-drop mutation would keep T4 and drop T0, failing this.
+        assert "T0" in rendered
+        assert "T4" not in rendered
+
+    def test_paa_only_overflow_returns_without_loop(self) -> None:
+        """With no organic items the cap returns as-is (no marker, no infinite loop)."""
+        from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
+            _cap_evidence_block,
+        )
+
+        huge_paa = [
+            {"question": "lorem ipsum " * 800, "link": "http://x", "snippet": "s"}
+        ]
+        rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1")
+        # organic is empty → early return, no trailing-drop marker added
+        assert "[… evidence truncated …]" not in rendered
+        assert "lorem ipsum" in rendered
+
+
+class TestFetchPageContent:
+    """Direct coverage of _fetch_page_content's four early-return paths."""
+
+    @staticmethod
+    def _resp(
+        status: int = 200,
+        content_type: str = "text/html; charset=utf-8",
+        text: str = "",
+    ) -> MagicMock:
+        resp = MagicMock()
+        resp.status_code = status
+        resp.headers = {"Content-Type": content_type}
+        resp.text = text
+        return resp
+
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_happy_path_cleaned(self, mock_get: MagicMock) -> None:
+        """200 + HTML → (cleaned_text, cleaned_text) in cleaned mode."""
+        mock_get.return_value = self._resp(text=_HTML_PAGE)
+        text, capture = module._fetch_page_content("http://x", mode="cleaned")
+        assert text is not None and "Federal Reserve" in text
+        assert capture == text  # cleaned mode stores the cleaned text
+
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_happy_path_raw_stores_html(self, mock_get: MagicMock) -> None:
+        """200 + HTML → capture is the raw HTML in raw mode."""
+        mock_get.return_value = self._resp(text=_HTML_PAGE)
+        text, capture = module._fetch_page_content("http://x", mode="raw")
+        assert text is not None and "Federal Reserve" in text
+        assert capture == _HTML_PAGE  # raw mode stores the raw html
+
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_non_200_returns_none(self, mock_get: MagicMock) -> None:
+        """A 404 yields (None, None)."""
+        mock_get.return_value = self._resp(status=404, text=_HTML_PAGE)
+        assert module._fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_non_html_content_type_returns_none(self, mock_get: MagicMock) -> None:
+        """A non-HTML content-type (JSON) yields (None, None)."""
+        mock_get.return_value = self._resp(
+            content_type="application/json", text='{"a": 1}'
+        )
+        assert module._fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_request_exception_returns_none(self, mock_get: MagicMock) -> None:
+        """A network exception is swallowed → (None, None)."""
+        mock_get.side_effect = requests.Timeout("slow")
+        assert module._fetch_page_content("http://x") == (None, None)
+
+    @patch(f"{SF_MODULE}._clean_html", return_value=None)
+    @patch(f"{SF_MODULE}.requests.get")
+    def test_unextractable_html_returns_none(
+        self, mock_get: MagicMock, _mock_clean: MagicMock
+    ) -> None:
+        """200 + HTML but readability extracts nothing → (None, None)."""
+        mock_get.return_value = self._resp(text="<html></html>")
+        assert module._fetch_page_content("http://x") == (None, None)
 
 
 class TestErrorHandling:

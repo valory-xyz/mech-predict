@@ -1,0 +1,40 @@
+name: superforcaster_calibrated_full_search
+author: valory
+version: 0.1.0
+type: custom
+description: Sibling of the calibration-ON superforcaster build live on Omen production
+  (Structured Outputs, max_tokens=4096, CALIBRATION block + EVIDENCE BAR / CONFIDENCE
+  COUPLING / NUMERIC QUESTIONS checks). Adds an evidence layer that fetches the top
+  organic results, extracts the main article text via readability + markdownify, and
+  feeds the cleaned page body into the forecasting prompt alongside the Serper snippet.
+  The prediction prompt and architecture are otherwise unchanged from that calibration-ON
+  build.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeif65opovmxvdk2yg56jsgauiuhjppuzrk4zvvruzklko3nmk5tjfm
+  superforcaster_calibrated_full_search.py: bafybeihq5w6g5crqmb5uiixrrbftz35j36zc4vbew5rfeexigr47ikah7y
+  tests/__init__.py: bafybeigjdbprffbvsm6xzzuuzlk7kme5pl7bfib5ce72h35vq4sajfu5hi
+  tests/test_superforcaster_calibrated_full_search.py: bafybeihfmhgvvympjumsx4yrd3cx6i3ajlsu2mh6bzymh2bernrfa6oucq
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_calibrated_full_search.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

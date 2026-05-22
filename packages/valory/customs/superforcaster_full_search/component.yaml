@@ -1,0 +1,36 @@
+name: superforcaster_full_search
+author: valory
+version: 0.1.0
+type: custom
+description: A sibling of superforcaster that fetches full search-result pages (top
+  organic results) and extracts the main article text via readability + markdownify,
+  feeding the cleaned page body into the forecasting prompt instead of relying on
+  Serper snippets alone. The forecasting prompt and prediction architecture are unchanged
+  from superforcaster.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
+  superforcaster_full_search.py: bafybeigydebqg7mahm3uap32qymfpdmrudvnwmwxulax2ky4mrh6t3owfe
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster_full_search.py: bafybeihromvcvabbnzkrl4neyj3r3j6fkdrggwfv57cwjtsqq3ge4ixwle
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_full_search.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

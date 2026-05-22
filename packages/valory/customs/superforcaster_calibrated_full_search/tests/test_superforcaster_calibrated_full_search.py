@@ -93,12 +93,15 @@ PREDICTION_PROMPT = (
 )
 
 
-def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
+def _make_mock_api_keys(
+    return_source_content: str = "false", source_content_mode: str = "cleaned"
+) -> MagicMock:
     """Create a mock KeyChain-like api_keys object."""
     services = {
         "openai": ["sk-test"],
         "serperapi": ["serper-test"],
         "return_source_content": [return_source_content],
+        "source_content_mode": [source_content_mode],
     }
     mock = MagicMock()
     mock.__getitem__ = lambda self, key: services[key][0]
@@ -487,3 +490,29 @@ class TestKeyRotationAndErrors:
         payload = json.loads(result[0])
         assert payload["p_yes"] is None
         assert "429" in payload["error"]
+
+    def test_invalid_source_content_mode_returns_error_json(self) -> None:
+        """A bad source_content_mode yields error JSON (not a silent string)."""
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(source_content_mode="bogus"),
+            counter_callback=None,
+        )
+
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert "Invalid source_content_mode" in payload["error"]
+
+    def test_max_cost_returns_float_not_wrapped_tuple(self) -> None:
+        """delivery_rate=0 returns the float max_cost untouched (float guard)."""
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=lambda **_: 0.0123,
+            delivery_rate=0,
+        )
+        assert result == 0.0123

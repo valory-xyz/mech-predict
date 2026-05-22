@@ -64,11 +64,11 @@ PENDING_MAX_AGE_DAYS = 90
 # Subgraph endpoints — read from env with defaults
 PREDICT_OMEN_SUBGRAPH_URL = os.environ.get(
     "PREDICT_OMEN_SUBGRAPH_URL",
-    "https://predict-agents.subgraph.autonolas.tech",
+    "https://api.subgraph.autonolas.tech/api/proxy/predict-omen",
 )
 PREDICT_POLYMARKET_SUBGRAPH_URL = os.environ.get(
     "PREDICT_POLYMARKET_SUBGRAPH_URL",
-    "https://predict-polymarket-agents.subgraph.autonolas.tech",
+    "https://api.subgraph.autonolas.tech/api/proxy/predict-polymarket",
 )
 MECH_MARKETPLACE_GNOSIS_URL = os.environ.get(
     "MECH_MARKETPLACE_GNOSIS_URL",

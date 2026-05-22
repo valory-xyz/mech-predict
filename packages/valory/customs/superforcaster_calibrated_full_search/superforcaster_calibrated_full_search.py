@@ -234,7 +234,6 @@ def count_tokens(text: str, model: str) -> int:
 
 DEFAULT_OPENAI_SETTINGS = {
     "max_tokens": 4096,
-    "limit_max_tokens": 4096,
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
@@ -381,6 +380,7 @@ def _parse_completion(
     :raises RuntimeError: if all retries exhausted without a successful parse.
     """
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.beta.chat.completions.parse(
@@ -425,11 +425,14 @@ def _parse_completion(
             )
             time.sleep(delay)
             attempt += 1
+            last_error = e
 
-    raise RuntimeError("Failed to get structured LLM completion after retries")
+    raise RuntimeError(
+        f"Failed to get structured LLM completion after retries: {last_error}"
+    ) from last_error
 
 
-def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:
+def fetch_additional_sources(question: str, serper_api_key: str) -> requests.Response:
     """Fetch additional sources for the given question using the Serper API."""
     url = "https://google.serper.dev/search"
     payload = json.dumps({"q": question})
@@ -609,10 +612,11 @@ def _cap_evidence_block(
 ) -> str:
     """Render the evidence block, dropping trailing organic items until it fits.
 
-    Mirrors factual_research's overflow handling: Serper orders organic
-    results by relevance so trailing drops are cheapest. If the block still
-    exceeds the budget once all organic items are gone, the result is
-    returned as-is (peopleAlsoAsk is small and not separately trimmed).
+    Same trailing-drop pattern as factual_research (which caps at 3000;
+    4000 here): Serper orders organic results by relevance so trailing
+    drops are cheapest. If the block still exceeds the budget once all
+    organic items are gone, the result is returned as-is (peopleAlsoAsk is
+    small and not separately trimmed).
 
     :param organic_data: Serper organic results (already capped to MAX_SOURCES).
     :param misc_data: Serper peopleAlsoAsk items.

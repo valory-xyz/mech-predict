@@ -389,6 +389,24 @@ class TestScrapePages:
         assert "content" not in organic[0]
         assert captured == {}
 
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    def test_scrape_pages_mixed_success(self, _mock_page_fetch: MagicMock) -> None:
+        """One URL succeeds, one fails: only the success gets content + capture."""
+        from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
+            _scrape_pages,
+        )
+
+        organic = [
+            {"link": "http://example.com/result", "title": "T1", "snippet": "s1"},
+            {"link": "http://example.com/unknown", "title": "T2", "snippet": "s2"},
+        ]
+        captured = _scrape_pages(organic, mode="cleaned")
+        # success → content attached + in capture; failure → neither (exercises
+        # the `if text:` / `if capture:` guards).
+        assert organic[0]["content"] == FAKE_PAGE_CONTENT
+        assert "content" not in organic[1]
+        assert captured == {"http://example.com/result": FAKE_PAGE_CONTENT}
+
 
 class TestEvidenceBlockCap:
     """The cap drops trailing organic items until the rendered block fits."""

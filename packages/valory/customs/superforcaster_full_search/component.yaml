@@ -11,9 +11,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
-  superforcaster_full_search.py: bafybeicmr2vwkr7wndl2llmdtbnzypqrielgiwh5u7rtkjxijlwrovnpqy
+  superforcaster_full_search.py: bafybeigydebqg7mahm3uap32qymfpdmrudvnwmwxulax2ky4mrh6t3owfe
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_full_search.py: bafybeib4hndclhlobujhh4pdb33zgh55k3kyceh7ascuixw6uwm5kmlzli
+  tests/test_superforcaster_full_search.py: bafybeihromvcvabbnzkrl4neyj3r3j6fkdrggwfv57cwjtsqq3ge4ixwle
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_full_search.py
 callable: run

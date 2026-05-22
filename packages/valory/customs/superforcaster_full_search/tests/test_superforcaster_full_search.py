@@ -31,6 +31,8 @@ import requests
 import packages.valory.customs.superforcaster_full_search.superforcaster_full_search as module
 from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (
     OpenAIClientManager,
+    OpenAIResponse,
+    Usage,
     fetch_additional_sources,
     generate_prediction_with_retry,
     run,
@@ -153,11 +155,15 @@ def _make_mock_api_keys(
 
 
 def _stub_openai(mock_client_mgr: MagicMock) -> MagicMock:
-    """Wire OpenAIClientManager to a stub that returns PREDICTION_JSON once."""
+    """Wire OpenAIClientManager to a stub returning PREDICTION_JSON."""
+    # The non-calibrated path calls the OpenAIClient.completions(...) wrapper
+    # (not chat.completions.create directly), so the stub must set
+    # completions.return_value to a real OpenAIResponse — otherwise result[0]
+    # is an auto-MagicMock and JSON-shape assertions are vacuous.
     mock_client = MagicMock()
-    mock_client.chat.completions.create.return_value = MagicMock(
-        choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
-        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+    mock_client.completions.return_value = OpenAIResponse(
+        content=PREDICTION_JSON,
+        usage=Usage(prompt_tokens=10, completion_tokens=5),
     )
     mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
     mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
@@ -202,6 +208,9 @@ class TestSuperforcasterSourceContent:
         prediction_prompt = result[1]
         assert FAKE_PAGE_CONTENT in prediction_prompt
         assert "**Content:**" in prediction_prompt
+        # result[0] is the LLM completion content (via the OpenAIClient
+        # wrapper), not an auto-MagicMock — so this JSON assertion is real.
+        assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
 
     @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -524,6 +533,28 @@ class TestErrorHandling:
         assert payload["p_yes"] is None
         assert payload["p_no"] is None
         assert payload["error"] == "boom"
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_null_content_surfaces_as_error_json(
+        self, mock_client_mgr: MagicMock, _mock_sleep: MagicMock
+    ) -> None:
+        """An LLM refusal (content=None) becomes error JSON, not a None prediction."""
+        mock_client = _stub_openai(mock_client_mgr)
+        mock_client.completions.return_value = OpenAIResponse(content=None)
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        payload = json.loads(result[0])  # not None → no downstream json.loads(None)
+        assert payload["p_yes"] is None
+        assert "content" in payload["error"].lower()
 
 
 class TestSerperRequest:

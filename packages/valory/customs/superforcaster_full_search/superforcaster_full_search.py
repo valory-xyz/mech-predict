@@ -170,7 +170,7 @@ class OpenAIClient:
             temperature=temperature,
             max_tokens=max_tokens,
             n=1,
-            timeout=150,
+            timeout=timeout if timeout is not None else 150,
             stop=None,
         )
         response = OpenAIResponse()
@@ -198,7 +198,6 @@ DEFAULT_OPENAI_SETTINGS = {
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
 ALLOWED_TOOLS = ["superforcaster_full_search"]
-ALLOWED_MODELS = [DEFAULT_OPENAI_MODEL]
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
@@ -314,6 +313,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -326,11 +326,15 @@ def generate_prediction_with_retry(
                 stop=None,
             )
 
-            if (
-                response
-                and response.content is not None
-                and counter_callback is not None
-            ):
+            # A refusal / empty completion yields content=None. Surface it as
+            # an error (mirrors the calibrated sibling's `parsed is None`
+            # guard) so the decorator's error JSON carries the real reason
+            # instead of returning None as the prediction and tripping
+            # json.loads(None) downstream in tournament scoring.
+            if response is None or response.content is None:
+                raise ValueError("Model returned no content (possible refusal)")
+
+            if counter_callback is not None:
                 counter_callback(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
@@ -338,13 +342,15 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            content = response.content if response else None
-            return content, counter_callback
-        except Exception as e:
+            return response.content, counter_callback
+        except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:

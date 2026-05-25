@@ -16,13 +16,22 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Fetch per-deployment IRRELEVANT_TOOLS lists so the daily report can annotate them.
+"""Resolve the per-deployment set of selectable tools so the daily report can annotate them.
 
-Each consumer (olas-operate-app Pearl, quickstart QS) stores the list as a
-JSON-encoded string in a public config on GitHub ``main``.  We return a
-``{deployment: [tool_names] | None}`` map; ``None`` signals a fetch or parse
-failure for that deployment so consumers can render "unavailable" rather
-than falsely claiming "no tools disabled".
+The trader no longer filters tools with a per-tool allow/deny list. Instead
+each deployment's ``service.yaml`` ships a ``valid_mechs`` whitelist of mech
+contract addresses, and the trader may select **any** tool offered by those
+mechs in the marketplace. We therefore resolve the allow-list dynamically:
+
+1. Find the latest ``valory-xyz/trader`` release tag.
+2. Read each deployment's ``service.yaml`` at that tag and parse ``valid_mechs``.
+3. Resolve each mech address to its tools via the marketplace subgraph
+   (mech → on-chain metadata CID → IPFS metadata ``tools`` list).
+4. A deployment's selectable tools are the union across its ``valid_mechs``.
+
+We return a ``{deployment: [tool_names] | None}`` map; ``None`` signals a fetch
+or parse failure for that deployment so consumers can render "unavailable"
+rather than falsely claiming a tool is (or is not) selectable.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ import json
 import logging
 import re
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -40,7 +49,6 @@ log = logging.getLogger(__name__)
 # Deployments we report on. Order is the column order in the rendered line.
 DEPLOYMENTS: tuple[str, ...] = (
     "omenstrat Pearl",
-    "omenstrat QS",
     "polystrat Pearl",
 )
 
@@ -49,8 +57,17 @@ DEPLOYMENTS: tuple[str, ...] = (
 DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
     {
         "omenstrat Pearl": "omen",
-        "omenstrat QS": "omen",
         "polystrat Pearl": "polymarket",
+    }
+)
+
+# Per-deployment resolution config: deployment -> (trader service dir, chain).
+# The trader service dir names the ``service.yaml`` carrying ``valid_mechs``;
+# the chain selects the marketplace subgraph the mech addresses live on.
+_DEPLOYMENT_CONFIG: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "omenstrat Pearl": ("trader_pearl", "gnosis"),
+        "polystrat Pearl": ("polymarket_trader", "polygon"),
     }
 )
 
@@ -66,39 +83,53 @@ def deployments_for_platform(platform: str) -> tuple[str, ...]:
     )
 
 
-# Source URLs (GitHub raw, ``main`` branch).
-OPERATE_APP_TRADER_TS_URL = (
-    "https://raw.githubusercontent.com/valory-xyz/olas-operate-app/"
-    "main/frontend/constants/serviceTemplates/service/trader.ts"
+# Source URLs.
+# Latest published release (includes pre-releases); ``[0]`` is the most recent.
+TRADER_RELEASES_URL = (
+    "https://api.github.com/repos/valory-xyz/trader/releases?per_page=1"
 )
-QUICKSTART_CONFIG_URL = (
-    "https://raw.githubusercontent.com/valory-xyz/quickstart/"
-    "main/configs/config_predict_trader.json"
+# Filled with the resolved release tag and the trader service dir.
+TRADER_SERVICE_YAML_URL = (
+    "https://raw.githubusercontent.com/valory-xyz/trader/"
+    "{ref}/packages/valory/services/{service}/service.yaml"
 )
+# Olas Mech Marketplace subgraphs, per chain.
+MARKETPLACE_SUBGRAPH_URL: Mapping[str, str] = MappingProxyType(
+    {
+        "gnosis": "https://api.subgraph.autonolas.tech/api/proxy/marketplace-gnosis",
+        "polygon": "https://api.subgraph.autonolas.tech/api/proxy/marketplace-polygon",
+    }
+)
+# IPFS gateway and the CIDv1 prefix mech-interact prepends to a metadata hash.
+IPFS_GATEWAY_URL = "https://gateway.autonolas.tech/ipfs"
+CID_PREFIX = "f01701220"
 
-# Fetch timeout (seconds). Short so a stalled GitHub never blocks the
+# Fetch timeout (seconds). Short so a stalled endpoint never blocks the
 # daily report pipeline.
-FETCH_TIMEOUT = 10
+FETCH_TIMEOUT = 30
 
-# Matches an ``IRRELEVANT_TOOLS`` block anchored to a specific exported
-# template name (e.g. ``PREDICT_SERVICE_TEMPLATE``).  The capture group is
-# the JSON-array-of-strings payload under ``value:``.  Anchoring to the
-# template name protects us against silent relabel if the two template
-# declarations are ever reordered in ``trader.ts``.
-_TS_TEMPLATE_BLOCK_TEMPLATE = (
-    r"{template_name}\b[\s\S]*?"
-    r"IRRELEVANT_TOOLS\s*:\s*\{{[^}}]*?value\s*:\s*'(?P<value>\[[^']*\])'"
+# Matches the ``valid_mechs`` env-override default in a trader ``service.yaml``:
+# ``valid_mechs: ${VALID_MECHS:list:["0x..","0x.."]}`` on a single line. The
+# inner ``[...]`` is valid JSON (array of double-quoted addresses); ``[^\]]*``
+# is safe because addresses never contain ``]``.
+_VALID_MECHS_RE = re.compile(
+    r"valid_mechs\s*:\s*\$\{VALID_MECHS:list:(?P<list>\[[^\]]*\])\}"
 )
-_OMENSTRAT_PEARL_TEMPLATE = "PREDICT_SERVICE_TEMPLATE"
-_POLYSTRAT_PEARL_TEMPLATE = "PREDICT_POLYMARKET_SERVICE_TEMPLATE"
+
+# Subgraph query: resolve a set of mech addresses to their on-chain metadata
+# CID. ``meches`` is keyed internally by id but carries the contract
+# ``address``; ``%(addrs)s`` is a comma-separated list of quoted addresses.
+_MECHES_QUERY = (
+    "{ meches(first: 1000, where: {address_in: [%(addrs)s]}) "
+    "{ address service { metadata { metadata } } } }"
+)
 
 
 def _normalize_tool_name(name: str) -> str:
     """Return a canonical form for cross-convention tool-name matching.
 
-    Operate-app and quickstart lists sometimes use ``prediction_request_X``
-    while the benchmark logs use ``prediction-request-X`` for the same tool;
-    the config authors defensively list both variants.  Treat underscores
+    Mech metadata and the benchmark logs sometimes spell the same tool
+    ``prediction_request_X`` vs ``prediction-request-X``. Treat underscores
     and hyphens as interchangeable so we don't under-report.
 
     :param name: raw tool name.
@@ -119,29 +150,37 @@ def _http_get(url: str) -> str:
     req = Request(url, headers={"User-Agent": "mech-predict-benchmark"})
     with urlopen(
         req, timeout=FETCH_TIMEOUT
-    ) as resp:  # nosec B310 — fixed mech-tool registry URL
+    ) as resp:  # nosec B310 — fixed registry/subgraph/IPFS URLs
         return resp.read().decode("utf-8")
 
 
-def _extract_template_irrelevant_tools(source: str, template_name: str) -> list[str]:
-    """Extract the IRRELEVANT_TOOLS list for one named template.
+def _post_graphql(url: str, query: str) -> dict[str, Any]:
+    """POST a GraphQL ``query`` to ``url`` and return the ``data`` object.
 
-    :param source: full text of ``trader.ts``.
-    :param template_name: exported template identifier
-        (e.g. ``PREDICT_SERVICE_TEMPLATE``).
-    :return: parsed list of tool names.
-    :raises ValueError: when no IRRELEVANT_TOOLS block is found for this template.
+    Propagates ``URLError`` (or subclasses) on network failure.
+
+    :param url: GraphQL endpoint.
+    :param query: GraphQL query string.
+    :return: the ``data`` object from the JSON response.
+    :raises ValueError: when the response reports GraphQL ``errors``.
     """
-    pattern = re.compile(
-        _TS_TEMPLATE_BLOCK_TEMPLATE.format(template_name=template_name),
-        re.DOTALL,
+    body = json.dumps({"query": query}).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "mech-predict-benchmark",
+        },
+        method="POST",
     )
-    match = pattern.search(source)
-    if match is None:
-        raise ValueError(
-            f"no IRRELEVANT_TOOLS block found for template {template_name}"
-        )
-    return _parse_json_string_list(match.group("value"))
+    with urlopen(
+        req, timeout=FETCH_TIMEOUT
+    ) as resp:  # nosec B310 — fixed marketplace subgraph URLs
+        payload = json.loads(resp.read().decode("utf-8"))
+    if payload.get("errors"):
+        raise ValueError(f"GraphQL errors from {url}: {payload['errors']}")
+    return payload.get("data") or {}
 
 
 def _parse_json_string_list(raw: str) -> list[str]:
@@ -153,73 +192,129 @@ def _parse_json_string_list(raw: str) -> list[str]:
     """
     parsed = json.loads(raw)
     if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
-        raise ValueError("IRRELEVANT_TOOLS value must be a JSON array of strings")
+        raise ValueError("expected a JSON array of strings")
     return parsed
 
 
-def parse_operate_app_ts(source: str) -> dict[str, list[str]]:
-    """Parse IRRELEVANT_TOOLS for each exported template in ``trader.ts``.
+def latest_trader_ref() -> str:
+    """Return the tag of the most recent ``valory-xyz/trader`` release.
 
-    Template identity is anchored to the exported identifier
-    (``PREDICT_SERVICE_TEMPLATE`` for omenstrat Pearl and
-    ``PREDICT_POLYMARKET_SERVICE_TEMPLATE`` for polystrat Pearl), not file
-    order, so silent relabel is impossible if the two declarations are
-    ever reordered.  Propagates ``ValueError`` from
-    ``_extract_template_irrelevant_tools`` when either template's block
-    is missing.
+    The releases endpoint lists published releases (pre-releases included)
+    newest-first, so ``[0].tag_name`` is the latest deployable trader version.
+    Propagates ``URLError`` (or subclasses) on network failure.
 
-    :param source: full text of ``trader.ts``.
-    :return: ``{"omenstrat Pearl": [...], "polystrat Pearl": [...]}``.
+    :return: the release tag (e.g. ``"v0.38.0-rc1"``).
+    :raises ValueError: when no release or no ``tag_name`` is present.
     """
-    return {
-        "omenstrat Pearl": _extract_template_irrelevant_tools(
-            source, _OMENSTRAT_PEARL_TEMPLATE
-        ),
-        "polystrat Pearl": _extract_template_irrelevant_tools(
-            source, _POLYSTRAT_PEARL_TEMPLATE
-        ),
-    }
+    releases = json.loads(_http_get(TRADER_RELEASES_URL))
+    if not isinstance(releases, list) or not releases:
+        raise ValueError("no trader releases found")
+    tag = releases[0].get("tag_name")
+    if not isinstance(tag, str) or not tag:
+        raise ValueError("latest trader release has no tag_name")
+    return tag
 
 
-def parse_quickstart_config(source: str) -> list[str]:
-    """Parse ``env_variables.IRRELEVANT_TOOLS.value`` from the quickstart JSON.
+def parse_valid_mechs(yaml_source: str) -> list[str]:
+    """Extract the ``valid_mechs`` whitelist from a trader ``service.yaml``.
 
-    Propagates ``KeyError`` when the expected path is missing, and
-    ``ValueError`` (from ``_parse_json_string_list`` or ``json.loads``)
-    when the value is not a JSON array of strings.
-
-    :param source: full text of the quickstart ``config_predict_trader.json``.
-    :return: the parsed list of irrelevant tool names.
+    :param yaml_source: full text of a trader ``service.yaml``.
+    :return: list of mech contract addresses (empty list is a real state:
+        "no mechs whitelisted").
+    :raises ValueError: when the ``valid_mechs`` env-default line is absent
+        or its payload is not a JSON array of strings.
     """
-    data = json.loads(source)
-    raw = data["env_variables"]["IRRELEVANT_TOOLS"]["value"]
-    return _parse_json_string_list(raw)
+    match = _VALID_MECHS_RE.search(yaml_source)
+    if match is None:
+        raise ValueError("no valid_mechs env default found in service.yaml")
+    return _parse_json_string_list(match.group("list"))
 
 
-def fetch_disabled_tools() -> dict[str, list[str] | None]:
-    """Return ``{deployment: [tool_names] | None}`` for all deployments.
+def fetch_tools_for_metadata(metadata_hash: str) -> list[str]:
+    """Fetch the tools manifest for one mech metadata hash from IPFS.
 
-    ``None`` signals a fetch or parse failure for that deployment so the
-    renderer can say "unavailable" instead of falsely claiming nothing is
-    disabled.  Failures are logged but never raised — the daily report
-    must never be blocked by a flaky GitHub fetch.
+    The subgraph stores the metadata as a hex hash; mech-interact resolves
+    it to a CIDv1 by prepending ``CID_PREFIX`` (after dropping any ``0x``).
+    Propagates ``URLError`` (or subclasses) on network failure.
 
-    :return: disabled-tools map keyed by deployment name.
+    :param metadata_hash: hex metadata hash from the subgraph
+        (e.g. ``0x204398...``).
+    :return: the tool names advertised in the manifest's ``tools`` array.
+    :raises ValueError: when the manifest has no JSON ``tools`` array of strings.
     """
-    disabled: dict[str, list[str] | None] = {name: None for name in DEPLOYMENTS}
+    digest = metadata_hash[2:] if metadata_hash.startswith("0x") else metadata_hash
+    url = f"{IPFS_GATEWAY_URL}/{CID_PREFIX}{digest}"
+    manifest = json.loads(_http_get(url))
+    tools = manifest.get("tools") if isinstance(manifest, dict) else None
+    if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
+        raise ValueError(f"metadata {metadata_hash} has no tools array of strings")
+    return tools
+
+
+def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
+    """Resolve a deployment's ``valid_mechs`` to the union of tools they offer.
+
+    Looks up each address' on-chain metadata CID via the marketplace
+    subgraph, then fetches each distinct manifest from IPFS and unions the
+    advertised tools. Distinct metadata hashes are de-duplicated so mechs
+    sharing a manifest are fetched once. Propagates ``URLError`` on a
+    subgraph/IPFS network failure and ``ValueError`` on a GraphQL error or
+    a malformed IPFS manifest, so the caller can mark the deployment
+    unavailable.
+
+    :param addresses: mech contract addresses (the parsed ``valid_mechs``).
+    :param subgraph_url: marketplace subgraph endpoint for the chain.
+    :return: sorted union of advertised tool names; ``[]`` when ``addresses``
+        is empty (a real "no mechs whitelisted" state, not a failure).
+    """
+    if not addresses:
+        return []
+    quoted = ",".join(f'"{addr.lower()}"' for addr in addresses)
+    data = _post_graphql(subgraph_url, _MECHES_QUERY % {"addrs": quoted})
+
+    metadata_hashes: set[str] = set()
+    for mech in data.get("meches") or []:
+        manifests = (mech.get("service") or {}).get("metadata") or []
+        if manifests and manifests[0].get("metadata"):
+            metadata_hashes.add(manifests[0]["metadata"])
+
+    tools: set[str] = set()
+    for metadata_hash in metadata_hashes:
+        tools.update(fetch_tools_for_metadata(metadata_hash))
+    return sorted(tools)
+
+
+def fetch_valid_tools() -> dict[str, list[str] | None]:
+    """Return ``{deployment: [selectable_tool_names] | None}`` for all deployments.
+
+    For each deployment: read its ``service.yaml`` at the latest trader
+    release, parse ``valid_mechs``, and resolve those mechs to the union of
+    tools they advertise in the marketplace. ``None`` signals a fetch or
+    parse failure for that deployment so the renderer can say "unavailable"
+    instead of falsely claiming a tool is or is not selectable. Failures are
+    logged but never raised — the daily report must never be blocked by a
+    flaky GitHub/subgraph/IPFS fetch.
+
+    :return: selectable-tools map keyed by deployment name.
+    """
+    valid: dict[str, list[str] | None] = {name: None for name in DEPLOYMENTS}
 
     try:
-        ts_source = _http_get(OPERATE_APP_TRADER_TS_URL)
-        pearl = parse_operate_app_ts(ts_source)
-        disabled["omenstrat Pearl"] = pearl["omenstrat Pearl"]
-        disabled["polystrat Pearl"] = pearl["polystrat Pearl"]
+        ref = latest_trader_ref()
     except (URLError, ValueError, OSError) as exc:
-        log.warning("operate-app fetch/parse failed: %s", exc)
+        log.warning("trader release resolution failed: %s", exc)
+        return valid  # every deployment stays None
 
-    try:
-        qs_source = _http_get(QUICKSTART_CONFIG_URL)
-        disabled["omenstrat QS"] = parse_quickstart_config(qs_source)
-    except (URLError, ValueError, KeyError, OSError) as exc:
-        log.warning("quickstart fetch/parse failed: %s", exc)
+    for deployment, (service, chain) in _DEPLOYMENT_CONFIG.items():
+        try:
+            yaml_source = _http_get(
+                TRADER_SERVICE_YAML_URL.format(ref=ref, service=service)
+            )
+            mechs = parse_valid_mechs(yaml_source)
+            valid[deployment] = resolve_mech_tools(
+                mechs, MARKETPLACE_SUBGRAPH_URL[chain]
+            )
+        except (URLError, ValueError, OSError) as exc:
+            log.warning("%s selectable-tools resolution failed: %s", deployment, exc)
 
-    return disabled
+    return valid

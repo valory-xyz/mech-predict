@@ -19,6 +19,7 @@
 """Tests for benchmark/tool_usage.py and the deployment-status report section."""
 
 import json
+from typing import Callable
 from urllib.error import URLError
 
 import pytest
@@ -53,58 +54,40 @@ class TestDeploymentPlatformMappingInvariants:
             "the deployment was removed but the mapping wasn't cleaned up"
         )
 
+    def test_every_deployment_has_resolution_config(self) -> None:
+        """Every deployment can be resolved (trader service dir + chain)."""
+        config = tool_usage._DEPLOYMENT_CONFIG  # pylint: disable=protected-access
+        missing = [name for name in DEPLOYMENTS if name not in config]
+        assert not missing, (
+            f"deployment(s) {missing} have no _DEPLOYMENT_CONFIG entry — "
+            "fetch_valid_tools would never resolve them"
+        )
+
+    def test_resolution_chains_are_known(self) -> None:
+        """Each deployment's chain has a marketplace subgraph URL."""
+        config = tool_usage._DEPLOYMENT_CONFIG  # pylint: disable=protected-access
+        for name, (_service, chain) in config.items():
+            assert (
+                chain in tool_usage.MARKETPLACE_SUBGRAPH_URL
+            ), f"{name} resolves on chain {chain!r} with no subgraph URL"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-PEARL_ONLY_MARKER = "omenstrat-only-marker"
-POLYSTRAT_ONLY_MARKER = "polystrat-only-marker"
 
-OPERATE_APP_TS_SAMPLE = f"""
-export const PREDICT_SERVICE_TEMPLATE = {{
-  env_variables: {{
-    IRRELEVANT_TOOLS: {{
-      name: 'Irrelevant tools',
-      description: '',
-      value:
-        '["native-transfer","echo","prediction-online-lite","{PEARL_ONLY_MARKER}"]',
-      provision_type: EnvProvisionType.FIXED,
-    }},
-    GENAI_API_KEY: {{ name: 'Gemini' }},
-  }},
-}};
-
-export const PREDICT_POLYMARKET_SERVICE_TEMPLATE = {{
-  env_variables: {{
-    IRRELEVANT_TOOLS: {{
-      name: 'Irrelevant tools',
-      description: '',
-      value:
-        '["native-transfer","echo","prediction-online-lite","{POLYSTRAT_ONLY_MARKER}"]',
-      provision_type: EnvProvisionType.FIXED,
-    }},
-  }},
-}};
-"""
-
-QUICKSTART_JSON_SAMPLE = json.dumps(
-    {
-        "name": "Trader Agent",
-        "env_variables": {
-            "IRRELEVANT_TOOLS": {
-                "name": "Irrelevant tools",
-                "value": json.dumps(
-                    [
-                        "native-transfer",
-                        "echo",
-                        "openai-gpt-4",
-                    ]
-                ),
-            },
-        },
-    }
-)
+def _service_yaml(addresses: list[str]) -> str:
+    """Build a trader service.yaml stub carrying a valid_mechs env default."""
+    payload = json.dumps(addresses)
+    return (
+        "    models:\n"
+        "      params:\n"
+        "        args:\n"
+        "          some_other_param: ${SOME_OTHER:int:5}\n"
+        f"          valid_mechs: ${{VALID_MECHS:list:{payload}}}\n"
+        "          trailing_param: ${TRAILING:bool:true}\n"
+    )
 
 
 def _scores_with_tools(tool_names: list[str]) -> dict:
@@ -122,141 +105,337 @@ def _scores_with_tools(tool_names: list[str]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# parse_operate_app_ts
+# latest_trader_ref
 # ---------------------------------------------------------------------------
 
 
-class TestParseOperateAppTs:
-    """Tests for parse_operate_app_ts."""
+class TestLatestTraderRef:
+    """Tests for latest_trader_ref."""
 
-    def test_extracts_both_templates(self) -> None:
-        """Each template's block is identified by name, not by file order."""
-        result = tool_usage.parse_operate_app_ts(OPERATE_APP_TS_SAMPLE)
-        # Template-unique markers prove the mapping didn't silently swap.
-        assert PEARL_ONLY_MARKER in result["omenstrat Pearl"]
-        assert PEARL_ONLY_MARKER not in result["polystrat Pearl"]
-        assert POLYSTRAT_ONLY_MARKER in result["polystrat Pearl"]
-        assert POLYSTRAT_ONLY_MARKER not in result["omenstrat Pearl"]
-
-    def test_identity_survives_template_reorder(self) -> None:
-        """If the file declares polystrat before omenstrat, labels still match."""
-        halves = OPERATE_APP_TS_SAMPLE.split(
-            "export const PREDICT_POLYMARKET_SERVICE_TEMPLATE", maxsplit=1
+    def test_returns_latest_tag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The first (newest) release's tag_name is returned."""
+        monkeypatch.setattr(
+            tool_usage,
+            "_http_get",
+            lambda url: json.dumps(
+                [{"tag_name": "v1.2.3-rc1"}, {"tag_name": "v1.2.2"}]
+            ),
         )
-        reordered = (
-            "export const PREDICT_POLYMARKET_SERVICE_TEMPLATE" + halves[1] + halves[0]
+        assert tool_usage.latest_trader_ref() == "v1.2.3-rc1"
+
+    def test_empty_release_list_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No releases -> ValueError (so the caller degrades, not crashes)."""
+        monkeypatch.setattr(tool_usage, "_http_get", lambda url: "[]")
+        with pytest.raises(ValueError, match="no trader releases"):
+            tool_usage.latest_trader_ref()
+
+    def test_missing_tag_name_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A release object without tag_name -> ValueError."""
+        monkeypatch.setattr(
+            tool_usage, "_http_get", lambda url: json.dumps([{"id": 1}])
         )
-        result = tool_usage.parse_operate_app_ts(reordered)
-        assert PEARL_ONLY_MARKER in result["omenstrat Pearl"]
-        assert POLYSTRAT_ONLY_MARKER in result["polystrat Pearl"]
-
-    def test_rejects_missing_template(self) -> None:
-        """Missing a template raises instead of silently returning a partial dict."""
-        single = OPERATE_APP_TS_SAMPLE.split(
-            "export const PREDICT_POLYMARKET_SERVICE_TEMPLATE", maxsplit=1
-        )[0]
-        with pytest.raises(
-            ValueError, match="no IRRELEVANT_TOOLS block found for template"
-        ):
-            tool_usage.parse_operate_app_ts(single)
-
-    def test_rejects_non_string_items(self) -> None:
-        """Array with non-string items raises ValueError."""
-        bad = OPERATE_APP_TS_SAMPLE.replace('"echo"', "123")
-        with pytest.raises(ValueError, match="must be a JSON array of strings"):
-            tool_usage.parse_operate_app_ts(bad)
+        with pytest.raises(ValueError, match="no tag_name"):
+            tool_usage.latest_trader_ref()
 
 
 # ---------------------------------------------------------------------------
-# parse_quickstart_config
+# parse_valid_mechs
 # ---------------------------------------------------------------------------
 
 
-class TestParseQuickstartConfig:
-    """Tests for parse_quickstart_config."""
+class TestParseValidMechs:
+    """Tests for parse_valid_mechs."""
 
     def test_happy_path(self) -> None:
-        """Standard shape returns the parsed list."""
-        assert tool_usage.parse_quickstart_config(QUICKSTART_JSON_SAMPLE) == [
-            "native-transfer",
-            "echo",
-            "openai-gpt-4",
-        ]
+        """The address list is extracted in order from the env default."""
+        yaml_source = _service_yaml(["0xAAA", "0xbbb"])
+        assert tool_usage.parse_valid_mechs(yaml_source) == ["0xAAA", "0xbbb"]
 
-    def test_missing_path_raises(self) -> None:
-        """Missing env_variables.IRRELEVANT_TOOLS raises KeyError."""
-        bad = json.dumps({"env_variables": {}})
-        with pytest.raises(KeyError):
-            tool_usage.parse_quickstart_config(bad)
+    def test_empty_list_returns_empty(self) -> None:
+        """An empty whitelist is a real state ([], not an error)."""
+        assert tool_usage.parse_valid_mechs(_service_yaml([])) == []
+
+    def test_missing_valid_mechs_raises(self) -> None:
+        """Absent valid_mechs line -> ValueError (no silent empty result)."""
+        with pytest.raises(ValueError, match="no valid_mechs"):
+            tool_usage.parse_valid_mechs("models:\n  params: {}\n")
+
+    def test_non_string_items_raise(self) -> None:
+        """A non-string array element -> ValueError."""
+        bad = "      valid_mechs: ${VALID_MECHS:list:[1,2,3]}\n"
+        with pytest.raises(ValueError, match="array of strings"):
+            tool_usage.parse_valid_mechs(bad)
 
 
 # ---------------------------------------------------------------------------
-# fetch_disabled_tools (fetch-failure handling)
+# fetch_tools_for_metadata
 # ---------------------------------------------------------------------------
 
 
-class TestFetchDisabledTools:
-    """Tests for fetch_disabled_tools and its failure semantics."""
+class TestFetchToolsForMetadata:
+    """Tests for fetch_tools_for_metadata."""
 
-    def test_both_sources_succeed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """All three deployment slots populated when both HTTP calls succeed."""
-
-        def fake_get(url: str) -> str:
-            if "olas-operate-app" in url:
-                return OPERATE_APP_TS_SAMPLE
-            return QUICKSTART_JSON_SAMPLE
-
-        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
-        result = tool_usage.fetch_disabled_tools()
-        pearl = result["omenstrat Pearl"]
-        assert pearl is not None
-        assert set(pearl) >= {"native-transfer", "echo", PEARL_ONLY_MARKER}
-        assert result["omenstrat QS"] == ["native-transfer", "echo", "openai-gpt-4"]
-        polystrat = result["polystrat Pearl"]
-        assert polystrat is not None and POLYSTRAT_ONLY_MARKER in polystrat
-
-    def test_operate_app_fetch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """operate-app failure -> None for both Pearl slots, QS still works."""
-
-        def fake_get(url: str) -> str:
-            if "olas-operate-app" in url:
-                raise URLError("network down")
-            return QUICKSTART_JSON_SAMPLE
-
-        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
-        result = tool_usage.fetch_disabled_tools()
-        assert result["omenstrat Pearl"] is None
-        assert result["polystrat Pearl"] is None
-        assert result["omenstrat QS"] == ["native-transfer", "echo", "openai-gpt-4"]
-
-    def test_quickstart_fetch_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Quickstart failure -> None for QS only, Pearl slots still populated."""
-
-        def fake_get(url: str) -> str:
-            if "olas-operate-app" in url:
-                return OPERATE_APP_TS_SAMPLE
-            raise URLError("network down")
-
-        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
-        result = tool_usage.fetch_disabled_tools()
-        assert result["omenstrat QS"] is None
-        assert result["omenstrat Pearl"] is not None
-
-    def test_malformed_response_is_not_raised(
+    def test_parses_tools_and_builds_cid_url(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Parse errors are swallowed so the daily report is never blocked."""
+        """0x is stripped and CID_PREFIX prepended; tools array is returned."""
+        seen: dict[str, str] = {}
 
         def fake_get(url: str) -> str:
-            return "not valid content"
+            seen["url"] = url
+            return json.dumps({"name": "Mech", "tools": ["a", "b"]})
 
         monkeypatch.setattr(tool_usage, "_http_get", fake_get)
-        result = tool_usage.fetch_disabled_tools()
-        assert all(v is None for v in result.values())
+        tools = tool_usage.fetch_tools_for_metadata("0xdeadbeef")
+        assert tools == ["a", "b"]
+        assert seen["url"] == (
+            f"{tool_usage.IPFS_GATEWAY_URL}/{tool_usage.CID_PREFIX}deadbeef"
+        )
+
+    def test_missing_tools_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A manifest with no tools array -> ValueError."""
+        monkeypatch.setattr(
+            tool_usage, "_http_get", lambda url: json.dumps({"name": "Mech"})
+        )
+        with pytest.raises(ValueError, match="no tools array"):
+            tool_usage.fetch_tools_for_metadata("0xabc")
+
+    def test_non_string_tools_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A tools array with non-string items -> ValueError."""
+        monkeypatch.setattr(
+            tool_usage, "_http_get", lambda url: json.dumps({"tools": [1, 2]})
+        )
+        with pytest.raises(ValueError, match="no tools array"):
+            tool_usage.fetch_tools_for_metadata("0xabc")
 
 
 # ---------------------------------------------------------------------------
-# Rendering of the deployment-status section
+# resolve_mech_tools
+# ---------------------------------------------------------------------------
+
+
+class TestResolveMechTools:
+    """Tests for resolve_mech_tools."""
+
+    def test_empty_addresses_makes_no_network_call(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty whitelist short-circuits to [] without touching the subgraph."""
+
+        def boom(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("network must not be touched for empty whitelist")
+
+        monkeypatch.setattr(tool_usage, "_post_graphql", boom)
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", boom)
+        assert tool_usage.resolve_mech_tools([], "http://subgraph") == []
+
+    def test_unions_and_dedupes_shared_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tools across mechs are unioned; a shared metadata hash is fetched once."""
+        monkeypatch.setattr(
+            tool_usage,
+            "_post_graphql",
+            lambda url, query: {
+                "meches": [
+                    {"address": "0xa", "service": {"metadata": [{"metadata": "0x11"}]}},
+                    {"address": "0xb", "service": {"metadata": [{"metadata": "0x11"}]}},
+                    {"address": "0xc", "service": {"metadata": [{"metadata": "0x22"}]}},
+                ]
+            },
+        )
+        fetched: list[str] = []
+
+        def fake_tools(metadata_hash: str) -> list[str]:
+            fetched.append(metadata_hash)
+            return {"0x11": ["superforcaster", "factual_research"], "0x22": ["jury"]}[
+                metadata_hash
+            ]
+
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", fake_tools)
+        tools = tool_usage.resolve_mech_tools(["0xa", "0xb", "0xc"], "http://subgraph")
+        # Sorted union across all distinct manifests.
+        assert tools == ["factual_research", "jury", "superforcaster"]
+        # The shared 0x11 manifest is fetched exactly once (dedup), not twice.
+        assert sorted(fetched) == ["0x11", "0x22"]
+
+    def test_query_lowercases_and_quotes_addresses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The subgraph query embeds the addresses, lowercased and quoted."""
+        captured: dict[str, str] = {}
+
+        def fake_post(url: str, query: str) -> dict:
+            captured["query"] = query
+            return {"meches": []}
+
+        monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
+        tool_usage.resolve_mech_tools(["0xAbC", "0xDEF"], "http://subgraph")
+        assert '"0xabc"' in captured["query"]
+        assert '"0xdef"' in captured["query"]
+        assert "0xAbC" not in captured["query"]
+
+    def test_subgraph_error_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A GraphQL/network error is raised so the caller can mark unavailable."""
+
+        def fake_post(url: str, query: str) -> dict:
+            raise URLError("subgraph down")
+
+        monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
+        with pytest.raises(URLError):
+            tool_usage.resolve_mech_tools(["0xa"], "http://subgraph")
+
+
+# ---------------------------------------------------------------------------
+# fetch_valid_tools (end-to-end resolution + failure handling)
+# ---------------------------------------------------------------------------
+
+RELEASE_TAG = "v9.9.9-test"
+PEARL_MECH = "0xpearlmech"
+POLY_MECH = "0xpolymech"
+PEARL_META = "0x1111"
+POLY_META = "0x2222"
+
+
+def _routed_http_get(
+    pearl_addrs: list[str], poly_addrs: list[str]
+) -> Callable[[str], str]:
+    """Build a fake _http_get routing by URL: releases, service.yamls, IPFS."""
+
+    def fake_get(url: str) -> str:
+        if "api.github.com" in url:
+            return json.dumps([{"tag_name": RELEASE_TAG}])
+        if "trader_pearl" in url:
+            assert RELEASE_TAG in url  # yaml fetched at the resolved release tag
+            return _service_yaml(pearl_addrs)
+        if "polymarket_trader" in url:
+            assert RELEASE_TAG in url
+            return _service_yaml(poly_addrs)
+        if url.endswith(PEARL_META[2:]):
+            return json.dumps({"tools": ["prediction-online", "shared-tool"]})
+        if url.endswith(POLY_META[2:]):
+            return json.dumps({"tools": ["echo", "shared-tool"]})
+        raise AssertionError(f"unexpected URL: {url}")
+
+    return fake_get
+
+
+def _routed_post_graphql(url: str, query: str) -> dict:
+    """Fake subgraph: route by chain, return each chain's mech metadata."""
+    if "marketplace-gnosis" in url:
+        return {
+            "meches": [
+                {
+                    "address": PEARL_MECH,
+                    "service": {"metadata": [{"metadata": PEARL_META}]},
+                }
+            ]
+        }
+    if "marketplace-polygon" in url:
+        return {
+            "meches": [
+                {
+                    "address": POLY_MECH,
+                    "service": {"metadata": [{"metadata": POLY_META}]},
+                }
+            ]
+        }
+    raise AssertionError(f"unexpected subgraph URL: {url}")
+
+
+class TestFetchValidTools:
+    """Tests for fetch_valid_tools and its per-deployment failure isolation."""
+
+    def test_both_deployments_succeed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each deployment resolves to the sorted union of its mechs' tools."""
+        monkeypatch.setattr(
+            tool_usage, "_http_get", _routed_http_get([PEARL_MECH], [POLY_MECH])
+        )
+        monkeypatch.setattr(tool_usage, "_post_graphql", _routed_post_graphql)
+        result = tool_usage.fetch_valid_tools()
+        assert result["omenstrat Pearl"] == ["prediction-online", "shared-tool"]
+        assert result["polystrat Pearl"] == ["echo", "shared-tool"]
+
+    def test_release_fetch_fails_blanks_all(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed release lookup leaves every deployment None (never raised)."""
+
+        def fake_get(url: str) -> str:
+            if "api.github.com" in url:
+                raise URLError("github down")
+            raise AssertionError("should not reach per-deployment fetch")
+
+        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
+        result = tool_usage.fetch_valid_tools()
+        assert all(v is None for v in result.values())
+
+    def test_one_deployment_yaml_fails_isolated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing service.yaml nulls only that deployment; the other resolves."""
+        base = _routed_http_get([PEARL_MECH], [POLY_MECH])
+
+        def fake_get(url: str) -> str:
+            if "trader_pearl" in url:
+                raise URLError("yaml 404")
+            return base(url)
+
+        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
+        monkeypatch.setattr(tool_usage, "_post_graphql", _routed_post_graphql)
+        result = tool_usage.fetch_valid_tools()
+        assert result["omenstrat Pearl"] is None
+        assert result["polystrat Pearl"] == ["echo", "shared-tool"]
+
+    def test_one_subgraph_fails_isolated(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A subgraph failure nulls only the affected deployment."""
+        monkeypatch.setattr(
+            tool_usage, "_http_get", _routed_http_get([PEARL_MECH], [POLY_MECH])
+        )
+
+        def fake_post(url: str, query: str) -> dict:
+            if "marketplace-gnosis" in url:
+                raise URLError("subgraph down")
+            return _routed_post_graphql(url, query)
+
+        monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
+        result = tool_usage.fetch_valid_tools()
+        assert result["omenstrat Pearl"] is None
+        assert result["polystrat Pearl"] == ["echo", "shared-tool"]
+
+    def test_malformed_yaml_not_raised(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A service.yaml missing valid_mechs nulls that deployment, never raises."""
+        base = _routed_http_get([PEARL_MECH], [POLY_MECH])
+
+        def fake_get(url: str) -> str:
+            if "trader_pearl" in url:
+                return "garbage: yaml: without: valid_mechs\n"
+            return base(url)
+
+        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
+        monkeypatch.setattr(tool_usage, "_post_graphql", _routed_post_graphql)
+        result = tool_usage.fetch_valid_tools()
+        assert result["omenstrat Pearl"] is None
+        assert result["polystrat Pearl"] == ["echo", "shared-tool"]
+
+    def test_empty_valid_mechs_is_empty_list_not_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty valid_mechs resolves to [] (a real state) without a subgraph call."""
+        monkeypatch.setattr(tool_usage, "_http_get", _routed_http_get([], [POLY_MECH]))
+
+        def fake_post(url: str, query: str) -> dict:
+            assert "marketplace-gnosis" not in url  # no mechs -> no gnosis query
+            return _routed_post_graphql(url, query)
+
+        monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
+        result = tool_usage.fetch_valid_tools()
+        assert result["omenstrat Pearl"] == []
+        assert result["polystrat Pearl"] == ["echo", "shared-tool"]
+
+
+# ---------------------------------------------------------------------------
+# Rendering of the deployment-status section (allow-list semantics)
 # ---------------------------------------------------------------------------
 
 
@@ -264,22 +443,19 @@ class TestSectionToolDeploymentStatus:
     """Rendering review: every code path produces the output a reader expects."""
 
     def test_active_tools_rendered(self) -> None:
-        """Each deployment shows the benchmarked tools that are NOT disabled."""
+        """Each deployment shows the benchmarked tools that ARE selectable."""
         scores = _scores_with_tools(["echo", "prediction-online"])
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["echo"],
-            "omenstrat QS": ["echo", "prediction-online"],
-            "polystrat Pearl": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["prediction-online"],
+            "polystrat Pearl": ["echo", "prediction-online"],
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
+        result = section_tool_deployment_status(scores, valid=valid)
         assert "## Tool Deployment Status" in result
         pearl_line = next(
             line for line in result.splitlines() if "omenstrat Pearl" in line
         )
         assert "`prediction-online`" in pearl_line
         assert "`echo`" not in pearl_line
-        qs_line = next(line for line in result.splitlines() if "omenstrat QS" in line)
-        assert "no benchmarked tools active" in qs_line
         poly_line = next(
             line for line in result.splitlines() if "polystrat Pearl" in line
         )
@@ -287,38 +463,65 @@ class TestSectionToolDeploymentStatus:
         assert "`prediction-online`" in poly_line
 
     def test_tool_in_config_but_not_benchmarked_is_hidden(self) -> None:
-        """Disabled entries naming non-benchmarked tools don't affect the active list."""
+        """Allow-list entries naming non-benchmarked tools don't invent rows."""
         scores = _scores_with_tools(["prediction-online"])
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["echo"],  # not in scores, ignored
-            "omenstrat QS": [],
-            "polystrat Pearl": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["prediction-online", "echo"],  # echo not benchmarked
+            "polystrat Pearl": ["echo"],  # only non-benchmarked -> empty
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
+        result = section_tool_deployment_status(scores, valid=valid)
         assert "`echo`" not in result
         pearl_line = next(
             line for line in result.splitlines() if "omenstrat Pearl" in line
         )
         assert "`prediction-online`" in pearl_line
+        poly_line = next(
+            line for line in result.splitlines() if "polystrat Pearl" in line
+        )
+        assert "no benchmarked tools active" in poly_line
 
-    def test_no_disabled_tools_means_all_tools_active(self) -> None:
-        """With nothing disabled, every benchmarked tool appears on every deployment."""
+    def test_full_allow_list_means_all_tools_active(self) -> None:
+        """With every tool selectable, each appears once per deployment."""
         scores = _scores_with_tools(["prediction-online"])
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
+            name: ["prediction-online"] for name in tool_usage.DEPLOYMENTS
+        }
+        result = section_tool_deployment_status(scores, valid=valid)
+        assert result.count("`prediction-online`") == len(tool_usage.DEPLOYMENTS)
+
+    def test_empty_allow_list_means_no_active(self) -> None:
+        """An empty allow-list renders 'no benchmarked tools active'."""
+        scores = _scores_with_tools(["prediction-online"])
+        valid: dict[str, list[str] | None] = {
             name: [] for name in tool_usage.DEPLOYMENTS
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
-        assert result.count("`prediction-online`") == len(tool_usage.DEPLOYMENTS)
+        result = section_tool_deployment_status(scores, valid=valid)
+        assert "`prediction-online`" not in result
+        assert result.count("no benchmarked tools active") == len(
+            tool_usage.DEPLOYMENTS
+        )
+
+    def test_normalizes_underscore_hyphen(self) -> None:
+        """Allow-list spelling with underscores still matches hyphen tool names."""
+        scores = _scores_with_tools(["prediction-request-reasoning-claude"])
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["prediction_request_reasoning_claude"],
+            "polystrat Pearl": [],
+        }
+        result = section_tool_deployment_status(scores, valid=valid)
+        pearl_line = next(
+            line for line in result.splitlines() if "omenstrat Pearl" in line
+        )
+        assert "`prediction-request-reasoning-claude`" in pearl_line
 
     def test_fetch_failure_renders_unavailable_banner(self) -> None:
         """Failed deployments render ⚠️ unavailable instead of a false 'active' list."""
         scores = _scores_with_tools(["echo"])
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": None,
-            "omenstrat QS": ["echo"],
-            "polystrat Pearl": None,
+            "polystrat Pearl": ["echo"],
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
+        result = section_tool_deployment_status(scores, valid=valid)
         assert "Could not fetch deployment config" in result
         pearl_line = next(
             line
@@ -330,28 +533,22 @@ class TestSectionToolDeploymentStatus:
             for line in result.splitlines()
             if line.startswith("- **polystrat Pearl**")
         )
-        qs_line = next(
-            line
-            for line in result.splitlines()
-            if line.startswith("- **omenstrat QS**")
-        )
         assert "⚠️ unavailable" in pearl_line
-        assert "⚠️ unavailable" in poly_line
-        assert "no benchmarked tools active" in qs_line
+        assert "`echo`" in poly_line
 
     def test_empty_dict_opts_out_entirely(self) -> None:
         """Empty dict means "caller opted out" and returns an empty string."""
         scores = _scores_with_tools(["echo"])
-        result = section_tool_deployment_status(scores, disabled={})
+        result = section_tool_deployment_status(scores, valid={})
         assert result == ""
 
     def test_all_fetches_fail_no_false_active_claim(self) -> None:
         """If everything fails, no deployment claims active tools."""
         scores = _scores_with_tools(["echo"])
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             name: None for name in tool_usage.DEPLOYMENTS
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
+        result = section_tool_deployment_status(scores, valid=valid)
         assert "Could not fetch deployment config" in result
         assert "`echo`" not in result
         assert result.count("⚠️ unavailable") == len(tool_usage.DEPLOYMENTS)
@@ -369,12 +566,11 @@ class TestSectionToolDeploymentStatus:
                 "mid-tool": {"brier": 0.30, "n": 10},
             },
         }
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": [],
-            "omenstrat QS": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["slow-tool", "fast-tool", "mid-tool"],
             "polystrat Pearl": [],
         }
-        result = section_tool_deployment_status(scores, disabled=disabled)
+        result = section_tool_deployment_status(scores, valid=valid)
         pearl_line = next(
             line for line in result.splitlines() if "omenstrat Pearl" in line
         )

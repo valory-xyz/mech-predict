@@ -40,7 +40,7 @@ from benchmark.scorer import (
     MIN_SAMPLE_SIZE,
     brier_sort_key,
 )
-from benchmark.tool_usage import deployments_for_platform, fetch_disabled_tools
+from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
 
 DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
 DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
@@ -260,26 +260,27 @@ def _sample_label(stats: dict[str, Any]) -> str:
 
 
 def _active_tools_for_platform(
-    disabled: dict[str, list[str] | None] | None,
+    valid: dict[str, list[str] | None] | None,
     platform: str,
     scores: dict[str, Any],
     rolling_scores: dict[str, Any] | None = None,
 ) -> frozenset[str] | None:
-    """Return tools currently active on at least one deployment of ``platform``.
+    """Return tools currently selectable on at least one deployment of ``platform``.
 
-    Computed as the union of (benchmarked tools - disabled tools) across
+    Computed as the union of (benchmarked tools ∩ selectable tools) across
     every deployment of ``platform`` whose config fetch succeeded. A tool
-    is "active" if any deployment has it enabled.
+    is "active" if any deployment can select it (i.e. it is offered by one
+    of that deployment's whitelisted mechs).
 
     Tool-name normalization mirrors ``section_tool_deployment_status``:
     underscores and hyphens are treated as interchangeable when comparing
-    against the disabled list. The returned set uses the names as they
+    against the selectable list. The returned set uses the names as they
     appear in ``by_tool`` keys.
 
-    :param disabled: ``{deployment: [tool_names] | None}`` map, where
-        ``None`` indicates a fetch/parse failure for that deployment.
-        ``None`` for the whole map (or an empty dict) is treated as
-        "no deployment data available".
+    :param valid: ``{deployment: [tool_names] | None}`` map of selectable
+        tools, where ``None`` indicates a fetch/parse failure for that
+        deployment. ``None`` for the whole map (or an empty dict) is
+        treated as "no deployment data available".
     :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
     :param scores: parsed platform-scoped all-time scores dict.
     :param rolling_scores: parsed platform-scoped current-window scores
@@ -288,16 +289,16 @@ def _active_tools_for_platform(
         tool with rolling data but no all-time history yet is still
         included in the active set.
     :return: frozenset of active tool names, or ``None`` when **every**
-        deployment of this platform has ``disabled=None`` (full fetch
+        deployment of this platform has ``valid=None`` (full fetch
         failure for the platform). Callers fall back to "show all
         tools" plus a ``⚠ deployment config unavailable`` notice.
     """
-    if not disabled:
+    if not valid:
         return None
 
     deployments = deployments_for_platform(platform)
-    relevant = {name: disabled.get(name) for name in deployments}
-    if all(disabled_tools is None for disabled_tools in relevant.values()):
+    relevant = {name: valid.get(name) for name in deployments}
+    if all(valid_tools is None for valid_tools in relevant.values()):
         # Every deployment for this platform failed — caller renders the
         # warning and shows all tools rather than blanking the report.
         return None
@@ -307,12 +308,12 @@ def _active_tools_for_platform(
         benchmarked |= set((rolling_scores.get("by_tool") or {}).keys())
 
     active: set[str] = set()
-    for disabled_tools in relevant.values():
-        if disabled_tools is None:
+    for valid_tools in relevant.values():
+        if valid_tools is None:
             continue
-        disabled_set = {t.replace("_", "-") for t in disabled_tools}
+        valid_set = {t.replace("_", "-") for t in valid_tools}
         for tool in benchmarked:
-            if tool.replace("_", "-") not in disabled_set:
+            if tool.replace("_", "-") in valid_set:
                 active.add(tool)
 
     return frozenset(active)
@@ -349,38 +350,39 @@ def _filter_by_active(
 
 def section_tool_deployment_status(
     scores: dict[str, Any],
-    disabled: dict[str, list[str] | None] | None = None,
+    valid: dict[str, list[str] | None] | None = None,
     platform: str | None = None,
 ) -> str:
-    """Render which benchmarked tools are active on each deployment.
+    """Render which benchmarked tools are selectable on each deployment.
 
     Deployments are filtered to ``platform`` when set; active tools are
-    the benchmarked tools minus the disabled tools for that deployment.
-    Failed-fetch deployments are called out so ``⚠️ unavailable`` is
-    never confused with "all tools active".
+    the benchmarked tools intersected with the selectable tools for that
+    deployment (the tools its whitelisted mechs offer). Failed-fetch
+    deployments are called out so ``⚠️ unavailable`` is never confused
+    with "no tools active".
 
     :param scores: parsed ``scores.json`` dict.
-    :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
-        Pass ``None`` to fetch on the fly (the daily-report default). Pass
-        an empty dict to skip the section entirely (tests use this to avoid
-        the live GitHub fetch).
+    :param valid: pre-fetched ``{deployment: [tool_names] | None}`` map of
+        selectable tools. Pass ``None`` to fetch on the fly (the
+        daily-report default). Pass an empty dict to skip the section
+        entirely (tests use this to avoid the live fetch).
     :param platform: when set, restrict the section to deployments matching
         this platform key (``"omen"`` or ``"polymarket"``).
     :return: markdown section string, or ``""`` when the caller opted out.
     """
-    if disabled is None:
-        disabled = fetch_disabled_tools()
+    if valid is None:
+        valid = fetch_valid_tools()
 
     # Explicit skip contract: an empty dict means "caller opted out" (used by
     # unit tests).  Returning "" means the section heading is omitted so the
     # report doesn't advertise a section that was never computed.
-    if not disabled:
+    if not valid:
         return ""
 
     if platform is not None:
         allowed = set(deployments_for_platform(platform))
-        disabled = {name: v for name, v in disabled.items() if name in allowed}
-        if not disabled:
+        valid = {name: v for name, v in valid.items() if name in allowed}
+        if not valid:
             return ""
 
     tools = scores.get("by_tool", {})
@@ -391,7 +393,7 @@ def section_tool_deployment_status(
         heading = f"## Tool Deployment Status ({PLATFORM_LABELS[platform]})"
     lines = [heading, ""]
 
-    failed = [name for name in disabled if disabled.get(name) is None]
+    failed = [name for name in valid if valid.get(name) is None]
     if failed:
         lines.append(
             "> ⚠️ Could not fetch deployment config for: "
@@ -399,12 +401,12 @@ def section_tool_deployment_status(
         )
         lines.append("")
 
-    for deployment, disabled_tools in disabled.items():
-        if disabled_tools is None:
+    for deployment, valid_tools in valid.items():
+        if valid_tools is None:
             lines.append(f"- **{deployment}** — ⚠️ unavailable")
             continue
-        disabled_set = {t.replace("_", "-") for t in disabled_tools}
-        active = [t for t in benchmarked if t.replace("_", "-") not in disabled_set]
+        valid_set = {t.replace("_", "-") for t in valid_tools}
+        active = [t for t in benchmarked if t.replace("_", "-") in valid_set]
         if not active:
             lines.append(f"- **{deployment}** — no benchmarked tools active")
             continue
@@ -2431,7 +2433,7 @@ def generate_report(  # pylint: disable=too-many-statements
     include_tournament: bool = False,
     scores_tournament: dict[str, Any] | None = None,
     rolling_scores_tournament: dict[str, Any] | None = None,
-    disabled_tools: dict[str, list[str] | None] | None = None,
+    valid_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a platform-scoped benchmark report from scores and history.
 
@@ -2459,8 +2461,8 @@ def generate_report(  # pylint: disable=too-many-statements
         ignored entirely.
     :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
     :param rolling_scores_tournament: tournament rolling window scores.
-    :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
-        map used by the Tool Deployment Status section.
+    :param valid_tools: pre-fetched ``{deployment: [tool_names] | None}``
+        map of selectable tools used by the Tool Deployment Status section.
     :return: full markdown report string.
     """
     if platform not in PLATFORM_LABELS:
@@ -2490,8 +2492,8 @@ def generate_report(  # pylint: disable=too-many-statements
     # comparison sections, the deployment-status section, and the
     # warning notice all see the same map. ``None`` (the default)
     # triggers a live fetch; an empty dict is the test-only opt-out.
-    if disabled_tools is None:
-        disabled_tools = fetch_disabled_tools()
+    if valid_tools is None:
+        valid_tools = fetch_valid_tools()
 
     # Restrict the per-platform comparison sections to tools currently
     # deployed somewhere on this platform. Returns ``None`` when every
@@ -2499,7 +2501,7 @@ def generate_report(  # pylint: disable=too-many-statements
     # is to skip the filter and prepend a one-line warning so the
     # reader knows the tool list is unfiltered for this run.
     active_tools = _active_tools_for_platform(
-        disabled_tools, platform, scores, rolling_scores
+        valid_tools, platform, scores, rolling_scores
     )
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
@@ -2507,7 +2509,7 @@ def generate_report(  # pylint: disable=too-many-statements
     # (non-empty input) but every deployment for this platform failed.
     # Empty-dict callers are the unit-test opt-out and shouldn't see
     # the notice.
-    if active_tools is None and disabled_tools:
+    if active_tools is None and valid_tools:
         sections.append(
             "> ⚠️ Deployment config unavailable for this platform — comparison "
             "sections show every benchmarked tool, including tools that may "
@@ -2575,9 +2577,7 @@ def generate_report(  # pylint: disable=too-many-statements
         )
 
     sections.append(
-        section_tool_deployment_status(
-            scores, disabled=disabled_tools, platform=platform
-        )
+        section_tool_deployment_status(scores, valid=valid_tools, platform=platform)
     )
 
     if include_tournament:

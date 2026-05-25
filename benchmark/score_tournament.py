@@ -196,9 +196,15 @@ def check_polymarket_resolutions(
 
     for cid in condition_ids:
         try:
+            # Gamma's filter param is `condition_ids` (snake_case); the
+            # camelCase `conditionId` is silently ignored and returns the
+            # default open-markets list instead. Resolved markets are
+            # `closed`, and Gamma's default query hides closed markets, so
+            # `closed=true` is required for a resolution lookup to return
+            # anything at all.
             resp = requests.get(
                 f"{POLYMARKET_GAMMA_URL}/markets",
-                params={"conditionId": cid},
+                params={"condition_ids": cid, "closed": "true"},
                 timeout=15,
             )
             if resp.status_code != 200:
@@ -211,8 +217,24 @@ def check_polymarket_resolutions(
             log.warning("Polymarket fetch failed for %s: %s", cid, exc)
             continue
 
-        # Check explicit resolved flag first, fall back to price proxy
-        is_resolved = m.get("resolved", False)
+        # Defensive guard: only trust a response that echoes back the
+        # condition ID we asked for. If a future API change ever ignores
+        # the filter again (the original bug), this prevents applying the
+        # wrong market's outcome to this prediction.
+        returned_cid = str(m.get("conditionId", "")).lower()
+        if returned_cid and returned_cid != cid.lower():
+            log.warning(
+                "Polymarket returned conditionId=%s for query %s; skipping",
+                m.get("conditionId"),
+                cid,
+            )
+            continue
+
+        # Authoritative resolution signal: UMA has finalized the market.
+        # The `resolved` field is frequently null even on settled markets,
+        # so fall back to it but treat umaResolutionStatus as primary.
+        uma_resolved = str(m.get("umaResolutionStatus", "")).lower() == "resolved"
+        is_resolved = bool(m.get("resolved")) or uma_resolved
 
         prices_raw = m.get("outcomePrices", "[]")
         try:

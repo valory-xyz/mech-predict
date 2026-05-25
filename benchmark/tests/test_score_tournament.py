@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from benchmark.score_tournament import (
     check_omen_resolutions,
     check_polymarket_resolutions,
@@ -142,19 +143,26 @@ class TestCheckOmenResolutions:
 class TestCheckPolymarketResolutions:
     """Tests for check_polymarket_resolutions."""
 
+    @staticmethod
+    def _make_mock_resp(payload: Any, status: int = 200) -> MagicMock:
+        """Build a mock requests response returning ``payload`` from ``.json()``."""
+        resp = MagicMock()
+        resp.status_code = status
+        resp.json.return_value = payload
+        return resp
+
     @patch("benchmark.score_tournament.requests.get")
     def test_resolved_yes(self, mock_get: MagicMock) -> None:
         """Test resolved Yes market returns True outcome."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {
-                "conditionId": "cid_1",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["1.0", "0.0"]',
-            }
-        ]
-        mock_get.return_value = mock_resp
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_1",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["1.0", "0.0"]',
+                }
+            ]
+        )
 
         result = check_polymarket_resolutions(["cid_1"])
         assert "cid_1" in result
@@ -163,16 +171,15 @@ class TestCheckPolymarketResolutions:
     @patch("benchmark.score_tournament.requests.get")
     def test_resolved_no(self, mock_get: MagicMock) -> None:
         """Test resolved No market returns False outcome."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {
-                "conditionId": "cid_2",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.0", "1.0"]',
-            }
-        ]
-        mock_get.return_value = mock_resp
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_2",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.0", "1.0"]',
+                }
+            ]
+        )
 
         result = check_polymarket_resolutions(["cid_2"])
         assert result["cid_2"]["outcome"] is False
@@ -180,16 +187,15 @@ class TestCheckPolymarketResolutions:
     @patch("benchmark.score_tournament.requests.get")
     def test_unresolved_skipped(self, mock_get: MagicMock) -> None:
         """Test unresolved market is skipped."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {
-                "conditionId": "cid_3",
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.55", "0.45"]',
-            }
-        ]
-        mock_get.return_value = mock_resp
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_3",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.55", "0.45"]',
+                }
+            ]
+        )
 
         result = check_polymarket_resolutions(["cid_3"])
         assert len(result) == 0
@@ -197,21 +203,123 @@ class TestCheckPolymarketResolutions:
     @patch("benchmark.score_tournament.requests.get")
     def test_resolved_flag_with_unsettled_prices(self, mock_get: MagicMock) -> None:
         """API says resolved=True but prices haven't hit 1.0 — should still score."""
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = [
-            {
-                "conditionId": "cid_4",
-                "resolved": True,
-                "outcomes": '["Yes", "No"]',
-                "outcomePrices": '["0.97", "0.03"]',
-            }
-        ]
-        mock_get.return_value = mock_resp
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_4",
+                    "resolved": True,
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.97", "0.03"]',
+                }
+            ]
+        )
 
         result = check_polymarket_resolutions(["cid_4"])
         assert "cid_4" in result
         assert result["cid_4"]["outcome"] is True  # 0.97 > 0.03 → Yes
+
+    @patch("benchmark.score_tournament.requests.get")
+    def test_query_uses_condition_ids_and_closed_filter(
+        self, mock_get: MagicMock
+    ) -> None:
+        """Gamma is queried with `condition_ids` (snake_case) + `closed=true`."""
+        # camelCase `conditionId` is silently ignored by Gamma (returns the
+        # default open-markets list), and resolved markets are only returned
+        # under `closed=true`. Pinning the params guards against a regression
+        # to the original silent-no-op behavior.
+        mock_get.return_value = self._make_mock_resp([])
+
+        check_polymarket_resolutions(["cid_xyz"])
+
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"] == {"condition_ids": "cid_xyz", "closed": "true"}
+
+    @patch("benchmark.score_tournament.requests.get")
+    def test_uma_resolved_with_null_resolved_field(self, mock_get: MagicMock) -> None:
+        """Real Gamma shape: `resolved` null but umaResolutionStatus=resolved."""
+        # Settled markets routinely return ``resolved: null``; the function
+        # must treat ``umaResolutionStatus == "resolved"`` as authoritative so
+        # these get scored instead of silently dropped.
+        # Unsettled prices (no side ≥0.99) so the price proxy alone would
+        # skip this row — only the umaResolutionStatus gate + argmax fallback
+        # can score it. Keeps the test falsifiable against the old code.
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_uma",
+                    "resolved": None,
+                    "umaResolutionStatus": "resolved",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.04", "0.96"]',
+                }
+            ]
+        )
+
+        result = check_polymarket_resolutions(["cid_uma"])
+        assert result["cid_uma"]["outcome"] is False  # highest price on "No"
+
+    @patch("benchmark.score_tournament.requests.get")
+    def test_wrong_condition_id_is_skipped(self, mock_get: MagicMock) -> None:
+        """A response echoing a different conditionId must not be applied."""
+        # Guards the original failure mode: an ignored filter returned an
+        # unrelated market whose outcome was applied to the queried prediction.
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "some_other_market",
+                    "umaResolutionStatus": "resolved",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["1", "0"]',
+                }
+            ]
+        )
+
+        result = check_polymarket_resolutions(["cid_requested"])
+        assert not result
+
+    @patch("benchmark.score_tournament.requests.get")
+    def test_missing_condition_id_is_skipped(self, mock_get: MagicMock) -> None:
+        """A response with no conditionId key at all must not be applied."""
+        # Same "filter was ignored" failure class as a mismatched id: when the
+        # response omits conditionId entirely the guard must still skip, rather
+        # than falling through and attributing this market's outcome.
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "umaResolutionStatus": "resolved",
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["1", "0"]',
+                }
+            ]
+        )
+
+        result = check_polymarket_resolutions(["cid_requested"])
+        assert not result
+
+    @pytest.mark.parametrize("status", ["disputed", "pending", ""])
+    @patch("benchmark.score_tournament.requests.get")
+    def test_non_resolved_uma_status_not_scored(
+        self, mock_get: MagicMock, status: str
+    ) -> None:
+        """Only `umaResolutionStatus == "resolved"` counts; other states defer."""
+        # Pins that an in-flight UMA status (disputed/pending) or an empty
+        # status does NOT score the row. Prices are unsettled (<0.99) so the
+        # price proxy can't score it either — the umaResolutionStatus gate is
+        # the only thing under test.
+        mock_get.return_value = self._make_mock_resp(
+            [
+                {
+                    "conditionId": "cid_x",
+                    "resolved": None,
+                    "umaResolutionStatus": status,
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["0.55", "0.45"]',
+                }
+            ]
+        )
+
+        result = check_polymarket_resolutions(["cid_x"])
+        assert not result
 
     def test_empty_input(self) -> None:
         """Test empty input returns empty dict."""

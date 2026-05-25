@@ -196,9 +196,15 @@ def check_polymarket_resolutions(
 
     for cid in condition_ids:
         try:
+            # Gamma's filter param is `condition_ids` (snake_case); the
+            # camelCase `conditionId` is silently ignored and returns the
+            # default open-markets list instead. Resolved markets are
+            # `closed`, and Gamma's default query hides closed markets, so
+            # `closed=true` is required for a resolution lookup to return
+            # anything at all.
             resp = requests.get(
                 f"{POLYMARKET_GAMMA_URL}/markets",
-                params={"conditionId": cid},
+                params={"condition_ids": cid, "closed": "true"},
                 timeout=15,
             )
             if resp.status_code != 200:
@@ -211,8 +217,25 @@ def check_polymarket_resolutions(
             log.warning("Polymarket fetch failed for %s: %s", cid, exc)
             continue
 
-        # Check explicit resolved flag first, fall back to price proxy
-        is_resolved = m.get("resolved", False)
+        # Defensive guard: only trust a response that echoes back the exact
+        # condition ID we asked for. A missing or mismatched id means the
+        # filter was ignored (the original bug); applying that market's
+        # outcome would attribute the wrong result to this prediction.
+        returned_cid = str(m.get("conditionId", "")).lower()
+        if not returned_cid or returned_cid != cid.lower():
+            log.warning(
+                "Polymarket returned conditionId=%s for query %s; skipping",
+                returned_cid,
+                cid,
+            )
+            continue
+
+        # A market counts as resolved if Gamma's `resolved` flag is set or
+        # UMA has finalized it. `resolved` is frequently null even on settled
+        # markets, so the umaResolutionStatus check is what actually catches
+        # most resolutions in practice.
+        uma_resolved = str(m.get("umaResolutionStatus", "")).lower() == "resolved"
+        is_resolved = bool(m.get("resolved")) or uma_resolved
 
         prices_raw = m.get("outcomePrices", "[]")
         try:

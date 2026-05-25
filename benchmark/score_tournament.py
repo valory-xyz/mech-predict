@@ -217,22 +217,23 @@ def check_polymarket_resolutions(
             log.warning("Polymarket fetch failed for %s: %s", cid, exc)
             continue
 
-        # Defensive guard: only trust a response that echoes back the
-        # condition ID we asked for. If a future API change ever ignores
-        # the filter again (the original bug), this prevents applying the
-        # wrong market's outcome to this prediction.
+        # Defensive guard: only trust a response that echoes back the exact
+        # condition ID we asked for. A missing or mismatched id means the
+        # filter was ignored (the original bug); applying that market's
+        # outcome would attribute the wrong result to this prediction.
         returned_cid = str(m.get("conditionId", "")).lower()
-        if returned_cid and returned_cid != cid.lower():
+        if not returned_cid or returned_cid != cid.lower():
             log.warning(
                 "Polymarket returned conditionId=%s for query %s; skipping",
-                m.get("conditionId"),
+                returned_cid,
                 cid,
             )
             continue
 
-        # Authoritative resolution signal: UMA has finalized the market.
-        # The `resolved` field is frequently null even on settled markets,
-        # so fall back to it but treat umaResolutionStatus as primary.
+        # A market counts as resolved if Gamma's `resolved` flag is set or
+        # UMA has finalized it. `resolved` is frequently null even on settled
+        # markets, so the umaResolutionStatus check is what actually catches
+        # most resolutions in practice.
         uma_resolved = str(m.get("umaResolutionStatus", "")).lower() == "resolved"
         is_resolved = bool(m.get("resolved")) or uma_resolved
 

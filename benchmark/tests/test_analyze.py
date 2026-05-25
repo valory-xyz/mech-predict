@@ -18,6 +18,7 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/analyze.py"""
 
+import json
 from typing import Any
 
 import pytest
@@ -1483,6 +1484,26 @@ def _tournament_scores_with_version(
     return s
 
 
+class TestLoadActiveTournamentCids:
+    """Tests for load_active_tournament_cids."""
+
+    def test_reads_cid_values(self, tmp_path: Any) -> None:
+        """Returns the set of CID values from tournament_tools.json."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import load_active_tournament_cids
+
+        path = tmp_path / "tournament_tools.json"
+        path.write_text(json.dumps({"tool-a": "cid1", "tool-b": "cid2"}))
+        assert load_active_tournament_cids(path) == {"cid1", "cid2"}
+
+    def test_missing_file_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Unreadable file returns None (no scoping) rather than hiding all rows."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import load_active_tournament_cids
+
+        assert load_active_tournament_cids(tmp_path / "absent.json") is None
+
+
 class TestTournamentCallouts:
     """Tests for section_tournament_callouts."""
 
@@ -1507,6 +1528,8 @@ class TestTournamentCallouts:
         assert "tool-a" in result
         assert "v2" in result
         assert "Tournament regressions:" not in result
+        # n=50 is above CALLOUT_MIN_N, so no low-data marker.
+        assert "⚠ low data" not in result
 
     def test_tournament_regression_flagged(self) -> None:
         """Tournament Brier meaningfully higher than production triggers a regression bullet."""
@@ -1519,14 +1542,35 @@ class TestTournamentCallouts:
         assert "Tournament regressions:" in result
         assert "Promotion candidates:" not in result
 
-    def test_suppressed_below_min_n(self) -> None:
-        """Tournament cells with n below CALLOUT_MIN_N are ignored."""
+    def test_low_n_callout_shown_with_marker(self) -> None:
+        """Low-n tournament cells are flagged, not suppressed.
+
+        Tournament is never sample-gated: a candidate's record shows from
+        its first resolved market with a ``⚠ low data`` marker so the
+        reader (and the Slack summary) can weight it.
+        """
         # pylint: disable=import-outside-toplevel
         from benchmark.analyze import section_tournament_callouts
 
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
-        assert section_tournament_callouts(prod, tourn) == ""
+        result = section_tournament_callouts(prod, tourn)
+        assert "Promotion candidates:" in result
+        assert "⚠ low data" in result
+        assert "n=10" in result
+
+    def test_scoped_to_active_cids(self) -> None:
+        """Only candidates whose CID is still in the tournament are flagged."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 50)
+        # v2 no longer under evaluation → dropped.
+        assert section_tournament_callouts(prod, tourn, active_cids=set()) == ""
+        # v2 active → flagged.
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "Promotion candidates:" in result
 
     def test_suppressed_within_delta_band(self) -> None:
         """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""
@@ -1569,7 +1613,7 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Tournament Callouts" not in report
 
     def test_tournament_sections_rendered_when_data_present(self) -> None:
-        """Tournament inputs with rows -> Tool × Version × Mode covers both modes."""
+        """Tournament inputs with rows -> all-time Tool × Version × Mode covers both modes."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
         report = generate_report(
@@ -1579,7 +1623,6 @@ class TestGenerateReportWithTournamentFiles:
             include_tournament=True,
             scores_tournament=tourn,
             rolling_scores=prod,
-            rolling_scores_tournament=tourn,
         )
         # Under the three-window restructure the per-mode headings live in
         # Tool × Version × Mode, not a duplicated " — Tournament" ranking.
@@ -1587,26 +1630,73 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Tool × Version × Mode (All-Time)" in report
         assert f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)" in report
 
-    def test_empty_rolling_tournament_does_not_crash(self) -> None:
-        """Rolling tournament input with zero rows renders cleanly.
-
-        scorer.score_period_split writes tournament period files on every
-        run; days with zero tournament rows in the window must not blow
-        up the TVM merge.
-        """
+    def test_last_n_days_table_is_production_only(self) -> None:
+        """Tournament rows never appear in the day-gated Last-N-Days table."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
-        all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
-        empty_rolling_tourn = {"total_rows": 0, "overall": {}}
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            rolling_scores=prod,
+            active_tournament_cids={"v2"},
+        )
+        marker = f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
+        last_n = report.split(marker, 1)[1].split("\n## ", 1)[0]
+        assert "| tournament |" not in last_n
+        assert "| production_replay |" in last_n
+
+    def test_inactive_tournament_cid_hidden_from_table(self) -> None:
+        """All-time breakdown drops tournament CIDs no longer in the tournament."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = {
+            "total_rows": 80,
+            "overall": {},
+            "by_tool_version_mode": {
+                "tool-a | activexyz | tournament": {
+                    "n": 40,
+                    "valid_n": 40,
+                    "brier": 0.1234,
+                    "directional_accuracy": 0.7,
+                    "brier_skill_score": 0.1,
+                },
+                "tool-a | droppedxyz | tournament": {
+                    "n": 40,
+                    "valid_n": 40,
+                    "brier": 0.4321,
+                    "directional_accuracy": 0.5,
+                    "brier_skill_score": -0.2,
+                },
+            },
+        }
+        report = generate_report(
+            prod,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            active_tournament_cids={"activexyz"},
+        )
+        assert "0.1234" in report  # active tournament CID rendered
+        assert "0.4321" not in report  # dropped tournament CID hidden
+
+    def test_scoping_to_no_active_cids_does_not_crash(self) -> None:
+        """An empty active set scopes tournament to nothing without crashing."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
         report = generate_report(
             prod,
             [],
             platform="omen",
             rolling_scores=None,
             include_tournament=True,
-            scores_tournament=all_time_tourn,
-            rolling_scores_tournament=empty_rolling_tourn,
+            scores_tournament=tourn,
+            active_tournament_cids=set(),
         )
         assert "# Benchmark Report (Omenstrat)" in report
+        assert "## Tournament Callouts" not in report
 
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""

@@ -2236,6 +2236,34 @@ def section_version_deltas(
 CALLOUT_DELTA = 0.03
 CALLOUT_MIN_N = 30
 
+TOURNAMENT_TOOLS_JSON = Path(__file__).parent / "tournament_tools.json"
+
+
+def load_active_tournament_cids(
+    path: Path = TOURNAMENT_TOOLS_JSON,
+) -> set[str] | None:
+    """Return the CIDs currently under tournament evaluation.
+
+    These are the values of ``tournament_tools.json`` — the live
+    candidate set. Tournament report sections scope to this set so a
+    candidate's aggregated all-time record is shown only while it is
+    still in the tournament; promoted, dropped, or superseded CIDs fall
+    off the report.
+
+    Returns ``None`` (rather than an empty set) when the file cannot be
+    read, so a transient failure fails open to "no scoping" instead of
+    silently hiding every tournament row. An empty/valid file yields an
+    empty set, which correctly scopes the tournament view to nothing.
+
+    :param path: path to ``tournament_tools.json``.
+    :return: set of active CIDs, or ``None`` when the file is unreadable.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return {str(cid) for cid in data.values() if cid}
+
 
 def _relabel_heading(section_md: str, suffix: str) -> str:
     """Append *suffix* to the first ``## Heading`` line in *section_md*.
@@ -2315,18 +2343,54 @@ def _merged_tvm_scores(
     return merged
 
 
+def _scope_tournament_to_active(
+    tvm_scores: dict[str, Any],
+    active_cids: set[str] | None,
+) -> dict[str, Any]:
+    """Drop tournament-mode rows whose CID is no longer under evaluation.
+
+    Production rows are left untouched — only ``tournament``-mode rows are
+    filtered, so the all-time breakdown keeps the production baseline a
+    reader compares against. When ``active_cids`` is ``None`` the input is
+    returned unchanged (scoping disabled / fail-open).
+
+    :param tvm_scores: scores-shaped dict with ``by_tool_version_mode``.
+    :param active_cids: CIDs still in the tournament, or ``None`` to skip
+        scoping.
+    :return: a scores-shaped dict with inactive tournament rows removed.
+    """
+    if active_cids is None:
+        return tvm_scores
+    kept: dict[str, Any] = {}
+    for key, stats in tvm_scores.get("by_tool_version_mode", {}).items():
+        _tool, cid, mode = _parse_tvm_key(key)
+        if mode == "tournament" and cid not in active_cids:
+            continue
+        kept[key] = stats
+    return {"by_tool_version_mode": kept}
+
+
 def section_tournament_callouts(
     scores_prod: dict[str, Any],
     scores_tournament: dict[str, Any] | None,
     release_map_data: dict[str, Any] | None = None,
+    active_cids: set[str] | None = None,
 ) -> str:
     """Flag tool versions whose tournament Brier diverges from prod.
 
-    A row qualifies when tournament sample size is at least
-    ``CALLOUT_MIN_N`` and the absolute Brier delta exceeds
+    A row qualifies when the absolute Brier delta exceeds
     ``CALLOUT_DELTA``. Negative deltas become promotion candidates
     (tournament better); positive deltas become tournament regressions
     (tournament worse — a warning before the version reaches production).
+
+    Tournament is **not** sample-size gated: a candidate's all-time record
+    is shown from its very first resolved market and grows each day, with
+    rows below ``CALLOUT_MIN_N`` carrying a ``⚠ low data`` marker so the
+    reader (and the Slack summary) can weight them accordingly.
+
+    When ``active_cids`` is provided, only candidates still in the
+    tournament (CIDs in ``tournament_tools.json``) are considered; promoted
+    or dropped candidates fall off.
 
     The production baseline is the **specific production CID with the
     latest release tag** for the same tool — not the tool-level
@@ -2337,6 +2401,8 @@ def section_tournament_callouts(
     :param scores_prod: production scores dict.
     :param scores_tournament: tournament scores dict, or None.
     :param release_map_data: optional pre-loaded release map.
+    :param active_cids: CIDs still under tournament evaluation, or None to
+        consider every tournament CID present in the scores.
     :return: markdown section, or empty string when no callouts qualify.
     """
     if not _has_tournament_data(scores_tournament):
@@ -2359,7 +2425,8 @@ def section_tournament_callouts(
         tool, cand_cid, mode = _parse_tvm_key(key)
         if mode != "tournament":
             continue
-        if t_stats.get("n", 0) < CALLOUT_MIN_N:
+        if active_cids is not None and cand_cid not in active_cids:
+            # Candidate no longer under tournament evaluation.
             continue
         t_brier = t_stats.get("brier")
         if t_brier is None:
@@ -2402,8 +2469,9 @@ def section_tournament_callouts(
     def _bullet(entry: Callout) -> str:
         tool, _cand_cid, cand_label, t_stats, _prod_cid, prod_label, p_stats = entry
         delta = t_stats["brier"] - p_stats["brier"]
+        low = " ⚠ low data" if t_stats["n"] < CALLOUT_MIN_N else ""
         return (
-            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}) Brier"
+            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}){low} Brier"
             f" {t_stats['brier']:.4f} vs `{prod_label}` (production,"
             f" n={p_stats['n']}) Brier {p_stats['brier']:.4f}. Δ {delta:+.4f}."
         )
@@ -2430,7 +2498,7 @@ def generate_report(  # pylint: disable=too-many-statements
     prev_rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
     scores_tournament: dict[str, Any] | None = None,
-    rolling_scores_tournament: dict[str, Any] | None = None,
+    active_tournament_cids: set[str] | None = None,
     disabled_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a platform-scoped benchmark report from scores and history.
@@ -2458,7 +2526,12 @@ def generate_report(  # pylint: disable=too-many-statements
         Version × Mode breakdown. When False, tournament inputs are
         ignored entirely.
     :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
-    :param rolling_scores_tournament: tournament rolling window scores.
+        Tournament data is rendered all-time only — never day-gated — and
+        is scoped to ``active_tournament_cids``.
+    :param active_tournament_cids: CIDs still under tournament evaluation
+        (from ``tournament_tools.json``). Tournament rows for other CIDs
+        are dropped from the breakdown and callouts. ``None`` disables
+        scoping.
     :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
         map used by the Tool Deployment Status section.
     :return: full markdown report string.
@@ -2581,19 +2654,25 @@ def generate_report(  # pylint: disable=too-many-statements
     )
 
     if include_tournament:
-        merged = _merged_tvm_scores(scores, scores_tournament)
+        # Tournament data is all-time only and scoped to CIDs still in the
+        # tournament — a candidate's record grows daily from its first
+        # resolved market and is never windowed (per-day tournament n is
+        # far too small to be meaningful, especially on Polymarket).
+        merged = _scope_tournament_to_active(
+            _merged_tvm_scores(scores, scores_tournament), active_tournament_cids
+        )
         tvm_section = section_tool_version_breakdown(
             merged, "Tool × Version × Mode (All-Time)"
         )
         if tvm_section:
             sections.append(tvm_section)
+        # The Last-N-Days breakdown is production-only: tournament never
+        # appears in a day-gated table. It lives solely in the all-time
+        # view above and the callouts below.
         if rolling_scores is not None:
-            merged_rolling = _merged_tvm_scores(
-                rolling_scores, rolling_scores_tournament
-            )
             rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
             tvm_rolling = section_tool_version_breakdown(
-                merged_rolling,
+                rolling_scores,
                 f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)",
             )
             if tvm_rolling:
@@ -2610,7 +2689,9 @@ def generate_report(  # pylint: disable=too-many-statements
     )
 
     if render_tournament:
-        callouts = section_tournament_callouts(scores, scores_tournament)
+        callouts = section_tournament_callouts(
+            scores, scores_tournament, active_cids=active_tournament_cids
+        )
         if callouts:
             sections.append(callouts)
 
@@ -2726,15 +2807,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--rolling-tournament",
-        type=Path,
-        default=None,
-        help=(
-            "Tournament rolling scores JSON. "
-            "Default: results/rolling_scores_tournament_<platform>.json."
-        ),
-    )
-    parser.add_argument(
         "--include-tournament",
         action="store_true",
         help=(
@@ -2771,10 +2843,6 @@ def main() -> None:
     scores_tournament_path = (
         args.scores_tournament or results_dir / f"scores_tournament_{platform}.json"
     )
-    rolling_tournament_path = (
-        args.rolling_tournament
-        or results_dir / f"rolling_scores_tournament_{platform}.json"
-    )
 
     def _maybe_load(path: Path | None) -> dict[str, Any] | None:
         return load_scores(path) if path and path.exists() else None
@@ -2783,7 +2851,10 @@ def main() -> None:
     rolling = _maybe_load(rolling_path)
     prev_rolling = _maybe_load(prev_rolling_path)
     scores_tournament = _maybe_load(scores_tournament_path)
-    rolling_tournament = _maybe_load(rolling_tournament_path)
+    # Scope the tournament view to candidates still under evaluation.
+    active_tournament_cids = (
+        load_active_tournament_cids() if args.include_tournament else None
+    )
 
     print(
         f"Loaded scores ({scores.get('total_rows', 0)} rows) for "
@@ -2798,7 +2869,7 @@ def main() -> None:
         prev_rolling_scores=prev_rolling,
         include_tournament=args.include_tournament,
         scores_tournament=scores_tournament,
-        rolling_scores_tournament=rolling_tournament,
+        active_tournament_cids=active_tournament_cids,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

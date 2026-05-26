@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,9 @@ from benchmark.scorer import (
     brier_sort_key,
 )
 from benchmark.tool_usage import deployments_for_platform, fetch_disabled_tools
+from benchmark.tournament import TOURNAMENT_TOOLS_JSON, load_tournament_tools
+
+log = logging.getLogger(__name__)
 
 DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
 DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
@@ -2236,8 +2240,6 @@ def section_version_deltas(
 CALLOUT_DELTA = 0.03
 CALLOUT_MIN_N = 30
 
-TOURNAMENT_TOOLS_JSON = Path(__file__).parent / "tournament_tools.json"
-
 
 def load_active_tournament_cids(
     path: Path = TOURNAMENT_TOOLS_JSON,
@@ -2250,19 +2252,33 @@ def load_active_tournament_cids(
     still in the tournament; promoted, dropped, or superseded CIDs fall
     off the report.
 
+    Delegates loading + schema validation to
+    :func:`benchmark.tournament.load_tournament_tools`, so non-dict
+    JSON, empty CIDs, and missing files are rejected by the same rules
+    the tournament runner uses (no second source of truth).
+
     Returns ``None`` (rather than an empty set) when the file cannot be
-    read, so a transient failure fails open to "no scoping" instead of
-    silently hiding every tournament row. An empty/valid file yields an
-    empty set, which correctly scopes the tournament view to nothing.
+    read or fails validation, so a transient failure fails open to "no
+    scoping" instead of silently hiding every tournament row. A
+    ``log.warning`` is emitted in that case so the unscoped state is
+    attributable in run logs (caller-passed ``None`` is silent). An
+    empty/valid file yields an empty set, which correctly scopes the
+    tournament view to nothing.
 
     :param path: path to ``tournament_tools.json``.
-    :return: set of active CIDs, or ``None`` when the file is unreadable.
+    :return: set of active CIDs, or ``None`` when the file is unreadable
+        or invalid.
     """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return set(load_tournament_tools(path).values())
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        log.warning(
+            "Tournament scoping disabled: could not load %s (%s). "
+            "Report will render without scoping; min-n gate stays active.",
+            path,
+            exc,
+        )
         return None
-    return {str(cid) for cid in data.values() if cid}
 
 
 def _relabel_heading(section_md: str, suffix: str) -> str:
@@ -2367,7 +2383,9 @@ def _scope_tournament_to_active(
         if mode == "tournament" and cid not in active_cids:
             continue
         kept[key] = stats
-    return {"by_tool_version_mode": kept}
+    # Preserve any sibling top-level fields (total_rows, overall, …) the
+    # input may carry; only by_tool_version_mode is narrowed here.
+    return {**tvm_scores, "by_tool_version_mode": kept}
 
 
 def section_tournament_callouts(
@@ -2383,10 +2401,18 @@ def section_tournament_callouts(
     (tournament better); positive deltas become tournament regressions
     (tournament worse — a warning before the version reaches production).
 
-    Tournament is **not** sample-size gated: a candidate's all-time record
-    is shown from its very first resolved market and grows each day, with
-    rows below ``CALLOUT_MIN_N`` carrying a ``⚠ low data`` marker so the
-    reader (and the Slack summary) can weight them accordingly.
+    Tournament is **not** sample-size gated when ``active_cids`` is
+    provided: a candidate's all-time record is shown from its very first
+    resolved market and grows each day, with rows below ``CALLOUT_MIN_N``
+    carrying a ``⚠ low data`` marker so the reader (and the Slack summary)
+    can weight them accordingly.
+
+    When ``active_cids`` is ``None`` (scoping unavailable — e.g.
+    ``tournament_tools.json`` failed to load) the ``CALLOUT_MIN_N`` gate
+    is re-applied as a hard floor so the degraded path stays bounded:
+    without scoping AND without the gate, every long-inactive low-n CID
+    would surface. The pairing ensures fail-open mode is strictly
+    quieter (not noisier) than the scoped path.
 
     When ``active_cids`` is provided, only candidates still in the
     tournament (CIDs in ``tournament_tools.json``) are considered; promoted
@@ -2425,7 +2451,13 @@ def section_tournament_callouts(
         tool, cand_cid, mode = _parse_tvm_key(key)
         if mode != "tournament":
             continue
-        if active_cids is not None and cand_cid not in active_cids:
+        if active_cids is None:
+            # Fail-open: scoping unavailable, so re-arm the min-n gate
+            # to keep callout volume bounded (matches pre-PR behavior
+            # for the degraded path).
+            if t_stats.get("n", 0) < CALLOUT_MIN_N:
+                continue
+        elif cand_cid not in active_cids:
             # Candidate no longer under tournament evaluation.
             continue
         t_brier = t_stats.get("brier")

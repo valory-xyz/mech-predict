@@ -1503,6 +1503,67 @@ class TestLoadActiveTournamentCids:
 
         assert load_active_tournament_cids(tmp_path / "absent.json") is None
 
+    def test_malformed_json_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Malformed JSON returns None (pins JSONDecodeError in except tuple)."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import load_active_tournament_cids
+
+        path = tmp_path / "tournament_tools.json"
+        path.write_text("not-json")
+        assert load_active_tournament_cids(path) is None
+
+    def test_non_dict_json_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Non-dict root (list/string/number) returns None instead of crashing."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import load_active_tournament_cids
+
+        path = tmp_path / "tournament_tools.json"
+        path.write_text(json.dumps(["cid1", "cid2"]))
+        assert load_active_tournament_cids(path) is None
+
+
+class TestScopeTournamentToActive:
+    """Tests for _scope_tournament_to_active."""
+
+    def test_preserves_top_level_fields(self) -> None:
+        """Sibling top-level fields (total_rows, overall) survive scoping.
+
+        Pins the {**tvm_scores, ...} spread: a narrowing to just
+        {"by_tool_version_mode": kept} would silently drop fields that
+        downstream consumers may rely on.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import _scope_tournament_to_active
+
+        tvm_scores = {
+            "total_rows": 42,
+            "overall": {"brier": 0.2, "n": 42},
+            "by_tool_version_mode": {
+                "tool-a | cid-active | tournament": {"n": 10, "brier": 0.1},
+                "tool-a | cid-dropped | tournament": {"n": 5, "brier": 0.3},
+                "tool-a | cid-prod | production_replay": {"n": 100, "brier": 0.2},
+            },
+        }
+        scoped = _scope_tournament_to_active(tvm_scores, {"cid-active"})
+        assert scoped["total_rows"] == 42
+        assert scoped["overall"] == {"brier": 0.2, "n": 42}
+        assert set(scoped["by_tool_version_mode"]) == {
+            "tool-a | cid-active | tournament",
+            "tool-a | cid-prod | production_replay",
+        }
+
+    def test_none_active_cids_returns_input_unchanged(self) -> None:
+        """active_cids=None disables scoping; input is returned as-is."""
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import _scope_tournament_to_active
+
+        tvm_scores = {
+            "by_tool_version_mode": {
+                "tool-a | cid1 | tournament": {"n": 10, "brier": 0.1},
+            },
+        }
+        assert _scope_tournament_to_active(tvm_scores, None) is tvm_scores
+
 
 class TestTournamentCallouts:
     """Tests for section_tournament_callouts."""
@@ -1543,24 +1604,47 @@ class TestTournamentCallouts:
         assert "Promotion candidates:" not in result
 
     def test_low_n_callout_shown_with_marker(self) -> None:
-        """Low-n tournament cells are flagged, not suppressed.
+        """Low-n tournament cells are flagged with a marker when scoping is on.
 
-        Tournament is never sample-gated: a candidate's record shows from
-        its first resolved market with a ``⚠ low data`` marker so the
-        reader (and the Slack summary) can weight it.
+        Tournament is not sample-gated while ``active_cids`` is
+        provided: a candidate's record shows from its first resolved
+        market with a ``⚠ low data`` marker so the reader (and the
+        Slack summary) can weight it.
         """
         # pylint: disable=import-outside-toplevel
         from benchmark.analyze import section_tournament_callouts
 
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
-        result = section_tournament_callouts(prod, tourn)
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
         assert "Promotion candidates:" in result
         assert "⚠ low data" in result
         assert "n=10" in result
 
+    def test_fail_open_reapplies_min_n_gate(self) -> None:
+        """When active_cids is None, CALLOUT_MIN_N gates the callout.
+
+        Without scoping (e.g. tournament_tools.json failed to load) the
+        report must stay bounded: a low-n row that would otherwise be
+        flagged with ``⚠ low data`` is suppressed entirely so the
+        degraded path is strictly quieter, not noisier.
+        """
+        # pylint: disable=import-outside-toplevel
+        from benchmark.analyze import section_tournament_callouts
+
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        # active_cids=None → min-n gate fires → empty.
+        assert section_tournament_callouts(prod, tourn, active_cids=None) == ""
+
     def test_scoped_to_active_cids(self) -> None:
-        """Only candidates whose CID is still in the tournament are flagged."""
+        """Active-CID scoping drops inactive rows; None disables scoping.
+
+        Three cases pin the ``is not None`` semantics the loader
+        depends on — empty set must not be treated the same as None,
+        otherwise a flip to truthy checks (``if active_cids:``) would
+        silently change behavior.
+        """
         # pylint: disable=import-outside-toplevel
         from benchmark.analyze import section_tournament_callouts
 
@@ -1569,8 +1653,12 @@ class TestTournamentCallouts:
         # v2 no longer under evaluation → dropped.
         assert section_tournament_callouts(prod, tourn, active_cids=set()) == ""
         # v2 active → flagged.
-        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
-        assert "Promotion candidates:" in result
+        result_scoped = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "Promotion candidates:" in result_scoped
+        # None disables scoping; n=50 ≥ CALLOUT_MIN_N so the row still
+        # surfaces under fail-open. Pins the empty-set ≠ None distinction.
+        result_unscoped = section_tournament_callouts(prod, tourn, active_cids=None)
+        assert "Promotion candidates:" in result_unscoped
 
     def test_suppressed_within_delta_band(self) -> None:
         """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""

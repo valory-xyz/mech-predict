@@ -19,7 +19,7 @@
 """Resolve the per-deployment set of selectable tools so the daily report can annotate them.
 
 The trader no longer filters tools with a per-tool allow/deny list. Instead
-each deployment's ``service.yaml`` ships a ``valid_mechs`` whitelist of mech
+each deployment's ``service.yaml`` ships a ``valid_mechs`` allow-list of mech
 contract addresses, and the trader may select **any** tool offered by those
 mechs in the marketplace. We therefore resolve the allow-list dynamically:
 
@@ -46,29 +46,29 @@ from urllib.request import Request, urlopen
 
 log = logging.getLogger(__name__)
 
-# Deployments we report on. Order is the column order in the rendered line.
-DEPLOYMENTS: tuple[str, ...] = (
-    "omenstrat Pearl",
-    "polystrat Pearl",
+# Single source of truth for every deployment we report on. Each entry maps
+# the deployment name to ``(trader_service_dir, chain, platform)``:
+#   * ``trader_service_dir`` selects which trader ``service.yaml`` to read
+#     for ``valid_mechs`` at the latest trader release.
+#   * ``chain`` selects the marketplace subgraph the mech addresses live on.
+#   * ``platform`` is the scorer key used to filter the report section.
+# Adding a new deployment requires editing exactly this one structure; the
+# public ``DEPLOYMENTS`` tuple and ``DEPLOYMENT_TO_PLATFORM`` mapping below
+# are derived from it.
+_DEPLOYMENTS: Mapping[str, tuple[str, str, str]] = MappingProxyType(
+    {
+        "omenstrat Pearl": ("trader_pearl", "gnosis", "omen"),
+        "polystrat Pearl": ("polymarket_trader", "polygon", "polymarket"),
+    }
 )
+
+# Deployments we report on. Order is the column order in the rendered line.
+DEPLOYMENTS: tuple[str, ...] = tuple(_DEPLOYMENTS)
 
 # Maps each deployment name to the scorer's platform key. Drives the
 # per-platform filter on the Tool Deployment Status section.
 DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
-    {
-        "omenstrat Pearl": "omen",
-        "polystrat Pearl": "polymarket",
-    }
-)
-
-# Per-deployment resolution config: deployment -> (trader service dir, chain).
-# The trader service dir names the ``service.yaml`` carrying ``valid_mechs``;
-# the chain selects the marketplace subgraph the mech addresses live on.
-_DEPLOYMENT_CONFIG: Mapping[str, tuple[str, str]] = MappingProxyType(
-    {
-        "omenstrat Pearl": ("trader_pearl", "gnosis"),
-        "polystrat Pearl": ("polymarket_trader", "polygon"),
-    }
+    {name: platform for name, (_service, _chain, platform) in _DEPLOYMENTS.items()}
 )
 
 
@@ -84,7 +84,11 @@ def deployments_for_platform(platform: str) -> tuple[str, ...]:
 
 
 # Source URLs.
-# Latest published release (includes pre-releases); ``[0]`` is the most recent.
+# Latest published release (pre-releases intentionally included: the trader
+# is shipped via pre-release tags like ``v0.38.7-rc1`` and that is what is
+# actually deployed). ``per_page=1`` keeps the response to one element, so
+# ``[0]`` is the newest tag. Any network / parse failure here degrades the
+# whole Tool Deployment Status section to ``⚠️ unavailable`` (never raises).
 TRADER_RELEASES_URL = (
     "https://api.github.com/repos/valory-xyz/trader/releases?per_page=1"
 )
@@ -118,10 +122,11 @@ _VALID_MECHS_RE = re.compile(
 
 # Subgraph query: resolve a set of mech addresses to their on-chain metadata
 # CID. ``meches`` is keyed internally by id but carries the contract
-# ``address``; ``%(addrs)s`` is a comma-separated list of quoted addresses.
+# ``address``; ``{addrs}`` is rendered with a comma-separated list of quoted
+# addresses at call time via ``.format(addrs=...)``.
 _MECHES_QUERY = (
-    "{ meches(first: 1000, where: {address_in: [%(addrs)s]}) "
-    "{ address service { metadata { metadata } } } }"
+    "{{ meches(first: 1000, where: {{address_in: [{addrs}]}}) "
+    "{{ address service {{ metadata {{ metadata }} }} }} }}"
 )
 
 
@@ -162,7 +167,11 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
     :param url: GraphQL endpoint.
     :param query: GraphQL query string.
     :return: the ``data`` object from the JSON response.
-    :raises ValueError: when the response reports GraphQL ``errors``.
+    :raises ValueError: when the response reports GraphQL ``errors`` or when
+        ``data`` is missing / not a JSON object. Spec-compliant subgraphs
+        always send a dict; defending here converts a hypothetical
+        ``AttributeError`` from downstream ``data.get(...)`` calls into the
+        normal ``None``-fallback path in ``fetch_valid_tools``.
     """
     body = json.dumps({"query": query}).encode("utf-8")
     req = Request(
@@ -180,7 +189,10 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
         payload = json.loads(resp.read().decode("utf-8"))
     if payload.get("errors"):
         raise ValueError(f"GraphQL errors from {url}: {payload['errors']}")
-    return payload.get("data") or {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise ValueError(f"unexpected data type from {url}: {type(data).__name__}")
+    return data
 
 
 def _parse_json_string_list(raw: str) -> list[str]:
@@ -216,18 +228,22 @@ def latest_trader_ref() -> str:
 
 
 def parse_valid_mechs(yaml_source: str) -> list[str]:
-    """Extract the ``valid_mechs`` whitelist from a trader ``service.yaml``.
+    """Extract the ``valid_mechs`` allow-list from a trader ``service.yaml``.
+
+    Addresses are returned lowercased so every downstream caller receives a
+    canonical-cased value without needing to know about the subgraph's
+    lowercase normalisation convention.
 
     :param yaml_source: full text of a trader ``service.yaml``.
     :return: list of mech contract addresses (empty list is a real state:
-        "no mechs whitelisted").
+        "no mechs allow-listed").
     :raises ValueError: when the ``valid_mechs`` env-default line is absent
         or its payload is not a JSON array of strings.
     """
     match = _VALID_MECHS_RE.search(yaml_source)
     if match is None:
         raise ValueError("no valid_mechs env default found in service.yaml")
-    return _parse_json_string_list(match.group("list"))
+    return [addr.lower() for addr in _parse_json_string_list(match.group("list"))]
 
 
 def fetch_tools_for_metadata(metadata_hash: str) -> list[str]:
@@ -262,23 +278,30 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
     a malformed IPFS manifest, so the caller can mark the deployment
     unavailable.
 
-    A subgraph response that omits any requested address (typo'd
-    ``valid_mechs`` entry, mech not yet indexed, address on the wrong chain,
-    etc.) is treated as a hard failure — silently unioning only the resolved
-    manifests would shrink the allow-list and look indistinguishable from a
-    real "no tools selectable" state on the daily report.
+    Two cases are treated as hard failures so the deployment falls back to
+    ``⚠️ unavailable`` rather than to a silently shrunk allow-list:
+
+    * The subgraph response omits any requested address (typo'd
+      ``valid_mechs`` entry, mech not yet indexed, address on the wrong
+      chain, etc.).
+    * Every requested address is returned but none carries a usable
+      on-chain metadata hash (``service`` is ``null`` or ``metadata`` is
+      empty) — without this guard the deployment would resolve to ``[]``
+      and render "no benchmarked tools active", indistinguishable from a
+      legitimately empty ``valid_mechs``.
 
     :param addresses: mech contract addresses (the parsed ``valid_mechs``).
     :param subgraph_url: marketplace subgraph endpoint for the chain.
     :return: sorted union of advertised tool names; ``[]`` when ``addresses``
-        is empty (a real "no mechs whitelisted" state, not a failure).
+        is empty (a real "no mechs allow-listed" state, not a failure).
     :raises ValueError: when the subgraph does not return every requested
-        address; the message lists the missing ones.
+        address (the message lists the missing ones), or when the resolved
+        mechs collectively yield no on-chain metadata hashes.
     """
     if not addresses:
         return []
     quoted = ",".join(f'"{addr.lower()}"' for addr in addresses)
-    data = _post_graphql(subgraph_url, _MECHES_QUERY % {"addrs": quoted})
+    data = _post_graphql(subgraph_url, _MECHES_QUERY.format(addrs=quoted))
 
     meches = data.get("meches") or []
     returned = {(mech.get("address") or "").lower() for mech in meches}
@@ -294,6 +317,11 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
         manifests = (mech.get("service") or {}).get("metadata") or []
         if manifests and manifests[0].get("metadata"):
             metadata_hashes.add(manifests[0]["metadata"])
+
+    if not metadata_hashes:
+        raise ValueError(
+            "subgraph returned all addresses but none have on-chain metadata"
+        )
 
     tools: set[str] = set()
     for metadata_hash in metadata_hashes:
@@ -322,7 +350,7 @@ def fetch_valid_tools() -> dict[str, list[str] | None]:
         log.warning("trader release resolution failed: %s", exc)
         return valid  # every deployment stays None
 
-    for deployment, (service, chain) in _DEPLOYMENT_CONFIG.items():
+    for deployment, (service, chain, _platform) in _DEPLOYMENTS.items():
         try:
             yaml_source = _http_get(
                 TRADER_SERVICE_YAML_URL.format(ref=ref, service=service)

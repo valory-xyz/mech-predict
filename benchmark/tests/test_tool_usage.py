@@ -25,48 +25,23 @@ from urllib.error import URLError
 import pytest
 from benchmark import tool_usage
 from benchmark.analyze import section_tool_deployment_status
-from benchmark.tool_usage import DEPLOYMENTS, DEPLOYMENT_TO_PLATFORM
 
 
-class TestDeploymentPlatformMappingInvariants:
-    """Lock the DEPLOYMENTS ↔ DEPLOYMENT_TO_PLATFORM coverage invariant.
+class TestDeploymentConfigInvariants:
+    """Lock invariants on the single ``_DEPLOYMENTS`` source of truth.
 
-    ``deployments_for_platform`` filters ``DEPLOYMENTS`` through
-    ``DEPLOYMENT_TO_PLATFORM``. If a deployment lands in the list but
-    not in the mapping, it silently disappears from the platform-scoped
-    Tool Deployment Status section. The tests below fail loudly at add
-    time so nobody has to rediscover the bug in production.
+    With ``DEPLOYMENTS`` and ``DEPLOYMENT_TO_PLATFORM`` derived directly
+    from ``_DEPLOYMENTS``, drift between those three views is no longer
+    possible by construction. The remaining real invariant is that every
+    chain referenced in ``_DEPLOYMENTS`` has a marketplace subgraph URL —
+    adding a new chain without wiring up the URL would crash
+    ``fetch_valid_tools`` at lookup time.
     """
 
-    def test_every_deployment_has_a_platform(self) -> None:
-        """No name in DEPLOYMENTS is missing from DEPLOYMENT_TO_PLATFORM."""
-        missing = [name for name in DEPLOYMENTS if name not in DEPLOYMENT_TO_PLATFORM]
-        assert not missing, (
-            f"deployment(s) {missing} in DEPLOYMENTS have no platform mapping — "
-            "deployments_for_platform would silently drop them"
-        )
-
-    def test_no_orphan_mapping_entries(self) -> None:
-        """Every mapping key is also present in DEPLOYMENTS (no drift the other way)."""
-        orphans = [name for name in DEPLOYMENT_TO_PLATFORM if name not in DEPLOYMENTS]
-        assert not orphans, (
-            f"mapping key(s) {orphans} have no matching DEPLOYMENTS entry — "
-            "the deployment was removed but the mapping wasn't cleaned up"
-        )
-
-    def test_every_deployment_has_resolution_config(self) -> None:
-        """Every deployment can be resolved (trader service dir + chain)."""
-        config = tool_usage._DEPLOYMENT_CONFIG  # pylint: disable=protected-access
-        missing = [name for name in DEPLOYMENTS if name not in config]
-        assert not missing, (
-            f"deployment(s) {missing} have no _DEPLOYMENT_CONFIG entry — "
-            "fetch_valid_tools would never resolve them"
-        )
-
-    def test_resolution_chains_are_known(self) -> None:
+    def test_every_chain_has_a_subgraph_url(self) -> None:
         """Each deployment's chain has a marketplace subgraph URL."""
-        config = tool_usage._DEPLOYMENT_CONFIG  # pylint: disable=protected-access
-        for name, (_service, chain) in config.items():
+        deployments = tool_usage._DEPLOYMENTS  # pylint: disable=protected-access
+        for name, (_service, chain, _platform) in deployments.items():
             assert (
                 chain in tool_usage.MARKETPLACE_SUBGRAPH_URL
             ), f"{name} resolves on chain {chain!r} with no subgraph URL"
@@ -113,15 +88,16 @@ class TestLatestTraderRef:
     """Tests for latest_trader_ref."""
 
     def test_returns_latest_tag(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The first (newest) release's tag_name is returned."""
-        monkeypatch.setattr(
-            tool_usage,
-            "_http_get",
-            lambda url: json.dumps(
-                [{"tag_name": "v1.2.3-rc1"}, {"tag_name": "v1.2.2"}]
-            ),
-        )
+        """First (newest) release's tag_name is returned; URL pins ``per_page=1``."""
+        seen: dict[str, str] = {}
+
+        def fake_get(url: str) -> str:
+            seen["url"] = url
+            return json.dumps([{"tag_name": "v1.2.3-rc1"}, {"tag_name": "v1.2.2"}])
+
+        monkeypatch.setattr(tool_usage, "_http_get", fake_get)
         assert tool_usage.latest_trader_ref() == "v1.2.3-rc1"
+        assert "per_page=1" in seen["url"]
 
     def test_empty_release_list_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No releases -> ValueError (so the caller degrades, not crashes)."""
@@ -147,12 +123,12 @@ class TestParseValidMechs:
     """Tests for parse_valid_mechs."""
 
     def test_happy_path(self) -> None:
-        """The address list is extracted in order from the env default."""
-        yaml_source = _service_yaml(["0xAAA", "0xbbb"])
-        assert tool_usage.parse_valid_mechs(yaml_source) == ["0xAAA", "0xbbb"]
+        """The address list is extracted in order and lowercased at the boundary."""
+        yaml_source = _service_yaml(["0xAAA", "0xbBB"])
+        assert tool_usage.parse_valid_mechs(yaml_source) == ["0xaaa", "0xbbb"]
 
     def test_empty_list_returns_empty(self) -> None:
-        """An empty whitelist is a real state ([], not an error)."""
+        """An empty allow-list is a real state ([], not an error)."""
         assert tool_usage.parse_valid_mechs(_service_yaml([])) == []
 
     def test_missing_valid_mechs_raises(self) -> None:
@@ -208,6 +184,14 @@ class TestFetchToolsForMetadata:
         with pytest.raises(ValueError, match="no tools array"):
             tool_usage.fetch_tools_for_metadata("0xabc")
 
+    def test_html_response_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """IPFS gateway returning HTML (cache miss / 504) -> ValueError (caught upstream)."""
+        monkeypatch.setattr(tool_usage, "_http_get", lambda url: "<html>504</html>")
+        with pytest.raises(ValueError):
+            tool_usage.fetch_tools_for_metadata("0xabc")
+
 
 # ---------------------------------------------------------------------------
 # resolve_mech_tools
@@ -220,10 +204,10 @@ class TestResolveMechTools:
     def test_empty_addresses_makes_no_network_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An empty whitelist short-circuits to [] without touching the subgraph."""
+        """An empty allow-list short-circuits to [] without touching the subgraph."""
 
         def boom(*_args: object, **_kwargs: object) -> object:
-            raise AssertionError("network must not be touched for empty whitelist")
+            raise AssertionError("network must not be touched for empty allow-list")
 
         monkeypatch.setattr(tool_usage, "_post_graphql", boom)
         monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", boom)
@@ -267,17 +251,24 @@ class TestResolveMechTools:
 
         def fake_post(url: str, query: str) -> dict:
             captured["query"] = query
-            # Return both requested addresses so resolve_mech_tools doesn't
-            # short-circuit on a missing-address ValueError before we get to
-            # inspect the recorded query string.
+            # Return both requested addresses *with* metadata so resolve_mech_tools
+            # doesn't short-circuit on missing-address / empty-metadata
+            # ValueErrors before we get to inspect the recorded query string.
             return {
                 "meches": [
-                    {"address": "0xabc", "service": {"metadata": []}},
-                    {"address": "0xdef", "service": {"metadata": []}},
+                    {
+                        "address": "0xabc",
+                        "service": {"metadata": [{"metadata": "0x11"}]},
+                    },
+                    {
+                        "address": "0xdef",
+                        "service": {"metadata": [{"metadata": "0x11"}]},
+                    },
                 ]
             }
 
         monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", lambda _h: ["t"])
         tool_usage.resolve_mech_tools(["0xAbC", "0xDEF"], "http://subgraph")
         assert '"0xabc"' in captured["query"]
         assert '"0xdef"' in captured["query"]
@@ -323,6 +314,70 @@ class TestResolveMechTools:
         assert "0xmissing1" in message
         assert "0xmissing2" in message
         assert "0xa" not in message
+
+    def test_all_addresses_missing_raises_with_every_address(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty meches list raises with every requested address (pins subtraction direction)."""
+        monkeypatch.setattr(
+            tool_usage, "_post_graphql", lambda url, query: {"meches": []}
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            tool_usage.resolve_mech_tools(["0xa", "0xb"], "http://subgraph")
+        message = str(excinfo.value)
+        assert "0xa" in message and "0xb" in message
+
+    def test_all_addresses_returned_but_no_metadata_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Addresses present but every mech lacks on-chain metadata -> ValueError."""
+        monkeypatch.setattr(
+            tool_usage,
+            "_post_graphql",
+            lambda url, query: {
+                "meches": [
+                    {"address": "0xa", "service": None},
+                    {"address": "0xb", "service": {"metadata": []}},
+                ]
+            },
+        )
+
+        def boom(_metadata_hash: str) -> list[str]:
+            raise AssertionError("IPFS must not be touched when no metadata is present")
+
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", boom)
+        with pytest.raises(ValueError, match="none have on-chain metadata"):
+            tool_usage.resolve_mech_tools(["0xa", "0xb"], "http://subgraph")
+
+    def test_partial_metadata_unions_present_skips_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mechs with ``service=None`` / empty metadata are skipped when at least one resolves."""
+        monkeypatch.setattr(
+            tool_usage,
+            "_post_graphql",
+            lambda url, query: {
+                "meches": [
+                    {"address": "0xa", "service": None},
+                    {
+                        "address": "0xb",
+                        "service": {"metadata": [{"metadata": "0x22"}]},
+                    },
+                ]
+            },
+        )
+
+        def fake_tools(metadata_hash: str) -> list[str]:
+            assert (
+                metadata_hash == "0x22"
+            ), f"unexpected metadata fetch: {metadata_hash}"
+            return ["superforcaster"]
+
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", fake_tools)
+        assert tool_usage.resolve_mech_tools(["0xa", "0xb"], "http://subgraph") == [
+            "superforcaster"
+        ]
 
 
 # ---------------------------------------------------------------------------

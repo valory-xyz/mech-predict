@@ -270,7 +270,7 @@ def _active_tools_for_platform(
     Computed as the union of (benchmarked tools ∩ selectable tools) across
     every deployment of ``platform`` whose config fetch succeeded. A tool
     is "active" if any deployment can select it (i.e. it is offered by one
-    of that deployment's whitelisted mechs).
+    of that deployment's allow-listed mechs).
 
     Tool-name normalization mirrors ``section_tool_deployment_status``:
     underscores and hyphens are treated as interchangeable when comparing
@@ -357,7 +357,7 @@ def section_tool_deployment_status(
 
     Deployments are filtered to ``platform`` when set; active tools are
     the benchmarked tools intersected with the selectable tools for that
-    deployment (the tools its whitelisted mechs offer). Failed-fetch
+    deployment (the tools its allow-listed mechs offer). Failed-fetch
     deployments are called out so ``⚠️ unavailable`` is never confused
     with "no tools active".
 

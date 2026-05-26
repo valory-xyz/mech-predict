@@ -267,7 +267,15 @@ class TestResolveMechTools:
 
         def fake_post(url: str, query: str) -> dict:
             captured["query"] = query
-            return {"meches": []}
+            # Return both requested addresses so resolve_mech_tools doesn't
+            # short-circuit on a missing-address ValueError before we get to
+            # inspect the recorded query string.
+            return {
+                "meches": [
+                    {"address": "0xabc", "service": {"metadata": []}},
+                    {"address": "0xdef", "service": {"metadata": []}},
+                ]
+            }
 
         monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
         tool_usage.resolve_mech_tools(["0xAbC", "0xDEF"], "http://subgraph")
@@ -284,6 +292,37 @@ class TestResolveMechTools:
         monkeypatch.setattr(tool_usage, "_post_graphql", fake_post)
         with pytest.raises(URLError):
             tool_usage.resolve_mech_tools(["0xa"], "http://subgraph")
+
+    def test_missing_subgraph_addresses_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Subgraph omitting any requested address raises ValueError listing them."""
+        monkeypatch.setattr(
+            tool_usage,
+            "_post_graphql",
+            lambda url, query: {
+                "meches": [
+                    {
+                        "address": "0xa",
+                        "service": {"metadata": [{"metadata": "0x11"}]},
+                    }
+                ]
+            },
+        )
+
+        def boom(_metadata_hash: str) -> list[str]:
+            raise AssertionError("IPFS must not be touched after missing-addr raise")
+
+        monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", boom)
+        with pytest.raises(ValueError) as excinfo:
+            tool_usage.resolve_mech_tools(
+                ["0xA", "0xMissing1", "0xMissing2"], "http://subgraph"
+            )
+        # Resolved address must not appear; missing ones must.
+        message = str(excinfo.value)
+        assert "0xmissing1" in message
+        assert "0xmissing2" in message
+        assert "0xa" not in message
 
 
 # ---------------------------------------------------------------------------

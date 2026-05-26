@@ -262,18 +262,35 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
     a malformed IPFS manifest, so the caller can mark the deployment
     unavailable.
 
+    A subgraph response that omits any requested address (typo'd
+    ``valid_mechs`` entry, mech not yet indexed, address on the wrong chain,
+    etc.) is treated as a hard failure — silently unioning only the resolved
+    manifests would shrink the allow-list and look indistinguishable from a
+    real "no tools selectable" state on the daily report.
+
     :param addresses: mech contract addresses (the parsed ``valid_mechs``).
     :param subgraph_url: marketplace subgraph endpoint for the chain.
     :return: sorted union of advertised tool names; ``[]`` when ``addresses``
         is empty (a real "no mechs whitelisted" state, not a failure).
+    :raises ValueError: when the subgraph does not return every requested
+        address; the message lists the missing ones.
     """
     if not addresses:
         return []
     quoted = ",".join(f'"{addr.lower()}"' for addr in addresses)
     data = _post_graphql(subgraph_url, _MECHES_QUERY % {"addrs": quoted})
 
+    meches = data.get("meches") or []
+    returned = {(mech.get("address") or "").lower() for mech in meches}
+    requested = {addr.lower() for addr in addresses}
+    missing = requested - returned
+    if missing:
+        raise ValueError(
+            "subgraph did not return mech address(es): " + ", ".join(sorted(missing))
+        )
+
     metadata_hashes: set[str] = set()
-    for mech in data.get("meches") or []:
+    for mech in meches:
         manifests = (mech.get("service") or {}).get("metadata") or []
         if manifests and manifests[0].get("metadata"):
             metadata_hashes.add(manifests[0]["metadata"])

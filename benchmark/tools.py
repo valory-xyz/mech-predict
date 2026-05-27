@@ -48,6 +48,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "superforcaster": ToolSpec(
         module="packages.valory.customs.superforcaster.superforcaster",
     ),
+    # valory/superforcaster_polymarket_v1
+    "superforcaster-polymarket-v1": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v1"
+            ".superforcaster_polymarket_v1"
+        ),
+    ),
     # napthaai/prediction_request_reasoning
     "prediction-request-reasoning": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",

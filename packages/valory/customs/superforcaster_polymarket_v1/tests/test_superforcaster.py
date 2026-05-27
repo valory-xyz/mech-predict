@@ -69,7 +69,9 @@ class TestOpenAIClientManager:
         assert params[0] == "client"
 
 
-SF_MODULE = "packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1"
+SF_MODULE = (
+    "packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1"
+)
 
 FAKE_SERPER_RESPONSE = {
     "searchParameters": {"q": "test query", "type": "search"},

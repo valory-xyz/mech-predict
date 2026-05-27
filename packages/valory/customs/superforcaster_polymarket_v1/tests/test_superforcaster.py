@@ -112,6 +112,28 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
     return mock
 
 
+def _install_mock_client(mock_client_mgr: MagicMock) -> MagicMock:
+    """Wire OpenAIClientManager to return a client whose completions() yields PREDICTION_JSON.
+
+    The wrapper's call path is `OpenAIClient.completions(...)`, so the response
+    must be configured on `mock_client.completions.return_value` — not on
+    `mock_client.chat.completions.create` (which is the raw OpenAI SDK path the
+    wrapper hides).
+
+    :param mock_client_mgr: the patched OpenAIClientManager mock.
+    :return: the inner mock_client wired into the manager's __enter__.
+    """
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = PREDICTION_JSON
+    mock_response.usage.prompt_tokens = 10
+    mock_response.usage.completion_tokens = 5
+    mock_client.completions.return_value = mock_response
+    mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+    mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_client
+
+
 class TestSuperforcasterSourceContent:
     """Verify superforcaster captures and replays source_content correctly."""
 
@@ -121,17 +143,10 @@ class TestSuperforcasterSourceContent:
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
         """Live run wraps Serper response in {'serper_response': ...}."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = FAKE_SERPER_RESPONSE
-        mock_fetch.return_value = mock_response
-
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
-            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
-        )
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        mock_serper = MagicMock()
+        mock_serper.json.return_value = FAKE_SERPER_RESPONSE
+        mock_fetch.return_value = mock_serper
+        _install_mock_client(mock_client_mgr)
 
         result = run(
             tool="superforcaster-polymarket-v1",
@@ -141,6 +156,7 @@ class TestSuperforcasterSourceContent:
             counter_callback=None,
         )
 
+        assert result[0] == PREDICTION_JSON
         used_params = result[4]
         assert "source_content" in used_params
         assert "mode" in used_params["source_content"]
@@ -152,13 +168,7 @@ class TestSuperforcasterSourceContent:
         self, mock_client_mgr: MagicMock
     ) -> None:
         """Replay with {'serper_response': ...} uses organic and peopleAlsoAsk."""
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
-            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
-        )
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _install_mock_client(mock_client_mgr)
 
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
@@ -170,7 +180,7 @@ class TestSuperforcasterSourceContent:
             source_content=source_content,
         )
 
-        # Verify the prompt contains the organic result
+        assert result[0] == PREDICTION_JSON
         prediction_prompt = result[1]
         assert "Test Result" in prediction_prompt
         assert "Test snippet content" in prediction_prompt
@@ -182,17 +192,10 @@ class TestSuperforcasterSourceContent:
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
         """When return_source_content is false, source_content is not in used_params."""
-        mock_response = MagicMock()
-        mock_response.json.return_value = FAKE_SERPER_RESPONSE
-        mock_fetch.return_value = mock_response
-
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=PREDICTION_JSON))],
-            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
-        )
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        mock_serper = MagicMock()
+        mock_serper.json.return_value = FAKE_SERPER_RESPONSE
+        mock_fetch.return_value = mock_serper
+        _install_mock_client(mock_client_mgr)
 
         result = run(
             tool="superforcaster-polymarket-v1",
@@ -202,5 +205,6 @@ class TestSuperforcasterSourceContent:
             counter_callback=None,
         )
 
+        assert result[0] == PREDICTION_JSON
         used_params = result[4]
         assert "source_content" not in used_params

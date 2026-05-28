@@ -50,6 +50,14 @@ jobs:
     timeout-minutes: 30
     needs: [tournament-run]
     if: always() && !cancelled()
+    # issues: write is needed by the Tool-improvement triage step at the
+    # end of this job; the default github.token has contents: read only.
+    # If TOOL_IMPROVEMENT_GH_TOKEN secret is set, it overrides github.token
+    # for that step (lets the issue be authored by a dedicated bot account
+    # rather than github-actions[bot]); these permissions still apply.
+    permissions:
+      contents: read
+      issues: write
     # Drives both the Python ROLLING_WINDOW_DAYS constant (read at import
     # time in benchmark/analyze.py) and the --period-days flag passed to
     # the scorer below, keeping the report and the scoring step in sync.
@@ -227,6 +235,7 @@ jobs:
             benchmark/results/scored_row_ids.json
             benchmark/results/report_omen.md
             benchmark/results/report_polymarket.md
+            benchmark/results/stats_loop_state.json
           retention-days: 90
 
       - name: Resolve report artifact URL
@@ -267,6 +276,32 @@ jobs:
           python -m benchmark.notify_slack \
             --report benchmark/results/report_polymarket.md \
             --platform-label Polystrat
+
+      # Tool-improvement triage: read the per-platform rolling-window
+      # scores produced above, apply the deterministic gate cascade, and
+      # open a GitHub issue (label: tool-improvement) for tools that
+      # meet all gates on two consecutive runs. The label routes the
+      # issue to tool-improvement-agent in the agent-skills monorepo.
+      # The hashFiles() gate is defensive — if either rolling file is
+      # missing (because that scorer step failed) we skip triage rather
+      # than open a noisy issue against half-data. ENABLE_TOOL_IMPROVEMENT
+      # is the kill-switch for an "observer mode" rollout (set to 'false'
+      # at the repo-vars level to silence dispatch while keeping the
+      # state-file write running, so we can measure gate behavior before
+      # the agent is live).
+      - name: Tool-improvement triage (Polystrat)
+        if: always() && !cancelled() && (vars.ENABLE_TOOL_IMPROVEMENT != 'false') && hashFiles('benchmark/results/rolling_scores_polymarket.json') != '' && hashFiles('benchmark/results/prev_rolling_scores_polymarket.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.TOOL_IMPROVEMENT_GH_TOKEN || github.token }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          DRY_RUN_FLAG=""
+          if [ "${{ vars.TOOL_IMPROVEMENT_DRY_RUN }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+          python -m benchmark.stats_loop.open_issue \
+            --repo "${{ github.repository }}" \
+            $DRY_RUN_FLAG
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

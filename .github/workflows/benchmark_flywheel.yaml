@@ -299,7 +299,7 @@ jobs:
           if [ "${{ vars.TOOL_IMPROVEMENT_DRY_RUN }}" = "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
-          python -m benchmark.stats_loop.open_issue \
+          python -m benchmark.stats_loop \
             --repo "${{ github.repository }}" \
             $DRY_RUN_FLAG
 

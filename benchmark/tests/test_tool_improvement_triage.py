@@ -383,6 +383,32 @@ class TestWindowISO:
         assert w["w2_start"] == "2026-05-14T12:00:00Z"
 
 
+class TestPlatformPropagation:
+    """Platform identity flows through triage and title rendering."""
+
+    def test_triage_records_platform_on_each_decision(self) -> None:
+        """Every decision dict carries the platform passed to triage()."""
+        cur = _scores(a=_stats(brier=0.260, log_loss=0.700))
+        prev = _scores(a=_stats(brier=0.210, log_loss=0.610))
+        d = triage(cur, prev, {}, platform="omen")
+        assert d[0]["platform"] == "omen"
+
+    def test_triage_default_platform_is_polymarket(self) -> None:
+        """Omitting the platform kwarg keeps the legacy default."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+        )
+        assert d[0]["platform"] == "polymarket"
+
+    def test_title_carries_platform(self) -> None:
+        """build_issue_title interpolates the platform into the title."""
+        assert build_issue_title("foo", "omen") == (
+            "[tool-improvement] `foo`: Brier regression on omen W-1"
+        )
+
+
 @pytest.mark.parametrize(
     "case",
     [

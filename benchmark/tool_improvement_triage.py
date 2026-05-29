@@ -75,12 +75,7 @@ log = logging.getLogger(__name__)
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
-    """Return JSON contents or ``{}`` on missing / corrupt file.
-
-    The state file rides in the ``benchmark-data`` artifact across
-    daily runs; a truncated write would wedge the loop without this
-    heal. Missing rolling-score files happen on first deploys.
-    """
+    """Return JSON contents of ``path`` or ``{}`` if missing/corrupt."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -92,14 +87,7 @@ def triage(
     prev: Dict[str, Any],
     prior_state: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade. Returns one decision dict per tool.
-
-    Each decision has ``tool``, ``decision`` (``open_issue`` |
-    ``reliability_collapse`` | ``silent``), ``reason``, ``issue_open``
-    (for state propagation), and the underlying numbers used in the
-    issue body (``brier_cur``, ``brier_prev``, ``delta_brier``,
-    ``n_cur``, ``n_prev``, ``reliability_cur``).
-    """
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     prior_open = {
         t: v.get("issue_open", False)
         for t, v in (prior_state.get("by_tool") or {}).items()
@@ -159,7 +147,7 @@ def triage(
 def write_state(
     state_path: Path, decisions: List[Dict[str, Any]], generated_at: str
 ) -> None:
-    """Persist today's per-tool outcomes for tomorrow's run."""
+    """Persist today's per-tool outcomes to ``state_path`` for tomorrow's run."""
     payload = {
         "generated_at": generated_at,
         "platform": PLATFORM,
@@ -184,7 +172,7 @@ def write_state(
 
 
 def _window_iso(now: datetime, days: int = ROLLING_WINDOW_DAYS) -> Dict[str, str]:
-    """Compute W-1 and W-2 ISO ranges relative to ``now``."""
+    """Compute W-1 and W-2 ISO ranges relative to ``now`` (window length ``days``)."""
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     w = timedelta(days=days)
     return {
@@ -196,7 +184,7 @@ def _window_iso(now: datetime, days: int = ROLLING_WINDOW_DAYS) -> Dict[str, str
 
 
 def build_issue_title(tool: str) -> str:
-    """Title format that the agent's Step 1 parser expects."""
+    """Issue title format for ``tool`` that the agent's Step 1 parser expects."""
     return f"[tool-improvement] `{tool}`: Brier regression on polymarket W-1"
 
 
@@ -207,13 +195,7 @@ def build_issue_body(
     artifact_url: str,
     window_iso: Dict[str, str],
 ) -> str:
-    """Render the data-only issue body for one flagged tool.
-
-    Contains only objective signals: the headline regression numbers,
-    two JSON stats blocks, the artifact URL, and a description of the
-    window definitions. No diagnosis, no hints. The agent pulls the
-    artifact, slices the rows, and forms its own hypothesis.
-    """
+    """Render the data-only Markdown issue body for one flagged tool."""
     tool = decision["tool"]
     pm = json.dumps(polymarket_stats, indent=2, sort_keys=True)
     cb = json.dumps({"tool": tool, "stats": combined_stats}, indent=2, sort_keys=True)
@@ -264,7 +246,7 @@ def build_issue_body(
 
 
 def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> int:
-    """Call ``gh issue create``. Returns subprocess return code."""
+    """Call ``gh issue create`` and return the subprocess return code (0 on success)."""
     if dry_run:
         log.info("DRY-RUN: would open issue title=%s", title)
         return 0
@@ -293,7 +275,7 @@ def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> 
 
 
 def main() -> int:
-    """CLI entry point invoked by benchmark_flywheel.yaml."""
+    """CLI entry point invoked by benchmark_flywheel.yaml (non-zero on dispatch failure)."""
     p = argparse.ArgumentParser(description=__doc__ or "")
     p.add_argument(
         "--cur-scores",

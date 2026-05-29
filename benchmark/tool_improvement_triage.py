@@ -232,16 +232,40 @@ def build_issue_body(
         "produced these numbers is at:\n\n"
         f"> **{artifact_url}**\n\n"
         "Download it with `gh run download <run-id> --name benchmark-data` "
-        "and read:\n\n"
-        "- `datasets/logs/production_log_<YYYY_MM_DD>.jsonl` - raw rows. "
-        f'Filter on `tool_name == "{tool}"` AND `platform == '
+        "and read the files below in the **listed order** - do not skip "
+        "ahead to raw rows before checking the breakdowns:\n\n"
+        "1. **`results/scores_polymarket.json`** - all the per-slice "
+        "aggregates the daily scorer produced. The trigger fired against "
+        f'`by_tool["{tool}"]`; the agent must decompose the regression '
+        "by inspecting these sub-keys for the same tool:\n"
+        f'   - `by_tool_category["{tool} | <category>"]` - is the '
+        "regression localized to one market category (politics, business, "
+        "sports, etc.)?\n"
+        f'   - `by_tool_version_mode["{tool} | <version> | <mode>"]` - '
+        "did a recent tool version bump introduce the regression?\n"
+        f'   - `by_difficulty["<bucket>"]` cross-referenced with the '
+        f"tool - is `{tool}` failing specifically on hard markets?\n"
+        f'   - `by_liquidity["<bucket>"]` cross-referenced - does '
+        "illiquidity correlate?\n"
+        f'   - `by_tool_platform["{tool} | polymarket"]` - sanity '
+        "check vs the headline number above.\n"
+        "   A regression localizes when a sub-cell satisfies "
+        "`cell_brier > tool_brier + 0.05` AND `cell_n >= 30`. Cells under "
+        "that threshold are statistically noisy at this n.\n"
+        "2. **`results/report_polymarket.md`** - the same numbers in "
+        "human-readable form, including `Tool x Category` and "
+        "`Tool x Category Historical Comparison` tables that mirror "
+        "the JSON above. Use this to sanity-check the decomposition.\n"
+        f"3. **`datasets/logs/production_log_<YYYY_MM_DD>.jsonl`** - raw "
+        f'rows. Filter on `tool_name == "{tool}"` AND `platform == '
         '"polymarket"` AND `prediction_parse_status == "valid"` AND '
-        "`final_outcome` not null.\n"
-        "- `results/scores_polymarket.json` - what the daily scorer wrote "
-        "(matches the baseline block above).\n"
-        "- `results/report_polymarket.md` - the human-readable report.\n\n"
-        "The agent must reproduce the headline number above from the raw "
-        "rows before forming any hypothesis.\n"
+        "`final_outcome` not null. Sample 10-20 misses from the worst "
+        "localized cell and read the prompt + tool response.\n\n"
+        "The agent must reproduce the headline number above from step 3 "
+        "raw rows BEFORE forming any hypothesis. If the reproduction "
+        "does not match within +/- 0.001, the scoring artifact may have "
+        "been rewritten between trigger and dispatch; close the issue "
+        "with that note rather than acting on stale data.\n"
     )
 
 

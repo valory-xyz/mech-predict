@@ -75,6 +75,9 @@ PREDICTION_REQUEST_REASONING_CONFIG = _component_config(
 PREDICTION_URL_COT_CONFIG = _component_config("napthaai/customs/prediction_url_cot")
 DALLE_REQUEST_CONFIG = _component_config("victorpolisetty/customs/dalle_request")
 SUPERFORCASTER_CONFIG = _component_config("valory/customs/superforcaster")
+SUPERFORCASTER_POLYMARKET_V1_CONFIG = _component_config(
+    "valory/customs/superforcaster_polymarket_v1"
+)
 FACTUAL_RESEARCH_CONFIG = _component_config("valory/customs/factual_research")
 
 # Prompts
@@ -173,6 +176,13 @@ class TestSuperforcaster(BaseIsolatedToolTest):
     """Test Superforcaster."""
 
     component_yaml = SUPERFORCASTER_CONFIG
+    prompts = [PREDICTION_PROMPT]
+
+
+class TestSuperforcasterPolymarketV1(BaseIsolatedToolTest):
+    """Test Superforcaster (Polymarket v1, uncalibrated)."""
+
+    component_yaml = SUPERFORCASTER_POLYMARKET_V1_CONFIG
     prompts = [PREDICTION_PROMPT]
 
 

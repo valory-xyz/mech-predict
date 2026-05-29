@@ -2398,6 +2398,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Incrementally merge rows from PATH into scores.json via update()",
     )
+    parser.add_argument(
+        "--skip-tournament-output",
+        action="store_true",
+        help=(
+            "Do not write the paired tournament scores file (and its "
+            "per-platform splits) in --period-days mode. Use for "
+            "rolling-window invocations whose tournament output is not "
+            "consumed by the report — keeps results/ free of dead files."
+        ),
+    )
     return parser
 
 
@@ -2429,17 +2439,24 @@ def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(prod_result, indent=2))
-    output_tournament.parent.mkdir(parents=True, exist_ok=True)
-    output_tournament.write_text(json.dumps(tourn_result, indent=2))
+
+    # Rolling-window invocations pass --skip-tournament-output: the
+    # report scopes tournament to all-time only, so per-platform rolling
+    # tournament files would just be dead output sitting in results/.
+    write_tournament = not args.skip_tournament_output
+    if write_tournament:
+        output_tournament.parent.mkdir(parents=True, exist_ok=True)
+        output_tournament.write_text(json.dumps(tourn_result, indent=2))
 
     for platform in PLATFORMS:
         plat_prod, plat_tourn = results[platform]
         _derive_platform_path(args.output, platform).write_text(
             json.dumps(plat_prod, indent=2)
         )
-        _derive_platform_path(output_tournament, platform).write_text(
-            json.dumps(plat_tourn, indent=2)
-        )
+        if write_tournament:
+            _derive_platform_path(output_tournament, platform).write_text(
+                json.dumps(plat_tourn, indent=2)
+            )
 
     overall = prod_result["overall"]
     t_overall = tourn_result["overall"]

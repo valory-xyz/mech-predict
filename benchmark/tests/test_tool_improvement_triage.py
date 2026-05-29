@@ -74,7 +74,7 @@ class TestRegressionSizeGate:
 
     def test_below_threshold_silent(self) -> None:
         """Delta Brier below the threshold leaves the tool silent."""
-        d = triage(_scores(a=_stats(brier=0.235)), _scores(a=_stats(brier=0.210)), {})
+        d = triage(_scores(a=_stats(brier=0.185)), _scores(a=_stats(brier=0.160)), {})
         assert d[0]["decision"] == "silent"
         assert d[0]["reason"] == "no_regression"
 
@@ -91,9 +91,10 @@ class TestRegressionSizeGate:
     def test_at_threshold_silent(self) -> None:
         """Delta exactly equal to the threshold is silent (gate uses > not >=)."""
         # Delta == threshold (0.040) must NOT pass (gate uses > not >=).
+        # cur kept below the level floor (0.20) so level does not fire.
         d = triage(
-            _scores(a=_stats(brier=0.240, log_loss=0.620)),
-            _scores(a=_stats(brier=0.200, log_loss=0.610)),
+            _scores(a=_stats(brier=0.180, log_loss=0.620)),
+            _scores(a=_stats(brier=0.140, log_loss=0.610)),
             {},
         )
         assert d[0]["decision"] == "silent"
@@ -141,10 +142,10 @@ class TestSignAgreement:
     def test_log_loss_improves_silent(self) -> None:
         """Sign disagreement on a regression silences when level stays low."""
         # Brier worsens, log_loss improves -> regression-path sign
-        # disagreement; level stays below 0.25 -> overall silent.
+        # disagreement; level stays below 0.20 -> overall silent.
         d = triage(
-            _scores(a=_stats(brier=0.240, log_loss=0.580)),
-            _scores(a=_stats(brier=0.190, log_loss=0.610)),
+            _scores(a=_stats(brier=0.190, log_loss=0.580)),
+            _scores(a=_stats(brier=0.140, log_loss=0.610)),
             {},
         )
         assert d[0]["decision"] == "silent"
@@ -200,12 +201,13 @@ class TestDuplicateIssueSuppression:
 
     def test_resolution_clears_issue_open(self) -> None:
         """Brier recovery clears issue_open so a future regression can fire."""
-        # Today Brier improved -> gates stop firing -> issue_open=False
-        # on today's outcome so tomorrow can open fresh if needed.
+        # Today Brier improved AND sits below the level floor -> no
+        # trigger fires -> issue_open=False on today's outcome so
+        # tomorrow can open fresh if needed.
         prior = _prior_state_with_issue("a")
         d = triage(
-            _scores(a=_stats(brier=0.205, log_loss=0.600)),
-            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            _scores(a=_stats(brier=0.155, log_loss=0.600)),
+            _scores(a=_stats(brier=0.160, log_loss=0.610)),
             prior,
         )
         assert d[0]["decision"] == "silent"
@@ -239,13 +241,13 @@ class TestMultipleTools:
         """Three tools with different fates resolve independently."""
         cur = _scores(
             a=_stats(brier=0.260, log_loss=0.700),  # regression + above level
-            b=_stats(brier=0.200, log_loss=0.600),  # no regression, below level
-            c=_stats(brier=0.230, log_loss=0.580),  # sign disagree, below level
+            b=_stats(brier=0.150, log_loss=0.600),  # no regression, below level
+            c=_stats(brier=0.180, log_loss=0.580),  # sign disagree, below level
         )
         prev = _scores(
             a=_stats(brier=0.210, log_loss=0.610),
-            b=_stats(brier=0.210, log_loss=0.610),
-            c=_stats(brier=0.180, log_loss=0.610),
+            b=_stats(brier=0.160, log_loss=0.610),
+            c=_stats(brier=0.130, log_loss=0.610),
         )
         d = {x["tool"]: x for x in triage(cur, prev, {})}
         assert d["a"]["decision"] == "open_issue"
@@ -372,8 +374,8 @@ class TestLevelTrigger:
     def test_level_below_floor_no_regression_silent(self) -> None:
         """A tool below the level floor and not regressing stays silent."""
         d = triage(
-            _scores(a=_stats(brier=0.230, log_loss=0.610)),
-            _scores(a=_stats(brier=0.230, log_loss=0.610)),
+            _scores(a=_stats(brier=0.180, log_loss=0.610)),
+            _scores(a=_stats(brier=0.180, log_loss=0.610)),
             {},
         )
         assert d[0]["decision"] == "silent"
@@ -422,8 +424,8 @@ class TestConstants:
         assert BRIER_REGRESSION_THRESHOLD == 0.040
 
     def test_level_threshold(self) -> None:
-        """Brier level-floor threshold is 0.25 (self-improvement trigger)."""
-        assert BRIER_LEVEL_THRESHOLD == 0.25
+        """Brier level-floor threshold is 0.20 (self-improvement trigger)."""
+        assert BRIER_LEVEL_THRESHOLD == 0.20
 
     def test_sample_floor(self) -> None:
         """Sample floor is 105 (the 15/day * 7d aggregate)."""

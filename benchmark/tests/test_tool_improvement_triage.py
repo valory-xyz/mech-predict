@@ -406,6 +406,47 @@ class TestPlatformPropagation:
             "[tool-improvement] `foo`: Brier regression on omen W-1"
         )
 
+    def test_body_single_platform_no_cross_ref(self) -> None:
+        """When only one platform is monitored, no cross-ref text is added."""
+        body = build_issue_body(
+            self._decision(),
+            polymarket_stats={},
+            combined_stats={},
+            artifact_url="https://example.test/x",
+            window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
+            platforms_monitored=["polymarket"],
+        )
+        assert "Other monitored platforms" not in body
+        assert "['polymarket']" in body
+
+    def test_body_multi_platform_carries_cross_ref(self) -> None:
+        """When multiple platforms are monitored, cross-ref text names the others."""
+        body = build_issue_body(
+            self._decision(),
+            polymarket_stats={},
+            combined_stats={},
+            artifact_url="https://example.test/x",
+            window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
+            platforms_monitored=["polymarket", "omen"],
+        )
+        assert "Other monitored platforms (omen)" in body
+        assert "this issue's platform" in body
+
+    def _decision(self) -> Dict[str, Any]:
+        """Reusable decision fixture for issue-body tests."""
+        return {
+            "tool": "factual_research",
+            "platform": "polymarket",
+            "brier_cur": 0.243,
+            "brier_prev": 0.219,
+            "delta_brier": 0.024,
+            "n_cur": 187,
+            "n_prev": 212,
+            "decision": "open_issue",
+            "reason": "all_gates_pass",
+            "issue_open": True,
+        }
+
 
 @pytest.mark.parametrize(
     "case",

@@ -24,8 +24,13 @@ Runs as a step inside ``benchmark_flywheel.yaml`` after the per-platform
 ``benchmark-data`` artifact. For each tool, applies a deterministic gate
 cascade:
 
-1. Platform = Polymarket only (Omen Brier is confounded by the on-chain
-   ``jury-resolve-market-v1`` mech tool's quality).
+1. Platform = whichever platforms are listed in ``ENABLED_PLATFORMS``.
+   Today that is ``["polymarket"]``; Omen is excluded because its
+   Brier is confounded by the on-chain ``jury-resolve-market-v1`` mech
+   tool's quality (a tool-side fix cannot reliably address an
+   Omen-only regression while the jury is in the loop). The triage
+   iterates each enabled platform separately and files one issue per
+   (tool, platform) regression.
 2. ``Brier_cur - Brier_prev > 0.040``. Calibrated 2026-05-29 against
    26 days of CI data: 0.015 + two-day confirmation produced ~0.5
    issues/week (too quiet); 0.040 alone yields ~1 issue/week per
@@ -59,7 +64,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
@@ -131,7 +136,11 @@ def triage(
             decisions.append(d)
             continue
         lc, lp = c.get("log_loss"), p.get("log_loss")
-        if lc is None or lp is None or lc - lp <= 0:
+        if lc is None or lp is None:
+            d.update(decision="silent", reason="missing_log_loss")
+            decisions.append(d)
+            continue
+        if lc - lp <= 0:
             d.update(decision="silent", reason="sign_disagreement")
             decisions.append(d)
             continue
@@ -199,10 +208,20 @@ def build_issue_body(
     combined_stats: Dict[str, Any],
     artifact_url: str,
     window_iso: Dict[str, str],
+    platforms_monitored: Optional[List[str]] = None,
 ) -> str:
     """Render the data-only Markdown issue body for one flagged tool."""
     tool = decision["tool"]
     platform = decision.get("platform", "polymarket")
+    monitored = platforms_monitored or [platform]
+    other = sorted(p for p in monitored if p != platform)
+    cross_ref = (
+        f" Other monitored platforms ({', '.join(other)}) are scored in "
+        "the same artifact and may be inspected for cross-reference, but "
+        "a proposed fix should address this issue's platform."
+        if other
+        else ""
+    )
     pm = json.dumps(polymarket_stats, indent=2, sort_keys=True)
     cb = json.dumps({"tool": tool, "stats": combined_stats}, indent=2, sort_keys=True)
     return (
@@ -213,7 +232,9 @@ def build_issue_body(
         f"(n={decision['n_cur']})\n"
         f"- Previous 7d (**W-2**, non-overlapping) Brier: "
         f"**{decision['brier_prev']:.4f}** (n={decision['n_prev']})\n"
-        f"- Delta: **{decision['delta_brier']:+.4f}**\n\n"
+        f"- Delta: **{decision['delta_brier']:+.4f}**\n"
+        f"- Platforms monitored: {sorted(monitored)}; "
+        f"this issue is scoped to **{platform}**.{cross_ref}\n\n"
         "This issue records the regression as a signal, not a diagnosis. "
         "The cause has not been identified.\n\n"
         "@valory-coding-agent\n\n"
@@ -386,7 +407,14 @@ def main() -> int:
             if d["decision"] == "open_issue":
                 stats_pm = (platform_scores.get("by_tool") or {}).get(d["tool"], {})
                 stats_cb = (cross_scores.get("by_tool") or {}).get(d["tool"], {})
-                body = build_issue_body(d, stats_pm, stats_cb, artifact_url, window_iso)
+                body = build_issue_body(
+                    d,
+                    stats_pm,
+                    stats_cb,
+                    artifact_url,
+                    window_iso,
+                    platforms_monitored=platforms,
+                )
                 title = build_issue_title(d["tool"], platform)
                 rc = _open_issue(args.repo, args.label, title, body, args.dry_run)
                 if rc == 0:

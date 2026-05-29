@@ -2429,8 +2429,9 @@ def section_tournament_callouts(
     :param scores_prod: production scores dict.
     :param scores_tournament: tournament scores dict, or None.
     :param release_map_data: optional pre-loaded release map.
-    :param active_cids: CIDs still under tournament evaluation, or None to
-        consider every tournament CID present in the scores.
+    :param active_cids: CIDs still under tournament evaluation, or None
+        when scoping is unavailable (fail-open: re-arms the
+        ``CALLOUT_MIN_N`` gate to keep callout volume bounded).
     :return: markdown section, or empty string when no callouts qualify.
     """
     if not _has_tournament_data(scores_tournament):

@@ -36,6 +36,7 @@ from benchmark.scorer import (
     WORST_BEST_SIZE,
     _accumulate_group,
     _cli_legacy_full_recompute,
+    _cli_period,
     _derive_group,
     _derive_platform_path,
     _derive_tournament_path,
@@ -2873,9 +2874,6 @@ class TestCliPeriodSkipTournamentOutput:
 
     def test_skip_flag_omits_tournament_files(self, tmp_path: Path) -> None:
         """With --skip-tournament-output, no tournament files are written."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.scorer import _cli_period
-
         args = self._args(tmp_path, skip=True)
         output_tournament = tmp_path / "rolling_scores_tournament.json"
 
@@ -2889,9 +2887,6 @@ class TestCliPeriodSkipTournamentOutput:
 
     def test_default_still_writes_tournament_files(self, tmp_path: Path) -> None:
         """Without the flag, behavior is unchanged: tournament files written."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.scorer import _cli_period
-
         args = self._args(tmp_path, skip=False)
         output_tournament = tmp_path / "rolling_scores_tournament.json"
 

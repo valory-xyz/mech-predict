@@ -31,6 +31,7 @@ from typing import Any, Dict
 
 import pytest
 from benchmark.tool_improvement_triage import (
+    BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
@@ -138,11 +139,12 @@ class TestSignAgreement:
     """Brier and log_loss must agree on the worsening direction."""
 
     def test_log_loss_improves_silent(self) -> None:
-        """Disagreement between Brier and log_loss signs silences the tool."""
-        # Brier worsens, log_loss improves -> disagreement -> silent.
+        """Sign disagreement on a regression silences when level stays low."""
+        # Brier worsens, log_loss improves -> regression-path sign
+        # disagreement; level stays below 0.25 -> overall silent.
         d = triage(
-            _scores(a=_stats(brier=0.260, log_loss=0.580)),
-            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            _scores(a=_stats(brier=0.240, log_loss=0.580)),
+            _scores(a=_stats(brier=0.190, log_loss=0.610)),
             {},
         )
         assert d[0]["decision"] == "silent"
@@ -236,19 +238,20 @@ class TestMultipleTools:
     def test_one_flags_others_silent(self) -> None:
         """Three tools with different fates resolve independently."""
         cur = _scores(
-            a=_stats(brier=0.260, log_loss=0.700),
-            b=_stats(brier=0.200, log_loss=0.600),  # no regression
-            c=_stats(brier=0.260, log_loss=0.580),  # sign disagree
+            a=_stats(brier=0.260, log_loss=0.700),  # regression + above level
+            b=_stats(brier=0.200, log_loss=0.600),  # no regression, below level
+            c=_stats(brier=0.230, log_loss=0.580),  # sign disagree, below level
         )
         prev = _scores(
             a=_stats(brier=0.210, log_loss=0.610),
             b=_stats(brier=0.210, log_loss=0.610),
-            c=_stats(brier=0.210, log_loss=0.610),
+            c=_stats(brier=0.180, log_loss=0.610),
         )
         d = {x["tool"]: x for x in triage(cur, prev, {})}
         assert d["a"]["decision"] == "open_issue"
         assert d["b"]["decision"] == "silent"
         assert d["c"]["decision"] == "silent"
+        assert d["c"]["reason"] == "sign_disagreement"
 
 
 class TestCorruptOrMissingState:
@@ -302,7 +305,7 @@ class TestIssueBodyContract:
             "n_cur": 187,
             "n_prev": 212,
             "decision": "open_issue",
-            "reason": "all_gates_pass",
+            "reason": "regression",
             "issue_open": True,
         }
 
@@ -352,12 +355,75 @@ class TestIssueBodyContract:
         body.encode("ascii")  # raises if any non-ASCII char snuck in.
 
 
+class TestLevelTrigger:
+    """The level-floor trigger fires when Brier persistently exceeds the floor."""
+
+    def test_level_above_floor_no_regression_opens(self) -> None:
+        """A tool above the level floor opens even without a regression."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            {},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+        assert d[0]["issue_open"] is True
+
+    def test_level_below_floor_no_regression_silent(self) -> None:
+        """A tool below the level floor and not regressing stays silent."""
+        d = triage(
+            _scores(a=_stats(brier=0.230, log_loss=0.610)),
+            _scores(a=_stats(brier=0.230, log_loss=0.610)),
+            {},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_level_floor_does_not_require_sign_agreement(self) -> None:
+        """Level trigger fires even when log_loss disagrees with Brier delta."""
+        # Brier worsens AND above floor; log_loss improves. Sign-disagreement
+        # silences the regression path, but level fires independently.
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.580)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_regression_reason_wins_over_level(self) -> None:
+        """When both trigger, the issue is labelled as regression."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "regression"
+
+    def test_open_issue_suppresses_level_too(self) -> None:
+        """An open issue suppresses level-floor firings just like regressions."""
+        prior = _prior_state_with_issue("a")
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            prior,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "duplicate_suppressed"
+        assert d[0]["issue_open"] is True
+
+
 class TestConstants:
     """The calibrated constants are part of the public contract."""
 
     def test_threshold(self) -> None:
         """Brier regression threshold is the calibrated 0.040 value."""
         assert BRIER_REGRESSION_THRESHOLD == 0.040
+
+    def test_level_threshold(self) -> None:
+        """Brier level-floor threshold is 0.25 (self-improvement trigger)."""
+        assert BRIER_LEVEL_THRESHOLD == 0.25
 
     def test_sample_floor(self) -> None:
         """Sample floor is 105 (the 15/day * 7d aggregate)."""
@@ -406,6 +472,15 @@ class TestPlatformPropagation:
             "[tool-improvement] `foo`: Brier regression on omen W-1"
         )
 
+    def test_title_changes_per_trigger_reason(self) -> None:
+        """Level-floor issues get a distinct title style."""
+        assert build_issue_title("foo", "polymarket", "level_floor") == (
+            "[tool-improvement] `foo`: Brier above level on polymarket W-1"
+        )
+        assert build_issue_title("foo", "polymarket", "regression") == (
+            "[tool-improvement] `foo`: Brier regression on polymarket W-1"
+        )
+
     def test_body_single_platform_no_cross_ref(self) -> None:
         """When only one platform is monitored, no cross-ref text is added."""
         body = build_issue_body(
@@ -443,7 +518,7 @@ class TestPlatformPropagation:
             "n_cur": 187,
             "n_prev": 212,
             "decision": "open_issue",
-            "reason": "all_gates_pass",
+            "reason": "regression",
             "issue_open": True,
         }
 

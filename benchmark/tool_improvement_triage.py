@@ -31,21 +31,27 @@ cascade:
    Omen-only regression while the jury is in the loop). The triage
    iterates each enabled platform separately and files one issue per
    (tool, platform) regression.
-2. ``Brier_cur - Brier_prev > 0.040``. Calibrated 2026-05-29 against
-   26 days of CI data: 0.015 + two-day confirmation produced ~0.5
-   issues/week (too quiet); 0.040 alone yields ~1 issue/week per
-   active tool.
+2. Trigger (either is sufficient):
+   - Regression: ``Brier_cur - Brier_prev > 0.040`` AND
+     ``sign(delta Brier) == sign(delta log_loss)``. Calibrated
+     2026-05-29 against 26 days of CI data: 0.040 alone yields ~1
+     issue/week per active tool.
+   - Level: ``Brier_cur > 0.25`` regardless of delta. The loop is
+     self-improvement, not just self-stabilization; a tool whose
+     Brier is persistently 0.30 is a candidate for improvement
+     even when it is not actively getting worse.
 3. ``valid_n / 7 >= 15`` on both windows (so ``valid_n >= 105``).
-4. ``sign(delta Brier) == sign(delta log_loss)`` (both primary metrics
-   from PROPOSAL.md Part 4 must agree on the worsening direction).
-5. ``reliability >= 0.80`` (collapses route to a WARNING log instead
+4. ``reliability >= 0.80`` (collapses route to a WARNING log instead
    of opening a tool-improvement issue; an operator watching the
    workflow output is the safety net).
 
-Duplicate-issue suppression: once a tool opens an issue, the persisted
-``issue_open=True`` flag stays true for as long as the gates keep
-firing. Tomorrow stays silent. Once the regression resolves (gates
-stop firing), the flag clears and a fresh issue can open later.
+Duplicate-issue suppression: once a tool has an open ``tool-improvement``
+issue on GitHub, the triage stays silent for that tool. ``prior_open``
+is seeded from the live ``gh issue list`` query at the start of
+``main()`` rather than from yesterday's state file alone, so a PR that
+fixes the issue (closing it) re-arms the trigger immediately; a PR
+still under review keeps the tool quiet for as long as the issue
+remains open.
 
 For each ``open_issue`` decision, the script calls ``gh issue create``
 with the ``tool-improvement`` label. The label routes the issue to
@@ -68,6 +74,7 @@ from typing import Any, Dict, List, Optional
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
+BRIER_LEVEL_THRESHOLD = 0.25
 VALID_N_PER_WINDOW_FLOOR = 105
 RELIABILITY_FLOOR = 0.80
 ROLLING_WINDOW_DAYS = 7
@@ -85,6 +92,60 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def _open_issue_tools(repo: str, label: str) -> List[str]:
+    """Return tool names with an open ``label``-labelled issue on ``repo`` (empty on any gh error)."""
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--label",
+        label,
+        "--state",
+        "open",
+        "--json",
+        "title",
+        "--limit",
+        "200",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning(
+            "gh issue list failed (%s); duplicate-suppression "
+            "will fall back to state file only",
+            exc,
+        )
+        return []
+    if result.returncode != 0:
+        log.warning(
+            "gh issue list rc=%d stderr=%r; falling back to state " "file only",
+            result.returncode,
+            result.stderr[:200],
+        )
+        return []
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except ValueError:
+        return []
+    tools: List[str] = []
+    for row in rows:
+        title = row.get("title") or ""
+        # title prefix carries the tool name between the first backtick pair  # noqa: E800
+        start = title.find("`")
+        end = title.find("`", start + 1)
+        if start != -1 and end != -1 and end > start:
+            tools.append(title[start + 1 : end])
+    return tools
 
 
 def triage(
@@ -131,26 +192,44 @@ def triage(
             continue
         delta_brier = bc - bp
         d["delta_brier"] = delta_brier
-        if delta_brier <= BRIER_REGRESSION_THRESHOLD:
+        # Two triggers express the self-improvement loop:
+        # - regression: today's Brier worsened by more than the threshold
+        #   AND log_loss agrees on the worsening direction. Sign
+        #   agreement filters noisy borderline regressions.
+        # - level: today's Brier exceeds an absolute floor. The tool is
+        #   not getting worse but it is persistently inaccurate, which
+        #   is a self-improvement opportunity. Level is checked
+        #   independently of sign-agreement: a high-level tool may still
+        #   warrant a fix even when log_loss disagrees on the delta.
+        above_level = bc > BRIER_LEVEL_THRESHOLD
+        regressed = False
+        if delta_brier > BRIER_REGRESSION_THRESHOLD:
+            lc, lp = c.get("log_loss"), p.get("log_loss")
+            if lc is None or lp is None:
+                if not above_level:
+                    d.update(decision="silent", reason="missing_log_loss")
+                    decisions.append(d)
+                    continue
+                # else fall through with regressed=False; level fires
+            elif lc - lp > 0:
+                regressed = True
+            elif not above_level:
+                d.update(decision="silent", reason="sign_disagreement")
+                decisions.append(d)
+                continue
+        if not regressed and not above_level:
             d.update(decision="silent", reason="no_regression")
             decisions.append(d)
             continue
-        lc, lp = c.get("log_loss"), p.get("log_loss")
-        if lc is None or lp is None:
-            d.update(decision="silent", reason="missing_log_loss")
-            decisions.append(d)
-            continue
-        if lc - lp <= 0:
-            d.update(decision="silent", reason="sign_disagreement")
-            decisions.append(d)
-            continue
-        # All gates pass. Duplicate-issue suppression: if an issue is
-        # already open for this tool, stay silent but keep issue_open=True
-        # so tomorrow also stays silent until the regression resolves.
+        # Duplicate-issue suppression: if an issue is already open for
+        # this tool (regression or level signal), stay silent and keep
+        # issue_open=True so tomorrow also stays silent until the
+        # human/agent closes the open GitHub issue.
+        reason = "regression" if regressed else "level_floor"
         if prior_open.get(tool):
             d.update(decision="silent", reason="duplicate_suppressed", issue_open=True)
         else:
-            d.update(decision="open_issue", reason="all_gates_pass", issue_open=True)
+            d.update(decision="open_issue", reason=reason, issue_open=True)
         decisions.append(d)
     return decisions
 
@@ -197,8 +276,14 @@ def _window_iso(now: datetime, days: int = ROLLING_WINDOW_DAYS) -> Dict[str, str
     }
 
 
-def build_issue_title(tool: str, platform: str = "polymarket") -> str:
+def build_issue_title(
+    tool: str,
+    platform: str = "polymarket",
+    reason: str = "regression",
+) -> str:
     """Issue title format for ``tool`` that the agent's Step 1 parser expects."""
+    if reason == "level_floor":
+        return f"[tool-improvement] `{tool}`: Brier above level on {platform} W-1"
     return f"[tool-improvement] `{tool}`: Brier regression on {platform} W-1"
 
 
@@ -224,18 +309,34 @@ def build_issue_body(
     )
     pm = json.dumps(polymarket_stats, indent=2, sort_keys=True)
     cb = json.dumps({"tool": tool, "stats": combined_stats}, indent=2, sort_keys=True)
+    reason = decision.get("reason", "regression")
+    if reason == "level_floor":
+        headline = (
+            f"`{tool}` on {platform} has a Brier persistently above "
+            f"{BRIER_LEVEL_THRESHOLD:.2f} in the most recent 7-day window. "
+            "This is a self-improvement opportunity: the tool is not "
+            "actively getting worse, but its level is high enough that a "
+            "structural change is worth attempting."
+        )
+        signal = "level signal"
+    else:
+        headline = (
+            f"`{tool}` on {platform} shows a Brier regression in the most "
+            "recent 7-day window."
+        )
+        signal = "regression signal"
     return (
         f"## Summary\n\n"
-        f"`{tool}` on {platform} shows a Brier regression in the most "
-        f"recent 7-day window.\n\n"
+        f"{headline}\n\n"
         f"- Current 7d (**W-1**) Brier: **{decision['brier_cur']:.4f}** "
         f"(n={decision['n_cur']})\n"
         f"- Previous 7d (**W-2**, non-overlapping) Brier: "
         f"**{decision['brier_prev']:.4f}** (n={decision['n_prev']})\n"
         f"- Delta: **{decision['delta_brier']:+.4f}**\n"
+        f"- Trigger: **{reason}**\n"
         f"- Platforms monitored: {sorted(monitored)}; "
         f"this issue is scoped to **{platform}**.{cross_ref}\n\n"
-        "This issue records the regression as a signal, not a diagnosis. "
+        f"This issue records the {signal}, not a diagnosis. "
         "The cause has not been identified.\n\n"
         "@valory-coding-agent\n\n"
         "## Windows\n\n"
@@ -392,6 +493,19 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     window_iso = _window_iso(now)
     state = _load_json(args.state)
+    # Overlay GitHub's view of currently-open tool-improvement issues on
+    # top of the persisted state. A tool whose issue is still open on
+    # GitHub stays silent regardless of whether the previous run wrote
+    # issue_open=True; conversely, an issue that has been closed (PR
+    # merged or human dismissed) re-arms the trigger even if the state
+    # file still says issue_open=True.
+    open_now = _open_issue_tools(args.repo, args.label)
+    if open_now:
+        log.info("triage open issues on GitHub: %s", sorted(open_now))
+        by_tool = state.setdefault("by_tool", {})
+        for tool in open_now:
+            row = by_tool.setdefault(tool, {})
+            row["issue_open"] = True
 
     all_decisions: List[Dict[str, Any]] = []
     n_opened = n_failed = n_collapse = n_silent = 0
@@ -415,7 +529,9 @@ def main() -> int:
                     window_iso,
                     platforms_monitored=platforms,
                 )
-                title = build_issue_title(d["tool"], platform)
+                title = build_issue_title(
+                    d["tool"], platform, d.get("reason", "regression")
+                )
                 rc = _open_issue(args.repo, args.label, title, body, args.dry_run)
                 if rc == 0:
                     n_opened += 1

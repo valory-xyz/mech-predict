@@ -96,11 +96,6 @@ logging_config:
       - logfile
       - console
       propagate: true
-  root:
-    handlers:
-    - logfile
-    - console
-    level: INFO
 dependencies:
   aiohttp:
     version: <4.0.0,>=3.8.5

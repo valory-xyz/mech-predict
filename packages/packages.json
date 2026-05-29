@@ -19,8 +19,8 @@
         "custom/valory/superforcaster_full_search/0.1.0": "bafybeihba6ch6g7gndfwv75dtpfrpnvg4dw6wq6lxexch5h3n3vjafuxsm",
         "custom/valory/superforcaster_calibrated_full_search/0.1.0": "bafybeialuhbtfumvlbdtzimfn7wdacqwccn2ny5cbhi4tkri6iih6pfgxe",
         "custom/valory/superforcaster_polymarket_v1/0.1.0": "bafybeiawfhy3w5aclmxm5zxebwd5l7paseqlgmihwbqfyhcdpn2kccgtrq",
-        "agent/valory/mech_predict/0.1.0": "bafybeifhcqjht6j75vyflsizom7tdhgpj5guvrkwj7oiowlej4ojtz26qm",
-        "service/valory/mech_predict/0.1.0": "bafybeigeg5exohrh3a4erbl7t2gazhnfsn3y4rcd5be6xnidb46sgytany"
+        "agent/valory/mech_predict/0.1.0": "bafybeicskngaz4hyzcgmjiothttzwsf4qplc7ktjyf2mzawnxjgqa5cdjm",
+        "service/valory/mech_predict/0.1.0": "bafybeick2zi4yvujhgnjk5kvdhia2ekxxvh6yavsnihaj5dbpell5f57ja"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

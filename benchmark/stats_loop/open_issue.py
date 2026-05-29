@@ -25,11 +25,17 @@ For each ``TriageDecision`` returned by ``triage.triage_tools``:
 
 - ``open_issue``: builds a data-only issue body and calls ``gh issue
   create --label tool-improvement``. The label routes the issue to
-  ``tool-improvement-agent`` in the agent-skills monorepo.
-- ``reliability_collapse``: prints a warning to stderr (operators tail
-  the workflow logs) and DOES NOT open a tool-improvement issue.
-  Reliability collapses are upstream and need a human.
-- ``silent``: no action.
+  ``tool-improvement-agent`` in the agent-skills monorepo. Failure of
+  the ``gh`` call is logged and propagated: ``main()`` returns a
+  non-zero exit code so the CI step turns red and the workflow log
+  surfaces the failure (a silently-swallowed dispatch would lose the
+  day's confirmed regression with no signal).
+- ``reliability_collapse``: emits a WARNING log line ('rely_collapse
+  on X: reliability=...') and does NOT open a tool-improvement issue.
+  No automated paging is wired today, so an operator watching the
+  workflow output is the safety net.
+- ``silent``: no action. This also covers the "issue already open
+  yesterday" duplicate-suppression path from ``triage.triage_tools``.
 
 The script always writes the new state file at the end so tomorrow's
 triage can apply the confirmation gate. State persists across daily
@@ -49,18 +55,13 @@ import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional
 
-from benchmark.stats_loop.triage import (
-    PLATFORM,
-    TriageDecision,
-    TriageOutcome,
-    triage_tools,
-    write_state,
-)
-
+from benchmark.stats_loop.triage import (PLATFORM, RELIABILITY_FLOOR,
+                                         TriageDecision, triage_tools,
+                                         write_state)
 
 log = logging.getLogger(__name__)
 
@@ -85,11 +86,32 @@ def _format_baseline_block(stats: Dict[str, Any]) -> str:
     return json.dumps(stats, indent=2, sort_keys=True)
 
 
-def _artifact_url(run_id: str) -> str:
-    """Build the GitHub Actions UI URL for this run's artifacts page."""
-    return (
-        f"https://github.com/{DEFAULT_REPO}/actions/runs/{run_id}#artifacts"
-    )
+def _artifact_url(repo: str, run_id: str) -> str:
+    """Build the GitHub Actions UI URL for this run's artifacts page.
+
+    The URL must point at ``args.repo`` (not the hardcoded
+    ``DEFAULT_REPO``) so issues filed in forks / staging environments
+    carry working artifact links.
+    """
+    return f"https://github.com/{repo}/actions/runs/{run_id}#artifacts"
+
+
+def _safe_load_json(path: Path) -> Dict[str, Any]:
+    """Load JSON from disk; return ``{}`` on missing or corrupt content.
+
+    A truncated score file (interrupted CI step) raises
+    ``JSONDecodeError`` if unguarded; that crash would also wedge the
+    workflow because the next run reads the same artifact. Returning
+    ``{}`` lets the missing-stats branches downstream decide what to do
+    (the missing tool will simply produce no decisions and stay silent).
+    """
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("Failed to parse %s (treating as empty): %s", path, exc)
+        return {}
 
 
 def build_issue_body(
@@ -120,11 +142,21 @@ def build_issue_body(
     :return: Markdown issue body, ASCII-only.
     """
     today = decision.today
+    # L2: explicit assertion so a future gate change that lets a None
+    # value reach this code path fails loudly (instead of crashing
+    # mid-format with the cryptic "TypeError: unsupported format string
+    # passed to NoneType"). The open_issue path guarantees these are set;
+    # the assertion documents that contract for the reader.
+    assert today.brier_cur is not None, "brier_cur required for open_issue"
+    assert today.brier_prev is not None, "brier_prev required for open_issue"
+    assert today.delta_brier is not None, "delta_brier required for open_issue"
     polymarket_block = _format_baseline_block(polymarket_stats)
-    combined_block = _format_baseline_block({
-        "tool": today.tool_name,
-        "stats": combined_stats,
-    })
+    combined_block = _format_baseline_block(
+        {
+            "tool": today.tool_name,
+            "stats": combined_stats,
+        }
+    )
     return (
         f"**Polystrat `{today.tool_name}`** Brier "
         f"**{today.brier_cur:.4f}** (n={today.n_cur}, current 7d window W-1) "
@@ -160,8 +192,8 @@ def build_issue_body(
         "Download it with `gh run download <run-id> --name benchmark-data` "
         "and read:\n\n"
         "- `datasets/logs/production_log_<YYYY_MM_DD>.jsonl` - raw rows. "
-        f"Filter on `tool_name == \"{today.tool_name}\"` AND `platform == "
-        "\"polymarket\"` AND `prediction_parse_status == \"valid\"` AND "
+        f'Filter on `tool_name == "{today.tool_name}"` AND `platform == '
+        '"polymarket"` AND `prediction_parse_status == "valid"` AND '
         "`final_outcome` not null.\n"
         "- `results/scores_polymarket.json` - what the daily scorer wrote "
         "(matches the baseline block above).\n"
@@ -195,21 +227,17 @@ def _window_iso_from_args(now: datetime, days: int = 7) -> Dict[str, str]:
     pulls the artifact.
     """
     fmt = "%Y-%m-%dT%H:%M:%SZ"
+    window = timedelta(days=days)
     w1_end = now
-    w1_start = w1_end.replace() - _delta_days(days)
+    w1_start = w1_end - window
     w2_end = w1_start
-    w2_start = w2_end - _delta_days(days)
+    w2_start = w2_end - window
     return {
         "w1_start": w1_start.strftime(fmt),
         "w1_end": w1_end.strftime(fmt),
         "w2_start": w2_start.strftime(fmt),
         "w2_end": w2_end.strftime(fmt),
     }
-
-
-def _delta_days(days: int):
-    from datetime import timedelta
-    return timedelta(days=days)
 
 
 def open_github_issue(
@@ -219,11 +247,14 @@ def open_github_issue(
     title: str,
     body: str,
     dry_run: bool,
-) -> int:
+) -> tuple[int, Optional[str]]:
     """Call ``gh issue create`` to publish the issue.
 
-    Returns 0 on success, the gh subprocess return code otherwise.
-    In dry-run mode prints what would be executed and returns 0.
+    :return: ``(returncode, issue_url)``. ``issue_url`` is the URL
+        ``gh`` emits on stdout when the issue is created, or ``None``
+        on subprocess failure / dry-run. The caller uses the returncode
+        to decide whether to count the call as a successful dispatch
+        (so ``main()`` can exit non-zero on any failure).
     """
     cmd = [
         "gh",
@@ -240,7 +271,7 @@ def open_github_issue(
     ]
     if dry_run:
         log.info("DRY-RUN: would execute gh issue create with title=%s", title)
-        return 0
+        return 0, None
     result = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         log.error(
@@ -248,9 +279,10 @@ def open_github_issue(
             result.returncode,
             result.stderr,
         )
-    else:
-        log.info("Issue opened: %s", result.stdout.strip())
-    return result.returncode
+        return result.returncode, None
+    issue_url = result.stdout.strip().splitlines()[-1] if result.stdout else None
+    log.info("Issue opened: %s", issue_url)
+    return 0, issue_url
 
 
 def main() -> int:
@@ -264,21 +296,23 @@ def main() -> int:
     parser.add_argument("--cur-scores", type=Path, default=DEFAULT_CUR_SCORES)
     parser.add_argument("--prev-scores", type=Path, default=DEFAULT_PREV_SCORES)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--platform-scores", type=Path, default=DEFAULT_PLATFORM_SCORES)
     parser.add_argument(
-        "--platform-scores", type=Path, default=DEFAULT_PLATFORM_SCORES
-    )
-    parser.add_argument(
-        "--scores", type=Path, default=DEFAULT_SCORES,
+        "--scores",
+        type=Path,
+        default=DEFAULT_SCORES,
         help="Cumulative cross-platform scores for the cross-reference block.",
     )
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--label", default=DEFAULT_LABEL)
     parser.add_argument(
-        "--run-id", default=os.environ.get("GITHUB_RUN_ID", ""),
+        "--run-id",
+        default=os.environ.get("GITHUB_RUN_ID", ""),
         help="GitHub Actions run id; used to build the artifact URL.",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Print the actions; do not call gh.",
     )
     args = parser.parse_args()
@@ -296,20 +330,25 @@ def main() -> int:
 
     now = datetime.now(timezone.utc)
     window_iso = _window_iso_from_args(now)
-    artifact_url = _artifact_url(args.run_id) if args.run_id else "<no run id>"
+    # L5: surface the missing-run-id case loudly. The fallback string
+    # IS embedded in the issue body, which the agent then mishandles
+    # silently; logging at WARNING makes the misconfiguration visible
+    # in the workflow output.
+    if args.run_id:
+        artifact_url = _artifact_url(args.repo, args.run_id)
+    else:
+        log.warning(
+            "GITHUB_RUN_ID not set; issue body will carry a placeholder "
+            "artifact URL. Set GITHUB_RUN_ID in the workflow env (it is "
+            "automatically provided by GitHub Actions on real runs)."
+        )
+        artifact_url = "<no run id>"
 
-    polymarket_scores = (
-        json.loads(args.platform_scores.read_text(encoding="utf-8"))
-        if args.platform_scores.exists()
-        else {}
-    )
-    cross_scores = (
-        json.loads(args.scores.read_text(encoding="utf-8"))
-        if args.scores.exists()
-        else {}
-    )
+    polymarket_scores = _safe_load_json(args.platform_scores)
+    cross_scores = _safe_load_json(args.scores)
 
     n_opened = 0
+    n_failed = 0
     n_reliability = 0
     n_silent = 0
     for decision in decisions:
@@ -328,7 +367,7 @@ def main() -> int:
                 window_iso=window_iso,
             )
             title = build_issue_title(decision)
-            rc = open_github_issue(
+            rc, _issue_url = open_github_issue(
                 repo=args.repo,
                 label=args.label,
                 title=title,
@@ -337,29 +376,46 @@ def main() -> int:
             )
             if rc == 0:
                 n_opened += 1
+            else:
+                # H3: a failed gh call must surface as a CI red. The
+                # day's confirmed regression issue would otherwise be
+                # silently lost (and tomorrow's duplicate-suppression
+                # gate would NOT fire for it, because today's persisted
+                # outcome carries issue_open=True for an issue that
+                # never actually opened). Counting failures here and
+                # returning non-zero below is the floor; an operator
+                # still needs to inspect the workflow log to recover.
+                n_failed += 1
         elif decision.decision == "reliability_collapse":
             log.warning(
                 "RELIABILITY COLLAPSE on %s: reliability=%.3f (< %.2f). "
-                "Page an operator; tool-improvement issue NOT opened.",
+                "Tool-improvement issue NOT opened; an operator watching "
+                "the workflow output is the safety net here.",
                 decision.today.tool_name,
                 decision.today.reliability_cur or float("nan"),
-                0.80,
+                RELIABILITY_FLOOR,
             )
             n_reliability += 1
         else:
             n_silent += 1
 
     log.info(
-        "stats-loop summary: %d issue(s) opened, %d reliability collapse(s), "
-        "%d tool(s) silent",
+        "stats-loop summary: %d issue(s) opened, %d failed, "
+        "%d reliability collapse(s), %d tool(s) silent",
         n_opened,
+        n_failed,
         n_reliability,
         n_silent,
     )
 
+    # Always write state (the next run depends on it being fresh). Do
+    # this BEFORE returning a non-zero exit code so an issue-dispatch
+    # failure does not also wedge tomorrow's confirmation gate.
     write_state(args.state, decisions, _now_iso())
     log.info("State saved to %s", args.state)
-    return 0
+
+    # H3: non-zero exit when any gh issue create failed.
+    return 1 if n_failed > 0 else 0
 
 
 if __name__ == "__main__":

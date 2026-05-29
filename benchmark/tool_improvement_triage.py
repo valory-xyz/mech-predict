@@ -112,38 +112,27 @@ def _open_issue_tools(repo: str, label: str) -> List[str]:
         "200",
     ]
     try:
-        result = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log.warning(
-            "gh issue list failed (%s); duplicate-suppression "
-            "will fall back to state file only",
-            exc,
-        )
+        log.warning("gh issue list failed (%s); falling back to state file only", exc)
         return []
-    if result.returncode != 0:
+    if r.returncode != 0:
         log.warning(
-            "gh issue list rc=%d stderr=%r; falling back to state " "file only",
-            result.returncode,
-            result.stderr[:200],
+            "gh issue list rc=%d stderr=%r; falling back to state file only",
+            r.returncode,
+            r.stderr[:200],
         )
         return []
     try:
-        rows = json.loads(result.stdout or "[]")
+        rows = json.loads(r.stdout or "[]")
     except ValueError:
         return []
     tools: List[str] = []
     for row in rows:
         title = row.get("title") or ""
-        # title prefix carries the tool name between the first backtick pair  # noqa: E800
         start = title.find("`")
         end = title.find("`", start + 1)
-        if start != -1 and end != -1 and end > start:
+        if 0 <= start < end:
             tools.append(title[start + 1 : end])
     return tools
 
@@ -290,7 +279,6 @@ def build_issue_title(
 def build_issue_body(
     decision: Dict[str, Any],
     polymarket_stats: Dict[str, Any],
-    combined_stats: Dict[str, Any],
     artifact_url: str,
     window_iso: Dict[str, str],
     platforms_monitored: Optional[List[str]] = None,
@@ -308,7 +296,6 @@ def build_issue_body(
         else ""
     )
     pm = json.dumps(polymarket_stats, indent=2, sort_keys=True)
-    cb = json.dumps({"tool": tool, "stats": combined_stats}, indent=2, sort_keys=True)
     reason = decision.get("reason", "regression")
     if reason == "level_floor":
         headline = (
@@ -325,75 +312,60 @@ def build_issue_body(
             "recent 7-day window."
         )
         signal = "regression signal"
-    return (
-        f"## Summary\n\n"
-        f"{headline}\n\n"
-        f"- Current 7d (**W-1**) Brier: **{decision['brier_cur']:.4f}** "
-        f"(n={decision['n_cur']})\n"
-        f"- Previous 7d (**W-2**, non-overlapping) Brier: "
-        f"**{decision['brier_prev']:.4f}** (n={decision['n_prev']})\n"
-        f"- Delta: **{decision['delta_brier']:+.4f}**\n"
-        f"- Trigger: **{reason}**\n"
-        f"- Platforms monitored: {sorted(monitored)}; "
-        f"this issue is scoped to **{platform}**.{cross_ref}\n\n"
-        f"This issue records the {signal}, not a diagnosis. "
-        "The cause has not been identified.\n\n"
-        "@valory-coding-agent\n\n"
-        "## Windows\n\n"
-        "| Window | Role | Range (predicted_at, UTC) |\n"
-        "|---|---|---|\n"
-        f"| **W-1** (current) | the regression to explain | "
-        f"`{window_iso['w1_start']}` - `{window_iso['w1_end']}` |\n"
-        f"| **W-2** (previous, disjoint) | comparison baseline; "
-        "any proposed fix should be validated on this window |"
-        f" `{window_iso['w2_start']}` - `{window_iso['w2_end']}` |\n\n"
-        "W-1 and W-2 are non-overlapping by construction. Any fix should "
-        "be evaluated against W-2 (or another window disjoint from W-1) "
-        "to avoid in-sample overfitting.\n\n"
-        f"## {platform.capitalize()} baseline stats (machine-readable)\n\n"
-        f"```baseline-stats-{platform}\n{pm}\n```\n\n"
-        "The combined cross-platform `baseline-stats` block follows for "
-        f"cross-reference; the regression itself is scoped to {platform}.\n\n"
-        f"```baseline-stats\n{cb}\n```\n\n"
-        "## Suggested investigation\n\n"
-        "The full `benchmark-data` artifact for the flywheel run that "
-        "produced these numbers is at:\n\n"
-        f"> **{artifact_url}**\n\n"
-        "Download it with `gh run download <run-id> --name benchmark-data` "
-        "and inspect the files below in this order before opening any "
-        "code change:\n\n"
-        f"1. **`results/scores_{platform}.json`** - all the per-slice "
-        "aggregates the daily scorer produced. Localize the regression "
-        f'starting from `by_tool["{tool}"]` and decomposing along:\n'
-        f'   - `by_tool_category["{tool} | <category>"]` - is the '
-        "regression localized to one market category (politics, business, "
-        "sports, etc.)?\n"
-        f'   - `by_tool_version_mode["{tool} | <version> | <mode>"]` - '
-        "did a recent tool version bump introduce the regression?\n"
-        f'   - `by_difficulty["<bucket>"]` cross-referenced with the '
-        f"tool - is `{tool}` failing specifically on hard markets?\n"
-        f'   - `by_liquidity["<bucket>"]` cross-referenced - does '
-        "illiquidity correlate?\n"
-        f'   - `by_tool_platform["{tool} | {platform}"]` - sanity '
-        "check vs the headline number above.\n"
-        "   A sub-cell is materially worse than the aggregate when "
-        "`cell_brier > tool_brier + 0.05` AND `cell_n >= 30`. Cells under "
-        "that threshold are statistically noisy at this n.\n"
-        f"2. **`results/report_{platform}.md`** - the same numbers in "
-        "human-readable form, including `Tool x Category` and "
-        "`Tool x Category Historical Comparison` tables that mirror "
-        "the JSON above. Use this to sanity-check the decomposition.\n"
-        f"3. **`datasets/logs/production_log_<YYYY_MM_DD>.jsonl`** - raw "
-        f'rows. Filter on `tool_name == "{tool}"` AND `platform == '
-        f'"{platform}"` AND `prediction_parse_status == "valid"` AND '
-        "`final_outcome` not null. Sample 10-20 misses from the worst "
-        "localized cell and read the prompt + tool response.\n\n"
-        "Before forming hypotheses, reproduce the headline number above "
-        "from the raw rows in step 3. If reproduction does not match "
-        "within +/- 0.001, the scoring artifact may have been rewritten "
-        "since this issue was filed; in that case the right action is to "
-        "close the issue with that note rather than act on stale data.\n"
+    return _BODY_TEMPLATE.format(
+        headline=headline,
+        brier_cur=decision["brier_cur"],
+        brier_prev=decision["brier_prev"],
+        delta=decision["delta_brier"],
+        n_cur=decision["n_cur"],
+        n_prev=decision["n_prev"],
+        reason=reason,
+        signal=signal,
+        platforms=sorted(monitored),
+        platform=platform,
+        cross_ref=cross_ref,
+        w1_start=window_iso["w1_start"],
+        w1_end=window_iso["w1_end"],
+        w2_start=window_iso["w2_start"],
+        w2_end=window_iso["w2_end"],
+        pm=pm,
+        artifact_url=artifact_url,
     )
+
+
+_BODY_TEMPLATE = """## Summary
+
+{headline}
+
+- Current 7d (**W-1**) Brier: **{brier_cur:.4f}** (n={n_cur})
+- Previous 7d (**W-2**, non-overlapping) Brier: **{brier_prev:.4f}** (n={n_prev})
+- Delta: **{delta:+.4f}**
+- Trigger: **{reason}**
+- Platforms monitored: {platforms}; this issue is scoped to **{platform}**.{cross_ref}
+
+This issue records the {signal}, not a diagnosis. The cause has not been identified.
+
+@valory-coding-agent
+
+## Windows
+
+| Window | Role | Range (predicted_at, UTC) |
+|---|---|---|
+| **W-1** (current) | the regression to explain | `{w1_start}` - `{w1_end}` |
+| **W-2** (previous, disjoint) | comparison baseline for any proposed fix | `{w2_start}` - `{w2_end}` |
+
+## Baseline stats (machine-readable)
+
+```baseline-stats-{platform}
+{pm}
+```
+
+## Investigation
+
+Artifact: {artifact_url}
+
+Download with `gh run download <run-id> --name benchmark-data`. The agent's pipeline (in agent-skills) is authoritative for the investigation procedure; the inputs are the daily JSONL logs and `results/scores_{platform}.json`. Reproduce the headline number from the raw rows before forming any hypothesis.
+"""
 
 
 def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> int:
@@ -425,11 +397,13 @@ def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> 
     return 0
 
 
+def _f(v: Optional[float], p: str) -> str:
+    """Format ``v`` with format spec ``p`` or return ``n/a``."""
+    return f"{v:{p}}" if v is not None else "n/a"
+
+
 def _log_decision(d: Dict[str, Any]) -> None:
     """Emit one greppable INFO line summarising a triage decision."""
-    db = d.get("delta_brier")
-    bc = d.get("brier_cur")
-    bp = d.get("brier_prev")
     log.info(
         "triage %s %s decision=%s reason=%s delta_brier=%s n_cur=%d "
         "brier_cur=%s brier_prev=%s issue_open=%s",
@@ -437,10 +411,10 @@ def _log_decision(d: Dict[str, Any]) -> None:
         d.get("tool", "?"),
         d.get("decision", "?"),
         d.get("reason", "?"),
-        f"{db:+.4f}" if db is not None else "n/a",
+        _f(d.get("delta_brier"), "+.4f"),
         d.get("n_cur", 0) or 0,
-        f"{bc:.4f}" if bc is not None else "n/a",
-        f"{bp:.4f}" if bp is not None else "n/a",
+        _f(d.get("brier_cur"), ".4f"),
+        _f(d.get("brier_prev"), ".4f"),
         d.get("issue_open", False),
     )
 
@@ -453,7 +427,6 @@ def main() -> int:
         type=Path,
         default=RESULTS_DIR / "tool_improvement_triage_state.json",
     )
-    p.add_argument("--scores", type=Path, default=RESULTS_DIR / "scores.json")
     p.add_argument("--repo", default=DEFAULT_REPO)
     p.add_argument("--label", default=DEFAULT_LABEL)
     p.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
@@ -471,9 +444,10 @@ def main() -> int:
 
     platforms = [p_.strip() for p_ in args.platforms.split(",") if p_.strip()]
     log.info(
-        "triage thresholds: brier_threshold=%.3f valid_n_floor=%d "
-        "reliability_floor=%.2f rolling_window_days=%d platforms=%s dry_run=%s",
+        "triage thresholds: regression=%.3f level=%.2f valid_n=%d reliability=%.2f "
+        "window_days=%d platforms=%s dry_run=%s",
         BRIER_REGRESSION_THRESHOLD,
+        BRIER_LEVEL_THRESHOLD,
         VALID_N_PER_WINDOW_FLOOR,
         RELIABILITY_FLOOR,
         ROLLING_WINDOW_DAYS,
@@ -489,7 +463,6 @@ def main() -> int:
         log.warning("GITHUB_RUN_ID not set; issue body will carry a placeholder URL.")
         artifact_url = "<no run id>"
 
-    cross_scores = _load_json(args.scores)
     now = datetime.now(timezone.utc)
     window_iso = _window_iso(now)
     state = _load_json(args.state)
@@ -520,11 +493,9 @@ def main() -> int:
             _log_decision(d)
             if d["decision"] == "open_issue":
                 stats_pm = (platform_scores.get("by_tool") or {}).get(d["tool"], {})
-                stats_cb = (cross_scores.get("by_tool") or {}).get(d["tool"], {})
                 body = build_issue_body(
                     d,
                     stats_pm,
-                    stats_cb,
                     artifact_url,
                     window_iso,
                     platforms_monitored=platforms,

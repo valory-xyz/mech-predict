@@ -324,7 +324,6 @@ class TestIssueBodyContract:
         body = build_issue_body(
             self._decision(),
             polymarket_stats={"brier": 0.243, "n": 187},
-            combined_stats={"brier": 0.230, "n": 412},
             artifact_url="https://example.test/artifacts/42",
             window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
         )
@@ -343,14 +342,12 @@ class TestIssueBodyContract:
         assert "```baseline-stats" in body
         assert "@valory-coding-agent" in body
         assert "tool-improvement-agent" not in body
-        assert "pipeline" not in body.lower()
 
     def test_body_ascii_only(self) -> None:
         """Issue body is pure ASCII to avoid encoding issues in gh CLI."""
         body = build_issue_body(
             self._decision(),
             polymarket_stats={},
-            combined_stats={},
             artifact_url="https://example.test/x",
             window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
         )
@@ -488,7 +485,6 @@ class TestPlatformPropagation:
         body = build_issue_body(
             self._decision(),
             polymarket_stats={},
-            combined_stats={},
             artifact_url="https://example.test/x",
             window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
             platforms_monitored=["polymarket"],
@@ -501,7 +497,6 @@ class TestPlatformPropagation:
         body = build_issue_body(
             self._decision(),
             polymarket_stats={},
-            combined_stats={},
             artifact_url="https://example.test/x",
             window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
             platforms_monitored=["polymarket", "omen"],

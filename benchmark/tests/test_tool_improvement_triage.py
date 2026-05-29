@@ -330,17 +330,15 @@ class TestIssueBodyContract:
         assert "factual_research" in body
         # Artifact URL passes through verbatim.
         assert "https://example.test/artifacts/42" in body
-        # Agent mention triggers the tool-improvement-agent route.
-        assert "@valory-coding-agent" in body
-        assert "tool-improvement-agent" in body
-        # Window markers used by the agent's parser.
+        # Window markers (any downstream parser reads these).
         assert "W-1" in body
         assert "W-2" in body
-        # Baseline blocks present (agent's contract with PR-CI).
+        # Baseline blocks present (machine-readable contract).
         assert "```baseline-stats-polymarket" in body
         assert "```baseline-stats" in body
-        # Honesty constraint stated.
-        assert "polymarket-only" in body
+        assert "@valory-coding-agent" in body
+        assert "tool-improvement-agent" not in body
+        assert "pipeline" not in body.lower()
 
     def test_body_ascii_only(self) -> None:
         """Issue body is pure ASCII to avoid encoding issues in gh CLI."""

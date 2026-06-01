@@ -25,6 +25,8 @@ expects.
 
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -611,6 +613,28 @@ class TestOpenIssueSubprocess:
         rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=False)
         assert rc == 1
 
+    def test_success_rc_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A successful gh issue create returns 0."""
+        result = SimpleNamespace(
+            returncode=0, stdout="https://example/issues/1", stderr=""
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=False)
+        assert rc == 0
+
+    def test_timeout_returns_124(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """subprocess.TimeoutExpired surfaces as rc=124 so main() counts a failure."""
+
+        def boom(*_a: Any, **_k: Any) -> None:
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+        monkeypatch.setattr("benchmark.tool_improvement_triage.subprocess.run", boom)
+        rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=False)
+        assert rc == 124
+
 
 class TestOpenIssueToolsParser:
     """_open_issue_tools backtick title parsing + gh-error fallback."""
@@ -785,3 +809,95 @@ class TestLevelFloorReArmAndRegressionCoverage:
         )
         assert d[0]["decision"] == "silent"
         assert d[0]["reason"] == "missing_log_loss"
+
+
+class TestMainExitCode:
+    """main()'s exit code is the CI contract for detecting lost dispatches."""
+
+    @staticmethod
+    def _write_scores(results_dir: Path, brier_cur: float, brier_prev: float) -> None:
+        """Drop matching cur/prev rolling score files for a single tool 'a'."""
+        results_dir.mkdir(parents=True, exist_ok=True)
+        cur = {"by_tool": {"a": _stats(brier=brier_cur, log_loss=0.700)}}
+        prev = {"by_tool": {"a": _stats(brier=brier_prev, log_loss=0.610)}}
+        (results_dir / "rolling_scores_polymarket.json").write_text(json.dumps(cur))
+        (results_dir / "prev_rolling_scores_polymarket.json").write_text(
+            json.dumps(prev)
+        )
+        (results_dir / "scores_polymarket.json").write_text(json.dumps(cur))
+
+    def test_main_returns_nonzero_when_open_issue_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A failed gh issue create surfaces as main() returning 1."""
+        from benchmark.tool_improvement_triage import main
+
+        results_dir = tmp_path / "results"
+        self._write_scores(results_dir, brier_cur=0.260, brier_prev=0.210)
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+
+        # gh issue list succeeds with no open issues; gh issue create fails.
+        call_count = {"n": 0}
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            call_count["n"] += 1
+            if "list" in cmd:
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=1, stdout="", stderr="forbidden")
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["triage", "--state", str(tmp_path / "state.json"), "--repo", "r/r"],
+        )
+        rc = main()
+        assert rc == 1
+        # Verify state.json was written and the failed open issue is
+        # NOT persisted as issue_open=True (state-poisoning guard).
+        state = json.loads((tmp_path / "state.json").read_text())
+        assert state["by_tool"]["a"]["issue_open"] is False
+        assert state["by_tool"]["a"]["reason"] == "open_issue_failed"
+
+    def test_main_returns_one_on_empty_cur_without_overwriting_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Empty cur -> log.error + return 1 + state file untouched."""
+        from benchmark.tool_improvement_triage import main
+
+        results_dir = tmp_path / "results"
+        results_dir.mkdir(parents=True)
+        # Valid JSON but empty by_tool -> zero decisions.
+        empty = {"by_tool": {}}
+        (results_dir / "rolling_scores_polymarket.json").write_text(json.dumps(empty))
+        (results_dir / "prev_rolling_scores_polymarket.json").write_text(
+            json.dumps(empty)
+        )
+        (results_dir / "scores_polymarket.json").write_text(json.dumps(empty))
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Pre-existing state should NOT be overwritten.
+        state_path = tmp_path / "state.json"
+        prior = {"by_tool": {"a": {"issue_open": True, "reason": "level_floor"}}}
+        state_path.write_text(json.dumps(prior))
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["triage", "--state", str(state_path), "--repo", "r/r"],
+        )
+        rc = main()
+        assert rc == 1
+        # Prior state preserved verbatim.
+        assert json.loads(state_path.read_text()) == prior

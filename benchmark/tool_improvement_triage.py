@@ -525,8 +525,10 @@ def main() -> int:
     # Live source-of-truth for duplicate-issue suppression: a tool whose
     # issue is currently open on GitHub stays silent; one whose issue was
     # closed (PR merged or human dismissed) re-arms the trigger
-    # immediately on the next run. The state file is no longer consulted
-    # for suppression (it remains informational, persisted for debugging).
+    # immediately on the next run. The state file is consulted only as a
+    # fallback when the live gh query fails (returns None); it is also
+    # the source of the level_floor cooldown band so a closed level
+    # issue does not re-fire while the Brier is still in the band.
     open_now = _open_issue_tools(args.repo, args.label)
     if open_now:
         log.info("triage open issues on GitHub: %s", sorted(open_now))

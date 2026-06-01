@@ -174,16 +174,17 @@ def triage(
             for t, v in (prior_state.get("by_tool") or {}).items()
         }
     # Hysteresis cooldown: a tool whose most recent open_issue carried
-    # reason="level_floor" remains suppressed (from the state file) until
-    # its current Brier drops below BRIER_LEVEL_RE_ARM. Without this,
-    # closing a level_floor issue while Brier is still above the trigger
-    # re-fires on the next run (the level signal is a standing
-    # condition; the regression signal is self-limiting and does not
-    # need this cooldown).
+    # trigger="level_floor" remains suppressed (from the state file)
+    # until its current Brier drops below BRIER_LEVEL_RE_ARM. Read from
+    # the dedicated ``trigger`` field, NOT from ``reason``: ``reason``
+    # gets clobbered with ``duplicate_suppressed`` every day the GitHub
+    # issue is open, but ``trigger`` carries the original signal that
+    # caused the issue to open and survives the entire suppressed period
+    # (and the cooldown period after the issue is closed).
     level_cooldown = {
         t
         for t, v in (prior_state.get("by_tool") or {}).items()
-        if v.get("reason") in ("level_floor", "level_floor_cooldown")
+        if v.get("trigger") == "level_floor"
     }
     decisions: List[Dict[str, Any]] = []
     for tool in sorted((cur.get("by_tool") or {}).keys()):
@@ -243,34 +244,52 @@ def triage(
                 d.update(decision="silent", reason="sign_disagreement")
                 decisions.append(d)
                 continue
+        # Level-floor hysteresis (checked BEFORE the no_regression guard
+        # so a Brier in the (BRIER_LEVEL_RE_ARM, BRIER_LEVEL_THRESHOLD]
+        # band actually keeps the cooldown alive instead of falling
+        # through to no_regression and silently clearing the marker).
+        # Gated on prior_open being false: cooldown is a "stay-silent
+        # AFTER close" mechanism; while the issue is still open, the
+        # duplicate_suppressed path below owns the suppression. Regression
+        # bypasses the cooldown so a genuinely regressing tool still fires.
+        in_cooldown = (
+            not regressed
+            and not prior_open.get(tool)
+            and tool in level_cooldown
+            and bc >= BRIER_LEVEL_RE_ARM
+        )
+        if in_cooldown:
+            d.update(
+                decision="silent",
+                reason="level_floor_cooldown",
+                trigger="level_floor",
+                issue_open=False,
+            )
+            decisions.append(d)
+            continue
         if not regressed and not above_level:
             d.update(decision="silent", reason="no_regression")
             decisions.append(d)
             continue
         # Duplicate-issue suppression: if an issue is already open for
-        # this tool (regression or level signal), stay silent and keep
-        # issue_open=True so tomorrow also stays silent until the
-        # human/agent closes the open GitHub issue.
-        reason = "regression" if regressed else "level_floor"
+        # this tool (regression or level signal), stay silent. Preserve
+        # the original ``trigger`` field across the suppressed period so
+        # the cooldown above can read it after the issue closes.
+        trigger = "regression" if regressed else "level_floor"
         if prior_open.get(tool):
-            d.update(decision="silent", reason="duplicate_suppressed", issue_open=True)
-        elif (
-            reason == "level_floor"
-            and tool in level_cooldown
-            and bc >= BRIER_LEVEL_RE_ARM
-        ):
-            # Level-floor hysteresis: prior level_floor issue is closed
-            # (absent from open_now) but Brier hasn't dropped below the
-            # re-arm band yet. Stay silent; keep state's reason marker
-            # alive by carrying issue_open=True so the cooldown persists
-            # across runs until the Brier recovers.
             d.update(
                 decision="silent",
-                reason="level_floor_cooldown",
+                reason="duplicate_suppressed",
+                trigger=trigger,
                 issue_open=True,
             )
         else:
-            d.update(decision="open_issue", reason=reason, issue_open=True)
+            d.update(
+                decision="open_issue",
+                reason=trigger,
+                trigger=trigger,
+                issue_open=True,
+            )
         decisions.append(d)
     return decisions
 
@@ -290,6 +309,7 @@ def write_state(
                 "platform": d.get("platform"),
                 "decision": d["decision"],
                 "reason": d["reason"],
+                "trigger": d.get("trigger"),
                 "issue_open": d["issue_open"],
                 "delta_brier": d.get("delta_brier"),
                 "brier_cur": d.get("brier_cur"),

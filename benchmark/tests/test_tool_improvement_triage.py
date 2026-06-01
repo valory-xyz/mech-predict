@@ -33,6 +33,7 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
+
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_RE_ARM,
     BRIER_LEVEL_THRESHOLD,
@@ -710,9 +711,38 @@ class TestLevelFloorIssueBody:
 
 
 def _prior_level_floor_state(*tools: str) -> Dict[str, Any]:
-    """Prior state where each tool last decided open_issue with reason=level_floor."""
+    """Prior state where each tool's last open_issue carried trigger=level_floor.
+
+    The cooldown reads the dedicated ``trigger`` field (not ``reason``)
+    because ``reason`` gets clobbered with ``duplicate_suppressed`` every
+    day the GitHub issue is open. Simulating an open-then-closed level
+    issue means injecting the ``trigger`` marker the live pipeline would
+    have set when it first opened.
+    """
     return {
-        "by_tool": {t: {"issue_open": True, "reason": "level_floor"} for t in tools}
+        "by_tool": {
+            t: {
+                "issue_open": False,
+                "reason": "duplicate_suppressed",
+                "trigger": "level_floor",
+            }
+            for t in tools
+        }
+    }
+
+
+def _state_from_decisions(decisions: list) -> Dict[str, Any]:
+    """Build a prior_state dict from triage() output (mimics write_state)."""
+    return {
+        "by_tool": {
+            d["tool"]: {
+                "decision": d["decision"],
+                "reason": d["reason"],
+                "trigger": d.get("trigger"),
+                "issue_open": d["issue_open"],
+            }
+            for d in decisions
+        }
     }
 
 
@@ -733,7 +763,11 @@ class TestLevelFloorCooldown:
         )
         assert d[0]["decision"] == "silent"
         assert d[0]["reason"] == "level_floor_cooldown"
-        assert d[0]["issue_open"] is True
+        assert d[0]["trigger"] == "level_floor"
+        # Cooldown is a local suppression after the GitHub issue closed,
+        # so issue_open=False (no live issue exists). The trigger marker
+        # carries the cooldown state across runs.
+        assert d[0]["issue_open"] is False
 
     def test_closed_level_floor_re_arms_below_band(self) -> None:
         """Brier dropped below BRIER_LEVEL_RE_ARM -> cooldown lifts and tool can re-fire later."""
@@ -768,6 +802,61 @@ class TestLevelFloorCooldown:
     def test_cooldown_constant_below_threshold(self) -> None:
         """The re-arm constant must sit strictly below the level threshold."""
         assert BRIER_LEVEL_RE_ARM < BRIER_LEVEL_THRESHOLD
+
+    def test_cooldown_survives_duplicate_suppressed_lifecycle(self) -> None:
+        """End-to-end lifecycle: open -> N days suppressed -> close -> still cooldown.
+
+        @OjusWiZard test_tool_improvement_triage.py:727 thread: the previous
+        cooldown test injected reason=level_floor directly, skipping the
+        duplicate_suppressed overwrite that happens on every real day the
+        issue is open. This test runs the actual day-by-day state machine
+        to prove the trigger marker survives the entire suppressed period.
+        """
+        # Day 1: Brier 0.30, no prior state -> open level_floor issue
+        cur = _scores(a=_stats(brier=0.300, log_loss=0.620))
+        prev = _scores(a=_stats(brier=0.295, log_loss=0.610))
+        d1 = triage(cur, prev, {}, open_now=[])
+        assert d1[0]["decision"] == "open_issue"
+        assert d1[0]["trigger"] == "level_floor"
+        state = _state_from_decisions(d1)
+
+        # Days 2..8: GitHub issue is open, Brier still 0.30. Every day
+        # triage writes reason=duplicate_suppressed. The trigger marker
+        # must persist through ALL of these writes.
+        for _ in range(7):
+            dN = triage(cur, prev, state, open_now=["a"])
+            assert dN[0]["decision"] == "silent"
+            assert dN[0]["reason"] == "duplicate_suppressed"
+            assert dN[0]["trigger"] == "level_floor"  # the load-bearing claim
+            state = _state_from_decisions(dN)
+
+        # Day 9: operator closes the GitHub issue as wontfix.
+        # Brier is still 0.30 (above 0.22 re-arm band). The cooldown must
+        # engage and stop a new issue from firing.
+        d9 = triage(cur, prev, state, open_now=[])
+        assert d9[0]["decision"] == "silent"
+        assert d9[0]["reason"] == "level_floor_cooldown"
+        assert d9[0]["trigger"] == "level_floor"
+
+    def test_cooldown_holds_in_hysteresis_band(self) -> None:
+        """Brier in (BRIER_LEVEL_RE_ARM, BRIER_LEVEL_THRESHOLD] keeps cooldown alive.
+
+        Without the cooldown check running before the no_regression guard,
+        a Brier in this band exits via no_regression (above_level is False)
+        and silently clears the marker. This test forces the band traversal.
+        """
+        prior = _prior_level_floor_state("a")
+        # Brier 0.230 sits inside (0.22, 0.25] -> above_level=False, no
+        # regression, but cooldown must still fire.
+        d = triage(
+            _scores(a=_stats(brier=0.230, log_loss=0.600)),
+            _scores(a=_stats(brier=0.225, log_loss=0.595)),
+            prior,
+            open_now=[],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "level_floor_cooldown"
+        assert d[0]["trigger"] == "level_floor"
 
 
 class TestLevelFloorReArmAndRegressionCoverage:

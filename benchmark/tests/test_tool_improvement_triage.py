@@ -45,6 +45,7 @@ from benchmark.tool_improvement_triage import (
     _window_iso,
     build_issue_body,
     build_issue_title,
+    main,
     triage,
     write_state,
 )
@@ -832,8 +833,6 @@ class TestMainExitCode:
         tmp_path: Path,
     ) -> None:
         """A failed gh issue create surfaces as main() returning 1."""
-        from benchmark.tool_improvement_triage import main
-
         results_dir = tmp_path / "results"
         self._write_scores(results_dir, brier_cur=0.260, brier_prev=0.210)
         monkeypatch.setattr(
@@ -870,12 +869,10 @@ class TestMainExitCode:
         tmp_path: Path,
     ) -> None:
         """Empty cur -> log.error + return 1 + state file untouched."""
-        from benchmark.tool_improvement_triage import main
-
         results_dir = tmp_path / "results"
         results_dir.mkdir(parents=True)
         # Valid JSON but empty by_tool -> zero decisions.
-        empty = {"by_tool": {}}
+        empty: Dict[str, Any] = {"by_tool": {}}
         (results_dir / "rolling_scores_polymarket.json").write_text(json.dumps(empty))
         (results_dir / "prev_rolling_scores_polymarket.json").write_text(
             json.dumps(empty)

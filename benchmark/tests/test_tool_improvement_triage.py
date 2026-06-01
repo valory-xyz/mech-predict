@@ -26,6 +26,7 @@ expects.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +34,6 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
-
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_RE_ARM,
     BRIER_LEVEL_THRESHOLD,
@@ -693,9 +693,7 @@ class TestOpenIssueToolsParser:
             "benchmark.tool_improvement_triage.subprocess.run",
             lambda *a, **k: result,
         )
-        import logging as _log
-
-        with caplog.at_level(_log.WARNING):
+        with caplog.at_level(logging.WARNING):
             assert _open_issue_tools("r/r", "tool-improvement") == []
         assert any(
             "did not match the expected format" in r.message for r in caplog.records
@@ -755,14 +753,12 @@ class TestLevelFloorIssueBody:
 
 
 def _prior_level_floor_state(*tools: str) -> Dict[str, Any]:
-    """Prior state where each tool's last open_issue carried trigger=level_floor.
-
-    The cooldown reads the dedicated ``trigger`` field (not ``reason``)
-    because ``reason`` gets clobbered with ``duplicate_suppressed`` every
-    day the GitHub issue is open. Simulating an open-then-closed level
-    issue means injecting the ``trigger`` marker the live pipeline would
-    have set when it first opened.
-    """
+    """Prior state where each tool's last open_issue carried trigger=level_floor."""
+    # The cooldown reads the dedicated ``trigger`` field (not ``reason``)
+    # because ``reason`` gets clobbered with ``duplicate_suppressed``
+    # every day the GitHub issue is open. Simulating an open-then-closed
+    # level issue means injecting the ``trigger`` marker the live
+    # pipeline would have set when it first opened.
     return {
         "by_tool": {
             t: {

@@ -174,14 +174,12 @@ def triage(
     platform: str = "polymarket",
     open_now: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
-
-    ``open_now`` may be a list of bare tool names (legacy single-platform
-    callers) OR a list of ``(tool, platform)`` tuples (multi-platform live-
-    gh callers). Tuple entries are filtered to the current ``platform`` so
-    an open issue on tool ``X`` on platform ``A`` does not suppress the
-    same tool on platform ``B``.
-    """
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
+    # ``open_now`` may be a list of bare tool names (legacy single-
+    # platform callers) OR a list of ``(tool, platform)`` tuples (multi-
+    # platform live-gh callers). Tuple entries are filtered to the
+    # current ``platform`` so an open issue on tool ``X`` on platform
+    # ``A`` does not suppress the same tool on platform ``B``.
     # Suppression source-of-truth: ``open_now`` (the live gh result)
     # when provided; falls back to ``prior_state`` only when the caller
     # did not run the live query. Closing the GitHub issue therefore

@@ -66,11 +66,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
@@ -101,8 +102,16 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _open_issue_tools(repo: str, label: str) -> Optional[List[str]]:
-    """Return open-issue tool names; ``None`` on gh error, ``[]`` on zero matches."""
+# Parses ``[tool-improvement] `<tool>`: Brier (regression|above level) on <platform> W-1``.
+# Backticks around the tool are required; the platform is captured from the
+# trailing ``on <platform> W-1`` segment so suppression can key on the
+# (tool, platform) pair. A manually-filed issue that omits either segment
+# logs a warning and is skipped (no silent suppression bypass).
+_TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+W-1\b")
+
+
+def _open_issue_tools(repo: str, label: str) -> Optional[List[Tuple[str, str]]]:
+    """Return (tool, platform) pairs for open issues; ``None`` on gh error, ``[]`` on zero."""
     # Distinguishing None (transient gh-CLI failure) from [] (gh
     # succeeded with zero matching open issues) lets the caller fall
     # back to the state file on transient errors, rather than treating
@@ -120,7 +129,7 @@ def _open_issue_tools(repo: str, label: str) -> Optional[List[str]]:
         "--json",
         "title",
         "--limit",
-        "200",
+        "0",
     ]
     try:
         r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
@@ -143,14 +152,19 @@ def _open_issue_tools(repo: str, label: str) -> Optional[List[str]]:
             exc,
         )
         return None
-    tools: List[str] = []
+    pairs: List[Tuple[str, str]] = []
     for row in rows:
         title = row.get("title") or ""
-        start = title.find("`")
-        end = title.find("`", start + 1)
-        if 0 <= start < end:
-            tools.append(title[start + 1 : end])
-    return tools
+        m = _TITLE_RE.search(title)
+        if m:
+            pairs.append((m.group(1), m.group(2)))
+        else:
+            log.warning(
+                "tool-improvement issue title did not match the expected format; "
+                "skipping (no suppression): %r",
+                title[:120],
+            )
+    return pairs
 
 
 def triage(
@@ -158,16 +172,30 @@ def triage(
     prev: Dict[str, Any],
     prior_state: Dict[str, Any],
     platform: str = "polymarket",
-    open_now: Optional[List[str]] = None,
+    open_now: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
+
+    ``open_now`` may be a list of bare tool names (legacy single-platform
+    callers) OR a list of ``(tool, platform)`` tuples (multi-platform live-
+    gh callers). Tuple entries are filtered to the current ``platform`` so
+    an open issue on tool ``X`` on platform ``A`` does not suppress the
+    same tool on platform ``B``.
+    """
     # Suppression source-of-truth: ``open_now`` (the live gh result)
     # when provided; falls back to ``prior_state`` only when the caller
     # did not run the live query. Closing the GitHub issue therefore
     # re-arms the trigger on the next run regardless of state-file
     # content -- with one exception, the level_floor cooldown below.
     if open_now is not None:
-        prior_open = {tool: True for tool in open_now}
+        prior_open = {}
+        for entry in open_now:
+            if isinstance(entry, tuple):
+                tool_name, tool_platform = entry
+                if tool_platform == platform:
+                    prior_open[tool_name] = True
+            else:
+                prior_open[entry] = True
     else:
         prior_open = {
             t: v.get("issue_open", False)

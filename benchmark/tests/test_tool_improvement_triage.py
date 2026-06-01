@@ -586,6 +586,32 @@ class TestOpenNowSuppression:
         assert d[0]["decision"] == "open_issue"
         assert d[0]["reason"] == "regression"
 
+    def test_open_now_tuple_keyed_by_platform(self) -> None:
+        """(tool, platform) tuples scope suppression to the matching platform only."""
+        # Issue open for tool 'a' on omen; we are triaging polymarket -->
+        # the omen issue MUST NOT suppress the polymarket dispatch.
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+            platform="polymarket",
+            open_now=[("a", "omen")],
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "regression"
+
+    def test_open_now_tuple_same_platform_suppresses(self) -> None:
+        """(tool, platform) tuple on the matching platform DOES suppress."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+            platform="polymarket",
+            open_now=[("a", "polymarket")],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "duplicate_suppressed"
+
 
 class TestOpenIssueSubprocess:
     """_open_issue subprocess paths: dry-run, success, failure, timeout."""
@@ -641,21 +667,39 @@ class TestOpenIssueSubprocess:
 class TestOpenIssueToolsParser:
     """_open_issue_tools backtick title parsing + gh-error fallback."""
 
-    def test_parses_backtick_tool_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Tool name between first two backticks is extracted."""
+    def test_parses_tool_and_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """(tool, platform) pairs are extracted from the standard title format."""
         stdout = (
             '[{"title": "[tool-improvement] `superforcaster`: Brier '
             'regression on polymarket W-1"},'
             ' {"title": "[tool-improvement] `factual_research`: Brier '
-            'above level on polymarket W-1"}]'
+            'above level on omen W-1"}]'
         )
         result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run",
             lambda *a, **k: result,
         )
-        tools = _open_issue_tools("r/r", "tool-improvement")
-        assert tools == ["superforcaster", "factual_research"]
+        pairs = _open_issue_tools("r/r", "tool-improvement")
+        assert pairs == [("superforcaster", "polymarket"), ("factual_research", "omen")]
+
+    def test_skips_title_without_backticks(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A label-matching issue filed manually (no backticks) is skipped + warned."""
+        stdout = '[{"title": "[tool-improvement] superforcaster bad on polymarket"}]'
+        result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        import logging as _log
+
+        with caplog.at_level(_log.WARNING):
+            assert _open_issue_tools("r/r", "tool-improvement") == []
+        assert any(
+            "did not match the expected format" in r.message for r in caplog.records
+        )
 
     def test_gh_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-zero gh exit yields None so caller falls back to state file."""
@@ -899,6 +943,59 @@ class TestLevelFloorReArmAndRegressionCoverage:
         )
         assert d[0]["decision"] == "silent"
         assert d[0]["reason"] == "missing_log_loss"
+
+    def test_missing_brier_cur_silent(self) -> None:
+        """Missing Brier on the current window -> silent/missing_brier (covers #311 g)."""
+        d = triage(
+            _scores(a=_stats(brier=None)),  # type: ignore[arg-type]
+            _scores(a=_stats(brier=0.200)),
+            {},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "missing_brier"
+
+    def test_missing_brier_prev_silent(self) -> None:
+        """Missing Brier on the previous window -> silent/missing_brier."""
+        d = triage(
+            _scores(a=_stats(brier=0.260)),
+            _scores(a=_stats(brier=None)),  # type: ignore[arg-type]
+            {},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "missing_brier"
+
+    def test_write_state_shape_for_silent_decision(self, tmp_path: Path) -> None:
+        """write_state persists delta_brier=None on silent/sample_floor (covers #311 h)."""
+        # Sample floor short-circuits BEFORE delta_brier is computed, so
+        # the persisted payload must carry delta_brier=None without
+        # crashing the JSON serializer.
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.300)),
+            _scores(a=_stats(brier=0.200)),
+            {},
+        )
+        state_path = tmp_path / "state.json"
+        write_state(state_path, d, "2026-06-01T03:45:00Z")
+        payload = json.loads(state_path.read_text())
+        row = payload["by_tool"]["a"]
+        assert row["decision"] == "silent"
+        assert row["reason"] == "sample_floor"
+        assert row["delta_brier"] is None
+        assert row["brier_cur"] == 0.300
+
+    def test_write_state_shape_for_reliability_collapse(self, tmp_path: Path) -> None:
+        """write_state persists delta_brier=None on reliability_collapse."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, reliability=0.65)),
+            _scores(a=_stats()),
+            {},
+        )
+        state_path = tmp_path / "state.json"
+        write_state(state_path, d, "2026-06-01T03:45:00Z")
+        payload = json.loads(state_path.read_text())
+        row = payload["by_tool"]["a"]
+        assert row["decision"] == "reliability_collapse"
+        assert row["delta_brier"] is None
 
 
 class TestMainExitCode:

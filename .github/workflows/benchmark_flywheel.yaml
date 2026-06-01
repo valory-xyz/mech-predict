@@ -187,10 +187,14 @@ jobs:
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
+          # --skip-tournament-output: the analyzer renders tournament
+          # all-time only (never day-gated), so rolling tournament files
+          # would just sit unread in results/.
           python -m benchmark.scorer \
             --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
+            --skip-tournament-output \
             $TOURNAMENT_FLAG
         continue-on-error: true
 
@@ -208,6 +212,7 @@ jobs:
             --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/prev_rolling_scores.json \
+            --skip-tournament-output \
             $TOURNAMENT_FLAG
         continue-on-error: true
 

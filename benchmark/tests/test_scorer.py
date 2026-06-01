@@ -36,6 +36,7 @@ from benchmark.scorer import (
     WORST_BEST_SIZE,
     _accumulate_group,
     _cli_legacy_full_recompute,
+    _cli_period,
     _derive_group,
     _derive_platform_path,
     _derive_tournament_path,
@@ -2843,6 +2844,59 @@ class TestPerPlatformPeriod:
         prod_omen, _ = result["omen"]
         assert prod_all["overall"]["n"] == 1
         assert prod_omen["overall"]["n"] == 1
+
+
+class TestCliPeriodSkipTournamentOutput:
+    """Tests for the --skip-tournament-output flag in _cli_period."""
+
+    @staticmethod
+    def _logs_with_row(tmp_path: Path) -> Path:
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y_%m_%d")
+        (logs_dir / f"production_log_{stamp}.jsonl").write_text(
+            json.dumps(_row(platform="omen", predicted_at=recent, row_id="o1")) + "\n"
+        )
+        return logs_dir
+
+    def _args(self, tmp_path: Path, skip: bool) -> argparse.Namespace:
+        return argparse.Namespace(
+            logs_dir=self._logs_with_row(tmp_path),
+            output=tmp_path / "rolling_scores.json",
+            period_days=7,
+            period_offset_days=0,
+            tournament_input=None,
+            skip_tournament_output=skip,
+        )
+
+    def test_skip_flag_omits_tournament_files(self, tmp_path: Path) -> None:
+        """With --skip-tournament-output, no tournament files are written."""
+        args = self._args(tmp_path, skip=True)
+        output_tournament = tmp_path / "rolling_scores_tournament.json"
+
+        _cli_period(args, output_tournament)
+
+        assert args.output.exists()
+        assert not output_tournament.exists()
+        for platform in PLATFORMS:
+            assert _derive_platform_path(args.output, platform).exists()
+            assert not _derive_platform_path(output_tournament, platform).exists()
+
+    def test_default_still_writes_tournament_files(self, tmp_path: Path) -> None:
+        """Without the flag, behavior is unchanged: tournament files written."""
+        args = self._args(tmp_path, skip=False)
+        output_tournament = tmp_path / "rolling_scores_tournament.json"
+
+        _cli_period(args, output_tournament)
+
+        assert args.output.exists()
+        assert output_tournament.exists()
+        for platform in PLATFORMS:
+            assert _derive_platform_path(args.output, platform).exists()
+            assert _derive_platform_path(output_tournament, platform).exists()
 
 
 class TestScorePeriodOffset:

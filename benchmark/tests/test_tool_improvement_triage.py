@@ -31,7 +31,6 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
-
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,

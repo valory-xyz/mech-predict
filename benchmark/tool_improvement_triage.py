@@ -128,8 +128,12 @@ def _open_issue_tools(repo: str, label: str) -> Optional[List[Tuple[str, str]]]:
         "open",
         "--json",
         "title",
+        # gh has no "unlimited" sentinel: --limit 0 is rejected with
+        # rc=1 ("invalid limit: 0"). Use a finite cap large enough that
+        # we never hit it in practice (orders of magnitude above the
+        # realistic max of simultaneously-open tool-improvement issues).
         "--limit",
-        "0",
+        "1000",
     ]
     try:
         r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)

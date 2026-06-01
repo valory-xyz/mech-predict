@@ -720,6 +720,28 @@ class TestOpenIssueToolsParser:
         )
         assert _open_issue_tools("r/r", "tool-improvement") == []
 
+    def test_gh_invocation_uses_valid_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pins the gh CLI contract: --limit must be a positive integer."""
+        # Regression guard: a previous version passed --limit 0 thinking
+        # it meant "unlimited"; gh rejects that with rc=1 and the live-gh
+        # suppression silently degraded to the state-file fallback.
+        captured = {}
+
+        def fake_run(cmd, **_k):  # type: ignore[no-untyped-def]
+            captured["cmd"] = cmd
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        _open_issue_tools("r/r", "tool-improvement")
+        cmd = captured["cmd"]
+        assert "--limit" in cmd
+        limit_val = cmd[cmd.index("--limit") + 1]
+        assert int(limit_val) >= 1, f"gh requires --limit >= 1, got {limit_val!r}"
+
 
 class TestLevelFloorIssueBody:
     """build_issue_body renders the level_floor signal with its own headline."""

@@ -75,6 +75,13 @@ from typing import Any, Dict, List, Optional
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
 BRIER_LEVEL_THRESHOLD = 0.25
+# Hysteresis floor for level_floor re-arm: a tool that previously
+# opened a level_floor issue stays suppressed (even after the GitHub
+# issue is closed) until its Brier drops below this band. Without it,
+# closing a level_floor issue with the Brier still above the trigger
+# would re-fire on the next run -- the level trigger is a standing
+# condition, unlike the regression trigger whose delta self-limits.
+BRIER_LEVEL_RE_ARM = 0.22
 VALID_N_PER_WINDOW_FLOOR = 105
 RELIABILITY_FLOOR = 0.80
 ROLLING_WINDOW_DAYS = 7
@@ -158,7 +165,7 @@ def triage(
     # when provided; falls back to ``prior_state`` only when the caller
     # did not run the live query. Closing the GitHub issue therefore
     # re-arms the trigger on the next run regardless of state-file
-    # content.
+    # content -- with one exception, the level_floor cooldown below.
     if open_now is not None:
         prior_open = {tool: True for tool in open_now}
     else:
@@ -166,6 +173,18 @@ def triage(
             t: v.get("issue_open", False)
             for t, v in (prior_state.get("by_tool") or {}).items()
         }
+    # Hysteresis cooldown: a tool whose most recent open_issue carried
+    # reason="level_floor" remains suppressed (from the state file) until
+    # its current Brier drops below BRIER_LEVEL_RE_ARM. Without this,
+    # closing a level_floor issue while Brier is still above the trigger
+    # re-fires on the next run (the level signal is a standing
+    # condition; the regression signal is self-limiting and does not
+    # need this cooldown).
+    level_cooldown = {
+        t
+        for t, v in (prior_state.get("by_tool") or {}).items()
+        if v.get("reason") in ("level_floor", "level_floor_cooldown")
+    }
     decisions: List[Dict[str, Any]] = []
     for tool in sorted((cur.get("by_tool") or {}).keys()):
         c = cur["by_tool"][tool]
@@ -235,6 +254,21 @@ def triage(
         reason = "regression" if regressed else "level_floor"
         if prior_open.get(tool):
             d.update(decision="silent", reason="duplicate_suppressed", issue_open=True)
+        elif (
+            reason == "level_floor"
+            and tool in level_cooldown
+            and bc >= BRIER_LEVEL_RE_ARM
+        ):
+            # Level-floor hysteresis: prior level_floor issue is closed
+            # (absent from open_now) but Brier hasn't dropped below the
+            # re-arm band yet. Stay silent; keep state's reason marker
+            # alive by carrying issue_open=True so the cooldown persists
+            # across runs until the Brier recovers.
+            d.update(
+                decision="silent",
+                reason="level_floor_cooldown",
+                issue_open=True,
+            )
         else:
             d.update(decision="open_issue", reason=reason, issue_open=True)
         decisions.append(d)
@@ -525,6 +559,12 @@ def main() -> int:
                     n_opened += 1
                 else:
                     n_failed += 1
+                    # A failed gh issue create must not be persisted as
+                    # "issue is open"; otherwise a later gh-list-failure
+                    # day would fall back to the state file and silently
+                    # suppress tomorrow's run for a nonexistent issue.
+                    d["issue_open"] = False
+                    d["reason"] = "open_issue_failed"
             elif d["decision"] == "reliability_collapse":
                 log.warning(
                     "RELIABILITY COLLAPSE on %s (%s): reliability=%.3f (< %.2f). "
@@ -547,6 +587,17 @@ def main() -> int:
     )
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not all_decisions:
+        # No tool produced a decision: a valid-but-empty rolling file
+        # would otherwise overwrite the prior state with {by_tool: {}}
+        # and silently drop every cooldown/issue_open marker on the
+        # fallback path. Surface the empty-input case and keep the
+        # existing state intact.
+        log.error(
+            "No decisions produced (empty cur for every platform?); "
+            "state file NOT overwritten."
+        )
+        return 1
     write_state(args.state, all_decisions, generated_at)
     log.info("State saved to %s", args.state)
     return 1 if n_failed > 0 else 0

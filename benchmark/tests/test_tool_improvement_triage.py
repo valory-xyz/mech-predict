@@ -32,6 +32,7 @@ from typing import Any, Dict
 
 import pytest
 from benchmark.tool_improvement_triage import (
+    BRIER_LEVEL_RE_ARM,
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
     RELIABILITY_FLOOR,
@@ -681,3 +682,106 @@ class TestLevelFloorIssueBody:
         assert "persistently above" in body
         assert "level signal" in body
         assert "factual_research" in body
+
+
+def _prior_level_floor_state(*tools: str) -> Dict[str, Any]:
+    """Prior state where each tool last decided open_issue with reason=level_floor."""
+    return {
+        "by_tool": {t: {"issue_open": True, "reason": "level_floor"} for t in tools}
+    }
+
+
+class TestLevelFloorCooldown:
+    """A closed level_floor issue stays suppressed until Brier drops below the re-arm band."""
+
+    def test_closed_level_floor_suppressed_while_brier_above_rearm(self) -> None:
+        """Live open_now=[] + brier still above 0.22 -> cooldown, no re-open."""
+        # Prior state: level_floor issue was open and is now closed (so
+        # open_now=[]). Brier is still above the re-arm band -> must NOT
+        # reopen.
+        prior = _prior_level_floor_state("a")
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            prior,
+            open_now=[],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "level_floor_cooldown"
+        assert d[0]["issue_open"] is True
+
+    def test_closed_level_floor_re_arms_below_band(self) -> None:
+        """Brier dropped below BRIER_LEVEL_RE_ARM -> cooldown lifts and tool can re-fire later."""
+        # Brier below 0.22 today + below the level floor + no
+        # regression -> silent/no_regression, cooldown effectively
+        # over.
+        prior = _prior_level_floor_state("a")
+        d = triage(
+            _scores(a=_stats(brier=0.150, log_loss=0.580)),
+            _scores(a=_stats(brier=0.160, log_loss=0.610)),
+            prior,
+            open_now=[],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_cooldown_does_not_block_regression_reason(self) -> None:
+        """Hysteresis applies to level_floor only; regression-reason re-fires immediately."""
+        # Same tool had a closed level_floor issue, but today it
+        # genuinely regresses (delta > 0.040 + sign agreement) -> the
+        # cooldown must not stop a regression dispatch.
+        prior = _prior_level_floor_state("a")
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            prior,
+            open_now=[],
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "regression"
+
+    def test_cooldown_constant_below_threshold(self) -> None:
+        """The re-arm constant must sit strictly below the level threshold."""
+        assert BRIER_LEVEL_RE_ARM < BRIER_LEVEL_THRESHOLD
+
+
+class TestLevelFloorReArmAndRegressionCoverage:
+    """Closes the test gap @OjusWiZard flagged on the re-arm + missing_log_loss branches."""
+
+    def test_open_now_empty_re_arms_level_floor(self) -> None:
+        """Re-arm path for reason=level_floor (no prior level cooldown, no regression)."""
+        # No prior state -> no cooldown. Brier above 0.25, no
+        # regression -> level_floor fires.
+        d = triage(
+            _scores(a=_stats(brier=0.270, log_loss=0.610)),
+            _scores(a=_stats(brier=0.265, log_loss=0.610)),
+            {},
+            open_now=[],
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_missing_log_loss_above_level_fires_level_floor(self) -> None:
+        """Missing log_loss + delta > threshold + above_level=True -> level fires."""
+        # Regression-path sign-agreement can't be computed because
+        # log_loss is None on cur. But level_floor still fires because
+        # Brier is above 0.25 -> open_issue with reason="level_floor".
+        d = triage(
+            _scores(a=_stats(brier=0.280, log_loss=None)),  # type: ignore[arg-type]
+            _scores(a=_stats(brier=0.230, log_loss=0.610)),
+            {},
+            open_now=[],
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_missing_log_loss_below_level_silent(self) -> None:
+        """Missing log_loss + delta > threshold + below level -> silent/missing_log_loss."""
+        d = triage(
+            _scores(a=_stats(brier=0.210, log_loss=None)),  # type: ignore[arg-type]
+            _scores(a=_stats(brier=0.160, log_loss=0.610)),
+            {},
+            open_now=[],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "missing_log_loss"

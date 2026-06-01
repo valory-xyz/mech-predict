@@ -74,7 +74,7 @@ from typing import Any, Dict, List, Optional
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
-BRIER_LEVEL_THRESHOLD = 0.20
+BRIER_LEVEL_THRESHOLD = 0.25
 VALID_N_PER_WINDOW_FLOOR = 105
 RELIABILITY_FLOOR = 0.80
 ROLLING_WINDOW_DAYS = 7
@@ -94,8 +94,15 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
-def _open_issue_tools(repo: str, label: str) -> List[str]:
-    """Return tool names with an open ``label``-labelled issue on ``repo`` (empty on any gh error)."""
+def _open_issue_tools(repo: str, label: str) -> Optional[List[str]]:
+    """Return tool names with an open ``label``-labelled issue on ``repo``.
+
+    Returns ``None`` on any gh error (caller falls back to the state file
+    for suppression) and ``[]`` only when the gh call succeeded with zero
+    matching open issues. Distinguishing the two avoids treating a
+    transient gh-CLI failure as "no issues open", which would otherwise
+    drop suppression and refile every regression.
+    """
     cmd = [
         "gh",
         "issue",
@@ -115,18 +122,23 @@ def _open_issue_tools(repo: str, label: str) -> List[str]:
         r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log.warning("gh issue list failed (%s); falling back to state file only", exc)
-        return []
+        return None
     if r.returncode != 0:
         log.warning(
             "gh issue list rc=%d stderr=%r; falling back to state file only",
             r.returncode,
             r.stderr[:200],
         )
-        return []
+        return None
     try:
         rows = json.loads(r.stdout or "[]")
-    except ValueError:
-        return []
+    except ValueError as exc:
+        log.warning(
+            "gh issue list returned unparseable JSON (%s); "
+            "falling back to state file only",
+            exc,
+        )
+        return None
     tools: List[str] = []
     for row in rows:
         title = row.get("title") or ""
@@ -142,12 +154,22 @@ def triage(
     prev: Dict[str, Any],
     prior_state: Dict[str, Any],
     platform: str = "polymarket",
+    open_now: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
-    prior_open = {
-        t: v.get("issue_open", False)
-        for t, v in (prior_state.get("by_tool") or {}).items()
-    }
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
+
+    Suppression source-of-truth: ``open_now`` (the live ``gh issue list``
+    result) when provided; falls back to ``prior_state`` only when the
+    caller did not run the live query. Closing the GitHub issue therefore
+    re-arms the trigger on the next run regardless of state-file content.
+    """
+    if open_now is not None:
+        prior_open = {tool: True for tool in open_now}
+    else:
+        prior_open = {
+            t: v.get("issue_open", False)
+            for t, v in (prior_state.get("by_tool") or {}).items()
+        }
     decisions: List[Dict[str, Any]] = []
     for tool in sorted((cur.get("by_tool") or {}).keys()):
         c = cur["by_tool"][tool]
@@ -316,7 +338,7 @@ def build_issue_body(
         headline=headline,
         brier_cur=decision["brier_cur"],
         brier_prev=decision["brier_prev"],
-        delta=decision["delta_brier"],
+        delta=decision.get("delta_brier") or 0.0,
         n_cur=decision["n_cur"],
         n_prev=decision["n_prev"],
         reason=reason,
@@ -364,7 +386,7 @@ This issue records the {signal}, not a diagnosis. The cause has not been identif
 
 Artifact: {artifact_url}
 
-Download with `gh run download <run-id> --name benchmark-data`. The agent's pipeline (in agent-skills) is authoritative for the investigation procedure; the inputs are the daily JSONL logs and `results/scores_{platform}.json`. Reproduce the headline number from the raw rows before forming any hypothesis.
+Download with `gh run download <run-id> --name benchmark-data`. The artifact contains the daily JSONL logs and `results/scores_{platform}.json`. Reproduce the headline number from the raw rows before forming any hypothesis.
 """
 
 
@@ -386,7 +408,13 @@ def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> 
         "--body",
         body,
     ]
-    r = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    try:
+        r = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        log.error("gh issue create timed out after 30s")
+        return 124
     if r.returncode != 0:
         log.error("gh issue create failed (rc=%d): %s", r.returncode, r.stderr)
         return r.returncode
@@ -466,19 +494,14 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     window_iso = _window_iso(now)
     state = _load_json(args.state)
-    # Overlay GitHub's view of currently-open tool-improvement issues on
-    # top of the persisted state. A tool whose issue is still open on
-    # GitHub stays silent regardless of whether the previous run wrote
-    # issue_open=True; conversely, an issue that has been closed (PR
-    # merged or human dismissed) re-arms the trigger even if the state
-    # file still says issue_open=True.
+    # Live source-of-truth for duplicate-issue suppression: a tool whose
+    # issue is currently open on GitHub stays silent; one whose issue was
+    # closed (PR merged or human dismissed) re-arms the trigger
+    # immediately on the next run. The state file is no longer consulted
+    # for suppression (it remains informational, persisted for debugging).
     open_now = _open_issue_tools(args.repo, args.label)
     if open_now:
         log.info("triage open issues on GitHub: %s", sorted(open_now))
-        by_tool = state.setdefault("by_tool", {})
-        for tool in open_now:
-            row = by_tool.setdefault(tool, {})
-            row["issue_open"] = True
 
     all_decisions: List[Dict[str, Any]] = []
     n_opened = n_failed = n_collapse = n_silent = 0
@@ -486,7 +509,7 @@ def main() -> int:
         cur = _load_json(RESULTS_DIR / f"rolling_scores_{platform}.json")
         prev = _load_json(RESULTS_DIR / f"prev_rolling_scores_{platform}.json")
         platform_scores = _load_json(RESULTS_DIR / f"scores_{platform}.json")
-        decisions = triage(cur, prev, state, platform=platform)
+        decisions = triage(cur, prev, state, platform=platform, open_now=open_now)
         all_decisions.extend(decisions)
 
         for d in decisions:

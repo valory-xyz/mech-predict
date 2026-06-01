@@ -36,6 +36,8 @@ from benchmark.tool_improvement_triage import (
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
     _load_json,
+    _open_issue,
+    _open_issue_tools,
     _window_iso,
     build_issue_body,
     build_issue_title,
@@ -421,8 +423,8 @@ class TestConstants:
         assert BRIER_REGRESSION_THRESHOLD == 0.040
 
     def test_level_threshold(self) -> None:
-        """Brier level-floor threshold is 0.20 (self-improvement trigger)."""
-        assert BRIER_LEVEL_THRESHOLD == 0.20
+        """Brier level-floor threshold is the no-skill baseline (0.25)."""
+        assert BRIER_LEVEL_THRESHOLD == 0.25
 
     def test_sample_floor(self) -> None:
         """Sample floor is 105 (the 15/day * 7d aggregate)."""
@@ -550,3 +552,159 @@ def test_gate_precedence(case: Dict[str, Any]) -> None:
         assert d[0]["decision"] == "reliability_collapse"
     else:
         assert d[0]["reason"] == case["expected"]
+
+
+class TestOpenNowSuppression:
+    """Live gh issue list overlay is the suppression source-of-truth."""
+
+    def test_open_now_suppresses_regardless_of_state(self) -> None:
+        """A tool in open_now is suppressed even when state says issue_open=False."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},  # empty state file
+            open_now=["a"],
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "duplicate_suppressed"
+
+    def test_open_now_empty_re_arms_trigger(self) -> None:
+        """Closing the issue (absent from open_now) re-arms even if state says issue_open=True."""
+        prior = _prior_state_with_issue("a")  # state pins issue_open=True
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            prior,
+            open_now=[],  # GitHub says no open issue
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "regression"
+
+
+class TestOpenIssueSubprocess:
+    """_open_issue subprocess paths: dry-run, success, failure, timeout."""
+
+    def test_dry_run_returns_zero_without_subprocess(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dry-run path returns 0 and does NOT shell out."""
+        called = {"n": 0}
+
+        def boom(*_a: Any, **_k: Any) -> None:
+            called["n"] += 1
+            raise RuntimeError("subprocess.run must not be called in dry-run")
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", boom
+        )
+        rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=True)
+        assert rc == 0
+        assert called["n"] == 0
+
+    def test_nonzero_rc_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed gh issue create surfaces its rc so main() exits non-zero."""
+
+        class _R:
+            returncode = 1
+            stdout = ""
+            stderr = "gh: forbidden"
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: _R(),
+        )
+        rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=False)
+        assert rc == 1
+
+
+class TestOpenIssueToolsParser:
+    """_open_issue_tools backtick title parsing + gh-error fallback."""
+
+    def test_parses_backtick_tool_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tool name between first two backticks is extracted."""
+
+        class _R:
+            returncode = 0
+            stdout = (
+                '[{"title": "[tool-improvement] `superforcaster`: Brier '
+                'regression on polymarket W-1"},'
+                ' {"title": "[tool-improvement] `factual_research`: Brier '
+                'above level on polymarket W-1"}]'
+            )
+            stderr = ""
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: _R(),
+        )
+        tools = _open_issue_tools("r/r", "tool-improvement")
+        assert tools == ["superforcaster", "factual_research"]
+
+    def test_gh_error_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh non-zero exit yields None so caller falls back to state file.
+
+        Distinct from "success with zero open issues" which returns [].
+        """
+
+        class _R:
+            returncode = 4
+            stdout = ""
+            stderr = "auth required"
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: _R(),
+        )
+        assert _open_issue_tools("r/r", "tool-improvement") is None
+
+    def test_gh_success_zero_issues_returns_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """gh succeeded but no open issues yields [] (re-arms suppression)."""
+
+        class _R:
+            returncode = 0
+            stdout = "[]"
+            stderr = ""
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: _R(),
+        )
+        assert _open_issue_tools("r/r", "tool-improvement") == []
+
+
+class TestLevelFloorIssueBody:
+    """build_issue_body renders the level_floor signal with its own headline."""
+
+    def test_level_floor_body_headline(self) -> None:
+        decision = {
+            "tool": "factual_research",
+            "platform": "polymarket",
+            "brier_cur": 0.262,
+            "brier_prev": 0.255,
+            "delta_brier": 0.007,
+            "n_cur": 210,
+            "n_prev": 212,
+            "reason": "level_floor",
+        }
+        body = build_issue_body(
+            decision,
+            polymarket_stats={"brier": 0.262, "valid_n": 210},
+            artifact_url="https://example/artifact",
+            window_iso={
+                "w1_start": "2026-05-22T00:00:00Z",
+                "w1_end": "2026-05-29T00:00:00Z",
+                "w2_start": "2026-05-15T00:00:00Z",
+                "w2_end": "2026-05-22T00:00:00Z",
+            },
+        )
+        assert "persistently above" in body
+        assert "level signal" in body
+        assert "factual_research" in body

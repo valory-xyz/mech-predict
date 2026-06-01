@@ -42,7 +42,7 @@ from benchmark.scorer import (
     brier_sort_key,
 )
 from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
-from benchmark.tournament import TOURNAMENT_TOOLS_JSON, load_tournament_tools
+from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 log = logging.getLogger(__name__)
 
@@ -2255,7 +2255,7 @@ def load_active_tournament_cids(
     off the report.
 
     Delegates loading + schema validation to
-    :func:`benchmark.tournament.load_tournament_tools`, so non-dict
+    :func:`benchmark.tournament_tools.load_tournament_tools`, so non-dict
     JSON, empty CIDs, and missing files are rejected by the same rules
     the tournament runner uses (no second source of truth).
 

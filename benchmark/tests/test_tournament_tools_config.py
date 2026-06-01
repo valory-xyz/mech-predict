@@ -19,6 +19,9 @@
 """Tests for benchmark/tournament_tools.py:load_tournament_tools."""
 
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -95,3 +98,47 @@ def test_shipped_file_loads_and_is_nonempty() -> None:
     for tool_name, cid in result.items():
         assert isinstance(tool_name, str) and tool_name
         assert isinstance(cid, str) and cid.startswith("bafy")
+
+
+def test_analyze_imports_without_heavy_stack() -> None:
+    """benchmark.analyze imports with aea/yaml/dotenv blocked.
+
+    Regression guard for the bug this module split fixes: the
+    benchmark-flywheel CI job runs ``python -m benchmark.analyze`` in a
+    minimal env (``pip install requests scipy numpy``), so analyze must not
+    transitively import the open-autonomy / ``aea`` stack. We reproduce that
+    env in a subprocess by blocking ``aea``, ``yaml`` and ``dotenv`` from the
+    import system, then importing analyze. If a future change re-couples
+    analyze to ``benchmark.tournament`` (which pulls those in), this fails
+    here instead of in the next scheduled flywheel run.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent("""
+        import sys
+
+        _BLOCKED = ("aea", "yaml", "dotenv")
+
+        class _Blocker:
+            def find_spec(self, name, path=None, target=None):
+                if name.split(".")[0] in _BLOCKED:
+                    raise ModuleNotFoundError(f"blocked heavy dep: {name}")
+                return None
+
+        sys.meta_path.insert(0, _Blocker())
+
+        import benchmark.tournament_tools  # noqa: F401
+        import benchmark.analyze  # noqa: F401
+
+        print("IMPORT_OK")
+        """)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (
+        result.returncode == 0
+    ), f"analyze import pulled a blocked heavy dep:\n{result.stderr}"
+    assert "IMPORT_OK" in result.stdout

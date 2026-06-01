@@ -2255,7 +2255,7 @@ def load_active_tournament_cids(
     off the report.
 
     Delegates loading + schema validation to
-    :func:`benchmark.tournament.load_tournament_tools`, so non-dict
+    :func:`benchmark.tournament_tools.load_tournament_tools`, so non-dict
     JSON, empty CIDs, and missing files are rejected by the same rules
     the tournament runner uses (no second source of truth).
 

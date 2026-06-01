@@ -95,14 +95,11 @@ def _load_json(path: Path) -> Dict[str, Any]:
 
 
 def _open_issue_tools(repo: str, label: str) -> Optional[List[str]]:
-    """Return tool names with an open ``label``-labelled issue on ``repo``.
-
-    Returns ``None`` on any gh error (caller falls back to the state file
-    for suppression) and ``[]`` only when the gh call succeeded with zero
-    matching open issues. Distinguishing the two avoids treating a
-    transient gh-CLI failure as "no issues open", which would otherwise
-    drop suppression and refile every regression.
-    """
+    """Return open-issue tool names; ``None`` on gh error, ``[]`` on zero matches."""
+    # Distinguishing None (transient gh-CLI failure) from [] (gh
+    # succeeded with zero matching open issues) lets the caller fall
+    # back to the state file on transient errors, rather than treating
+    # the empty result as "no issues open" and refiling every regression.
     cmd = [
         "gh",
         "issue",
@@ -156,13 +153,12 @@ def triage(
     platform: str = "polymarket",
     open_now: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
-
-    Suppression source-of-truth: ``open_now`` (the live ``gh issue list``
-    result) when provided; falls back to ``prior_state`` only when the
-    caller did not run the live query. Closing the GitHub issue therefore
-    re-arms the trigger on the next run regardless of state-file content.
-    """
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
+    # Suppression source-of-truth: ``open_now`` (the live gh result)
+    # when provided; falls back to ``prior_state`` only when the caller
+    # did not run the live query. Closing the GitHub issue therefore
+    # re-arms the trigger on the next run regardless of state-file
+    # content.
     if open_now is not None:
         prior_open = {tool: True for tool in open_now}
     else:
@@ -409,9 +405,7 @@ def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> 
         body,
     ]
     try:
-        r = subprocess.run(
-            cmd, check=False, capture_output=True, text=True, timeout=30
-        )
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         log.error("gh issue create timed out after 30s")
         return 124

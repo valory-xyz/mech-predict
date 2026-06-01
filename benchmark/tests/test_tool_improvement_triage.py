@@ -27,9 +27,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
+
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
@@ -594,26 +596,17 @@ class TestOpenIssueSubprocess:
             called["n"] += 1
             raise RuntimeError("subprocess.run must not be called in dry-run")
 
-        monkeypatch.setattr(
-            "benchmark.tool_improvement_triage.subprocess.run", boom
-        )
+        monkeypatch.setattr("benchmark.tool_improvement_triage.subprocess.run", boom)
         rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=True)
         assert rc == 0
         assert called["n"] == 0
 
-    def test_nonzero_rc_propagates(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_nonzero_rc_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A failed gh issue create surfaces its rc so main() exits non-zero."""
-
-        class _R:
-            returncode = 1
-            stdout = ""
-            stderr = "gh: forbidden"
-
+        result = SimpleNamespace(returncode=1, stdout="", stderr="gh: forbidden")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run",
-            lambda *a, **k: _R(),
+            lambda *a, **k: result,
         )
         rc = _open_issue("r/r", "tool-improvement", "t", "b", dry_run=False)
         assert rc == 1
@@ -622,60 +615,40 @@ class TestOpenIssueSubprocess:
 class TestOpenIssueToolsParser:
     """_open_issue_tools backtick title parsing + gh-error fallback."""
 
-    def test_parses_backtick_tool_name(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_parses_backtick_tool_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Tool name between first two backticks is extracted."""
-
-        class _R:
-            returncode = 0
-            stdout = (
-                '[{"title": "[tool-improvement] `superforcaster`: Brier '
-                'regression on polymarket W-1"},'
-                ' {"title": "[tool-improvement] `factual_research`: Brier '
-                'above level on polymarket W-1"}]'
-            )
-            stderr = ""
-
+        stdout = (
+            '[{"title": "[tool-improvement] `superforcaster`: Brier '
+            'regression on polymarket W-1"},'
+            ' {"title": "[tool-improvement] `factual_research`: Brier '
+            'above level on polymarket W-1"}]'
+        )
+        result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run",
-            lambda *a, **k: _R(),
+            lambda *a, **k: result,
         )
         tools = _open_issue_tools("r/r", "tool-improvement")
         assert tools == ["superforcaster", "factual_research"]
 
-    def test_gh_error_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """gh non-zero exit yields None so caller falls back to state file.
-
-        Distinct from "success with zero open issues" which returns [].
-        """
-
-        class _R:
-            returncode = 4
-            stdout = ""
-            stderr = "auth required"
-
+    def test_gh_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-zero gh exit yields None so caller falls back to state file."""
+        # Distinct from "success with zero open issues" which returns [].
+        result = SimpleNamespace(returncode=4, stdout="", stderr="auth required")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run",
-            lambda *a, **k: _R(),
+            lambda *a, **k: result,
         )
         assert _open_issue_tools("r/r", "tool-improvement") is None
 
     def test_gh_success_zero_issues_returns_empty_list(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """gh succeeded but no open issues yields [] (re-arms suppression)."""
-
-        class _R:
-            returncode = 0
-            stdout = "[]"
-            stderr = ""
-
+        """Successful gh with no open issues yields [] (re-arms suppression)."""
+        result = SimpleNamespace(returncode=0, stdout="[]", stderr="")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run",
-            lambda *a, **k: _R(),
+            lambda *a, **k: result,
         )
         assert _open_issue_tools("r/r", "tool-improvement") == []
 
@@ -684,6 +657,7 @@ class TestLevelFloorIssueBody:
     """build_issue_body renders the level_floor signal with its own headline."""
 
     def test_level_floor_body_headline(self) -> None:
+        """level_floor reason yields the persistent-level headline + signal label."""
         decision = {
             "tool": "factual_research",
             "platform": "polymarket",

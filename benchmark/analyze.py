@@ -42,7 +42,7 @@ from benchmark.scorer import (
     brier_sort_key,
 )
 from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
-from benchmark.tournament import TOURNAMENT_TOOLS_JSON, load_tournament_tools
+from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 log = logging.getLogger(__name__)
 

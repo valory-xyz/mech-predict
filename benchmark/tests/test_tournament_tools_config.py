@@ -16,13 +16,13 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Tests for benchmark/tournament.py:load_tournament_tools."""
+"""Tests for benchmark/tournament_tools.py:load_tournament_tools."""
 
 import json
 from pathlib import Path
 
 import pytest
-from benchmark.tournament import TOURNAMENT_TOOLS_JSON, load_tournament_tools
+from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 
 def test_loads_valid_file(tmp_path: Path) -> None:

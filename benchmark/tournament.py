@@ -36,6 +36,11 @@ from benchmark.tools import (
     load_tool_run,
 )
 
+# load_tournament_tools lives in a dependency-free module so lightweight consumers
+# (e.g. benchmark.analyze in CI's minimal env) can read the tool→CID map without
+# importing the aea stack this module pulls in.
+from benchmark.tournament_tools import load_tournament_tools
+
 # isort treats `benchmark` as third-party (not in known_first_party=autonomy);
 # pylint treats it as first-party. The two views disagree on import order.
 # isort wins — silence pylint's complaint on the import that follows.
@@ -44,12 +49,6 @@ from dotenv import (  # type: ignore[import-not-found]  # pylint: disable=wrong-
 )
 
 from packages.valory.skills.task_execution.utils.apis import KeyChain
-
-# ---------------------------------------------------------------------------
-# Tournament tools — single source of truth (TOURNAMENT_IPFS_LOADER_SPEC §3.1)
-# ---------------------------------------------------------------------------
-
-TOURNAMENT_TOOLS_JSON = Path(__file__).resolve().parent / "tournament_tools.json"
 
 # Patterns that look like API keys / tokens (long hex, base64, sk-... etc.)
 _SECRET_RE = re.compile(
@@ -60,42 +59,6 @@ _SECRET_RE = re.compile(
 def _sanitize_error(error: str) -> str:
     """Redact potential secrets from error strings."""
     return _SECRET_RE.sub("REDACTED", error)
-
-
-def load_tournament_tools(path: Path = TOURNAMENT_TOOLS_JSON) -> dict[str, str]:
-    """Load the tournament tool→CID map from JSON.
-
-    :param path: path to tournament_tools.json. Defaults to the file shipped
-        alongside this module.
-    :return: dict mapping tool_name → IPFS CID.
-    :raises FileNotFoundError: if the file is missing.
-    :raises ValueError: if the file is malformed (not a dict[str, str]).
-    """
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Tournament tools config not found: {path}. "
-            "Tournament cannot run without it."
-        )
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Tournament tools config is not valid JSON: {path}") from exc
-    if not isinstance(data, dict):
-        raise ValueError(
-            f"Tournament tools config must be a JSON object, got {type(data).__name__}: {path}"
-        )
-    for tool_name, cid in data.items():
-        if not isinstance(tool_name, str) or not isinstance(cid, str):
-            raise ValueError(
-                f"Tournament tools config must map str→str; "
-                f"got {tool_name!r}→{cid!r} in {path}"
-            )
-        if not tool_name or not cid:
-            raise ValueError(
-                f"Tournament tools config has empty tool_name or CID: "
-                f"{tool_name!r}→{cid!r} in {path}"
-            )
-    return data
 
 
 load_dotenv()

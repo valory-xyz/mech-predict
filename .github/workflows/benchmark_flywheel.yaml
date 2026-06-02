@@ -38,6 +38,11 @@ on:
         description: 'Trailing-window length (days) for the Current/Prev rolling comparison sections'
         required: false
         default: '7'
+      run_triage:
+        description: 'Run the tool-improvement triage step at the end (default: true). Cron always runs it; manual dispatch can flip it off to skip the step.'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   # -----------------------------------------------------------------------
@@ -300,23 +305,23 @@ jobs:
       # benchmark-data artifact). The hashFiles() gate is defensive: if
       # either rolling file is missing (because the scorer step failed)
       # we skip triage rather than open a noisy issue against half-data.
-      # ENABLE_TOOL_IMPROVEMENT is opt-in: the step runs only when the
-      # repo var is explicitly 'true'. This keeps the default state
-      # silent (no live dispatch) until the operator deliberately
-      # promotes from observer -> dry-run -> live by flipping repo vars.
+      # Triage runs by default. The `run_triage` workflow_dispatch input
+      # lets a human dispatch flip it off (run_triage=false). Cron-
+      # triggered runs send an empty string for the input, so the
+      # `!= 'false'` semantics fire the step on cron as the YAML
+      # `default: true` advertises. No repo-level Actions Variables
+      # are required. (The script still accepts --dry-run for local
+      # debugging; we don't expose it as a workflow input because
+      # mech-predict-test is the right place to validate behaviour
+      # without filing real issues.)
       - name: Tool-improvement triage (Polystrat)
-        if: always() && !cancelled() && (vars.ENABLE_TOOL_IMPROVEMENT == 'true') && hashFiles('benchmark/results/rolling_scores_polymarket.json') != '' && hashFiles('benchmark/results/prev_rolling_scores_polymarket.json') != ''
+        if: always() && !cancelled() && (github.event.inputs.run_triage != 'false') && hashFiles('benchmark/results/rolling_scores_polymarket.json') != '' && hashFiles('benchmark/results/prev_rolling_scores_polymarket.json') != ''
         env:
           GH_TOKEN: ${{ secrets.TOOL_IMPROVEMENT_GH_TOKEN || github.token }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          DRY_RUN_FLAG=""
-          if [ "${{ vars.TOOL_IMPROVEMENT_DRY_RUN }}" = "true" ]; then
-            DRY_RUN_FLAG="--dry-run"
-          fi
           python -m benchmark.tool_improvement_triage \
-            --repo "${{ github.repository }}" \
-            $DRY_RUN_FLAG
+            --repo "${{ github.repository }}"
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

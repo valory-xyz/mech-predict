@@ -226,10 +226,10 @@ Pick exactly ONE based on the size of the change:
 
 | Path | When | What you DO NOT do |
 | --- | --- | --- |
-| **In place** — edit `packages/{author}/customs/<tool>/<tool>.py` | Small bugfix: output clamp, parsing fix, one-line prompt tweak, typo, dead-branch removal. Pre-lint diff ≤ 30 LOC. Does NOT touch the prompt's `system`/`user` template structure or the tool's high-level reasoning flow. | Do NOT touch `tool_lineage.json`. Do NOT rename. Do NOT create a new sibling directory. |
-| **New version** — create `packages/{author}/customs/<base>_v<n+1>/<base>_v<n+1>.py` | Significant change: prompt rewrite, mechanism swap, new business logic, new evidence source, different model class. | Do NOT delete or modify the existing `<tool>` source — the previous variant keeps running alongside the new one. |
+| **In place** — edit `packages/{author}/customs/<tool>/<tool>.py` | Output-preserving fixes only: typos, comments, dead-branch removal, refactors with identical behaviour, parsing/error-handling on previously-crashing inputs. Pre-lint diff ≤ 30 LOC. | Do NOT touch `tool_lineage.json`. Do NOT rename. Do NOT create a new sibling directory. Do NOT edit the prompt text or any code that can shift `p_yes` on a normal input. |
+| **New version** — create `packages/{author}/customs/<base>_v<n+1>/<base>_v<n+1>.py` | Anything that can change the probability distribution: any prompt edit (even one line), output clamp/calibration, mechanism swap, new evidence source, model swap, new business logic. | Do NOT delete or modify the existing `<tool>` source — the previous variant keeps running alongside the new one. |
 
-If unsure: default to **in place** for smaller changes, **new version** for anything that crosses a paragraph boundary in the prompt or rewires the call graph.
+If unsure: default to **new version**. If you cannot show the edit leaves outputs bit-identical on the existing benchmark, treat it as a new version.
 
 #### Naming convention (new-version path)
 
@@ -247,7 +247,7 @@ Examples:
 | `superforcaster-v2` | `superforcaster` | `superforcaster`, `superforcaster-v2` | 2 | `superforcaster-v3` |
 | `superforcaster-polymarket-v1` | `superforcaster-polymarket` | `superforcaster-polymarket-v1` | 1 | `superforcaster-polymarket-v2` |
 
-Directory uses `_` (Python module convention); the registered tool name uses `-` (trader-visible convention).
+Directory uses `_` (Python module convention). New variants' registered tool names use `-` (trader-visible convention); some legacy tools (e.g. `factual_research`, `close_market`, `superforcaster_full_search`) use `_` — keep their existing form rather than renaming.
 
 #### The `tool_lineage.json` ledger
 
@@ -259,9 +259,7 @@ Lives at the repo root. The `tools` field is a **dictionary keyed by tool name**
   "tools": {
     "superforcaster-v3": {
       "parent": "superforcaster-v2",
-      "reason": "<one-line why, e.g. 'prompt rewrite to add low-p_yes evidence bar'>",
-      "pr": "<URL of the PR introducing this variant>",
-      "deployed": false
+      "reason": "<one-line why, e.g. 'prompt rewrite to add low-p_yes evidence bar'>"
     }
   }
 }
@@ -269,11 +267,11 @@ Lives at the repo root. The `tools` field is a **dictionary keyed by tool name**
 
 Field semantics:
 
-- The dictionary key is the tool name. Must match `^[a-z][a-z0-9_-]*$` and equal `<base>-v<n+1>` per the naming convention.
+- The dictionary key is the tool name. Must match `^[a-z][a-z0-9._-]*$` and equal `<base>-v<n+1>` per the naming convention (legacy underscored names are grandfathered).
 - `parent` — the tool named in the issue (the one that triggered this version), or `null` for a tool introduced from scratch. Lets readers walk back the lineage.
 - `reason` — one human-readable line. NOT the hypothesis (that goes in the PR body); just the housekeeping reason.
-- `pr` — URL of this PR. Use `"PENDING"` as a placeholder if appending before `gh pr create`; replace with the real URL in the same commit.
-- `deployed` — defaults to `false`. `false` = variant ships in source but NOT routed to live traders. Promotion to live traffic is a separate human PR on `agent-deployments`; that PR flips this to `true`. The automation never sets `deployed: true`.
+
+PR-of-introduction is intentionally omitted — `git log -- packages/{author}/customs/<dir>/component.yaml` is authoritative. Deployment status is intentionally omitted — it drifts; query the marketplace subgraph + IPFS manifests to get live truth.
 
 Add exactly ONE entry per new variant. Do not modify or remove existing entries.
 

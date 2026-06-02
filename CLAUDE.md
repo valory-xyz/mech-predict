@@ -216,15 +216,105 @@ Configure in `.1env` or `.agentenv`:
 
 ## Important Patterns
 
-### Adding a New Tool
+### Tool-improvement housekeeping rules
 
-1. Create package structure in `packages/{author}/customs/{tool_name}/`
-2. Implement `run(**kwargs)` function with proper signature
-3. Use `@with_key_rotation` decorator if calling rate-limited APIs
-4. Add tool metadata to `component.yaml`
-5. Add IPFS hash to `TOOLS_TO_PACKAGE_HASH` mapping
-6. Update package hashes: `autonomy packages lock`
-7. Test with `scripts/test_tool.py`
+When modifying an existing prediction tool (e.g. in response to a `tool-improvement`-labelled issue), follow these rules. They are scoped to **housekeeping** only — file paths, naming, the `tool_lineage.json` ledger, side effects. They do NOT cover investigation, hypothesis-forming, or whether a change is warranted (that logic lives in the `tool-improvement-agent` pipeline in the `agent-skills` repo).
+
+#### In place vs new version
+
+Pick exactly ONE based on the size of the change:
+
+| Path | When | What you DO NOT do |
+| --- | --- | --- |
+| **In place** — edit `packages/{author}/customs/<tool>/<tool>.py` | Small bugfix: output clamp, parsing fix, one-line prompt tweak, typo, dead-branch removal. Pre-lint diff ≤ 30 LOC. Does NOT touch the prompt's `system`/`user` template structure or the tool's high-level reasoning flow. | Do NOT touch `tool_lineage.json`. Do NOT rename. Do NOT create a new sibling directory. |
+| **New version** — create `packages/{author}/customs/<base>_v<n+1>/<base>_v<n+1>.py` | Significant change: prompt rewrite, mechanism swap, new business logic, new evidence source, different model class. | Do NOT delete or modify the existing `<tool>` source — the previous variant keeps running alongside the new one. |
+
+If unsure: default to **in place** for smaller changes, **new version** for anything that crosses a paragraph boundary in the prompt or rewires the call graph.
+
+#### Naming convention (new-version path)
+
+To compute the new tool name from the `<tool>` named in the issue:
+
+1. Strip a trailing `-v<digits>` from `<tool>` to get `<base>`. Bare names with no suffix are implicit `-v0`.
+2. Find the largest `n` such that `<base>-v<n>` exists in either `benchmark/tools.py:TOOL_REGISTRY` keys or `tool_lineage.json` `tools` keys.
+3. New name is `<base>-v<n+1>`.
+
+Examples:
+
+| `<tool>` (from issue) | `<base>` | Existing | `n` | New name |
+| --- | --- | --- | --- | --- |
+| `superforcaster` | `superforcaster` | `superforcaster` | 0 | `superforcaster-v1` |
+| `superforcaster-v2` | `superforcaster` | `superforcaster`, `superforcaster-v2` | 2 | `superforcaster-v3` |
+| `superforcaster-polymarket-v1` | `superforcaster-polymarket` | `superforcaster-polymarket-v1` | 1 | `superforcaster-polymarket-v2` |
+
+Directory uses `_` (Python module convention); the registered tool name uses `-` (trader-visible convention).
+
+#### The `tool_lineage.json` ledger
+
+Lives at the repo root. The `tools` field is a **dictionary keyed by tool name**, so lookup is O(1) and "does this name already exist?" is a trivial `name in tools` check. Updated **only** on the new-version path (in-place edits leave it untouched).
+
+```json
+{
+  "version": 1,
+  "tools": {
+    "superforcaster-v3": {
+      "parent": "superforcaster-v2",
+      "reason": "<one-line why, e.g. 'prompt rewrite to add low-p_yes evidence bar'>",
+      "pr": "<URL of the PR introducing this variant>",
+      "deployed": false
+    }
+  }
+}
+```
+
+Field semantics:
+
+- The dictionary key is the tool name. Must match `^[a-z][a-z0-9_-]*$` and equal `<base>-v<n+1>` per the naming convention.
+- `parent` — the tool named in the issue (the one that triggered this version), or `null` for a tool introduced from scratch. Lets readers walk back the lineage.
+- `reason` — one human-readable line. NOT the hypothesis (that goes in the PR body); just the housekeeping reason.
+- `pr` — URL of this PR. Use `"PENDING"` as a placeholder if appending before `gh pr create`; replace with the real URL in the same commit.
+- `deployed` — defaults to `false`. `false` = variant ships in source but NOT routed to live traders. Promotion to live traffic is a separate human PR on `agent-deployments`; that PR flips this to `true`. The automation never sets `deployed: true`.
+
+Add exactly ONE entry per new variant. Do not modify or remove existing entries.
+
+#### File side effects, by path
+
+**In-place path:**
+
+| File | Action |
+| --- | --- |
+| `packages/{author}/customs/<tool>/<tool>.py` | edit |
+| `packages/{author}/customs/<tool>/component.yaml` | re-fingerprinted by `autonomy packages lock` |
+| `packages/packages.json` | CID bumped by `autonomy packages lock` |
+| `benchmark/tournament_tools.json[<tool>]` | bump to new CID (value swap; key unchanged) |
+| `tool_lineage.json` | **untouched** |
+| `benchmark/tools.py:TOOL_REGISTRY` | **untouched** |
+
+**New-version path:**
+
+| File | Action |
+| --- | --- |
+| `packages/{author}/customs/<tool>/` | **untouched** — previous variant keeps running |
+| `packages/{author}/customs/<base>_v<n+1>/<base>_v<n+1>.py` | NEW — copy previous tool's source as starting point, then apply the change |
+| `packages/{author}/customs/<base>_v<n+1>/component.yaml` | NEW — generated by `autonomy packages lock` |
+| `packages/{author}/customs/<base>_v<n+1>/__init__.py` | NEW — copy from previous tool's `__init__.py` |
+| `packages/packages.json` | CID added by `autonomy packages lock` |
+| `benchmark/tools.py:TOOL_REGISTRY` | ADD entry mapping `<base>-v<n+1>` → new module path |
+| `benchmark/tournament_tools.json` | ADD entry `<base>-v<n+1>` → new CID. Previous entry left in place. |
+| `tool_lineage.json` | ADD one entry to `tools` (schema above) |
+
+#### Adding a new tool from scratch (not an update)
+
+If you are adding a tool that has no predecessor (a brand-new tool, not a variant of an existing one), the flow is the same as the new-version path above, except:
+
+- `tool_lineage.json` gets an entry where `parent` is `null`.
+- The new tool's name does not need a `-v<N>` suffix on first introduction — `superforcaster` is fine; the suffix only appears when a variant of it is later spawned.
+
+#### Out-of-scope reminders
+
+- Do NOT run `autonomy push-all`. Publishing bytes to IPFS is a human step before merging.
+- Do NOT modify `agent-deployments`. Routing a CID to live traffic is a separate human PR.
+- Do NOT delete old variants. The previous version keeps running until a human explicitly retires it.
 
 ### API Key Management
 

@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "_doc": "Ledger of tool variants, keyed by tool name. See CLAUDE.md section 'Tool-improvement housekeeping rules' for the canonical schema and update rule.",
+  "tools": {
+    "superforcaster-polymarket-v1": {
+      "parent": "superforcaster",
+      "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched.",
+      "pr": 297,
+      "deployed": true
+    },
+    "claude-prediction-offline": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "claude-prediction-online": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "close_market": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": false
+    },
+    "corcel-completion": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 252,
+      "deployed": false
+    },
+    "corcel-prediction": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 252,
+      "deployed": false
+    },
+    "dall-e-2": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 239,
+      "deployed": false
+    },
+    "dall-e-3": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 239,
+      "deployed": false
+    },
+    "factual_research": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 118,
+      "deployed": true
+    },
+    "gemini-2.0-flash": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 228,
+      "deployed": false
+    },
+    "gemini-2.0-flash-lite": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 228,
+      "deployed": false
+    },
+    "gemini-completion": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 252,
+      "deployed": false
+    },
+    "gemini-prediction": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 252,
+      "deployed": false
+    },
+    "native_transfer": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 201,
+      "deployed": false
+    },
+    "prediction-langchain": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 231,
+      "deployed": false
+    },
+    "prediction-offline": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "prediction-offline-sme": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "prediction-online": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "prediction-online-sme": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 177,
+      "deployed": true
+    },
+    "prediction-request-rag": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 164,
+      "deployed": true
+    },
+    "prediction-request-rag-claude": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 164,
+      "deployed": true
+    },
+    "prediction-request-reasoning": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 188,
+      "deployed": true
+    },
+    "prediction-request-reasoning-claude": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 188,
+      "deployed": true
+    },
+    "prediction-url-cot": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 208,
+      "deployed": false
+    },
+    "prediction-url-cot-claude": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 208,
+      "deployed": false
+    },
+    "resolve-market-jury-v1": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 157,
+      "deployed": true
+    },
+    "resolve-market-reasoning-gpt-4.1": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 164,
+      "deployed": true
+    },
+    "superforcaster": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 260,
+      "deployed": true
+    },
+    "superforcaster_calibrated_full_search": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 290,
+      "deployed": false
+    },
+    "superforcaster_full_search": {
+      "parent": null,
+      "reason": "Original tool, baseline entry.",
+      "pr": 290,
+      "deployed": false
+    }
+  }
+}

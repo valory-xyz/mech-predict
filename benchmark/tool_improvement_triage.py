@@ -467,6 +467,8 @@ This issue records the {signal}, not a diagnosis. The cause has not been identif
 Artifact: {artifact_url}
 
 Download with `gh run download <run-id> --name benchmark-data`. The artifact contains the daily JSONL logs and `results/scores_{platform}.json`. Reproduce the headline number from the raw rows before forming any hypothesis.
+
+If your investigation concludes that a code change is warranted, **before editing anything** read the [Tool-improvement housekeeping rules](../blob/main/CLAUDE.md#tool-improvement-housekeeping-rules) section of `CLAUDE.md` at the repo root. It is the canonical reference for: in-place edit vs new-version spawn decision, naming convention, the `tool_lineage.json` ledger, and the side-effect file list.
 """
 
 

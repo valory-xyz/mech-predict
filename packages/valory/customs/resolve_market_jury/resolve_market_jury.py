@@ -136,6 +136,21 @@ resolver's contract). Pick exactly one:
   (C2) NO -- the event did NOT occur:
         is_valid=true, is_determinable=true, has_occurred=false, confidence>=0.7
 
+WHEN TO USE UNDETERMINABLE (B) vs COMMITTING (C1/C2):
+  UNDETERMINABLE is ONLY for when your web search returned NO relevant results \
+at all -- zero articles, zero data points, zero mentions of the topic. It means \
+"I searched and found nothing."
+  If you found ANY relevant data -- a published figure from the named source, a \
+news article about the event, a government report, a price listing -- you MUST \
+commit to YES or NO based on what you found. Partial or indirect evidence still \
+warrants a verdict: use confidence 0.7-0.8 for indirect evidence, 0.9+ for \
+direct evidence.
+  ABSENCE OF NEWS about a scheduled event by the deadline is itself evidence \
+the event did NOT occur (C2). "No announcement found" -> has_occurred=false.
+  ABSENCE OF CHANGE in a publicly tracked metric (interest rates, prices, \
+standings) is evidence the status quo HELD (C1). If the question asks "will X \
+remain at Y" and you find no news of X changing, that supports has_occurred=true.
+
 VALIDITY RULES (when to choose A -- INVALID):
 * Questions with relative dates ("in 6 months") are invalid.
 * Questions about opinions rather than facts are invalid.
@@ -189,7 +204,10 @@ DECISION PROCESS:
    c. Follow the majority UNLESS your own research or the minority's sources \
 show a clear factual error in the majority's reasoning.
    d. When evidence quality is similar on both sides, follow the majority.
-4. If no clear majority exists, or evidence is too weak, pick (B) UNDETERMINABLE.
+4. UNDETERMINABLE (B) is a LAST RESORT. Pick it ONLY when ALL voters returned \
+UNDETERMINABLE AND your own web search also found zero relevant results. If \
+even ONE voter committed to YES or NO with cited sources, you must evaluate \
+their evidence and either agree or disagree -- do not default to UNDETERMINABLE.
 5. If a voter flags the question as invalid with sound reasoning, pick (A) INVALID.
 6. If the majority of decided voters say UNDETERMINABLE or INVALID, do NOT \
 override them with your own affirmative answer -- pick (B) or (A) respectively. \
@@ -199,6 +217,10 @@ agree on YES or NO: you MUST follow them unless you can cite a specific \
 factual error in their reasoning text -- a different INTERPRETATION of the \
 question (e.g. of VERB MATCH, NUMERIC RANGE, NEGATION) is NOT a factual error \
 and does not justify override.
+7. ABSENCE OF NEWS is evidence: if the question asks whether an announcement \
+was made or an event occurred, and no voter found any report of it happening, \
+that supports NO (C2). If the question asks whether a status quo held (rates, \
+prices, standings) and no voter found news of a change, that supports YES (C1).
 
 SEMANTIC CHECKS (apply before producing has_occurred):
 (a) NEGATION TRAP -- "still pending", "still in effect", "remain at", "not yet" \

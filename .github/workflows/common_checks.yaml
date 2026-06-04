@@ -186,10 +186,79 @@ jobs:
           name: codecov-umbrella
           fail_ci_if_error: false
 
+  detect_changes:
+    # Decide whether the live-tool integration suite needs to run. It is the
+    # ONLY gated job: it spins up isolated venvs and calls real third-party
+    # APIs (cost + secrets + ~2h budget). We run it by DEFAULT and skip it only
+    # when EVERY changed file lives under benchmark/ — that code is self-contained
+    # offline analysis that never touches the live tools, so it can't affect the
+    # integration results. Every other job — including the unit-test matrix above
+    # — stays ungated and runs on every push/PR.
+    name: Detect tool changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      run_integration: ${{ steps.filter.outputs.run_integration }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Determine whether to run the integration suite
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+            head_sha="${{ github.event.pull_request.head.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+            head_sha="${{ github.sha }}"
+          fi
+          # New branch or unknown base (all-zero SHA): can't diff, so run the
+          # suite to stay on the safe side.
+          if [ -z "${base_sha}" ] || [ "${base_sha}" = "0000000000000000000000000000000000000000" ]; then
+            echo "No usable base SHA; running integration tests."
+            echo "run_integration=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # --no-renames: keep rename detection OFF so a move is recorded as
+          # delete(old)+add(new). Otherwise git collapses a rename to its
+          # destination only, and moving a tool INTO benchmark/ would look
+          # benchmark-only and wrongly skip the live suite.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            changed="$(git diff --name-only --no-renames "${base_sha}...${head_sha}")"
+          else
+            changed="$(git diff --name-only --no-renames "${base_sha}" "${head_sha}")"
+          fi
+          echo "Changed files:"
+          echo "${changed:-<none>}"
+          # Skip the live suite ONLY when every changed file is under benchmark/.
+          # List the changed files NOT under benchmark/ (|| true so a
+          # benchmark-only diff — where grep matches nothing and exits 1 —
+          # doesn't trip set -e/pipefail). If that list is non-empty, something
+          # outside benchmark/ changed, so run. Branching on grep's output, not
+          # its exit code, keeps this correct across grep implementations.
+          non_benchmark="$(echo "${changed}" | grep -vE '^benchmark/' || true)"
+          if [ -z "${changed}" ]; then
+            echo "Empty diff -> running integration tests to be safe."
+            echo "run_integration=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "${non_benchmark}" ]; then
+            echo "Change outside benchmark/ detected -> running integration tests."
+            echo "run_integration=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Benchmark-only change -> skipping integration tests."
+            echo "run_integration=false" >> "$GITHUB_OUTPUT"
+          fi
+
   integration_tests:
     continue-on-error: False
     needs:
       - test
+      - detect_changes
+    # Skipped (not failed) for benchmark-only changes, so the all_checks_passed
+    # aggregate below still goes green.
+    if: needs.detect_changes.outputs.run_integration == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -233,6 +302,7 @@ jobs:
       - linter_checks
       - scan
       - test
+      - detect_changes
       - integration_tests
     runs-on: ubuntu-24.04
     steps:

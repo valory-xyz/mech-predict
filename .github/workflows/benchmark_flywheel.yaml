@@ -38,6 +38,11 @@ on:
         description: 'Trailing-window length (days) for the Current/Prev rolling comparison sections'
         required: false
         default: '7'
+      run_triage:
+        description: 'Run the tool-improvement triage step at the end (default: true). Cron always runs it; manual dispatch can flip it off to skip the step.'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   # -----------------------------------------------------------------------
@@ -50,6 +55,22 @@ jobs:
     timeout-minutes: 30
     needs: [tournament-run]
     if: always() && !cancelled()
+    # issues: write is needed by the Tool-improvement triage step at the
+    # end of this job; the default github.token has contents: read only.
+    # actions: read is needed by `Download previous benchmark data` (the
+    # action calls the Actions REST API to locate the prior run's
+    # benchmark-data artifact carrying tool_improvement_triage_state.json,
+    # scores.json, and the fetch cursor) and by `Resolve report artifact
+    # URL` (gh api .../actions/runs/.../artifacts). Without it those calls
+    # 403 silently (both wrap continue-on-error), state restore fails
+    # every day, and duplicate-suppression breaks.
+    # If TOOL_IMPROVEMENT_GH_TOKEN secret is set, it overrides github.token
+    # for that step (lets the issue be authored by a dedicated bot account
+    # rather than github-actions[bot]); these permissions still apply.
+    permissions:
+      contents: read
+      issues: write
+      actions: read
     # Drives both the Python ROLLING_WINDOW_DAYS constant (read at import
     # time in benchmark/analyze.py) and the --period-days flag passed to
     # the scorer below, keeping the report and the scoring step in sync.
@@ -171,10 +192,14 @@ jobs:
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
+          # --skip-tournament-output: the analyzer renders tournament
+          # all-time only (never day-gated), so rolling tournament files
+          # would just sit unread in results/.
           python -m benchmark.scorer \
             --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/rolling_scores.json \
+            --skip-tournament-output \
             $TOURNAMENT_FLAG
         continue-on-error: true
 
@@ -192,6 +217,7 @@ jobs:
             --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
             --logs-dir benchmark/datasets/logs/ \
             --output benchmark/results/prev_rolling_scores.json \
+            --skip-tournament-output \
             $TOURNAMENT_FLAG
         continue-on-error: true
 
@@ -227,6 +253,7 @@ jobs:
             benchmark/results/scored_row_ids.json
             benchmark/results/report_omen.md
             benchmark/results/report_polymarket.md
+            benchmark/results/tool_improvement_triage_state.json
           retention-days: 90
 
       - name: Resolve report artifact URL
@@ -267,6 +294,34 @@ jobs:
           python -m benchmark.notify_slack \
             --report benchmark/results/report_polymarket.md \
             --platform-label Polystrat
+
+      # Tool-improvement triage: read the per-platform rolling-window
+      # scores produced above, apply the deterministic gate cascade, and
+      # open a GitHub issue (label: tool-improvement) for each tool that
+      # passes every gate. The label routes the issue to the
+      # tool-improvement-agent in the agent-skills monorepo. Tools that
+      # already have an open issue stay silent (duplicate suppression
+      # via tool_improvement_triage_state.json carried in the
+      # benchmark-data artifact). The hashFiles() gate is defensive: if
+      # either rolling file is missing (because the scorer step failed)
+      # we skip triage rather than open a noisy issue against half-data.
+      # Triage runs by default. The `run_triage` workflow_dispatch input
+      # lets a human dispatch flip it off (run_triage=false). Cron-
+      # triggered runs send an empty string for the input, so the
+      # `!= 'false'` semantics fire the step on cron as the YAML
+      # `default: true` advertises. No repo-level Actions Variables
+      # are required. (The script still accepts --dry-run for local
+      # debugging; we don't expose it as a workflow input because
+      # mech-predict-test is the right place to validate behaviour
+      # without filing real issues.)
+      - name: Tool-improvement triage (Polystrat)
+        if: always() && !cancelled() && (github.event.inputs.run_triage != 'false') && hashFiles('benchmark/results/rolling_scores_polymarket.json') != '' && hashFiles('benchmark/results/prev_rolling_scores_polymarket.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.TOOL_IMPROVEMENT_GH_TOKEN || github.token }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python -m benchmark.tool_improvement_triage \
+            --repo "${{ github.repository }}"
 
       # Daily log files uploaded separately for archival
       - name: Upload daily log archive

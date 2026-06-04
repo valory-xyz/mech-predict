@@ -18,6 +18,7 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/analyze.py"""
 
+import json
 from typing import Any
 
 import pytest
@@ -36,8 +37,10 @@ from benchmark.analyze import (
     _filter_by_active,
     _parse_tvm_key,
     _sample_label,
+    _scope_tournament_to_active,
     generate_fleet_report,
     generate_report,
+    load_active_tournament_cids,
     section_category,
     section_category_platform,
     section_diagnostics_comparison,
@@ -54,6 +57,7 @@ from benchmark.analyze import (
     section_tool_comparison,
     section_tool_deployment_status,
     section_tool_version_breakdown,
+    section_tournament_callouts,
     section_trend,
     section_version_deltas,
     section_weak_spots,
@@ -954,7 +958,7 @@ class TestGenerateReport:
         )
         history = [{"month": "2026-03", "overall": {"brier": 0.3, "n": 50}}]
         report = generate_report(
-            s, history, platform="omen", rolling_scores=s, disabled_tools={}
+            s, history, platform="omen", rolling_scores=s, valid_tools={}
         )
 
         assert "# Benchmark Report (Omenstrat) — " in report
@@ -987,7 +991,7 @@ class TestGenerateReport:
     def test_empty_data_no_crash(self) -> None:
         """Test empty data does not crash."""
         s = _scores(brier=None, reliability=None, total=0, valid=0)
-        report = generate_report(s, [], platform="omen", disabled_tools={})
+        report = generate_report(s, [], platform="omen", valid_tools={})
         assert "# Benchmark Report (Omenstrat) — " in report
         # With no rolling_scores, the snapshot banner explains the gap.
         assert (
@@ -1369,7 +1373,7 @@ class TestGenerateReportTournamentToggle:
     def test_off_by_default_omits_tournament_sections(self) -> None:
         """Default behavior: no tournament sections in the rendered report."""
         s = self._scores_with_versions()
-        report = generate_report(s, [], platform="omen", disabled_tools={})
+        report = generate_report(s, [], platform="omen", valid_tools={})
         assert "Tool × Version × Mode" not in report
         assert "Version Deltas" not in report
 
@@ -1380,7 +1384,7 @@ class TestGenerateReportTournamentToggle:
         """
         s = self._scores_with_versions()
         report = generate_report(
-            s, [], platform="omen", include_tournament=True, disabled_tools={}
+            s, [], platform="omen", include_tournament=True, valid_tools={}
         )
         assert "Tool × Version × Mode (All-Time)" in report
         assert "## Version Deltas" in report
@@ -1404,7 +1408,7 @@ class TestGenerateReportTournamentToggle:
             platform="omen",
             rolling_scores=rolling,
             include_tournament=True,
-            disabled_tools={},
+            valid_tools={},
         )
         assert "Tool × Version × Mode (All-Time)" in report
         assert f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)" in report
@@ -1483,23 +1487,133 @@ def _tournament_scores_with_version(
     return s
 
 
+class TestLoadActiveTournamentCids:
+    """Tests for load_active_tournament_cids."""
+
+    def test_reads_cid_values(self, tmp_path: Any) -> None:
+        """Returns the set of CID values from tournament_tools.json."""
+        path = tmp_path / "tournament_tools.json"
+        path.write_text(json.dumps({"tool-a": "cid1", "tool-b": "cid2"}))
+        assert load_active_tournament_cids(path) == {"cid1", "cid2"}
+
+    def test_missing_file_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Unreadable file returns None (no scoping) rather than hiding all rows."""
+        assert load_active_tournament_cids(tmp_path / "absent.json") is None
+
+    def test_malformed_json_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Malformed JSON returns None (pins JSONDecodeError in except tuple)."""
+        path = tmp_path / "tournament_tools.json"
+        path.write_text("not-json")
+        assert load_active_tournament_cids(path) is None
+
+    def test_non_dict_json_fails_open_to_none(self, tmp_path: Any) -> None:
+        """Non-dict root (list/string/number) returns None instead of crashing."""
+        path = tmp_path / "tournament_tools.json"
+        path.write_text(json.dumps(["cid1", "cid2"]))
+        assert load_active_tournament_cids(path) is None
+
+    def test_value_error_fails_open_to_none(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ValueError from the loader fails open to None.
+
+        Forces the exception directly rather than relying on inputs that
+        happen to make ``load_tournament_tools`` raise today. If the
+        loader is ever loosened (e.g. tolerates malformed JSON), the
+        malformed/non-dict tests above stop exercising the ``except``
+        branch silently; this one always does.
+
+        :param tmp_path: pytest fixture for a temporary directory.
+        :param monkeypatch: pytest fixture for per-test attribute swapping.
+        """
+
+        def _raise(_path: Any) -> dict[str, str]:
+            raise ValueError("bad json")
+
+        monkeypatch.setattr("benchmark.analyze.load_tournament_tools", _raise)
+        assert load_active_tournament_cids(tmp_path / "x.json") is None
+
+    def test_os_error_fails_open_to_none(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An OSError from the loader fails open to None.
+
+        ``OSError`` is in the except tuple but no input-driven test
+        reaches it (``FileNotFoundError`` is its only common subclass).
+        Removing ``OSError`` from the tuple would otherwise go uncaught.
+
+        :param tmp_path: pytest fixture for a temporary directory.
+        :param monkeypatch: pytest fixture for per-test attribute swapping.
+        """
+
+        def _raise(_path: Any) -> dict[str, str]:
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("benchmark.analyze.load_tournament_tools", _raise)
+        assert load_active_tournament_cids(tmp_path / "x.json") is None
+
+    def test_empty_dict_yields_empty_set(self, tmp_path: Any) -> None:
+        """An empty (but valid) file scopes to nothing, not fail-open None.
+
+        Pins the documented ``set()``-vs-``None`` distinction: returning
+        None here would collapse "scope the tournament view to nothing"
+        into "scoping unavailable", silently un-scoping the report.
+
+        :param tmp_path: pytest fixture for a temporary directory.
+        """
+        path = tmp_path / "tournament_tools.json"
+        path.write_text("{}")
+        assert load_active_tournament_cids(path) == set()
+
+
+class TestScopeTournamentToActive:
+    """Tests for _scope_tournament_to_active."""
+
+    def test_preserves_top_level_fields(self) -> None:
+        """Sibling top-level fields (total_rows, overall) survive scoping.
+
+        Pins the {**tvm_scores, ...} spread: a narrowing to just
+        {"by_tool_version_mode": kept} would silently drop fields that
+        downstream consumers may rely on.
+        """
+        tvm_scores = {
+            "total_rows": 42,
+            "overall": {"brier": 0.2, "n": 42},
+            "by_tool_version_mode": {
+                "tool-a | cid-active | tournament": {"n": 10, "brier": 0.1},
+                "tool-a | cid-dropped | tournament": {"n": 5, "brier": 0.3},
+                "tool-a | cid-prod | production_replay": {"n": 100, "brier": 0.2},
+            },
+        }
+        scoped = _scope_tournament_to_active(tvm_scores, {"cid-active"})
+        assert scoped["total_rows"] == 42
+        assert scoped["overall"] == {"brier": 0.2, "n": 42}
+        assert set(scoped["by_tool_version_mode"]) == {
+            "tool-a | cid-active | tournament",
+            "tool-a | cid-prod | production_replay",
+        }
+
+    def test_none_active_cids_returns_input_unchanged(self) -> None:
+        """active_cids=None disables scoping; input is returned as-is."""
+        tvm_scores = {
+            "by_tool_version_mode": {
+                "tool-a | cid1 | tournament": {"n": 10, "brier": 0.1},
+            },
+        }
+        assert _scope_tournament_to_active(tvm_scores, None) is tvm_scores
+
+
 class TestTournamentCallouts:
     """Tests for section_tournament_callouts."""
 
     def test_empty_when_no_tournament_data(self) -> None:
         """Missing tournament scores returns empty string."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
-
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         assert section_tournament_callouts(prod, None) == ""
         assert section_tournament_callouts(prod, {"total_rows": 0}) == ""
 
     def test_promotion_candidate_flagged(self) -> None:
         """Tournament Brier meaningfully lower than production triggers a promotion bullet."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
-
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
         result = section_tournament_callouts(prod, tourn)
@@ -1507,32 +1621,84 @@ class TestTournamentCallouts:
         assert "tool-a" in result
         assert "v2" in result
         assert "Tournament regressions:" not in result
+        # n=50 is above CALLOUT_MIN_N, so no low-data marker.
+        assert "⚠ low data" not in result
 
     def test_tournament_regression_flagged(self) -> None:
         """Tournament Brier meaningfully higher than production triggers a regression bullet."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
-
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 50)
         result = section_tournament_callouts(prod, tourn)
         assert "Tournament regressions:" in result
         assert "Promotion candidates:" not in result
 
-    def test_suppressed_below_min_n(self) -> None:
-        """Tournament cells with n below CALLOUT_MIN_N are ignored."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
+    def test_low_n_callout_shown_with_marker(self) -> None:
+        """Low-n tournament cells are flagged with a marker when scoping is on.
 
+        Tournament is not sample-gated while ``active_cids`` is
+        provided: a candidate's record shows from its first resolved
+        market with a ``⚠ low data`` marker so the reader (and the
+        Slack summary) can weight it.
+        """
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
-        assert section_tournament_callouts(prod, tourn) == ""
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "Promotion candidates:" in result
+        assert "⚠ low data" in result
+        assert "n=10" in result
+
+    def test_low_n_regression_shown_with_marker(self) -> None:
+        """The low-data marker is added on the regression path too.
+
+        Companion to the promotion case above. ``_bullet`` adds the
+        marker unconditionally for both lists; a future refactor that
+        moved it inside the promotion branch would leave low-n
+        regressions reading as reliable. Asserts the marker appears
+        under the ``Tournament regressions:`` heading specifically.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 10)
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "Promotion candidates:" not in result
+        regressions_section = result.split("Tournament regressions:")[1]
+        assert "⚠ low data" in regressions_section
+        assert "n=10" in regressions_section
+
+    def test_fail_open_reapplies_min_n_gate(self) -> None:
+        """When active_cids is None, CALLOUT_MIN_N gates the callout.
+
+        Without scoping (e.g. tournament_tools.json failed to load) the
+        report must stay bounded: a low-n row that would otherwise be
+        flagged with ``⚠ low data`` is suppressed entirely so the
+        degraded path is strictly quieter, not noisier.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        # active_cids=None → min-n gate fires → empty.
+        assert section_tournament_callouts(prod, tourn, active_cids=None) == ""
+
+    def test_scoped_to_active_cids(self) -> None:
+        """Active-CID scoping drops inactive rows; None disables scoping.
+
+        Three cases pin the ``is not None`` semantics the loader
+        depends on — empty set must not be treated the same as None,
+        otherwise a flip to truthy checks (``if active_cids:``) would
+        silently change behavior.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 50)
+        # v2 no longer under evaluation → dropped.
+        assert section_tournament_callouts(prod, tourn, active_cids=set()) == ""
+        # v2 active → flagged.
+        result_scoped = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "Promotion candidates:" in result_scoped
+        # None disables scoping; n=50 ≥ CALLOUT_MIN_N so the row still
+        # surfaces under fail-open. Pins the empty-set ≠ None distinction.
+        result_unscoped = section_tournament_callouts(prod, tourn, active_cids=None)
+        assert "Promotion candidates:" in result_unscoped
 
     def test_suppressed_within_delta_band(self) -> None:
         """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
-
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
         assert section_tournament_callouts(prod, tourn) == ""
@@ -1547,9 +1713,6 @@ class TestTournamentCallouts:
         must suppress this, otherwise the rollout fix promised by this
         PR is itself a regression.
         """
-        # pylint: disable=import-outside-toplevel
-        from benchmark.analyze import section_tournament_callouts
-
         shared_cid = "cid_v2"
         prod = _scores_with_tool("tool-a", 0.20, 1000, prod_cid=shared_cid)
         # Tournament cell uses the same CID; Brier diverges enough to
@@ -1569,7 +1732,7 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Tournament Callouts" not in report
 
     def test_tournament_sections_rendered_when_data_present(self) -> None:
-        """Tournament inputs with rows -> Tool × Version × Mode covers both modes."""
+        """Tournament inputs with rows -> all-time Tool × Version × Mode covers both modes."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
         report = generate_report(
@@ -1579,7 +1742,6 @@ class TestGenerateReportWithTournamentFiles:
             include_tournament=True,
             scores_tournament=tourn,
             rolling_scores=prod,
-            rolling_scores_tournament=tourn,
         )
         # Under the three-window restructure the per-mode headings live in
         # Tool × Version × Mode, not a duplicated " — Tournament" ranking.
@@ -1587,26 +1749,73 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Tool × Version × Mode (All-Time)" in report
         assert f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)" in report
 
-    def test_empty_rolling_tournament_does_not_crash(self) -> None:
-        """Rolling tournament input with zero rows renders cleanly.
-
-        scorer.score_period_split writes tournament period files on every
-        run; days with zero tournament rows in the window must not blow
-        up the TVM merge.
-        """
+    def test_last_n_days_table_is_production_only(self) -> None:
+        """Tournament rows never appear in the day-gated Last-N-Days table."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
-        all_time_tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
-        empty_rolling_tourn = {"total_rows": 0, "overall": {}}
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
+        report = generate_report(
+            prod,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            rolling_scores=prod,
+            active_tournament_cids={"v2"},
+        )
+        marker = f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
+        last_n = report.split(marker, 1)[1].split("\n## ", 1)[0]
+        assert "| tournament |" not in last_n
+        assert "| production_replay |" in last_n
+
+    def test_inactive_tournament_cid_hidden_from_table(self) -> None:
+        """All-time breakdown drops tournament CIDs no longer in the tournament."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = {
+            "total_rows": 80,
+            "overall": {},
+            "by_tool_version_mode": {
+                "tool-a | activexyz | tournament": {
+                    "n": 40,
+                    "valid_n": 40,
+                    "brier": 0.1234,
+                    "directional_accuracy": 0.7,
+                    "brier_skill_score": 0.1,
+                },
+                "tool-a | droppedxyz | tournament": {
+                    "n": 40,
+                    "valid_n": 40,
+                    "brier": 0.4321,
+                    "directional_accuracy": 0.5,
+                    "brier_skill_score": -0.2,
+                },
+            },
+        }
+        report = generate_report(
+            prod,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            active_tournament_cids={"activexyz"},
+        )
+        assert "0.1234" in report  # active tournament CID rendered
+        assert "0.4321" not in report  # dropped tournament CID hidden
+
+    def test_scoping_to_no_active_cids_does_not_crash(self) -> None:
+        """An empty active set scopes tournament to nothing without crashing."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.18, 100)
         report = generate_report(
             prod,
             [],
             platform="omen",
             rolling_scores=None,
             include_tournament=True,
-            scores_tournament=all_time_tourn,
-            rolling_scores_tournament=empty_rolling_tourn,
+            scores_tournament=tourn,
+            active_tournament_cids=set(),
         )
         assert "# Benchmark Report (Omenstrat)" in report
+        assert "## Tournament Callouts" not in report
 
     def test_merged_tool_version_mode_includes_both_modes(self) -> None:
         """Tool × Version × Mode table shows both production and tournament cells."""
@@ -1670,13 +1879,13 @@ class TestGenerateReportPerPlatform:
     def test_header_uses_deployment_label_for_omen(self) -> None:
         """Omen scores render with 'Omenstrat' in the header."""
         s = _scores()
-        report = generate_report(s, [], platform="omen", disabled_tools={})
+        report = generate_report(s, [], platform="omen", valid_tools={})
         assert "# Benchmark Report (Omenstrat) — " in report
 
     def test_header_uses_deployment_label_for_polymarket(self) -> None:
         """Polymarket scores render with 'Polystrat' in the header."""
         s = _scores()
-        report = generate_report(s, [], platform="polymarket", disabled_tools={})
+        report = generate_report(s, [], platform="polymarket", valid_tools={})
         assert "# Benchmark Report (Polystrat) — " in report
 
     def test_platform_comparison_absent(self) -> None:
@@ -1687,20 +1896,20 @@ class TestGenerateReportPerPlatform:
         s["by_platform"] = {
             "omen": {"brier": 0.2, "n": 100, "edge": 0.04, "edge_n": 80},
         }
-        report = generate_report(s, [], platform="omen", disabled_tools={})
+        report = generate_report(s, [], platform="omen", valid_tools={})
         assert "## Platform Comparison" not in report
 
     def test_tool_platform_section_absent(self) -> None:
         """Tool × Platform section never renders in per-platform mode."""
         s = _scores()
-        report = generate_report(s, [], platform="omen", disabled_tools={})
+        report = generate_report(s, [], platform="omen", valid_tools={})
         assert "## Tool \u00d7 Platform" not in report
 
     def test_rejects_unknown_platform(self) -> None:
         """Unknown platform raises ValueError with a helpful message."""
         s = _scores()
         with pytest.raises(ValueError, match="platform must be one of"):
-            generate_report(s, [], platform="gnosis", disabled_tools={})
+            generate_report(s, [], platform="gnosis", valid_tools={})
 
     def test_platform_labels_are_deployment_names(self) -> None:
         """Label map pairs scorer keys with the team's deployment names."""
@@ -1749,13 +1958,13 @@ class TestTrendSectionPlatformAnnotation:
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         prod["current_month"] = "2026-04"
         history = [{"month": "2026-03", "overall": {"brier": 0.2, "n": 100}}]
-        report = generate_report(prod, history, platform="omen", disabled_tools={})
+        report = generate_report(prod, history, platform="omen", valid_tools={})
         assert "*(in progress)*" not in report
         assert "2026-04" not in report
 
 
 class TestSectionToolDeploymentStatusInverted:
-    """Phase 3: section renders active tools per deployment, scoped to platform."""
+    """Phase 3: section renders selectable tools per deployment, scoped to platform."""
 
     def _scores_with_tools(self, *tools: str) -> dict[str, Any]:
         return {"by_tool": {t: {"brier": 0.2, "n": 100, "valid_n": 100} for t in tools}}
@@ -1763,101 +1972,88 @@ class TestSectionToolDeploymentStatusInverted:
     def test_omen_platform_hides_polystrat_deployment(self) -> None:
         """Omenstrat report never mentions polystrat Pearl."""
         scores = self._scores_with_tools("tool-a", "tool-b")
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": [],
-            "omenstrat QS": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
             "polystrat Pearl": ["tool-a"],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        rendered = section_tool_deployment_status(scores, valid, platform="omen")
         assert "omenstrat Pearl" in rendered
-        assert "omenstrat QS" in rendered
         assert "polystrat" not in rendered
 
     def test_polymarket_platform_hides_omenstrat_deployments(self) -> None:
         """Polystrat report never mentions omenstrat-anything."""
         scores = self._scores_with_tools("tool-a")
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-a"],
-            "omenstrat QS": ["tool-a"],
-            "polystrat Pearl": [],
+            "polystrat Pearl": ["tool-a"],
         }
-        rendered = section_tool_deployment_status(
-            scores, disabled, platform="polymarket"
-        )
+        rendered = section_tool_deployment_status(scores, valid, platform="polymarket")
         assert "polystrat Pearl" in rendered
         assert "omenstrat" not in rendered
 
     def test_heading_carries_platform_label(self) -> None:
         """Section heading is scoped with the deployment label."""
         scores = self._scores_with_tools("tool-a")
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": [],
-            "omenstrat QS": [],
             "polystrat Pearl": [],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        rendered = section_tool_deployment_status(scores, valid, platform="omen")
         assert rendered.startswith("## Tool Deployment Status (Omenstrat)")
 
-    def test_active_tools_exclude_disabled(self) -> None:
-        """Active tools are the benchmarked set with disabled tools removed."""
+    def test_active_tools_are_allow_listed(self) -> None:
+        """Active tools are the benchmarked set intersected with the allow-list."""
         scores = self._scores_with_tools("tool-a", "tool-b", "tool-c")
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["tool-b"],
-            "omenstrat QS": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a", "tool-c"],
             "polystrat Pearl": [],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        rendered = section_tool_deployment_status(scores, valid, platform="omen")
         pearl_line = [
             line for line in rendered.splitlines() if "omenstrat Pearl" in line
         ][0]
         assert "`tool-a`" in pearl_line
         assert "`tool-c`" in pearl_line
         assert "`tool-b`" not in pearl_line
-        qs_line = [line for line in rendered.splitlines() if "omenstrat QS" in line][0]
-        for expected in ("`tool-a`", "`tool-b`", "`tool-c`"):
-            assert expected in qs_line
 
-    def test_normalizes_underscores_in_disabled_list(self) -> None:
-        """Config files sometimes list prediction_request_X; treat as equivalent."""
+    def test_normalizes_underscores_in_allow_list(self) -> None:
+        """Manifests sometimes list prediction_request_X; treat as equivalent."""
         scores = self._scores_with_tools("prediction-request-reasoning")
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["prediction_request_reasoning"],
-            "omenstrat QS": [],
             "polystrat Pearl": [],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        rendered = section_tool_deployment_status(scores, valid, platform="omen")
         pearl_line = [
             line for line in rendered.splitlines() if "omenstrat Pearl" in line
         ][0]
-        assert "prediction-request-reasoning" not in pearl_line
+        assert "`prediction-request-reasoning`" in pearl_line
 
     def test_failed_fetch_renders_unavailable_banner(self) -> None:
         """Deployment whose fetch returned None is not claimed as empty."""
         scores = self._scores_with_tools("tool-a")
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": None,
-            "omenstrat QS": [],
-            "polystrat Pearl": [],
+            "polystrat Pearl": ["tool-a"],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform="omen")
+        rendered = section_tool_deployment_status(scores, valid, platform="omen")
         assert "omenstrat Pearl" in rendered
         assert "⚠️ unavailable" in rendered
 
     def test_fleet_wide_mode_still_supported(self) -> None:
         """platform=None keeps the legacy fleet-wide render for ad-hoc callers."""
         scores = self._scores_with_tools("tool-a")
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": [],
-            "omenstrat QS": [],
-            "polystrat Pearl": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a"],
+            "polystrat Pearl": ["tool-a"],
         }
-        rendered = section_tool_deployment_status(scores, disabled, platform=None)
-        for deployment in ("omenstrat Pearl", "omenstrat QS", "polystrat Pearl"):
+        rendered = section_tool_deployment_status(scores, valid, platform=None)
+        for deployment in ("omenstrat Pearl", "polystrat Pearl"):
             assert deployment in rendered
         assert "(Omenstrat)" not in rendered
         assert "(Polystrat)" not in rendered
 
-    def test_empty_disabled_opts_out_of_section(self) -> None:
+    def test_empty_valid_opts_out_of_section(self) -> None:
         """Existing contract: empty dict skips the section entirely."""
         scores = self._scores_with_tools("tool-a")
         assert section_tool_deployment_status(scores, {}, platform="omen") == ""
@@ -1870,7 +2066,7 @@ class TestToolCategoryPositionInReport:
         """Current-3d table and historical comparison both render, in that order."""
         scores = _scores_with_tool("tool-a", 0.20, 1000)
         report = generate_report(
-            scores, [], platform="omen", rolling_scores=scores, disabled_tools={}
+            scores, [], platform="omen", rolling_scores=scores, valid_tools={}
         )
         current_idx = report.index(
             f"## Tool \u00d7 Category (Current {ROLLING_WINDOW_DAYS}d)"
@@ -1894,7 +2090,7 @@ class TestToolCategoryPositionInReport:
             platform="omen",
             rolling_scores=scores,
             include_tournament=True,
-            disabled_tools={},
+            valid_tools={},
         )
         tc_idx = report.index("## Tool \u00d7 Category Historical Comparison")
         tvm_idx = report.index("## Tool \u00d7 Version \u00d7 Mode (All-Time)")
@@ -1948,7 +2144,7 @@ class TestGenerateReportLegendPlacement:
             [],
             platform="omen",
             rolling_scores=rolling,
-            disabled_tools={},
+            valid_tools={},
         )
         legend_idx = report.index("## Metric References")
         snapshot_idx = report.index("## Platform Snapshot")
@@ -1966,7 +2162,7 @@ class TestGenerateReportLegendPlacement:
             platform="omen",
             include_tournament=True,
             scores_tournament=tourn,
-            disabled_tools={},
+            valid_tools={},
         )
         assert report.count("## Metric References") == 1
 
@@ -1982,7 +2178,7 @@ class TestGenerateReportRollingBanner:
         gap and every rolling/comparison section is skipped.
         """
         scores = _scores_with_tool("tool-a", 0.20, 1000)
-        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        report = generate_report(scores, [], platform="omen", valid_tools={})
         assert f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)" in report
         assert (
             f"Scores for the last {ROLLING_WINDOW_DAYS} days are unavailable" in report
@@ -2014,7 +2210,7 @@ class TestGenerateReportRollingBanner:
             platform="omen",
             rolling_scores=scores,
             include_tournament=True,
-            disabled_tools={},
+            valid_tools={},
         )
         heading_idx = report.index(
             f"## Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)"
@@ -2038,7 +2234,7 @@ class TestGenerateReportStructure:
             [],
             platform="omen",
             rolling_scores=rolling,
-            disabled_tools={},
+            valid_tools={},
         )
         ordered_headings = [
             f"## Platform Snapshot (Current {ROLLING_WINDOW_DAYS}d)",
@@ -2064,7 +2260,7 @@ class TestGenerateReportStructure:
             [],
             platform="omen",
             rolling_scores=scores,
-            disabled_tools={},
+            valid_tools={},
         )
         assert "## Since Last Report" not in report
 
@@ -2585,7 +2781,7 @@ class TestZeroRowPrevRollingRouting:
             platform="omen",
             rolling_scores=rolling,
             prev_rolling_scores=empty_prev,
-            disabled_tools={},
+            valid_tools={},
         )
         assert "no prev window" in report
 
@@ -2602,7 +2798,7 @@ class TestZeroRowPrevRollingRouting:
             platform="omen",
             rolling_scores=rolling,
             prev_rolling_scores=empty_prev,
-            disabled_tools={},
+            valid_tools={},
         )
         report_none = generate_report(
             scores,
@@ -2610,7 +2806,7 @@ class TestZeroRowPrevRollingRouting:
             platform="omen",
             rolling_scores=rolling,
             prev_rolling_scores=None,
-            disabled_tools={},
+            valid_tools={},
         )
         # The date stamps in the header carry ``generated_at`` which is
         # identical across both calls for a single-scorer fixture, so the
@@ -2628,7 +2824,7 @@ class TestZeroRowPrevRollingRouting:
             platform="omen",
             rolling_scores=rolling,
             prev_rolling_scores=populated_prev,
-            disabled_tools={},
+            valid_tools={},
         )
         assert "no prev window" not in report
 
@@ -2648,7 +2844,7 @@ class TestZeroRowPrevRollingRouting:
             platform="omen",
             rolling_scores=rolling,
             prev_rolling_scores=None,
-            disabled_tools={},
+            valid_tools={},
         )
         # The value-cell on the prev column must carry "no prev window"
         # wherever a delta cell does; an "N/A (n=0)" leaking through
@@ -2693,72 +2889,68 @@ class TestSectionReliabilityComparison:
 
 
 class TestActiveToolsForPlatform:
-    """``_active_tools_for_platform`` builds the per-platform deployed set."""
+    """``_active_tools_for_platform`` builds the per-platform selectable set.
+
+    Each platform now maps to a single deployment (omen → omenstrat Pearl,
+    polymarket → polystrat Pearl), so the active set is the benchmarked
+    universe intersected with that deployment's selectable-tools allow-list.
+    """
 
     _SCORES: dict[str, dict[str, dict[str, Any]]] = {
         "by_tool": {"tool-a": {}, "tool-b": {}, "tool-c": {}}
     }
 
-    def test_full_failure_returns_none(self) -> None:
-        """All deployments None -> caller falls back to "show all" with a notice."""
-        disabled: dict[str, list[str] | None] = {
+    def test_failure_returns_none(self) -> None:
+        """The platform's only deployment None -> caller shows all + notice."""
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": None,
-            "omenstrat QS": None,
+            "polystrat Pearl": ["tool-a"],
+        }
+        assert _active_tools_for_platform(valid, "omen", self._SCORES) is None
+
+    def test_active_set_is_benchmarked_intersect_allow_list(self) -> None:
+        """Active set is benchmarked ∩ the deployment's selectable tools."""
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a", "tool-c"],
             "polystrat Pearl": None,
         }
-        assert _active_tools_for_platform(disabled, "omen", self._SCORES) is None
+        active = _active_tools_for_platform(valid, "omen", self._SCORES)
+        assert active == frozenset({"tool-a", "tool-c"})
 
-    def test_partial_failure_uses_what_is_available(self) -> None:
-        """One omen deployment fails, the other still drives the active set."""
-        disabled: dict[str, list[str] | None] = {
+    def test_selectable_tool_not_benchmarked_is_ignored(self) -> None:
+        """A selectable tool with no benchmark rows never enters the active set."""
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-a", "tool-z"],  # tool-z not benchmarked
+            "polystrat Pearl": None,
+        }
+        active = _active_tools_for_platform(valid, "omen", self._SCORES)
+        assert active == frozenset({"tool-a"})
+
+    def test_each_platform_reads_only_its_deployment(self) -> None:
+        """Polymarket draws from polystrat Pearl, not the omen deployment."""
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-a"],
-            "omenstrat QS": None,
-            "polystrat Pearl": None,
+            "polystrat Pearl": ["tool-b"],
         }
-        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
-        # tool-a is disabled on Pearl and QS is unknown; union of (benchmarked - disabled)
-        # over successful deployments is {tool-b, tool-c}.
-        assert active == frozenset({"tool-b", "tool-c"})
+        active = _active_tools_for_platform(valid, "polymarket", self._SCORES)
+        assert active == frozenset({"tool-b"})
 
-    def test_polystrat_failure_returns_none(self) -> None:
-        """Polystrat has one deployment — its failure means full failure."""
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": [],
-            "omenstrat QS": [],
-            "polystrat Pearl": None,
-        }
-        assert _active_tools_for_platform(disabled, "polymarket", self._SCORES) is None
-
-    def test_union_across_deployments(self) -> None:
-        """A tool active on at least one deployment is in the active set."""
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": ["tool-a"],
-            "omenstrat QS": ["tool-b"],
-            "polystrat Pearl": None,
-        }
-        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
-        # Pearl excludes tool-a (so {tool-b, tool-c}); QS excludes tool-b (so
-        # {tool-a, tool-c}); union = {tool-a, tool-b, tool-c}.
-        assert active == frozenset({"tool-a", "tool-b", "tool-c"})
-
-    def test_empty_disabled_returns_none(self) -> None:
+    def test_empty_valid_returns_none(self) -> None:
         """Empty input is the test-only opt-out — caller skips both filter and warning."""
         assert _active_tools_for_platform({}, "omen", self._SCORES) is None
         assert _active_tools_for_platform(None, "omen", self._SCORES) is None
 
     def test_underscore_hyphen_normalization(self) -> None:
-        """Disabled list with underscores excludes the hyphenated benchmark name."""
-        disabled: dict[str, list[str] | None] = {
+        """Allow-list with underscores still matches the hyphenated benchmark name."""
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool_a"],  # underscore variant of "tool-a"
-            "omenstrat QS": ["tool_a"],
             "polystrat Pearl": None,
         }
-        active = _active_tools_for_platform(disabled, "omen", self._SCORES)
-        # Both deployments disable tool-a (underscore variant), so it should
-        # NOT appear in the active set.
+        active = _active_tools_for_platform(valid, "omen", self._SCORES)
+        # The underscore variant matches "tool-a", which is the only active tool.
         assert active is not None
-        assert "tool-a" not in active
-        assert "tool-b" in active and "tool-c" in active
+        assert "tool-a" in active
+        assert "tool-b" not in active and "tool-c" not in active
 
     def test_benchmarked_universe_unions_rolling_and_alltime(self) -> None:
         """Tool with rolling rows but no all-time entry is still considered.
@@ -2773,13 +2965,12 @@ class TestActiveToolsForPlatform:
         rolling: dict[str, Any] = {
             "by_tool": {"tool-a": {}, "tool-b": {}, "tool-new": {}}
         }
-        disabled: dict[str, list[str] | None] = {
-            "omenstrat Pearl": [],
-            "omenstrat QS": [],
+        valid: dict[str, list[str] | None] = {
+            "omenstrat Pearl": ["tool-new"],
             "polystrat Pearl": None,
         }
         active = _active_tools_for_platform(
-            disabled, "omen", all_time, rolling_scores=rolling
+            valid, "omen", all_time, rolling_scores=rolling
         )
         assert active is not None
         assert "tool-new" in active
@@ -2791,14 +2982,12 @@ class TestActiveToolsForPlatform:
         yet still produce the same active set as before.
         """
         all_time: dict[str, Any] = {"by_tool": {"tool-a": {}, "tool-b": {}}}
-        disabled: dict[str, list[str] | None] = {
+        valid: dict[str, list[str] | None] = {
             "omenstrat Pearl": ["tool-a"],
-            "omenstrat QS": [],
             "polystrat Pearl": None,
         }
-        active = _active_tools_for_platform(disabled, "omen", all_time)
-        # tool-a is disabled on Pearl but enabled on QS → in active set
-        assert active == frozenset({"tool-a", "tool-b"})
+        active = _active_tools_for_platform(valid, "omen", all_time)
+        assert active == frozenset({"tool-a"})
 
 
 class TestFilterByActive:
@@ -2936,10 +3125,9 @@ class TestGenerateReportDeploymentConfigUnavailable:
 
         monkeypatch.setattr(
             analyze,
-            "fetch_disabled_tools",
+            "fetch_valid_tools",
             lambda: {
                 "omenstrat Pearl": None,
-                "omenstrat QS": None,
                 "polystrat Pearl": None,
             },
         )
@@ -2951,10 +3139,10 @@ class TestGenerateReportDeploymentConfigUnavailable:
         assert "Deployment config unavailable" in report
 
     def test_no_notice_for_explicit_test_optout(self) -> None:
-        """``disabled_tools={}`` is the unit-test opt-out; no notice rendered."""
+        """``valid_tools={}`` is the unit-test opt-out; no notice rendered."""
         scores = {
             "by_tool": {"tool-a": {"brier": 0.20, "n": 100, "valid_n": 100}},
             "by_tool_category": {},
         }
-        report = generate_report(scores, [], platform="omen", disabled_tools={})
+        report = generate_report(scores, [], platform="omen", valid_tools={})
         assert "Deployment config unavailable" not in report

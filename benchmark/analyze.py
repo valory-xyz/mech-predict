@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,10 @@ from benchmark.scorer import (
     MIN_SAMPLE_SIZE,
     brier_sort_key,
 )
-from benchmark.tool_usage import deployments_for_platform, fetch_disabled_tools
+from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
+from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
+
+log = logging.getLogger(__name__)
 
 DEFAULT_RESULTS_DIR = Path(__file__).parent / "results"
 DEFAULT_HISTORY = DEFAULT_RESULTS_DIR / "scores_history.jsonl"
@@ -260,26 +264,27 @@ def _sample_label(stats: dict[str, Any]) -> str:
 
 
 def _active_tools_for_platform(
-    disabled: dict[str, list[str] | None] | None,
+    valid: dict[str, list[str] | None] | None,
     platform: str,
     scores: dict[str, Any],
     rolling_scores: dict[str, Any] | None = None,
 ) -> frozenset[str] | None:
-    """Return tools currently active on at least one deployment of ``platform``.
+    """Return tools currently selectable on at least one deployment of ``platform``.
 
-    Computed as the union of (benchmarked tools - disabled tools) across
+    Computed as the union of (benchmarked tools ∩ selectable tools) across
     every deployment of ``platform`` whose config fetch succeeded. A tool
-    is "active" if any deployment has it enabled.
+    is "active" if any deployment can select it (i.e. it is offered by one
+    of that deployment's allow-listed mechs).
 
     Tool-name normalization mirrors ``section_tool_deployment_status``:
     underscores and hyphens are treated as interchangeable when comparing
-    against the disabled list. The returned set uses the names as they
+    against the selectable list. The returned set uses the names as they
     appear in ``by_tool`` keys.
 
-    :param disabled: ``{deployment: [tool_names] | None}`` map, where
-        ``None`` indicates a fetch/parse failure for that deployment.
-        ``None`` for the whole map (or an empty dict) is treated as
-        "no deployment data available".
+    :param valid: ``{deployment: [tool_names] | None}`` map of selectable
+        tools, where ``None`` indicates a fetch/parse failure for that
+        deployment. ``None`` for the whole map (or an empty dict) is
+        treated as "no deployment data available".
     :param platform: scorer platform key (``"omen"`` or ``"polymarket"``).
     :param scores: parsed platform-scoped all-time scores dict.
     :param rolling_scores: parsed platform-scoped current-window scores
@@ -288,16 +293,16 @@ def _active_tools_for_platform(
         tool with rolling data but no all-time history yet is still
         included in the active set.
     :return: frozenset of active tool names, or ``None`` when **every**
-        deployment of this platform has ``disabled=None`` (full fetch
+        deployment of this platform has ``valid=None`` (full fetch
         failure for the platform). Callers fall back to "show all
         tools" plus a ``⚠ deployment config unavailable`` notice.
     """
-    if not disabled:
+    if not valid:
         return None
 
     deployments = deployments_for_platform(platform)
-    relevant = {name: disabled.get(name) for name in deployments}
-    if all(disabled_tools is None for disabled_tools in relevant.values()):
+    relevant = {name: valid.get(name) for name in deployments}
+    if all(valid_tools is None for valid_tools in relevant.values()):
         # Every deployment for this platform failed — caller renders the
         # warning and shows all tools rather than blanking the report.
         return None
@@ -307,12 +312,12 @@ def _active_tools_for_platform(
         benchmarked |= set((rolling_scores.get("by_tool") or {}).keys())
 
     active: set[str] = set()
-    for disabled_tools in relevant.values():
-        if disabled_tools is None:
+    for valid_tools in relevant.values():
+        if valid_tools is None:
             continue
-        disabled_set = {t.replace("_", "-") for t in disabled_tools}
+        valid_set = {t.replace("_", "-") for t in valid_tools}
         for tool in benchmarked:
-            if tool.replace("_", "-") not in disabled_set:
+            if tool.replace("_", "-") in valid_set:
                 active.add(tool)
 
     return frozenset(active)
@@ -349,38 +354,39 @@ def _filter_by_active(
 
 def section_tool_deployment_status(
     scores: dict[str, Any],
-    disabled: dict[str, list[str] | None] | None = None,
+    valid: dict[str, list[str] | None] | None = None,
     platform: str | None = None,
 ) -> str:
-    """Render which benchmarked tools are active on each deployment.
+    """Render which benchmarked tools are selectable on each deployment.
 
     Deployments are filtered to ``platform`` when set; active tools are
-    the benchmarked tools minus the disabled tools for that deployment.
-    Failed-fetch deployments are called out so ``⚠️ unavailable`` is
-    never confused with "all tools active".
+    the benchmarked tools intersected with the selectable tools for that
+    deployment (the tools its allow-listed mechs offer). Failed-fetch
+    deployments are called out so ``⚠️ unavailable`` is never confused
+    with "no tools active".
 
     :param scores: parsed ``scores.json`` dict.
-    :param disabled: pre-fetched ``{deployment: [tool_names] | None}`` map.
-        Pass ``None`` to fetch on the fly (the daily-report default). Pass
-        an empty dict to skip the section entirely (tests use this to avoid
-        the live GitHub fetch).
+    :param valid: pre-fetched ``{deployment: [tool_names] | None}`` map of
+        selectable tools. Pass ``None`` to fetch on the fly (the
+        daily-report default). Pass an empty dict to skip the section
+        entirely (tests use this to avoid the live fetch).
     :param platform: when set, restrict the section to deployments matching
         this platform key (``"omen"`` or ``"polymarket"``).
     :return: markdown section string, or ``""`` when the caller opted out.
     """
-    if disabled is None:
-        disabled = fetch_disabled_tools()
+    if valid is None:
+        valid = fetch_valid_tools()
 
     # Explicit skip contract: an empty dict means "caller opted out" (used by
     # unit tests).  Returning "" means the section heading is omitted so the
     # report doesn't advertise a section that was never computed.
-    if not disabled:
+    if not valid:
         return ""
 
     if platform is not None:
         allowed = set(deployments_for_platform(platform))
-        disabled = {name: v for name, v in disabled.items() if name in allowed}
-        if not disabled:
+        valid = {name: v for name, v in valid.items() if name in allowed}
+        if not valid:
             return ""
 
     tools = scores.get("by_tool", {})
@@ -391,7 +397,7 @@ def section_tool_deployment_status(
         heading = f"## Tool Deployment Status ({PLATFORM_LABELS[platform]})"
     lines = [heading, ""]
 
-    failed = [name for name in disabled if disabled.get(name) is None]
+    failed = [name for name in valid if valid.get(name) is None]
     if failed:
         lines.append(
             "> ⚠️ Could not fetch deployment config for: "
@@ -399,12 +405,12 @@ def section_tool_deployment_status(
         )
         lines.append("")
 
-    for deployment, disabled_tools in disabled.items():
-        if disabled_tools is None:
+    for deployment, valid_tools in valid.items():
+        if valid_tools is None:
             lines.append(f"- **{deployment}** — ⚠️ unavailable")
             continue
-        disabled_set = {t.replace("_", "-") for t in disabled_tools}
-        active = [t for t in benchmarked if t.replace("_", "-") not in disabled_set]
+        valid_set = {t.replace("_", "-") for t in valid_tools}
+        active = [t for t in benchmarked if t.replace("_", "-") in valid_set]
         if not active:
             lines.append(f"- **{deployment}** — no benchmarked tools active")
             continue
@@ -2237,6 +2243,46 @@ CALLOUT_DELTA = 0.03
 CALLOUT_MIN_N = 30
 
 
+def load_active_tournament_cids(
+    path: Path = TOURNAMENT_TOOLS_JSON,
+) -> set[str] | None:
+    """Return the CIDs currently under tournament evaluation.
+
+    These are the values of ``tournament_tools.json`` — the live
+    candidate set. Tournament report sections scope to this set so a
+    candidate's aggregated all-time record is shown only while it is
+    still in the tournament; promoted, dropped, or superseded CIDs fall
+    off the report.
+
+    Delegates loading + schema validation to
+    :func:`benchmark.tournament_tools.load_tournament_tools`, so non-dict
+    JSON, empty CIDs, and missing files are rejected by the same rules
+    the tournament runner uses (no second source of truth).
+
+    Returns ``None`` (rather than an empty set) when the file cannot be
+    read or fails validation, so a transient failure fails open to "no
+    scoping" instead of silently hiding every tournament row. A
+    ``log.warning`` is emitted in that case so the unscoped state is
+    attributable in run logs (caller-passed ``None`` is silent). An
+    empty/valid file yields an empty set, which correctly scopes the
+    tournament view to nothing.
+
+    :param path: path to ``tournament_tools.json``.
+    :return: set of active CIDs, or ``None`` when the file is unreadable
+        or invalid.
+    """
+    try:
+        return set(load_tournament_tools(path).values())
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        log.warning(
+            "Tournament scoping disabled: could not load %s (%s). "
+            "Report will render without scoping; min-n gate stays active.",
+            path,
+            exc,
+        )
+        return None
+
+
 def _relabel_heading(section_md: str, suffix: str) -> str:
     """Append *suffix* to the first ``## Heading`` line in *section_md*.
 
@@ -2315,18 +2361,64 @@ def _merged_tvm_scores(
     return merged
 
 
+def _scope_tournament_to_active(
+    tvm_scores: dict[str, Any],
+    active_cids: set[str] | None,
+) -> dict[str, Any]:
+    """Drop tournament-mode rows whose CID is no longer under evaluation.
+
+    Production rows are left untouched — only ``tournament``-mode rows are
+    filtered, so the all-time breakdown keeps the production baseline a
+    reader compares against. When ``active_cids`` is ``None`` the input is
+    returned unchanged (scoping disabled / fail-open).
+
+    :param tvm_scores: scores-shaped dict with ``by_tool_version_mode``.
+    :param active_cids: CIDs still in the tournament, or ``None`` to skip
+        scoping.
+    :return: a scores-shaped dict with inactive tournament rows removed.
+    """
+    if active_cids is None:
+        return tvm_scores
+    kept: dict[str, Any] = {}
+    for key, stats in tvm_scores.get("by_tool_version_mode", {}).items():
+        _tool, cid, mode = _parse_tvm_key(key)
+        if mode == "tournament" and cid not in active_cids:
+            continue
+        kept[key] = stats
+    # Preserve any sibling top-level fields (total_rows, overall, …) the
+    # input may carry; only by_tool_version_mode is narrowed here.
+    return {**tvm_scores, "by_tool_version_mode": kept}
+
+
 def section_tournament_callouts(
     scores_prod: dict[str, Any],
     scores_tournament: dict[str, Any] | None,
     release_map_data: dict[str, Any] | None = None,
+    active_cids: set[str] | None = None,
 ) -> str:
     """Flag tool versions whose tournament Brier diverges from prod.
 
-    A row qualifies when tournament sample size is at least
-    ``CALLOUT_MIN_N`` and the absolute Brier delta exceeds
+    A row qualifies when the absolute Brier delta exceeds
     ``CALLOUT_DELTA``. Negative deltas become promotion candidates
     (tournament better); positive deltas become tournament regressions
     (tournament worse — a warning before the version reaches production).
+
+    Tournament is **not** sample-size gated when ``active_cids`` is
+    provided: a candidate's all-time record is shown from its very first
+    resolved market and grows each day, with rows below ``CALLOUT_MIN_N``
+    carrying a ``⚠ low data`` marker so the reader (and the Slack summary)
+    can weight them accordingly.
+
+    When ``active_cids`` is ``None`` (scoping unavailable — e.g.
+    ``tournament_tools.json`` failed to load) the ``CALLOUT_MIN_N`` gate
+    is re-applied as a hard floor so the degraded path stays bounded:
+    without scoping AND without the gate, every long-inactive low-n CID
+    would surface. The pairing ensures fail-open mode is strictly
+    quieter (not noisier) than the scoped path.
+
+    When ``active_cids`` is provided, only candidates still in the
+    tournament (CIDs in ``tournament_tools.json``) are considered; promoted
+    or dropped candidates fall off.
 
     The production baseline is the **specific production CID with the
     latest release tag** for the same tool — not the tool-level
@@ -2337,6 +2429,9 @@ def section_tournament_callouts(
     :param scores_prod: production scores dict.
     :param scores_tournament: tournament scores dict, or None.
     :param release_map_data: optional pre-loaded release map.
+    :param active_cids: CIDs still under tournament evaluation, or None
+        when scoping is unavailable (fail-open: re-arms the
+        ``CALLOUT_MIN_N`` gate to keep callout volume bounded).
     :return: markdown section, or empty string when no callouts qualify.
     """
     if not _has_tournament_data(scores_tournament):
@@ -2359,7 +2454,14 @@ def section_tournament_callouts(
         tool, cand_cid, mode = _parse_tvm_key(key)
         if mode != "tournament":
             continue
-        if t_stats.get("n", 0) < CALLOUT_MIN_N:
+        if active_cids is None:
+            # Fail-open: scoping unavailable, so re-arm the min-n gate
+            # to keep callout volume bounded (matches pre-PR behavior
+            # for the degraded path).
+            if t_stats.get("n", 0) < CALLOUT_MIN_N:
+                continue
+        elif cand_cid not in active_cids:
+            # Candidate no longer under tournament evaluation.
             continue
         t_brier = t_stats.get("brier")
         if t_brier is None:
@@ -2402,8 +2504,9 @@ def section_tournament_callouts(
     def _bullet(entry: Callout) -> str:
         tool, _cand_cid, cand_label, t_stats, _prod_cid, prod_label, p_stats = entry
         delta = t_stats["brier"] - p_stats["brier"]
+        low = " ⚠ low data" if t_stats["n"] < CALLOUT_MIN_N else ""
         return (
-            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}) Brier"
+            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}){low} Brier"
             f" {t_stats['brier']:.4f} vs `{prod_label}` (production,"
             f" n={p_stats['n']}) Brier {p_stats['brier']:.4f}. Δ {delta:+.4f}."
         )
@@ -2430,8 +2533,8 @@ def generate_report(  # pylint: disable=too-many-statements
     prev_rolling_scores: dict[str, Any] | None = None,
     include_tournament: bool = False,
     scores_tournament: dict[str, Any] | None = None,
-    rolling_scores_tournament: dict[str, Any] | None = None,
-    disabled_tools: dict[str, list[str] | None] | None = None,
+    active_tournament_cids: set[str] | None = None,
+    valid_tools: dict[str, list[str] | None] | None = None,
 ) -> str:
     """Generate a platform-scoped benchmark report from scores and history.
 
@@ -2458,9 +2561,14 @@ def generate_report(  # pylint: disable=too-many-statements
         Version × Mode breakdown. When False, tournament inputs are
         ignored entirely.
     :param scores_tournament: parsed ``scores_tournament_<platform>.json`` dict.
-    :param rolling_scores_tournament: tournament rolling window scores.
-    :param disabled_tools: pre-fetched ``{deployment: [tool_names] | None}``
-        map used by the Tool Deployment Status section.
+        Tournament data is rendered all-time only — never day-gated — and
+        is scoped to ``active_tournament_cids``.
+    :param active_tournament_cids: CIDs still under tournament evaluation
+        (from ``tournament_tools.json``). Tournament rows for other CIDs
+        are dropped from the breakdown and callouts. ``None`` disables
+        scoping.
+    :param valid_tools: pre-fetched ``{deployment: [tool_names] | None}``
+        map of selectable tools used by the Tool Deployment Status section.
     :return: full markdown report string.
     """
     if platform not in PLATFORM_LABELS:
@@ -2490,8 +2598,8 @@ def generate_report(  # pylint: disable=too-many-statements
     # comparison sections, the deployment-status section, and the
     # warning notice all see the same map. ``None`` (the default)
     # triggers a live fetch; an empty dict is the test-only opt-out.
-    if disabled_tools is None:
-        disabled_tools = fetch_disabled_tools()
+    if valid_tools is None:
+        valid_tools = fetch_valid_tools()
 
     # Restrict the per-platform comparison sections to tools currently
     # deployed somewhere on this platform. Returns ``None`` when every
@@ -2499,7 +2607,7 @@ def generate_report(  # pylint: disable=too-many-statements
     # is to skip the filter and prepend a one-line warning so the
     # reader knows the tool list is unfiltered for this run.
     active_tools = _active_tools_for_platform(
-        disabled_tools, platform, scores, rolling_scores
+        valid_tools, platform, scores, rolling_scores
     )
 
     sections: list[str] = [f"# Benchmark Report ({platform_label}) — {date}"]
@@ -2507,7 +2615,7 @@ def generate_report(  # pylint: disable=too-many-statements
     # (non-empty input) but every deployment for this platform failed.
     # Empty-dict callers are the unit-test opt-out and shouldn't see
     # the notice.
-    if active_tools is None and disabled_tools:
+    if active_tools is None and valid_tools:
         sections.append(
             "> ⚠️ Deployment config unavailable for this platform — comparison "
             "sections show every benchmarked tool, including tools that may "
@@ -2575,25 +2683,29 @@ def generate_report(  # pylint: disable=too-many-statements
         )
 
     sections.append(
-        section_tool_deployment_status(
-            scores, disabled=disabled_tools, platform=platform
-        )
+        section_tool_deployment_status(scores, valid=valid_tools, platform=platform)
     )
 
     if include_tournament:
-        merged = _merged_tvm_scores(scores, scores_tournament)
+        # Tournament data is all-time only and scoped to CIDs still in the
+        # tournament — a candidate's record grows daily from its first
+        # resolved market and is never windowed (per-day tournament n is
+        # far too small to be meaningful, especially on Polymarket).
+        merged = _scope_tournament_to_active(
+            _merged_tvm_scores(scores, scores_tournament), active_tournament_cids
+        )
         tvm_section = section_tool_version_breakdown(
             merged, "Tool × Version × Mode (All-Time)"
         )
         if tvm_section:
             sections.append(tvm_section)
+        # The Last-N-Days breakdown is production-only: tournament never
+        # appears in a day-gated table. It lives solely in the all-time
+        # view above and the callouts below.
         if rolling_scores is not None:
-            merged_rolling = _merged_tvm_scores(
-                rolling_scores, rolling_scores_tournament
-            )
             rolling_window_note = f"last {ROLLING_WINDOW_DAYS} days"
             tvm_rolling = section_tool_version_breakdown(
-                merged_rolling,
+                rolling_scores,
                 f"Tool × Version × Mode (Last {ROLLING_WINDOW_DAYS} Days)",
             )
             if tvm_rolling:
@@ -2610,7 +2722,9 @@ def generate_report(  # pylint: disable=too-many-statements
     )
 
     if render_tournament:
-        callouts = section_tournament_callouts(scores, scores_tournament)
+        callouts = section_tournament_callouts(
+            scores, scores_tournament, active_cids=active_tournament_cids
+        )
         if callouts:
             sections.append(callouts)
 
@@ -2726,15 +2840,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--rolling-tournament",
-        type=Path,
-        default=None,
-        help=(
-            "Tournament rolling scores JSON. "
-            "Default: results/rolling_scores_tournament_<platform>.json."
-        ),
-    )
-    parser.add_argument(
         "--include-tournament",
         action="store_true",
         help=(
@@ -2771,10 +2876,6 @@ def main() -> None:
     scores_tournament_path = (
         args.scores_tournament or results_dir / f"scores_tournament_{platform}.json"
     )
-    rolling_tournament_path = (
-        args.rolling_tournament
-        or results_dir / f"rolling_scores_tournament_{platform}.json"
-    )
 
     def _maybe_load(path: Path | None) -> dict[str, Any] | None:
         return load_scores(path) if path and path.exists() else None
@@ -2783,7 +2884,10 @@ def main() -> None:
     rolling = _maybe_load(rolling_path)
     prev_rolling = _maybe_load(prev_rolling_path)
     scores_tournament = _maybe_load(scores_tournament_path)
-    rolling_tournament = _maybe_load(rolling_tournament_path)
+    # Scope the tournament view to candidates still under evaluation.
+    active_tournament_cids = (
+        load_active_tournament_cids() if args.include_tournament else None
+    )
 
     print(
         f"Loaded scores ({scores.get('total_rows', 0)} rows) for "
@@ -2798,7 +2902,7 @@ def main() -> None:
         prev_rolling_scores=prev_rolling,
         include_tournament=args.include_tournament,
         scores_tournament=scores_tournament,
-        rolling_scores_tournament=rolling_tournament,
+        active_tournament_cids=active_tournament_cids,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

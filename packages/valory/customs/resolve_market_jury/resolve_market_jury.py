@@ -137,9 +137,14 @@ resolver's contract). Pick exactly one:
         is_valid=true, is_determinable=true, has_occurred=false, confidence>=0.7
 
 WHEN TO USE UNDETERMINABLE (B) vs COMMITTING (C1/C2):
-  UNDETERMINABLE is ONLY for when your web search returned NO relevant results \
-at all -- zero articles, zero data points, zero mentions of the topic. It means \
-"I searched and found nothing."
+  The key distinction is TOPIC-ABSENT vs EVENT-UNREPORTED:
+  - TOPIC-ABSENT (-> B): your search found nothing about the entities or \
+subject at all. You cannot even confirm the topic exists. Example: a question \
+about "Celeste Ecoflyers dAS10 drone" and no search result mentions this \
+company or product.
+  - EVENT-UNREPORTED (-> commit C1/C2): your search found coverage of the \
+topic/entities but no report of the specific event happening. This is evidence \
+the event did NOT occur (C2), or that the status quo held (C1).
   If you found ANY relevant data -- a published figure from the named source, a \
 news article about the event, a government report, a price listing -- you MUST \
 commit to YES or NO based on what you found. Partial or indirect evidence still \
@@ -209,9 +214,11 @@ UNDETERMINABLE AND your own web search also found zero relevant results. If \
 even ONE voter committed to YES or NO with cited sources, you must evaluate \
 their evidence and either agree or disagree -- do not default to UNDETERMINABLE.
 5. If a voter flags the question as invalid with sound reasoning, pick (A) INVALID.
-6. If the majority of decided voters say UNDETERMINABLE or INVALID, do NOT \
-override them with your own affirmative answer -- pick (B) or (A) respectively. \
-Reserve C1/C2 for cases where decided voters actually support that verdict. \
+6. If the majority of decided voters say INVALID, do NOT override them -- \
+pick (A). For UNDETERMINABLE majorities, apply Rule 4 first: if a minority \
+voter committed YES or NO with cited sources, evaluate their evidence before \
+defaulting to (B). Reserve C1/C2 for cases where decided voters actually \
+support that verdict. \
 The same rule applies when two or more decided voters with confidence >= 0.9 \
 agree on YES or NO: you MUST follow them unless you can cite a specific \
 factual error in their reasoning text -- a different INTERPRETATION of the \

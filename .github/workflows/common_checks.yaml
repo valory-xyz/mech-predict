@@ -222,10 +222,14 @@ jobs:
             echo "run_integration=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # --no-renames: keep rename detection OFF so a move is recorded as
+          # delete(old)+add(new). Otherwise git collapses a rename to its
+          # destination only, and moving a tool INTO benchmark/ would look
+          # benchmark-only and wrongly skip the live suite.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            changed="$(git diff --name-only "${base_sha}...${head_sha}")"
+            changed="$(git diff --name-only --no-renames "${base_sha}...${head_sha}")"
           else
-            changed="$(git diff --name-only "${base_sha}" "${head_sha}")"
+            changed="$(git diff --name-only --no-renames "${base_sha}" "${head_sha}")"
           fi
           echo "Changed files:"
           echo "${changed:-<none>}"

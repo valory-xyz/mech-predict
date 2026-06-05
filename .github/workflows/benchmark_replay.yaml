@@ -25,6 +25,10 @@ on:
         description: 'PR number to post results on (optional)'
         required: false
         default: ''
+      candidate_tool:
+        description: 'Candidate tool whose code runs against the baseline rows (default: same as tool, i.e. in-place edit)'
+        required: false
+        default: ''
 
 jobs:
   replay:
@@ -66,6 +70,7 @@ jobs:
           INPUT_SAMPLE: ${{ github.event.inputs.sample }}
           INPUT_SEED: ${{ github.event.inputs.seed }}
           INPUT_PR: ${{ github.event.inputs.pr }}
+          INPUT_CANDIDATE_TOOL: ${{ github.event.inputs.candidate_tool }}
           ACTOR: ${{ github.actor }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           COMMENT_USER: ${{ github.event.comment.user.login }}
@@ -76,12 +81,14 @@ jobs:
             SAMPLE="$INPUT_SAMPLE"
             SEED="$INPUT_SEED"
             PR="$INPUT_PR"
+            CANDIDATE_TOOL="$INPUT_CANDIDATE_TOOL"
             TRIGGERED_BY="$ACTOR"
           else
             TOOL=$(echo "$COMMENT_BODY" | awk '{print $2}')
             PHASE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
             SAMPLE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
             SEED=$(echo "$COMMENT_BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
+            CANDIDATE_TOOL=$(echo "$COMMENT_BODY" | grep -oP '(?<=--candidate-tool )\S+' || echo "")
             PR="$ISSUE_NUMBER"
             TRIGGERED_BY="$COMMENT_USER"
           fi
@@ -91,15 +98,22 @@ jobs:
             echo "::error::Invalid tool name: '$TOOL'. Must match [a-z0-9_-]+"
             exit 1
           fi
+          # Same whitelist on candidate-tool when provided (defense-in-depth
+          # against shell-injection via attacker-controlled comment body).
+          if [ -n "$CANDIDATE_TOOL" ] && ! echo "$CANDIDATE_TOOL" | grep -qP '^[a-z0-9_-]+$'; then
+            echo "::error::Invalid candidate-tool name: '$CANDIDATE_TOOL'. Must match [a-z0-9_-]+"
+            exit 1
+          fi
 
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
           echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
           echo "sample=$SAMPLE" >> "$GITHUB_OUTPUT"
           echo "seed=$SEED" >> "$GITHUB_OUTPUT"
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "candidate_tool=$CANDIDATE_TOOL" >> "$GITHUB_OUTPUT"
           echo "triggered_by=$TRIGGERED_BY" >> "$GITHUB_OUTPUT"
 
-          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED, PR: $PR"
+          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED, PR: $PR, Candidate: ${CANDIDATE_TOOL:-<same as tool>}"
 
       # Checkout — PR head for issue_comment, current branch for workflow_dispatch
       - name: Checkout PR head
@@ -162,11 +176,20 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+          CANDIDATE_TOOL: ${{ steps.parse.outputs.candidate_tool }}
         run: |
+          # New-version PRs pass --candidate-tool so candidate code runs on
+          # the baseline's W-2 rows; in-place edits leave it empty so replay
+          # imports from the same tool as the enriched-row filter.
+          CANDIDATE_ARG=""
+          if [ -n "$CANDIDATE_TOOL" ]; then
+            CANDIDATE_ARG="--candidate-tool $CANDIDATE_TOOL"
+          fi
           uv run python -m benchmark.prompt_replay replay \
             --dataset benchmark/results/ci_enriched/dataset.jsonl \
             --output-dir benchmark/results/ci_replay/ \
-            --phase "${{ steps.parse.outputs.phase }}"
+            --phase "${{ steps.parse.outputs.phase }}" \
+            $CANDIDATE_ARG
 
       # Compute metrics and post comment (only if PR number is set)
       - name: Post benchmark report

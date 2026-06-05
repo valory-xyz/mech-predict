@@ -56,6 +56,7 @@ from benchmark.datasets.fetch_production import (
     parse_tool_response,
 )
 from benchmark.io import load_jsonl
+from benchmark.tools import TOOL_REGISTRY
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1253,6 +1254,35 @@ def _replay_reasoning_tool(
 # ---------------------------------------------------------------------------
 
 
+def _baseline_family(tool_name: str) -> str:
+    """Classify a baseline tool by its prompt-attribute schema.
+
+    The replay path keys off this family to decide which symbols
+    (``PREDICTION_PROMPT`` / ``SYSTEM_PROMPT`` / ``ESTIMATE_USER`` / etc.)
+    to read from the candidate module. Widened from exact-name match so
+    ``-v<n+1>`` siblings (housekeeping default for ``p_yes``-shifting fixes)
+    route to the same family as their parent, and so tool families that
+    don't export ``SYSTEM_PROMPT_FORECASTER`` (superforcaster siblings,
+    prediction-url-cot, ``*-sme``) reach a branch that matches what their
+    module actually exposes.
+
+    :param tool_name: tool name from the enriched rows.
+    :return: one of ``"reasoning"``, ``"rag"``, ``"superforcaster"``,
+        ``"factual_research"``, ``"default"``.
+    """
+    if tool_name.startswith("prediction-request-reasoning"):
+        return "reasoning"
+    if tool_name.startswith("prediction-request-rag") or tool_name.startswith(
+        "prediction-url-cot"
+    ):
+        return "rag"
+    if tool_name.startswith("superforcaster") or tool_name.endswith("-sme"):
+        return "superforcaster"
+    if tool_name.startswith("factual_research"):
+        return "factual_research"
+    return "default"
+
+
 def replay(  # pylint: disable=too-many-statements,too-many-locals
     dataset: Path,
     output_dir: Path,
@@ -1301,21 +1331,26 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     # meaningful Brier delta against the parent on the same evidence + ground
     # truth.
     candidate_tool_name = candidate_tool or tool_name
-    is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
-    is_rag_tool = tool_name.startswith("prediction-request-rag")
-    is_superforcaster = tool_name == "superforcaster"
-    is_factual_research = tool_name == "factual_research"
 
-    # Resolve the candidate's module via TOOL_REGISTRY so new-version tools get
-    # replay support without growing the if/elif cascade below — only the
-    # baseline's family decides which attribute names we pull from the module.
-    from benchmark.tools import TOOL_REGISTRY  # pylint: disable=import-outside-toplevel
+    family = _baseline_family(tool_name)
+    is_reasoning_tool = family == "reasoning"
+    is_rag_tool = family == "rag"
+    is_superforcaster = family == "superforcaster"
+    is_factual_research = family == "factual_research"
 
+    # Two registry checks split so the error message points at the right knob:
+    # the baseline comes from the enriched rows (no user-facing flag), the
+    # candidate comes from `--candidate-tool` (which may equal the baseline).
+    if tool_name not in TOOL_REGISTRY:
+        raise ValueError(
+            f"Baseline tool '{tool_name}' (from enriched rows) is not registered "
+            f"in benchmark/tools.py TOOL_REGISTRY."
+        )
     if candidate_tool_name not in TOOL_REGISTRY:
         raise ValueError(
             f"--candidate-tool '{candidate_tool_name}' is not registered in "
-            f"benchmark/tools.py TOOL_REGISTRY. Add a ToolSpec entry pointing "
-            f"at the candidate's module before running replay."
+            f"benchmark/tools.py TOOL_REGISTRY. Add a ToolSpec entry pointing at "
+            f"the candidate's module before running replay."
         )
     candidate_module = importlib.import_module(
         TOOL_REGISTRY[candidate_tool_name].module

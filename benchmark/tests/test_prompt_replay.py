@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from benchmark.prompt_replay import (
+    _baseline_family,
     _extract_factual_research_prompt_components,
     _load_and_filter_rows,
     _log_replay_summary,
@@ -337,3 +339,71 @@ class TestExtractFactualResearchPromptComponents:
         assert out["user_prompt"] == "Q?"
         assert out["today"] == "2026-04-22"
         assert out["additional_information"] == "B"
+
+
+class TestBaselineFamily:
+    """`_baseline_family` classifies a tool name to its prompt-attribute schema.
+
+    Direct unit test of the small pure helper the replay path uses to decide
+    which symbols (PREDICTION_PROMPT / SYSTEM_PROMPT / ESTIMATE_USER / ...)
+    to read from the candidate module. The widening from exact-name match
+    fixes the gap the #321 review flagged: previously several registered
+    tools fell into the `else` branch and crashed when their module didn't
+    export ``SYSTEM_PROMPT_FORECASTER``.
+    """
+
+    @pytest.mark.parametrize(
+        "tool_name,expected",
+        [
+            # Reasoning family (two-stage).
+            ("prediction-request-reasoning", "reasoning"),
+            ("prediction-request-reasoning-claude", "reasoning"),
+            # Rag family (PREDICTION_PROMPT + SYSTEM_PROMPT).
+            ("prediction-request-rag", "rag"),
+            ("prediction-request-rag-claude", "rag"),
+            # prediction-url-cot is rag-shaped — #321 review fix.
+            ("prediction-url-cot", "rag"),
+            ("prediction-url-cot-claude", "rag"),
+            # Superforcaster family (PREDICTION_PROMPT only).
+            ("superforcaster", "superforcaster"),
+            # Existing -polymarket-v1 sibling — #321 review fix; would
+            # previously fall to `else` and crash on SYSTEM_PROMPT_FORECASTER.
+            ("superforcaster-polymarket-v1", "superforcaster"),
+            # Hypothetical new-version siblings the housekeeping default
+            # produces: superforcaster -> superforcaster-v1 etc.
+            ("superforcaster-v1", "superforcaster"),
+            ("superforcaster-polymarket-v2", "superforcaster"),
+            # SME tools also export only PREDICTION_PROMPT — #321 review fix.
+            ("prediction-offline-sme", "superforcaster"),
+            ("prediction-online-sme", "superforcaster"),
+            # factual_research family (ESTIMATE_USER + ESTIMATE_SYSTEM).
+            ("factual_research", "factual_research"),
+            ("factual_research-v1", "factual_research"),
+            # Default family (PREDICTION_PROMPT + SYSTEM_PROMPT_FORECASTER).
+            ("prediction-online", "default"),
+            ("prediction-offline", "default"),
+            ("claude-prediction-online", "default"),
+            ("claude-prediction-offline", "default"),
+        ],
+    )
+    def test_classifies_registered_tools_to_their_actual_schema(
+        self, tool_name: str, expected: str
+    ) -> None:
+        """Registered tools route to the schema their module actually exports.
+
+        Covers the three tools the #321 review caught falling into the wrong
+        branch (superforcaster-polymarket-v1, prediction-url-cot, *-sme) plus
+        hypothetical ``-v<n+1>`` siblings the housekeeping default produces.
+
+        :param tool_name: tool name from the parametrize matrix.
+        :param expected: family the helper should classify ``tool_name`` to.
+        """
+        assert _baseline_family(tool_name) == expected
+
+    def test_unknown_tool_falls_to_default(self) -> None:
+        """Unknown names fall to the default family.
+
+        The existing ``else`` branch in replay() then handles them (or raises
+        on missing attributes downstream).
+        """
+        assert _baseline_family("totally-made-up-name") == "default"

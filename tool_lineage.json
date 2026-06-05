@@ -38,6 +38,10 @@
       "parent": null,
       "reason": "Original tool, baseline entry."
     },
+    "factual_research-v1": {
+      "parent": "factual_research",
+      "reason": "Add an as-of-date freshness guard at the estimate stage so it stops anchoring p_yes on stale prior-period figures on earnings/revenue-threshold markets."
+    },
     "gemini-2.0-flash": {
       "parent": null,
       "reason": "Original tool, baseline entry."

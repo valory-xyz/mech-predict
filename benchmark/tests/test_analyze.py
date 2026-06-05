@@ -1604,7 +1604,7 @@ class TestScopeTournamentToActive:
 
 
 class TestTournamentCallouts:
-    """Tests for section_tournament_callouts."""
+    """Tests for section_tournament_callouts (active-candidate standings)."""
 
     def test_empty_when_no_tournament_data(self) -> None:
         """Missing tournament scores returns empty string."""
@@ -1612,113 +1612,153 @@ class TestTournamentCallouts:
         assert section_tournament_callouts(prod, None) == ""
         assert section_tournament_callouts(prod, {"total_rows": 0}) == ""
 
-    def test_promotion_candidate_flagged(self) -> None:
-        """Tournament Brier meaningfully lower than production triggers a promotion bullet."""
+    def test_renders_standings_table(self) -> None:
+        """An active candidate renders as a row under the table header."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
-        result = section_tournament_callouts(prod, tourn)
-        assert "Promotion candidates:" in result
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "## Tournament Callouts" in result
+        assert "| Tool | Version | n | Brier | BSS vs mkt | vs Production |" in result
         assert "tool-a" in result
         assert "v2" in result
-        assert "Tournament regressions:" not in result
-        # n=50 is above CALLOUT_MIN_N, so no low-data marker.
-        assert "⚠ low data" not in result
 
-    def test_tournament_regression_flagged(self) -> None:
-        """Tournament Brier meaningfully higher than production triggers a regression bullet."""
+    def test_better_than_prod_tagged_green(self) -> None:
+        """A candidate beating prod by >= CALLOUT_DELTA is tagged 🟢 with its Δ."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "🟢" in result
+        assert "🔴" not in result
+        assert "Δ -0.1000" in result  # 0.10 (tournament) - 0.20 (prod)
+
+    def test_worse_than_prod_tagged_red(self) -> None:
+        """A candidate worse than prod by >= CALLOUT_DELTA is tagged 🔴."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 50)
-        result = section_tournament_callouts(prod, tourn)
-        assert "Tournament regressions:" in result
-        assert "Promotion candidates:" not in result
-
-    def test_low_n_callout_shown_with_marker(self) -> None:
-        """Low-n tournament cells are flagged with a marker when scoping is on.
-
-        Tournament is not sample-gated while ``active_cids`` is
-        provided: a candidate's record shows from its first resolved
-        market with a ``⚠ low data`` marker so the reader (and the
-        Slack summary) can weight it.
-        """
-        prod = _scores_with_tool("tool-a", 0.20, 1000)
-        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
         result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
-        assert "Promotion candidates:" in result
-        assert "⚠ low data" in result
-        assert "n=10" in result
+        assert "🔴" in result
+        assert "🟢" not in result
 
-    def test_low_n_regression_shown_with_marker(self) -> None:
-        """The low-data marker is added on the regression path too.
+    def test_within_delta_band_row_shown_untagged(self) -> None:
+        """A within-noise candidate is still surfaced, just without a 🟢/🔴 tag.
 
-        Companion to the promotion case above. ``_bullet`` adds the
-        marker unconditionally for both lists; a future refactor that
-        moved it inside the promotion branch would leave low-n
-        regressions reading as reliable. Asserts the marker appears
-        under the ``Tournament regressions:`` heading specifically.
+        Behaviour change from the callouts-only design: every active
+        candidate appears, but a delta inside ``CALLOUT_DELTA`` carries no
+        promotion/regression signal. The old design returned "" here.
         """
-        prod = _scores_with_tool("tool-a", 0.20, 1000)
-        tourn = _tournament_scores_with_version("tool-a", "v2", 0.40, 10)
-        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
-        assert "Promotion candidates:" not in result
-        regressions_section = result.split("Tournament regressions:")[1]
-        assert "⚠ low data" in regressions_section
-        assert "n=10" in regressions_section
-
-    def test_fail_open_reapplies_min_n_gate(self) -> None:
-        """When active_cids is None, CALLOUT_MIN_N gates the callout.
-
-        Without scoping (e.g. tournament_tools.json failed to load) the
-        report must stay bounded: a low-n row that would otherwise be
-        flagged with ``⚠ low data`` is suppressed entirely so the
-        degraded path is strictly quieter, not noisier.
-        """
-        prod = _scores_with_tool("tool-a", 0.20, 1000)
-        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
-        # active_cids=None → min-n gate fires → empty.
-        assert section_tournament_callouts(prod, tourn, active_cids=None) == ""
-
-    def test_scoped_to_active_cids(self) -> None:
-        """Active-CID scoping drops inactive rows; None disables scoping.
-
-        Three cases pin the ``is not None`` semantics the loader
-        depends on — empty set must not be treated the same as None,
-        otherwise a flip to truthy checks (``if active_cids:``) would
-        silently change behavior.
-        """
-        prod = _scores_with_tool("tool-a", 0.20, 1000)
-        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 50)
-        # v2 no longer under evaluation → dropped.
-        assert section_tournament_callouts(prod, tourn, active_cids=set()) == ""
-        # v2 active → flagged.
-        result_scoped = section_tournament_callouts(prod, tourn, active_cids={"v2"})
-        assert "Promotion candidates:" in result_scoped
-        # None disables scoping; n=50 ≥ CALLOUT_MIN_N so the row still
-        # surfaces under fail-open. Pins the empty-set ≠ None distinction.
-        result_unscoped = section_tournament_callouts(prod, tourn, active_cids=None)
-        assert "Promotion candidates:" in result_unscoped
-
-    def test_suppressed_within_delta_band(self) -> None:
-        """Tournament vs production deltas within CALLOUT_DELTA are not flagged."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
-        assert section_tournament_callouts(prod, tourn) == ""
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "tool-a" in result
+        assert "🟢" not in result
+        assert "🔴" not in result
 
-    def test_same_cid_on_both_sides_is_skipped(self) -> None:
-        """After rollout, tournament and production share a CID; don't flag noise.
+    def test_tournament_only_tool_surfaced_without_prod(self) -> None:
+        """A candidate with no production predecessor still appears.
 
-        ``_most_recent_prod_cid`` returns the latest-tagged prod CID.
-        Once the candidate has rolled out, ``cand_cid == prod_cid`` and
-        the loop compares two samples of the same version — sampling
-        noise alone can exceed ``CALLOUT_DELTA`` at small n. The section
-        must suppress this, otherwise the rollout fix promised by this
-        PR is itself a regression.
+        The core of the standings redesign: a brand-new tool that has
+        never reached production is ranked by Brier and its skill against
+        the market baseline, shown with a "no prod baseline" note instead
+        of being dropped (the old design skipped it entirely).
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)  # unrelated prod tool
+        tourn = _tournament_scores_with_version("tool-b", "vnew", 0.12, 60)
+        result = section_tournament_callouts(prod, tourn, active_cids={"vnew"})
+        assert "tool-b" in result
+        assert "no prod baseline" in result
+        # BSS-vs-market (0.1 from the builder) is still surfaced.
+        assert "+0.100" in result
+
+    def test_low_n_marked_not_gated(self) -> None:
+        """Low resolved-n candidates are surfaced with a ⚠ marker (scoped path)."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        assert "⚠" in result
+        assert "| 10 ⚠ |" in result
+
+    def test_no_resolved_markets_renders_dashes(self) -> None:
+        """A candidate with no resolved markets degrades Brier/BSS to em-dash."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = {
+            "total_rows": 5,
+            "overall": {},
+            "by_tool_version_mode": {
+                "tool-a | vpending | tournament": {
+                    "n": 5,
+                    "valid_n": 0,
+                    "brier": None,
+                    "brier_skill_score": None,
+                },
+            },
+        }
+        result = section_tournament_callouts(prod, tourn, active_cids={"vpending"})
+        assert "tool-a" in result
+        assert "| — |" in result  # Brier/BSS cells degrade, no crash
+
+    def test_rolled_out_candidate_noted_not_dropped(self) -> None:
+        """A candidate whose CID == latest prod CID shows "rolled out", still listed.
+
+        Same-version comparison is pipeline noise, so no Δ/tag is emitted,
+        but the candidate stays visible (it's still in tournament_tools.json).
+        The old design dropped this row entirely.
         """
         shared_cid = "cid_v2"
         prod = _scores_with_tool("tool-a", 0.20, 1000, prod_cid=shared_cid)
-        # Tournament cell uses the same CID; Brier diverges enough to
-        # trigger a promotion bullet if the same-CID guard is missing.
         tourn = _tournament_scores_with_version("tool-a", shared_cid, 0.10, 50)
-        assert section_tournament_callouts(prod, tourn) == ""
+        result = section_tournament_callouts(prod, tourn, active_cids={shared_cid})
+        assert "rolled out" in result
+        assert "🟢" not in result
+
+    def test_fail_open_reapplies_min_n_gate(self) -> None:
+        """When active_cids is None, the min-n gate suppresses low-n rows.
+
+        Without scoping (e.g. tournament_tools.json failed to load) the
+        report must stay bounded, so the degraded path drops a low-n row
+        that would otherwise carry a ⚠ marker.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 10)
+        assert section_tournament_callouts(prod, tourn, active_cids=None) == ""
+
+    def test_scoping_distinguishes_empty_set_from_none(self) -> None:
+        """Empty set scopes to nothing; None disables scoping (high-n survives).
+
+        Pins the ``is not None`` semantics — a flip to truthy checks
+        (``if active_cids:``) would collapse the two cases.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.05, 50)
+        # Empty set → v2 not active → no rows.
+        assert section_tournament_callouts(prod, tourn, active_cids=set()) == ""
+        # v2 active → surfaced.
+        assert "tool-a" in section_tournament_callouts(prod, tourn, active_cids={"v2"})
+        # None → fail-open; n=50 ≥ CALLOUT_MIN_N so the row survives.
+        assert "tool-a" in section_tournament_callouts(prod, tourn, active_cids=None)
+
+    def test_sorted_by_brier_best_first(self) -> None:
+        """Multiple candidates are ordered by Brier ascending."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = {
+            "total_rows": 100,
+            "overall": {},
+            "by_tool_version_mode": {
+                "tool-worse | cidw | tournament": {
+                    "n": 50,
+                    "valid_n": 50,
+                    "brier": 0.30,
+                    "brier_skill_score": -0.1,
+                },
+                "tool-best | cidb | tournament": {
+                    "n": 50,
+                    "valid_n": 50,
+                    "brier": 0.12,
+                    "brier_skill_score": 0.2,
+                },
+            },
+        }
+        result = section_tournament_callouts(prod, tourn, active_cids={"cidw", "cidb"})
+        assert result.index("tool-best") < result.index("tool-worse")
 
 
 class TestGenerateReportWithTournamentFiles:
@@ -1840,8 +1880,8 @@ class TestGenerateReportWithTournamentFiles:
         assert "v1" in report
         assert "v2" in report
 
-    def test_callout_section_included_when_triggered(self) -> None:
-        """Promotion-worthy tournament data causes the callouts section to render."""
+    def test_callout_section_included_when_candidate_present(self) -> None:
+        """Any active tournament candidate causes the standings section to render."""
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
         report = generate_report(
@@ -1853,8 +1893,13 @@ class TestGenerateReportWithTournamentFiles:
         )
         assert "## Tournament Callouts" in report
 
-    def test_callout_section_omitted_when_empty(self) -> None:
-        """Tournament data present but within delta band -> no callout section."""
+    def test_within_band_candidate_still_listed(self) -> None:
+        """A within-delta candidate is now surfaced (untagged), not omitted.
+
+        Behaviour change: the standings view lists every active candidate,
+        so tournament data inside the noise band still renders the section
+        (the old callouts-only design omitted it).
+        """
         prod = _scores_with_tool("tool-a", 0.20, 1000)
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.21, 100)
         report = generate_report(
@@ -1864,7 +1909,10 @@ class TestGenerateReportWithTournamentFiles:
             include_tournament=True,
             scores_tournament=tourn,
         )
-        assert "## Tournament Callouts" not in report
+        assert "## Tournament Callouts" in report
+        callouts = report.split("## Tournament Callouts", 1)[1].split("\n## ", 1)[0]
+        assert "🟢" not in callouts
+        assert "🔴" not in callouts
 
 
 # ---------------------------------------------------------------------------

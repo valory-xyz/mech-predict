@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -1257,6 +1258,7 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     output_dir: Path,
     model: str,
     phase: str = "prediction-only",
+    candidate_tool: Optional[str] = None,
 ) -> None:
     """Replay enriched rows through current prompt template vs production baseline.
 
@@ -1266,6 +1268,14 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     :param output_dir: directory for baseline.jsonl + candidate.jsonl output.
     :param model: LLM model identifier.
     :param phase: replay phase — "prediction-only", "reasoning-only", or "both".
+    :param candidate_tool: tool name whose module supplies the prompt templates
+        being replayed. Defaults to the baseline tool from the enriched rows
+        (in-place edit path: same name, edited code). Set to a different name
+        for new-version PRs (e.g. baseline=superforcaster, candidate=
+        superforcaster-v1) so the candidate's code runs against the baseline's
+        W-2 rows. The candidate must share the baseline's prompt-attribute
+        schema (PREDICTION_PROMPT / ESTIMATE_USER / etc.) and be registered in
+        benchmark.tools.TOOL_REGISTRY.
     """
     # Load enriched dataset first to detect tool
     sampled: list[dict[str, Any]] = load_jsonl(dataset)
@@ -1285,51 +1295,53 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
             log.warning("Could not load filter stats from %s: %s", stats_path, exc)
 
     tool_name = sampled[0]["tool_name"]
+    # Candidate defaults to baseline (in-place edits: same name, edited code).
+    # When set, the candidate's code is replayed against the baseline's W-2
+    # rows so new-version PRs (e.g. superforcaster -> superforcaster-v1) get a
+    # meaningful Brier delta against the parent on the same evidence + ground
+    # truth.
+    candidate_tool_name = candidate_tool or tool_name
     is_reasoning_tool = tool_name.startswith("prediction-request-reasoning")
     is_rag_tool = tool_name.startswith("prediction-request-rag")
     is_superforcaster = tool_name == "superforcaster"
     is_factual_research = tool_name == "factual_research"
 
-    # Import prompt templates from the appropriate tool module
+    # Resolve the candidate's module via TOOL_REGISTRY so new-version tools get
+    # replay support without growing the if/elif cascade below — only the
+    # baseline's family decides which attribute names we pull from the module.
+    from benchmark.tools import TOOL_REGISTRY  # pylint: disable=import-outside-toplevel
+
+    if candidate_tool_name not in TOOL_REGISTRY:
+        raise ValueError(
+            f"--candidate-tool '{candidate_tool_name}' is not registered in "
+            f"benchmark/tools.py TOOL_REGISTRY. Add a ToolSpec entry pointing "
+            f"at the candidate's module before running replay."
+        )
+    candidate_module = importlib.import_module(
+        TOOL_REGISTRY[candidate_tool_name].module
+    )
+
+    # Pull prompt templates from the candidate module per the baseline family's
+    # attribute schema. New-version tools must mirror the parent's symbols.
     if is_reasoning_tool:
-        from packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning import (  # pylint: disable=import-outside-toplevel
-            PREDICTION_PROMPT,
-            REASONING_PROMPT,
-            SYSTEM_PROMPT,
-            parser_reasoning_response,
-        )
-
-        system_prompt = SYSTEM_PROMPT
+        PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
+        REASONING_PROMPT = candidate_module.REASONING_PROMPT
+        parser_reasoning_response = candidate_module.parser_reasoning_response
+        system_prompt = candidate_module.SYSTEM_PROMPT
     elif is_rag_tool:
-        from packages.napthaai.customs.prediction_request_rag.prediction_request_rag import (  # pylint: disable=import-outside-toplevel
-            PREDICTION_PROMPT,
-            SYSTEM_PROMPT,
-        )
-
-        system_prompt = SYSTEM_PROMPT
+        PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
+        system_prompt = candidate_module.SYSTEM_PROMPT
     elif is_superforcaster:
-        from packages.valory.customs.superforcaster.superforcaster import (  # pylint: disable=import-outside-toplevel
-            PREDICTION_PROMPT,
-        )
-
+        PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         system_prompt = "You are a helpful assistant."
     elif is_factual_research:
         # Replay only the ESTIMATE step; REFRAME + SYNTHESIS are upstream and
         # use cached evidence. ESTIMATE_USER takes (question, today, briefing).
-        from packages.valory.customs.factual_research.factual_research import (  # pylint: disable=import-outside-toplevel
-            ESTIMATE_SYSTEM,
-            ESTIMATE_USER,
-        )
-
-        PREDICTION_PROMPT = ESTIMATE_USER
-        system_prompt = ESTIMATE_SYSTEM
+        PREDICTION_PROMPT = candidate_module.ESTIMATE_USER
+        system_prompt = candidate_module.ESTIMATE_SYSTEM
     else:
-        from packages.valory.customs.prediction_request.prediction_request import (  # pylint: disable=import-outside-toplevel
-            PREDICTION_PROMPT,
-            SYSTEM_PROMPT_FORECASTER,
-        )
-
-        system_prompt = SYSTEM_PROMPT_FORECASTER
+        PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
+        system_prompt = candidate_module.SYSTEM_PROMPT_FORECASTER
 
     if "claude" in model:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1662,6 +1674,20 @@ def main() -> None:
             "(default: prediction-only)"
         ),
     )
+    replay_parser.add_argument(
+        "--candidate-tool",
+        type=str,
+        default=None,
+        help=(
+            "Tool name whose code is replayed (default: same as the baseline "
+            "tool stamped on the enriched rows). Set this for new-version PRs "
+            "(e.g. baseline=superforcaster, candidate=superforcaster-v1) so "
+            "the candidate's code runs against the baseline's W-2 rows on the "
+            "same evidence + ground truth. Must be registered in "
+            "benchmark/tools.py TOOL_REGISTRY and mirror the baseline's "
+            "prompt-attribute schema."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1680,6 +1706,7 @@ def main() -> None:
             output_dir=args.output_dir,
             model=args.model,
             phase=args.phase,
+            candidate_tool=args.candidate_tool,
         )
 
 

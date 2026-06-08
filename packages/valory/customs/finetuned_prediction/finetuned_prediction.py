@@ -141,9 +141,9 @@ COMPLETION_TIMEOUT = 150
 # Placeholder tokens substituted into PREDICTION_TEMPLATE. Sentinels (not
 # str.format) are used because the vendored template contains literal JSON
 # braces that would break str.format.
-QUESTION_TOKEN = "__QUESTION__"
-TODAY_TOKEN = "__TODAY__"
-SOURCES_TOKEN = "__SOURCES__"
+QUESTION_PLACEHOLDER = "__QUESTION__"
+TODAY_PLACEHOLDER = "__TODAY__"
+SOURCES_PLACEHOLDER = "__SOURCES__"
 DATE_FORMAT = "%d/%m/%Y"
 
 # The in-distribution forecaster prompt. Vendored verbatim from the dominant
@@ -592,9 +592,9 @@ def build_forecaster_prompt(question: str, today: str, sources: str) -> str:
     and the trailing `Recall the question…` echo.
     """
     return (
-        PREDICTION_TEMPLATE.replace(SOURCES_TOKEN, sources)
-        .replace(TODAY_TOKEN, today)
-        .replace(QUESTION_TOKEN, question)
+        PREDICTION_TEMPLATE.replace(SOURCES_PLACEHOLDER, sources)
+        .replace(TODAY_PLACEHOLDER, today)
+        .replace(QUESTION_PLACEHOLDER, question)
     )
 
 

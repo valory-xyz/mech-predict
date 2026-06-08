@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
@@ -38,6 +38,7 @@ from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_RE_ARM,
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
+    RECENT_CLOSE_DAYS,
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
     _load_json,
@@ -1014,6 +1015,214 @@ class TestLevelFloorReArmAndRegressionCoverage:
         row = payload["by_tool"]["a"]
         assert row["decision"] == "reliability_collapse"
         assert row["delta_brier"] is None
+
+
+def _closed_triples(*pairs: Any, days_ago: int) -> Any:
+    """Helper: build a `(tool, platform, closed_at)` list for ``triage(closed_issues=...)``.
+
+    :param pairs: (tool, platform) tuples to time-stamp identically.
+    :param days_ago: how many days ago each close happened (used to land
+        inside or outside the RECENT_CLOSE_DAYS window).
+    :return: list of (tool, platform, closed_at) triples.
+    """
+    closed_at = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc) - timedelta(
+        days=days_ago
+    )
+    return [(t, p, closed_at) for t, p in pairs]
+
+
+_NOW = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+
+class TestRecentlyClosedSilence:
+    """Issues closed within RECENT_CLOSE_DAYS silence any re-fire of the same pair.
+
+    Stacks ON TOP of the existing Brier-band re-arm: even when the re-arm
+    would have allowed a fire (e.g. regression bypass), the recently-closed
+    silence wins. Tests exercise both triggers + the "no trigger" pass-through.
+    """
+
+    def test_recently_closed_above_level_silenced(self) -> None:
+        """Tool would fire level_floor but closed within window -> silent."""
+        closed = _closed_triples(("a", "polymarket"), days_ago=1)
+        d = triage(
+            _scores(a=_stats(brier=0.300, log_loss=0.620)),
+            _scores(a=_stats(brier=0.295, log_loss=0.610)),
+            {},
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "recently_closed"
+        assert d[0]["trigger"] == "level_floor"
+        assert d[0]["issue_open"] is False
+
+    def test_recently_closed_regression_silenced(self) -> None:
+        """Regression delta crossed but closed recently -> silent (cooldown wins over re-arm bypass)."""
+        closed = _closed_triples(("a", "polymarket"), days_ago=2)
+        d = triage(
+            _scores(a=_stats(brier=0.270, log_loss=0.700)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610)),
+            {},
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "recently_closed"
+        assert d[0]["trigger"] == "regression"
+
+    def test_recently_closed_but_no_trigger_passes_through(self) -> None:
+        """No trigger fires -> cooldown gate is irrelevant; standard no_regression."""
+        closed = _closed_triples(("a", "polymarket"), days_ago=1)
+        d = triage(
+            _scores(a=_stats(brier=0.180, log_loss=0.580)),
+            _scores(a=_stats(brier=0.180, log_loss=0.580)),
+            {},
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_recently_closed_filtered_by_platform(self) -> None:
+        """Close on `(tool, platform_A)` must not silence `(tool, platform_B)`."""
+        closed = _closed_triples(("a", "omen"), days_ago=1)
+        d = triage(
+            _scores(a=_stats(brier=0.300, log_loss=0.620)),
+            _scores(a=_stats(brier=0.295, log_loss=0.610)),
+            {},
+            platform="polymarket",
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_closed_issues_none_applies_no_cooldown(self) -> None:
+        """Gh failure path: closed_issues=None -> no cooldown, fires normally."""
+        d = triage(
+            _scores(a=_stats(brier=0.300, log_loss=0.620)),
+            _scores(a=_stats(brier=0.295, log_loss=0.610)),
+            {},
+            open_now=[],
+            closed_issues=None,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_close_exactly_at_window_boundary_silenced(self) -> None:
+        """Close on the exact RECENT_CLOSE_DAYS boundary is still recent (>= cutoff)."""
+        closed = _closed_triples(("a", "polymarket"), days_ago=RECENT_CLOSE_DAYS)
+        d = triage(
+            _scores(a=_stats(brier=0.300, log_loss=0.620)),
+            _scores(a=_stats(brier=0.295, log_loss=0.610)),
+            {},
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        # Boundary uses >= so the close at exactly N days ago still silences.
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "recently_closed"
+
+    def test_recent_close_days_constant_is_positive(self) -> None:
+        """RECENT_CLOSE_DAYS must be a positive integer or the gate becomes a no-op."""
+        assert isinstance(RECENT_CLOSE_DAYS, int)
+        assert RECENT_CLOSE_DAYS > 0
+
+
+class TestStaleClosedMarkerReset:
+    """A close older than RECENT_CLOSE_DAYS clears the level_cooldown marker.
+
+    Without reset, a level_floor marker stored in state would silence a tool
+    indefinitely once the Brier sat in the re-arm band [0.22, 0.25]. The
+    reset lets the loop re-evaluate a still-bad tool as a fresh issue once
+    engineers have had the silence window to act.
+    """
+
+    def test_stale_close_clears_marker_so_tool_re_fires(self) -> None:
+        """Closed > N days ago + Brier in re-arm band -> marker reset, level_floor fires."""
+        # Pre-fix this scenario was silenced forever by the re-arm: prior
+        # state has trigger=level_floor, Brier=0.260 sits above re-arm
+        # 0.22 and above level threshold 0.25, no regression delta. The
+        # re-arm marker would have held silent forever.
+        prior = {"by_tool": {"a": {"trigger": "level_floor", "issue_open": False}}}
+        closed = _closed_triples(("a", "polymarket"), days_ago=RECENT_CLOSE_DAYS + 2)
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            prior,
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_stale_close_does_not_silence_recent_close_via_recently_closed(
+        self,
+    ) -> None:
+        """A pair with BOTH a stale and a recent close -> recent close wins (silenced)."""
+        # Tool was closed 10 days ago AND again 2 days ago. The most
+        # recent close is within the window -> silenced.
+        old = _closed_triples(("a", "polymarket"), days_ago=10)
+        new = _closed_triples(("a", "polymarket"), days_ago=2)
+        d = triage(
+            _scores(a=_stats(brier=0.300, log_loss=0.620)),
+            _scores(a=_stats(brier=0.295, log_loss=0.610)),
+            {},
+            open_now=[],
+            closed_issues=old + new,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "recently_closed"
+
+    def test_recent_close_preserves_marker(self) -> None:
+        """A close WITHIN the window does NOT mark the level_cooldown marker stale."""
+        # The recently_closed silence already fires (silencing in band as
+        # well), but the test pins down that the marker reset only fires
+        # for stale closes -- not every close. Distinguished by: the
+        # decision uses "recently_closed", not "level_floor_cooldown".
+        prior = {"by_tool": {"a": {"trigger": "level_floor", "issue_open": False}}}
+        closed = _closed_triples(("a", "polymarket"), days_ago=1)
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            _scores(a=_stats(brier=0.260, log_loss=0.610)),
+            prior,
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        # Brier 0.260 is above level threshold, so trigger fires;
+        # recently_closed silences it. The level_cooldown reset is NOT
+        # exercised because the close is recent (within window).
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "recently_closed"
+
+    def test_stale_close_clears_marker_then_no_trigger_falls_through(self) -> None:
+        """Stale close + benign Brier -> marker cleared, no spurious silence."""
+        # If the reset cleared the marker INCORRECTLY (e.g. set
+        # level_cooldown wrong polarity), this tool would either be
+        # silenced as level_floor_cooldown or fire spuriously. The
+        # expected path is plain no_regression silence.
+        prior = {"by_tool": {"a": {"trigger": "level_floor", "issue_open": False}}}
+        closed = _closed_triples(("a", "polymarket"), days_ago=RECENT_CLOSE_DAYS + 5)
+        d = triage(
+            _scores(a=_stats(brier=0.180, log_loss=0.580)),
+            _scores(a=_stats(brier=0.180, log_loss=0.580)),
+            prior,
+            open_now=[],
+            closed_issues=closed,
+            now=_NOW,
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
 
 
 class TestMainExitCode:

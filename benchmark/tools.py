@@ -84,6 +84,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "factual_research-v1": ToolSpec(
         module="packages.valory.customs.factual_research_v1.factual_research_v1",
     ),
+    # valory/factual_research_v2
+    "factual_research-v2": ToolSpec(
+        module="packages.valory.customs.factual_research_v2.factual_research_v2",
+    ),
     # nickcom007/prediction_request_sme
     "prediction-offline-sme": ToolSpec(
         module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",

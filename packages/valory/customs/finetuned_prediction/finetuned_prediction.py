@@ -120,7 +120,7 @@ API_KEYS_SERVICE = "finetuned"
 
 
 def resolve_model(tool: str) -> str:
-    """vLLM served-model name for `tool` (the mode)."""
+    """The vLLM served-model name for `tool` (the mode)."""
     return MODEL_BY_TOOL[tool]
 
 
@@ -272,6 +272,9 @@ def extract_json(
     """Strip the <think> block and parse the remaining flat JSON object.
 
     Returns None if the response has no parseable JSON object.
+
+    :param completion: the model output (string or chat-message list).
+    :return: the parsed JSON object, or None if not parseable.
     """
     text = _to_text(completion)
     if not text:
@@ -291,6 +294,9 @@ def parse_p_yes(completion: Union[str, List[Dict[str, str]]]) -> Optional[float]
 
     Invalid if: no parseable JSON object, no `p_yes` key, or `p_yes` is not a
     float in [0, 1].
+
+    :param completion: the model output (string or chat-message list).
+    :return: the parsed p_yes in [0, 1], or None if invalid.
     """
     obj = extract_json(completion)
     if not isinstance(obj, dict):
@@ -314,6 +320,9 @@ def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     normalised object from the parsed completion so `p_no` is always present and
     consistent with `p_yes`, defaulting confidence/info_utility when the model
     omitted them. Returns None when `p_yes` could not be parsed.
+
+    :param completion: the raw model completion (or None).
+    :return: the canonical delivery JSON string, or None if p_yes is unparseable.
     """
     if completion is None:
         return None
@@ -354,6 +363,9 @@ def with_key_rotation(func: Callable) -> Callable:
     `serperapi`), so a self-hosted deployment with no OpenAI key does not
     KeyError. The wrapper always returns the tool result with `api_keys`
     appended, as the mech task-execution layer requires.
+
+    :param func: the tool entrypoint to wrap.
+    :return: the wrapped function that retries with key rotation.
     """
 
     @functools.wraps(func)
@@ -528,6 +540,10 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
     <background> blocks the model trained on — see fine_tuning
     out_evidence/train.parquet. Changing the formatting would drift the inner
     evidence text away from the training distribution.
+
+    :param organic_data: Serper organic results.
+    :param misc_data: Serper 'People Also Ask' results.
+    :return: the formatted evidence block.
     """
     sources = ""
 
@@ -590,6 +606,11 @@ def build_forecaster_prompt(question: str, today: str, sources: str) -> str:
     Sentinel substitution (not str.format) because PREDICTION_TEMPLATE contains
     literal JSON braces. `question` is inserted at both the `Question:` header
     and the trailing `Recall the question…` echo.
+
+    :param question: the market question.
+    :param today: the current date string.
+    :param sources: the formatted <background> evidence block.
+    :return: the filled forecaster prompt.
     """
     return (
         PREDICTION_TEMPLATE.replace(SOURCES_PLACEHOLDER, sources)
@@ -605,6 +626,9 @@ def build_messages(content: str) -> List[Dict[str, str]]:
     user message, NO system message. We mirror that exactly — adding a system
     message (as the mech-parity *benchmark* did) would push the model out of
     distribution relative to how it was trained.
+
+    :param content: the user-message content (the forecaster prompt).
+    :return: the single-user-message chat list.
     """
     return [{"role": "user", "content": content}]
 
@@ -628,6 +652,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     The served model is fixed per mode (MODEL_BY_TOOL[tool]); the requester does
     not choose it.
+
+    :param kwargs: the mech task kwargs described above.
+    :return: the mech response tuple, or the max-cost float for delivery_rate=0.
     """
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:

@@ -52,16 +52,20 @@ class FakeKeyChain:
     """Minimal stand-in for the task-execution KeyChain object."""
 
     def __init__(self, keys: Dict[str, str]):
+        """Initialise with a service->key mapping."""
         self._keys = dict(keys)
         self.rotated: List[str] = []
 
     def __getitem__(self, service: str) -> str:
+        """Return the key for `service`, raising KeyError when absent."""
         return self._keys[service]  # raises KeyError when absent, like the real one
 
     def max_retries(self) -> Dict[str, int]:
+        """Return one retry per configured service."""
         return {service: 1 for service in self._keys}
 
     def rotate(self, service: str) -> None:
+        """Record a rotation request for `service`."""
         self.rotated.append(service)
 
 
@@ -92,10 +96,12 @@ class FakeKeyChain:
     ],
 )
 def test_parse_p_yes(completion: str, expected: Optional[float]) -> None:
+    """parse_p_yes extracts p_yes and rejects malformed / out-of-range outputs."""
     assert parse_p_yes(completion) == expected
 
 
 def test_canonical_prediction_normalises_schema() -> None:
+    """A well-formed completion yields the four-field delivery JSON."""
     result = canonical_prediction(WELL_FORMED)
     assert result is not None
     obj = json.loads(result)
@@ -104,6 +110,7 @@ def test_canonical_prediction_normalises_schema() -> None:
 
 def test_canonical_prediction_derives_p_no_and_defaults() -> None:
     # confidence/info_utility absent -> defaulted; p_no derived from p_yes.
+    """p_no is derived from p_yes; confidence / info_utility default when absent."""
     result = canonical_prediction('{"p_yes": 0.25}')
     assert result is not None
     obj = json.loads(result)
@@ -114,6 +121,7 @@ def test_canonical_prediction_derives_p_no_and_defaults() -> None:
 
 
 def test_canonical_prediction_returns_none_on_malformed() -> None:
+    """Unparseable or missing completions yield None."""
     assert canonical_prediction("<think>oops</think> not json") is None
     assert canonical_prediction(None) is None
 
@@ -125,10 +133,12 @@ def test_canonical_prediction_returns_none_on_malformed() -> None:
 
 def test_build_messages_is_single_user_message_no_system() -> None:
     # to_chat_format parity: one user message, NO system message.
+    """build_messages wraps content in a single user message, no system message."""
     assert build_messages("CONTENT") == [{"role": "user", "content": "CONTENT"}]
 
 
 def test_build_forecaster_prompt_fills_background_template() -> None:
+    """The <background> template is filled with question, date, and sources."""
     out = build_forecaster_prompt("Will X happen?", "05/06/2026", "SOURCE BLOCK")
     assert "<background>" in out and "</background>" in out
     assert "SOURCE BLOCK" in out
@@ -145,10 +155,11 @@ def test_build_forecaster_prompt_fills_background_template() -> None:
 
 
 def test_key_rotation_appends_api_keys_on_success() -> None:
+    """A successful tool call returns its result with api_keys appended."""
     keychain = FakeKeyChain({"finetuned": "EMPTY"})
 
     @with_key_rotation
-    def tool(**kwargs: Any):
+    def tool(**kwargs: Any) -> tuple[str, str, None, None, dict[str, str]]:
         return "result", "prompt", None, None, {"k": "v"}
 
     out = tool(api_keys=keychain)
@@ -156,10 +167,11 @@ def test_key_rotation_appends_api_keys_on_success() -> None:
 
 
 def test_key_rotation_converts_exception_to_error_tuple() -> None:
+    """A raising tool call is converted into an error result tuple."""
     keychain = FakeKeyChain({"finetuned": "EMPTY"})
 
     @with_key_rotation
-    def tool(**kwargs: Any):
+    def tool(**kwargs: Any) -> None:
         raise RuntimeError("boom")
 
     out = tool(api_keys=keychain)
@@ -172,6 +184,7 @@ def test_key_rotation_converts_exception_to_error_tuple() -> None:
 
 
 def test_each_mode_resolves_to_its_served_model() -> None:
+    """Each tool name resolves to its own distinct served-model name."""
     assert resolve_model(TOOL_BASE) == MODEL_BY_TOOL[TOOL_BASE]
     assert resolve_model(TOOL_FINE_TUNED) == MODEL_BY_TOOL[TOOL_FINE_TUNED]
     assert MODEL_BY_TOOL[TOOL_BASE] != MODEL_BY_TOOL[TOOL_FINE_TUNED]
@@ -183,6 +196,7 @@ def test_each_mode_resolves_to_its_served_model() -> None:
 
 
 def test_run_rejects_unknown_tool() -> None:
+    """An unsupported tool name surfaces a 'not supported' error result."""
     out = run(tool="not-a-tool", prompt="q", api_keys=FakeKeyChain({"finetuned": "x"}))
     # with_key_rotation converts the ValueError into an error result tuple.
     assert "not supported" in out[0]
@@ -197,10 +211,13 @@ def _bare_prompt(question: str) -> str:
 
 
 def test_run_fine_tuned_mode_calls_its_model_and_returns_canonical_json() -> None:
+    """Fine-tuned mode calls the fine-tuned model and returns canonical JSON."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ), patch(f"{MODULE_PATH}.gather_sources", return_value="SRC") as gather:
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC") as gather,
+    ):
         gen.return_value = (WELL_FORMED, None)
         out = run(
             tool=TOOL_FINE_TUNED,
@@ -230,10 +247,13 @@ def test_run_fine_tuned_mode_calls_its_model_and_returns_canonical_json() -> Non
 
 
 def test_run_base_mode_calls_the_base_served_model() -> None:
+    """Base mode calls the base served model."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ), patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"):
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
         gen.return_value = (WELL_FORMED, None)
         run(
             tool=TOOL_BASE,
@@ -246,10 +266,13 @@ def test_run_base_mode_calls_the_base_served_model() -> None:
 def test_run_ignores_requester_supplied_model() -> None:
     # The served model is fixed per mode; a `model` in the request must NOT
     # change which model the tool calls (no untrusted model input).
+    """A requester-supplied `model` is ignored; the per-mode model is used."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ), patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"):
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
         gen.return_value = (WELL_FORMED, None)
         run(
             tool=TOOL_BASE,
@@ -261,10 +284,13 @@ def test_run_ignores_requester_supplied_model() -> None:
 
 
 def test_run_uses_default_endpoint() -> None:
+    """Without an override, run uses the default VLLM_ENDPOINT."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ) as mgr, patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"):
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager") as mgr,
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
         gen.return_value = (WELL_FORMED, None)
         run(tool=TOOL_BASE, prompt=_bare_prompt("Will X happen?"), api_keys=keychain)
     # VLLMClientManager(api_key, endpoint) — endpoint is the 2nd positional arg.
@@ -272,11 +298,14 @@ def test_run_uses_default_endpoint() -> None:
 
 
 def test_run_endpoint_kwarg_overrides_default() -> None:
+    """The `vllm_endpoint` kwarg overrides the default endpoint."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
     custom = "http://other-box:9000/v1"
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ) as mgr, patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"):
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager") as mgr,
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
         gen.return_value = (WELL_FORMED, None)
         run(
             tool=TOOL_BASE,
@@ -288,10 +317,13 @@ def test_run_endpoint_kwarg_overrides_default() -> None:
 
 
 def test_run_raises_on_unparseable_completion() -> None:
+    """An unparseable completion surfaces a 'parseable p_yes' error result."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    with patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen, patch(
-        f"{MODULE_PATH}.VLLMClientManager"
-    ), patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"):
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
         gen.return_value = ("<think>only reasoning, no json</think>", None)
         out = run(
             tool=TOOL_BASE,
@@ -303,6 +335,7 @@ def test_run_raises_on_unparseable_completion() -> None:
 
 
 def test_run_delivery_rate_zero_returns_max_cost() -> None:
+    """A zero delivery rate returns the counter callback's max cost."""
     counter = MagicMock(return_value=1.23)
     out = run(
         tool=TOOL_BASE,
@@ -317,6 +350,7 @@ def test_run_delivery_rate_zero_returns_max_cost() -> None:
 
 
 def test_vllm_client_passes_base_url() -> None:
+    """Test that the VLLMClient builds the OpenAI client with the given base_url."""
     with patch("openai.OpenAI") as MockOpenAI:
         module.VLLMClient(api_key="EMPTY", base_url=ENDPOINT)
         MockOpenAI.assert_called_once_with(api_key="EMPTY", base_url=ENDPOINT)

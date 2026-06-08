@@ -48,6 +48,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "superforcaster": ToolSpec(
         module="packages.valory.customs.superforcaster.superforcaster",
     ),
+    # valory/superforcaster_v1
+    "superforcaster-v1": ToolSpec(
+        module="packages.valory.customs.superforcaster_v1.superforcaster_v1",
+    ),
     # valory/superforcaster_polymarket_v1
     "superforcaster-polymarket-v1": ToolSpec(
         module=(

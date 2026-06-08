@@ -5,13 +5,15 @@ type: custom
 description: Serves the base or the fine-tuned 14B Qwen models via vLLM.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
-fingerprint: {}
+fingerprint:
+  __init__.py: bafybeid3gdbuetsikbutcl4i32avmicucmmrqmtnwn7gw454uizs5322se
+  finetuned_prediction.py: bafybeigoclonvmy3siaetw32rknxxf5feurahy4w3ldfhd4ksns7iiyova
+  tests/__init__.py: bafybeieut53j2sz53firzcldhpqeh2ca6rdopnywd7dnyzis4hvsprfs3m
+  tests/test_finetuned_prediction.py: bafybeifrznilxc7xaln3kslkmvbdflxme75aqytzq6aqtcdrga4nhi7fae
 fingerprint_ignore_patterns: []
 entry_point: finetuned_prediction.py
 callable: run
 params:
-  # default_model below is unused: the tool routes by tool name, not by the framework's `model` kwarg.
-  # Kept as the conventional params slot (the framework reads it with a None default, so its value does not matter).
   default_model: ''
 dependencies:
   openai:

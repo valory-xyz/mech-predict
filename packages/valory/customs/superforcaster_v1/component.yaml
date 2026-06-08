@@ -7,7 +7,7 @@ description: A tool for making binary predictions on markets using the Serper AP
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeiahscz5uzzlakd73dzpm5drxv73jozcy7xizjqbp4m5h7aszmqziy
+  __init__.py: bafybeifsytmglg4pjdobqggwgdwokeomp2d5kv3clnhqvvcnljccls7f7e
   superforcaster_v1.py: bafybeiagtlertr3nidxqrq7rvv6a3neafpxt5xe6p667razqbt6ovy4vqe
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_v1.py

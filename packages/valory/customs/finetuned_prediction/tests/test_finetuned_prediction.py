@@ -371,22 +371,30 @@ def _serper_response(payload: dict) -> MagicMock:
 def test_gather_sources_formats_results() -> None:
     """A normal Serper response is formatted into the <background> body."""
     payload = {"organic": [{"position": 1, "title": "T", "link": "L", "snippet": "S"}]}
-    with patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)):
+    with patch(
+        f"{MODULE_PATH}.fetch_additional_sources",
+        return_value=_serper_response(payload),
+    ):
         out = gather_sources("Will X happen?", "serp-key")
     assert "Organic Results" in out and "T" in out
 
 
 def test_gather_sources_raises_on_serper_request_failure() -> None:
     """A Serper request error becomes an explanatory failure (not empty context)."""
-    with patch(f"{MODULE_PATH}.fetch_additional_sources", side_effect=Exception("down")):
+    with patch(
+        f"{MODULE_PATH}.fetch_additional_sources", side_effect=Exception("down")
+    ):
         with pytest.raises(RuntimeError, match="request failed"):
             gather_sources("Will X happen?", "serp-key")
 
 
 def test_gather_sources_raises_on_zero_results() -> None:
     """Zero usable results becomes an explanatory failure (model is OOD without sources)."""
-    payload = {"organic": [], "peopleAlsoAsk": []}
-    with patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)):
+    payload: dict[str, list] = {"organic": [], "peopleAlsoAsk": []}
+    with patch(
+        f"{MODULE_PATH}.fetch_additional_sources",
+        return_value=_serper_response(payload),
+    ):
         with pytest.raises(RuntimeError, match="no results"):
             gather_sources("Will X happen?", "serp-key")
 
@@ -394,10 +402,13 @@ def test_gather_sources_raises_on_zero_results() -> None:
 def test_run_fails_with_explanation_when_serper_returns_nothing() -> None:
     """End-to-end: empty Serper results surface the explanatory message as the result."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    payload = {"organic": [], "peopleAlsoAsk": []}
+    payload: dict[str, list] = {"organic": [], "peopleAlsoAsk": []}
     with (
         patch(f"{MODULE_PATH}.VLLMClientManager"),
-        patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)),
+        patch(
+            f"{MODULE_PATH}.fetch_additional_sources",
+            return_value=_serper_response(payload),
+        ),
     ):
         out = run(
             tool=TOOL_BASE,

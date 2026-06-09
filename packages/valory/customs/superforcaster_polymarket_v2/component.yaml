@@ -2,8 +2,9 @@ name: superforcaster_polymarket_v2
 author: valory
 version: 0.1.0
 type: custom
-description: A tool for making binary predictions on markets using the Serper API
-  and LLMs.
+description: Extends superforcaster-polymarket-v1 with an explicit resolution-criterion
+  specificity check; applies a base-rate correction for narrow-scope criteria (exact
+  phrase, threshold, or time-window conditions).
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

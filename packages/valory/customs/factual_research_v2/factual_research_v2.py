@@ -640,9 +640,11 @@ def _search_serper(
 
 # Maximum words to keep per scraped page
 _MAX_PAGE_WORDS = 400
-# Maximum words to keep from trader-forwarded Polymarket resolution rules;
-# mech requests are permissionless so this cap must hold regardless of caller.
-_MAX_RESOLUTION_RULES_WORDS = 500
+# Maximum characters to keep from trader-forwarded Polymarket resolution rules.
+# Matches the trader's MAX_REQUEST_CONTEXT_DESCRIPTION_LEN (5000, trader #989) so
+# honest within-limit rules are never clipped; the cap only bites the
+# permissionless path, where a requester can bypass the trader's bound entirely.
+_MAX_RESOLUTION_RULES_CHARS = 5000
 # Image / junk patterns to strip from HTML before extraction
 _IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
 _SCRIPT_STYLE_PATTERN = re.compile(
@@ -789,9 +791,8 @@ def _extract_resolution_rules(request_context: Any) -> Optional[str]:
     description = description.strip()
     if not description:
         return None
-    words = description.split()
-    if len(words) > _MAX_RESOLUTION_RULES_WORDS:
-        description = " ".join(words[:_MAX_RESOLUTION_RULES_WORDS]) + " [...]"
+    if len(description) > _MAX_RESOLUTION_RULES_CHARS:
+        description = description[:_MAX_RESOLUTION_RULES_CHARS] + " […]"
     return description
 
 

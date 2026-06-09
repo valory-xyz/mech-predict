@@ -912,6 +912,25 @@ class TestExtractResolutionRules:
         assert _extract_resolution_rules(None) is None
         assert _extract_resolution_rules("nonsense") is None
 
+    def test_at_cap_not_truncated(self) -> None:
+        """A description exactly at the char cap is returned verbatim.
+
+        Honest trader rules sit within MAX_REQUEST_CONTEXT_DESCRIPTION_LEN, so
+        the boundary case must never be clipped.
+        """
+        desc = "y" * module._MAX_RESOLUTION_RULES_CHARS
+        out = _extract_resolution_rules({"description": desc})
+        assert out == desc
+
+    def test_over_cap_truncated_with_sentinel(self) -> None:
+        """A description over the char cap is clipped and gets a sentinel."""
+        desc = "x" * (module._MAX_RESOLUTION_RULES_CHARS + 50)
+        out = _extract_resolution_rules({"description": desc})
+        assert out is not None
+        assert out.endswith(" […]")
+        # Kept body is exactly the cap; sentinel is the only extra text.
+        assert out == "x" * module._MAX_RESOLUTION_RULES_CHARS + " […]"
+
 
 class TestFormatResolutionBlock:
     """Tests for _format_resolution_block — prompt rendering."""

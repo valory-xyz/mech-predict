@@ -640,6 +640,9 @@ def _search_serper(
 
 # Maximum words to keep per scraped page
 _MAX_PAGE_WORDS = 400
+# Maximum words to keep from trader-forwarded Polymarket resolution rules;
+# mech requests are permissionless so this cap must hold regardless of caller.
+_MAX_RESOLUTION_RULES_WORDS = 500
 # Image / junk patterns to strip from HTML before extraction
 _IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
 _SCRIPT_STYLE_PATTERN = re.compile(
@@ -784,7 +787,12 @@ def _extract_resolution_rules(request_context: Any) -> Optional[str]:
     if not isinstance(description, str):
         return None
     description = description.strip()
-    return description or None
+    if not description:
+        return None
+    words = description.split()
+    if len(words) > _MAX_RESOLUTION_RULES_WORDS:
+        description = " ".join(words[:_MAX_RESOLUTION_RULES_WORDS]) + " [...]"
+    return description
 
 
 def _format_resolution_block(description: Optional[str]) -> str:
@@ -800,11 +808,9 @@ def _format_resolution_block(description: Optional[str]) -> str:
     if not description:
         return ""
     return (
-        "\nMARKET RESOLUTION RULES (the authoritative criteria for how this "
-        f'market resolves YES vs NO):\n"""{description}"""\n'
-        "Treat these rules as the precise definition of what counts as a YES "
-        "resolution; align your work with this exact condition, not a loose "
-        "reading of the question.\n"
+        "\nMARKET RESOLUTION RULES:\n"
+        "The following is the market's stated resolution criteria; use it to "
+        f'interpret what the question is asking:\n"""{description}"""\n'
     )
 
 

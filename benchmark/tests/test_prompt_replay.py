@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from benchmark.prompt_replay import (
     _prepare_output_dir,
     extract_prompt_components,
 )
+from benchmark.tools import TOOL_REGISTRY
 
 from packages.valory.customs.factual_research.factual_research import REFRAME_USER
 
@@ -342,14 +344,20 @@ class TestExtractFactualResearchPromptComponents:
 
 
 class TestBaselineFamily:
-    """`_baseline_family` classifies a tool name to its prompt-attribute schema.
+    """`_baseline_family` classifies a tool name to its prompt-schema family.
 
-    Direct unit test of the small pure helper the replay path uses to decide
-    which symbols (PREDICTION_PROMPT / SYSTEM_PROMPT / ESTIMATE_USER / ...)
-    to read from the candidate module. The widening from exact-name match
-    fixes the gap the #321 review flagged: previously several registered
-    tools fell into the `else` branch and crashed when their module didn't
-    export ``SYSTEM_PROMPT_FORECASTER``.
+    Direct unit test of the helper both ``prompt_replay`` dispatch sites use to
+    decide which symbols (PREDICTION_PROMPT / SYSTEM_PROMPT / ESTIMATE_USER /
+    ...) the replay path reads from a module and which regex extractor the
+    enrich path uses. Family is read from ``TOOL_REGISTRY`` (source of truth)
+    for registered tools, with a name heuristic only as a fallback for
+    not-yet-registered ``-v<n+1>`` siblings.
+
+    Note on history: before the registry field, the replay ``else`` branch
+    hard-imported from ``prediction_request`` (which *does* export
+    ``SYSTEM_PROMPT_FORECASTER``), so misrouted tools ran with the *wrong
+    prompt* — they did not crash on import. The defect was silent
+    mis-prompting, not an exception.
     """
 
     @pytest.mark.parametrize(
@@ -361,21 +369,22 @@ class TestBaselineFamily:
             # Rag family (PREDICTION_PROMPT + SYSTEM_PROMPT).
             ("prediction-request-rag", "rag"),
             ("prediction-request-rag-claude", "rag"),
-            # prediction-url-cot is rag-shaped — #321 review fix.
+            # prediction-url-cot is rag-shaped (<user_prompt> XML).
             ("prediction-url-cot", "rag"),
             ("prediction-url-cot-claude", "rag"),
-            # Superforcaster family (PREDICTION_PROMPT only).
+            # Superforcaster family (PREDICTION_PROMPT + Question/<background>).
             ("superforcaster", "superforcaster"),
-            # Existing -polymarket-v1 sibling — #321 review fix; would
-            # previously fall to `else` and crash on SYSTEM_PROMPT_FORECASTER.
             ("superforcaster-polymarket-v1", "superforcaster"),
-            # Hypothetical new-version siblings the housekeeping default
-            # produces: superforcaster -> superforcaster-v1 etc.
+            # Not-yet-registered new-version siblings route via the heuristic
+            # fallback to their parent's family.
             ("superforcaster-v1", "superforcaster"),
             ("superforcaster-polymarket-v2", "superforcaster"),
-            # SME tools also export only PREDICTION_PROMPT — #321 review fix.
-            ("prediction-offline-sme", "superforcaster"),
-            ("prediction-online-sme", "superforcaster"),
+            # SME exports only PREDICTION_PROMPT but it uses
+            # {user_prompt}/{additional_information} and ships no
+            # SYSTEM_PROMPT_FORECASTER — that is the *default* schema, not
+            # superforcaster (Ojus #321 review, comment 3364080538).
+            ("prediction-offline-sme", "default"),
+            ("prediction-online-sme", "default"),
             # factual_research family (ESTIMATE_USER + ESTIMATE_SYSTEM).
             ("factual_research", "factual_research"),
             ("factual_research-v1", "factual_research"),
@@ -391,19 +400,169 @@ class TestBaselineFamily:
     ) -> None:
         """Registered tools route to the schema their module actually exports.
 
-        Covers the three tools the #321 review caught falling into the wrong
-        branch (superforcaster-polymarket-v1, prediction-url-cot, *-sme) plus
-        hypothetical ``-v<n+1>`` siblings the housekeeping default produces.
+        Pins the families the #321 review flagged as mis-routed — SME to
+        ``default`` (not superforcaster), prediction-url-cot to ``rag`` — plus
+        not-yet-registered ``-v<n+1>`` siblings handled by the fallback.
 
         :param tool_name: tool name from the parametrize matrix.
         :param expected: family the helper should classify ``tool_name`` to.
         """
         assert _baseline_family(tool_name) == expected
 
-    def test_unknown_tool_falls_to_default(self) -> None:
-        """Unknown names fall to the default family.
+    def test_registry_is_source_of_truth_over_heuristic(self) -> None:
+        """A registered name returns its registry family, not the heuristic.
 
-        The existing ``else`` branch in replay() then handles them (or raises
-        on missing attributes downstream).
+        ``prediction-online-sme`` ends in ``-sme`` and the old heuristic mapped
+        that to ``superforcaster``; the registry entry says ``default`` and
+        must win. Guards against re-introducing the name heuristic as primary.
         """
+        assert TOOL_REGISTRY["prediction-online-sme"].family == "default"
+        assert _baseline_family("prediction-online-sme") == "default"
+
+    def test_unknown_tool_falls_to_default(self) -> None:
+        """Unknown, unregistered names fall to the default family."""
         assert _baseline_family("totally-made-up-name") == "default"
+
+
+def _sf_prompt(question: str = "Will X?", today: str = "2026-04-22") -> str:
+    """Minimal superforcaster IPFS prompt (Question/<background> layout)."""
+    return (
+        f"Question:\n{question}\n\nToday's date: {today}\n"
+        f"<background>Some background.</background>"
+    )
+
+
+def _rag_prompt(question: str = "Will X?") -> str:
+    """Minimal RAG-family IPFS prompt (XML-tagged, not backtick-fenced)."""
+    return (
+        f"<user_prompt>{question}</user_prompt>\n"
+        f"<additional_information>Some info.</additional_information>"
+    )
+
+
+def _default_prompt(question: str = "Will X?") -> str:
+    """Minimal prediction-online / SME IPFS prompt (backtick-fenced)."""
+    return (
+        f"USER_PROMPT:\n```\n{question}\n```\n\n"
+        f"ADDITIONAL_INFORMATION:\n```\nSome info.\n```"
+    )
+
+
+class TestExtractPromptComponentsDispatch:
+    """`extract_prompt_components` routes sibling baselines to the right extractor.
+
+    Regression guard for the #321 review's unresolved 🔴 (comment 3364080553):
+    the enrich-time dispatch used exact-name matches (`== "superforcaster"`,
+    `== "factual_research"`), so a sibling baseline like
+    ``superforcaster-polymarket-v1`` or ``factual_research-v2`` fell through to
+    the default backtick regex, returned None, and every row was silently
+    dropped (``Enriched 0/N``). Now both this and the replay path share
+    `_baseline_family`, so siblings parse.
+    """
+
+    def test_superforcaster_sibling_parses_not_none(self) -> None:
+        """A ``superforcaster-*`` baseline parses via the superforcaster extractor.
+
+        Under the old exact-match dispatch this hit the default backtick regex
+        and returned None — the 0/140 enrichment failure.
+        """
+        out = extract_prompt_components(
+            _sf_prompt(question="Will it rain?"),
+            tool_name="superforcaster-polymarket-v1",
+        )
+        assert out is not None
+        assert out["user_prompt"] == "Will it rain?"
+
+    def test_factual_research_sibling_parses_not_none(self) -> None:
+        """A ``factual_research-*`` baseline parses via the FR extractor."""
+        out = extract_prompt_components(
+            _fr_prompt(question="Will it snow?", today="2026-04-22", briefing="B"),
+            tool_name="factual_research-v2",
+        )
+        assert out is not None
+        assert out["user_prompt"] == "Will it snow?"
+
+    def test_url_cot_parses_via_rag_extractor(self) -> None:
+        """``prediction-url-cot`` is rag-shaped, not default backtick format."""
+        out = extract_prompt_components(
+            _rag_prompt(question="Will it hail?"),
+            tool_name="prediction-url-cot",
+        )
+        assert out is not None
+        assert out["user_prompt"] == "Will it hail?"
+
+    def test_sme_parses_via_default_extractor(self) -> None:
+        """``*-sme`` is default-schema: backtick USER_PROMPT, not superforcaster."""
+        out = extract_prompt_components(
+            _default_prompt(question="Will it freeze?"),
+            tool_name="prediction-online-sme",
+        )
+        assert out is not None
+        assert out["user_prompt"] == "Will it freeze?"
+
+
+# Per-family contract the replay path relies on: which module attribute holds
+# the user-facing template and which kwargs format() it. Mirrors the dispatch
+# in replay() — keep in sync.
+_FAMILY_TEMPLATE = {
+    "rag": ("PREDICTION_PROMPT", {"USER_PROMPT": "q", "ADDITIONAL_INFORMATION": "a"}),
+    "superforcaster": (
+        "PREDICTION_PROMPT",
+        {"question": "q", "today": "t", "sources": "s"},
+    ),
+    "factual_research": (
+        "ESTIMATE_USER",
+        {"question": "q", "today": "t", "briefing": "b"},
+    ),
+    "default": (
+        "PREDICTION_PROMPT",
+        {"user_prompt": "q", "additional_information": "a"},
+    ),
+}
+
+
+class TestRegistryFamilyFormatRoundTrip:
+    """Every registered tool's module satisfies its declared family's contract.
+
+    Closes the #321 review test-gap (comment 3364080586): ``TestBaselineFamily``
+    only checked the string→family mapping, never that the chosen family's
+    ``.format(**kwargs)`` actually succeeds against the real module. That gap is
+    why the SME ``KeyError`` (comment 3364080538) stayed green — SME was routed
+    to superforcaster, whose ``format(question=, today=, sources=)`` blows up on
+    SME's ``{user_prompt}``/``{additional_information}`` template. This test
+    imports each module and runs the round-trip, so a mis-declared family fails.
+    """
+
+    @pytest.mark.parametrize("tool_name", sorted(TOOL_REGISTRY))
+    def test_family_template_formats_with_family_kwargs(self, tool_name: str) -> None:
+        """The family's template attr exists and formats with the family kwargs.
+
+        :param tool_name: a registered tool name.
+        """
+        spec = TOOL_REGISTRY[tool_name]
+        module = importlib.import_module(spec.module)
+
+        if spec.family == "reasoning":
+            # Two-stage: assert the symbols replay reads all exist.
+            for attr in (
+                "PREDICTION_PROMPT",
+                "REASONING_PROMPT",
+                "parser_reasoning_response",
+                "SYSTEM_PROMPT",
+            ):
+                assert hasattr(module, attr), f"{tool_name} missing {attr}"
+            return
+
+        attr, kwargs = _FAMILY_TEMPLATE[spec.family]
+        template = getattr(module, attr)
+        # Must not raise KeyError/IndexError on the family's kwargs.
+        template.format(**kwargs)
+
+    def test_default_family_system_prompt_is_optional(self) -> None:
+        """SME (default family) ships no SYSTEM_PROMPT_FORECASTER; replay tolerates it.
+
+        Pins the getattr fallback in replay() so default-family tools without
+        the forecaster system prompt don't AttributeError on import.
+        """
+        module = importlib.import_module(TOOL_REGISTRY["prediction-online-sme"].module)
+        assert not hasattr(module, "SYSTEM_PROMPT_FORECASTER")

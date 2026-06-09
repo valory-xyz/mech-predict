@@ -54,12 +54,14 @@ benchmark-only artifact and is intentionally NOT used here.
 
 Parsing parity
 --------------
-`extract_json` / `parse_p_yes` are vendored verbatim from
-`fine_tuning/src/fine_tuning/training/reward.py` (the single source of
-truth there). They MUST stay byte-for-byte equivalent: the reward used to train
-the model and the parser used to score its deliveries have to agree, otherwise
-the production behaviour silently diverges from the benchmark. If the upstream
-parser changes, mirror the change here.
+`extract_json` / `parse_p_yes` are vendored from
+`fine_tuning/src/fine_tuning/training/reward.py` (the single source of truth
+there). They MUST stay behaviourally equivalent — same regexes and parsing
+logic — so the reward used to train the model and the parser used to score its
+deliveries agree; otherwise production parsing silently diverges from the
+benchmark. (Only cosmetics differ here: type-hint syntax and docstrings.) If the
+upstream parser changes, mirror the change here. See the pinned commit on the
+parsing block below.
 """
 
 import functools

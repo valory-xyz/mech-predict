@@ -13,8 +13,6 @@ fingerprint:
 fingerprint_ignore_patterns: []
 entry_point: finetuned_prediction.py
 callable: run
-params:
-  default_model: ''
 dependencies:
   openai:
     version: ==1.30.2

@@ -1284,9 +1284,16 @@ def _default_family_system_prompt(candidate_module: Any) -> str:
     :param candidate_module: the imported candidate tool module.
     :return: the module's ``SYSTEM_PROMPT_FORECASTER`` or the generic fallback.
     """
-    return getattr(
-        candidate_module, "SYSTEM_PROMPT_FORECASTER", DEFAULT_REPLAY_SYSTEM_PROMPT
+    if hasattr(candidate_module, "SYSTEM_PROMPT_FORECASTER"):
+        return candidate_module.SYSTEM_PROMPT_FORECASTER
+    # Expected for *-sme; for any other default-family tool this likely means a
+    # missing/typo'd symbol, so make the substitution visible rather than silent.
+    log.warning(
+        "%s exports no SYSTEM_PROMPT_FORECASTER; replaying with the generic "
+        "system prompt. Expected for *-sme tools, suspicious otherwise.",
+        getattr(candidate_module, "__name__", candidate_module),
     )
+    return DEFAULT_REPLAY_SYSTEM_PROMPT
 
 
 def _baseline_family(tool_name: str) -> str:
@@ -1311,6 +1318,15 @@ def _baseline_family(tool_name: str) -> str:
     spec = TOOL_REGISTRY.get(tool_name)
     if spec is not None:
         return spec.family
+    # Unregistered name: the heuristic below is a guess. Warn so a misnamed or
+    # not-yet-registered tool is visible here rather than only as a silent
+    # ``Enriched 0/N`` drop downstream (the original bug's failure mode).
+    log.warning(
+        "Tool '%s' is not in TOOL_REGISTRY; guessing its prompt-schema family "
+        "from the name. Register it with an explicit family to avoid a silent "
+        "mis-route.",
+        tool_name,
+    )
     if tool_name.startswith("prediction-request-reasoning"):
         return "reasoning"
     if tool_name.startswith("prediction-request-rag") or tool_name.startswith(

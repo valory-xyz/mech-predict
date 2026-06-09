@@ -431,6 +431,27 @@ class TestBaselineFamily:
         """Unknown, unregistered names fall to the default family."""
         assert _baseline_family("totally-made-up-name") == "default"
 
+    def test_unregistered_name_warns(self, caplog: Any) -> None:
+        """An unregistered tool warns that its family is being guessed.
+
+        Makes a misnamed / not-yet-registered tool visible at classify time
+        rather than only as a silent ``Enriched 0/N`` drop downstream.
+
+        :param caplog: pytest log-capture fixture.
+        """
+        with caplog.at_level("WARNING"):
+            _baseline_family("totally-made-up-name")
+        assert "not in TOOL_REGISTRY" in caplog.text
+
+    def test_registered_name_does_not_warn(self, caplog: Any) -> None:
+        """A registered tool resolves from the registry with no warning.
+
+        :param caplog: pytest log-capture fixture.
+        """
+        with caplog.at_level("WARNING"):
+            _baseline_family("superforcaster")
+        assert "not in TOOL_REGISTRY" not in caplog.text
+
 
 def _sf_prompt(question: str = "Will X?", today: str = "2026-04-22") -> str:
     """Minimal superforcaster IPFS prompt (Question/<background> layout)."""
@@ -617,7 +638,16 @@ class TestDefaultFamilySystemPrompt:
         module = SimpleNamespace(SYSTEM_PROMPT_FORECASTER="Custom forecaster prompt.")
         assert _default_family_system_prompt(module) == "Custom forecaster prompt."
 
-    def test_falls_back_when_absent(self) -> None:
-        """When the symbol is missing (e.g. SME), the generic fallback is used."""
+    def test_falls_back_when_absent(self, caplog: Any) -> None:
+        """When the symbol is missing (e.g. SME), the generic fallback is used.
+
+        The substitution is logged at WARNING so a missing/typo'd symbol on a
+        non-SME default-family tool is visible.
+
+        :param caplog: pytest log-capture fixture.
+        """
         module = SimpleNamespace()
-        assert _default_family_system_prompt(module) == DEFAULT_REPLAY_SYSTEM_PROMPT
+        with caplog.at_level("WARNING"):
+            result = _default_family_system_prompt(module)
+        assert result == DEFAULT_REPLAY_SYSTEM_PROMPT
+        assert "SYSTEM_PROMPT_FORECASTER" in caplog.text

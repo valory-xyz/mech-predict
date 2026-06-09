@@ -922,7 +922,7 @@ class TestFormatResolutionBlock:
 
         assert "Resolves YES if X." in block
         assert "RESOLUTION RULES" in block
-        assert "precise definition of what counts as a YES" in block
+        assert "stated resolution criteria" in block
 
     def test_no_description_returns_empty(self) -> None:
         """No description → empty string (so templates degrade cleanly)."""

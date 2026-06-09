@@ -131,7 +131,11 @@ DEFAULT_SETTINGS = {
 }
 
 MAX_SOURCES = 5
-COMPLETION_RETRIES = 3
+# Single inference attempt: with the 150s per-attempt timeout, one Serper call
+# (≤60s) + one attempt stays under the 240s task deadline. Raise this (and lower
+# the timeout to keep the product under 240s) only if transient vLLM failures
+# warrant retries.
+COMPLETION_RETRIES = 1
 COMPLETION_DELAY = 2
 COMPLETION_TIMEOUT = 150
 

@@ -251,6 +251,11 @@ OUTPUT_FORMAT
 # ---------------------------------------------------------------------------
 # Output parsing — vendored from fine_tuning reward.py (keep in sync)
 # ---------------------------------------------------------------------------
+# Vendored from valory-xyz/fine-tuning @ 5551073
+# (src/fine_tuning/training/reward.py). Re-sync on every upstream parser change
+# so production parsing cannot drift from the training-time reward. Behaviourally
+# identical to that source; only the type-hint syntax and docstrings differ (the
+# regexes and parsing logic are the same).
 
 # Strip the <think>...</think> block (non-greedy, multiline).
 THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)

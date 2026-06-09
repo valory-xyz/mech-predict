@@ -2,6 +2,14 @@
   "version": 1,
   "_doc": "Ledger of tool variants, keyed by tool name. See CLAUDE.md section 'Tool-improvement housekeeping rules' for the canonical schema and update rule.",
   "tools": {
+    "predict-base": {
+      "parent": null,
+      "reason": "New from-scratch tool: un-fine-tuned DeepSeek-R1-Distill-Qwen-14B base served via vLLM (baseline mode)."
+    },
+    "predict-fine-tuned": {
+      "parent": null,
+      "reason": "New from-scratch tool: GRPO fine-tuned DeepSeek-R1-Distill-Qwen-14B served via vLLM."
+    },
     "superforcaster-polymarket-v1": {
       "parent": "superforcaster",
       "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched."

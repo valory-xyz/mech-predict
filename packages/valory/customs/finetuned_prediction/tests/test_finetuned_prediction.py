@@ -34,6 +34,7 @@ from packages.valory.customs.finetuned_prediction.finetuned_prediction import (
     build_forecaster_prompt,
     build_messages,
     canonical_prediction,
+    gather_sources,
     parse_p_yes,
     resolve_model,
     run,
@@ -353,3 +354,55 @@ def test_vllm_client_passes_base_url() -> None:
     with patch("openai.OpenAI") as MockOpenAI:
         module.VLLMClient(api_key="EMPTY", base_url=ENDPOINT)
         MockOpenAI.assert_called_once_with(api_key="EMPTY", base_url=ENDPOINT)
+
+
+# ---------------------------------------------------------------------------
+# gather_sources — fail closed when there is no web context (OOD for the model)
+# ---------------------------------------------------------------------------
+
+
+def _serper_response(payload: dict) -> MagicMock:
+    """Build a fake Serper response whose .json() returns `payload`."""
+    resp = MagicMock()
+    resp.json.return_value = payload
+    return resp
+
+
+def test_gather_sources_formats_results() -> None:
+    """A normal Serper response is formatted into the <background> body."""
+    payload = {"organic": [{"position": 1, "title": "T", "link": "L", "snippet": "S"}]}
+    with patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)):
+        out = gather_sources("Will X happen?", "serp-key")
+    assert "Organic Results" in out and "T" in out
+
+
+def test_gather_sources_raises_on_serper_request_failure() -> None:
+    """A Serper request error becomes an explanatory failure (not empty context)."""
+    with patch(f"{MODULE_PATH}.fetch_additional_sources", side_effect=Exception("down")):
+        with pytest.raises(RuntimeError, match="request failed"):
+            gather_sources("Will X happen?", "serp-key")
+
+
+def test_gather_sources_raises_on_zero_results() -> None:
+    """Zero usable results becomes an explanatory failure (model is OOD without sources)."""
+    payload = {"organic": [], "peopleAlsoAsk": []}
+    with patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)):
+        with pytest.raises(RuntimeError, match="no results"):
+            gather_sources("Will X happen?", "serp-key")
+
+
+def test_run_fails_with_explanation_when_serper_returns_nothing() -> None:
+    """End-to-end: empty Serper results surface the explanatory message as the result."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    payload = {"organic": [], "peopleAlsoAsk": []}
+    with (
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=_serper_response(payload)),
+    ):
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    # with_key_rotation converts the RuntimeError into an error result tuple.
+    assert "no results" in out[0]

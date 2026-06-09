@@ -595,11 +595,31 @@ def extract_question(prompt: str) -> str:
 
 
 def gather_sources(question: str, serper_api_key: str) -> str:
-    """Run the question through Serper and format the top results."""
-    response = fetch_additional_sources(question, serper_api_key)
-    data = response.json()
+    """Run the question through Serper and format the top results.
+
+    Fails (raises, so with_key_rotation returns the error for the mech to
+    handle) on a Serper request error OR when Serper returns no usable results:
+    the model was trained only on research-backed prompts, so an empty
+    `<background>` block is out-of-distribution — we fail the prediction with an
+    explanation rather than forecast on zero web context.
+
+    :param question: the market question to search.
+    :param serper_api_key: the Serper API key.
+    :return: the formatted `<background>` evidence block.
+    """
+    try:
+        response = fetch_additional_sources(question, serper_api_key)
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001 — surface as an explanatory failure
+        raise RuntimeError(f"Web search (Serper) request failed: {exc}") from exc
+
     organic = data.get("organic", [])[:MAX_SOURCES]
     misc = data.get("peopleAlsoAsk", [])
+    if not organic and not misc:
+        raise RuntimeError(
+            "Web search (Serper) returned no results; this model requires web "
+            "context and cannot forecast without it."
+        )
     return format_sources_data(organic, misc)
 
 

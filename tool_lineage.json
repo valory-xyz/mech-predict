@@ -6,6 +6,10 @@
       "parent": "superforcaster",
       "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched."
     },
+    "superforcaster-polymarket-v2": {
+      "parent": "superforcaster-polymarket-v1",
+      "reason": "Add resolution-criterion specificity check in step 6 to correct overconfidence on narrow-scope questions."
+    },
     "claude-prediction-offline": {
       "parent": null,
       "reason": "Original tool, baseline entry."

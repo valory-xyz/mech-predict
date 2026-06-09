@@ -297,10 +297,9 @@ def test_run_uses_default_endpoint() -> None:
     assert mgr.call_args.args[1] == VLLM_ENDPOINT
 
 
-def test_run_endpoint_kwarg_overrides_default() -> None:
-    """The `vllm_endpoint` kwarg overrides the default endpoint."""
+def test_run_ignores_requester_supplied_endpoint() -> None:
+    """A request-supplied endpoint is ignored; the constant is always used."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
-    custom = "http://other-box:9000/v1"
     with (
         patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
         patch(f"{MODULE_PATH}.VLLMClientManager") as mgr,
@@ -309,11 +308,11 @@ def test_run_endpoint_kwarg_overrides_default() -> None:
         gen.return_value = (WELL_FORMED, None)
         run(
             tool=TOOL_BASE,
-            vllm_endpoint=custom,
+            vllm_endpoint="http://attacker/v1",
             prompt=_bare_prompt("Will X happen?"),
             api_keys=keychain,
         )
-    assert mgr.call_args.args[1] == custom
+    assert mgr.call_args.args[1] == VLLM_ENDPOINT
 
 
 def test_run_raises_on_unparseable_completion() -> None:

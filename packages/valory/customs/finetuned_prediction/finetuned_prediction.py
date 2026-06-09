@@ -106,12 +106,9 @@ MODEL_BY_TOOL = {
     TOOL_FINE_TUNED: "qwen-14b-fine-tuned",
 }
 
-# Default self-hosted vLLM OpenAI-compatible endpoint. One server hosts both
-# models, so the two modes share it. Overridable per request via the
-# `vllm_endpoint` kwarg (ENDPOINT_KWARG) — e.g. to point at a different serving
-# box without re-locking the package.
+# Self-hosted vLLM OpenAI-compatible endpoint. One server hosts both models, so
+# the two modes share it.
 VLLM_ENDPOINT = "http://localhost:8000/v1"
-ENDPOINT_KWARG = "vllm_endpoint"
 
 # vLLM does not require a real key by default; the OpenAI client still demands a
 # non-empty string. A secured gateway can override via api_keys["finetuned"].
@@ -643,15 +640,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     """Run the fine-tuned prediction tool.
 
     Expected kwargs (supplied by the mech task-execution layer):
-      - tool:          one of ALLOWED_TOOLS — selects base vs fine-tuned MODE.
-      - prompt:        the bare prediction-market request prompt.
-      - api_keys:      KeyChain; `serperapi` (required), `finetuned` (optional).
-      - vllm_endpoint: optional override of the vLLM endpoint (default
-                       VLLM_ENDPOINT).
+      - tool:        one of ALLOWED_TOOLS — selects base vs fine-tuned MODE.
+      - prompt:      the bare prediction-market request prompt.
+      - api_keys:    KeyChain; `serperapi` (required), `finetuned` (optional).
       - delivery_rate, counter_callback: mech cost-accounting plumbing.
 
-    The served model is fixed per mode (MODEL_BY_TOOL[tool]); the requester does
-    not choose it.
+    The served model is fixed per mode (MODEL_BY_TOOL[tool]) and the endpoint is
+    the VLLM_ENDPOINT constant; the requester chooses neither.
 
     :param kwargs: the mech task kwargs described above.
     :return: the mech response tuple, or the max-cost float for delivery_rate=0.
@@ -672,8 +667,6 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             )
         return counter_callback(max_cost=True, models_calls=(model,) * N_MODEL_CALLS)
 
-    endpoint = kwargs.get(ENDPOINT_KWARG) or VLLM_ENDPOINT
-
     api_keys = kwargs["api_keys"]
     llm_api_key = _optional_key(api_keys, API_KEYS_SERVICE) or DUMMY_API_KEY
 
@@ -692,7 +685,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     messages = build_messages(content)
 
-    with VLLMClientManager(llm_api_key, endpoint) as llm_client:
+    with VLLMClientManager(llm_api_key, VLLM_ENDPOINT) as llm_client:
         completion, counter_callback = generate_prediction_with_retry(
             client=llm_client,
             model=model,

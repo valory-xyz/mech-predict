@@ -6,11 +6,14 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from benchmark.prompt_replay import (
+    DEFAULT_REPLAY_SYSTEM_PROMPT,
     _baseline_family,
+    _default_family_system_prompt,
     _extract_factual_research_prompt_components,
     _load_and_filter_rows,
     _log_replay_summary,
@@ -353,11 +356,12 @@ class TestBaselineFamily:
     for registered tools, with a name heuristic only as a fallback for
     not-yet-registered ``-v<n+1>`` siblings.
 
-    Note on history: before the registry field, the replay ``else`` branch
-    hard-imported from ``prediction_request`` (which *does* export
-    ``SYSTEM_PROMPT_FORECASTER``), so misrouted tools ran with the *wrong
-    prompt* — they did not crash on import. The defect was silent
-    mis-prompting, not an exception.
+    Note on history: the prior defect differed by branch. Tools misrouted into
+    the old ``else``/default branch hard-imported from ``prediction_request``
+    (which *does* export ``SYSTEM_PROMPT_FORECASTER``), so they ran with the
+    *wrong prompt* — silent mis-prompting, no exception. The superforcaster
+    branch was harsher: SME routed there hit a format-time ``KeyError`` (see
+    ``TestRegistryFamilyFormatRoundTrip``), crashing the whole replay.
     """
 
     @pytest.mark.parametrize(
@@ -366,9 +370,13 @@ class TestBaselineFamily:
             # Reasoning family (two-stage).
             ("prediction-request-reasoning", "reasoning"),
             ("prediction-request-reasoning-claude", "reasoning"),
+            # Not-yet-registered reasoning sibling → heuristic fallback.
+            ("prediction-request-reasoning-v2", "reasoning"),
             # Rag family (PREDICTION_PROMPT + SYSTEM_PROMPT).
             ("prediction-request-rag", "rag"),
             ("prediction-request-rag-claude", "rag"),
+            # Not-yet-registered rag sibling → heuristic fallback.
+            ("prediction-request-rag-v2", "rag"),
             # prediction-url-cot is rag-shaped (<user_prompt> XML).
             ("prediction-url-cot", "rag"),
             ("prediction-url-cot-claude", "rag"),
@@ -448,6 +456,17 @@ def _default_prompt(question: str = "Will X?") -> str:
     )
 
 
+def _reasoning_prompt(question: str = "Will X?") -> str:
+    """Minimal two-stage reasoning IPFS prompt (reasoning ////  prediction)."""
+    reasoning_half = (
+        f"Here is the user's question: {question}\n"
+        f"Here is some additional information "
+        f"<additional_information>Some info.</additional_information>"
+    )
+    prediction_half = f"<user_input>{question}</user_input>"
+    return f"{reasoning_half}////{prediction_half}"
+
+
 class TestExtractPromptComponentsDispatch:
     """`extract_prompt_components` routes sibling baselines to the right extractor.
 
@@ -500,24 +519,43 @@ class TestExtractPromptComponentsDispatch:
         assert out is not None
         assert out["user_prompt"] == "Will it freeze?"
 
+    def test_reasoning_parses_via_two_stage_extractor(self) -> None:
+        """Reasoning baselines parse via the ``////``-split extractor."""
+        out = extract_prompt_components(
+            _reasoning_prompt(question="Will it thaw?"),
+            tool_name="prediction-request-reasoning",
+        )
+        assert out is not None
+        assert out["user_prompt"] == "Will it thaw?"
+        assert out["user_input"] == "Will it thaw?"
 
-# Per-family contract the replay path relies on: which module attribute holds
-# the user-facing template and which kwargs format() it. Mirrors the dispatch
-# in replay() — keep in sync.
-_FAMILY_TEMPLATE = {
-    "rag": ("PREDICTION_PROMPT", {"USER_PROMPT": "q", "ADDITIONAL_INFORMATION": "a"}),
-    "superforcaster": (
-        "PREDICTION_PROMPT",
-        {"question": "q", "today": "t", "sources": "s"},
-    ),
-    "factual_research": (
-        "ESTIMATE_USER",
-        {"question": "q", "today": "t", "briefing": "b"},
-    ),
-    "default": (
-        "PREDICTION_PROMPT",
-        {"user_prompt": "q", "additional_information": "a"},
-    ),
+
+# Per-family contract the replay path relies on: which module attribute(s) hold
+# the user-facing template(s) and which kwargs format() them. Each family maps
+# to a list so multi-template families (reasoning: PREDICTION_PROMPT +
+# REASONING_PROMPT) are covered. Mirrors the dispatch in replay() — keep in sync.
+_FAMILY_TEMPLATES = {
+    "reasoning": [
+        ("PREDICTION_PROMPT", {"USER_INPUT": "q", "REASONING": "r"}),
+        ("REASONING_PROMPT", {"USER_PROMPT": "q", "ADDITIONAL_INFOMATION": "a"}),
+    ],
+    "rag": [("PREDICTION_PROMPT", {"USER_PROMPT": "q", "ADDITIONAL_INFORMATION": "a"})],
+    "superforcaster": [
+        ("PREDICTION_PROMPT", {"question": "q", "today": "t", "sources": "s"}),
+    ],
+    "factual_research": [
+        ("ESTIMATE_USER", {"question": "q", "today": "t", "briefing": "b"}),
+    ],
+    "default": [
+        ("PREDICTION_PROMPT", {"user_prompt": "q", "additional_information": "a"}),
+    ],
+}
+
+# Non-template symbols the replay path reads per family (beyond the templates
+# above). Checked for existence so a missing symbol fails loudly here.
+_FAMILY_EXTRA_SYMBOLS = {
+    "reasoning": ("parser_reasoning_response", "SYSTEM_PROMPT"),
+    "rag": ("SYSTEM_PROMPT",),
 }
 
 
@@ -535,28 +573,24 @@ class TestRegistryFamilyFormatRoundTrip:
 
     @pytest.mark.parametrize("tool_name", sorted(TOOL_REGISTRY))
     def test_family_template_formats_with_family_kwargs(self, tool_name: str) -> None:
-        """The family's template attr exists and formats with the family kwargs.
+        """The family's template(s) exist and format with the family kwargs.
+
+        Every template the replay path formats is exercised — including both
+        stages of the reasoning family — so a placeholder added to a template
+        without a matching family kwarg fails here instead of at replay time.
 
         :param tool_name: a registered tool name.
         """
         spec = TOOL_REGISTRY[tool_name]
         module = importlib.import_module(spec.module)
 
-        if spec.family == "reasoning":
-            # Two-stage: assert the symbols replay reads all exist.
-            for attr in (
-                "PREDICTION_PROMPT",
-                "REASONING_PROMPT",
-                "parser_reasoning_response",
-                "SYSTEM_PROMPT",
-            ):
-                assert hasattr(module, attr), f"{tool_name} missing {attr}"
-            return
+        for attr, kwargs in _FAMILY_TEMPLATES[spec.family]:
+            template = getattr(module, attr)
+            # Must not raise KeyError/IndexError on the family's kwargs.
+            template.format(**kwargs)
 
-        attr, kwargs = _FAMILY_TEMPLATE[spec.family]
-        template = getattr(module, attr)
-        # Must not raise KeyError/IndexError on the family's kwargs.
-        template.format(**kwargs)
+        for attr in _FAMILY_EXTRA_SYMBOLS.get(spec.family, ()):
+            assert hasattr(module, attr), f"{tool_name} missing {attr}"
 
     def test_default_family_system_prompt_is_optional(self) -> None:
         """SME (default family) ships no SYSTEM_PROMPT_FORECASTER; replay tolerates it.
@@ -566,3 +600,24 @@ class TestRegistryFamilyFormatRoundTrip:
         """
         module = importlib.import_module(TOOL_REGISTRY["prediction-online-sme"].module)
         assert not hasattr(module, "SYSTEM_PROMPT_FORECASTER")
+
+
+class TestDefaultFamilySystemPrompt:
+    """`_default_family_system_prompt` — the testable system-prompt selector.
+
+    Positive coverage for the getattr fallback (Ojus #321 review, comment on
+    prompt_replay.py:1399): asserting the attribute is *absent* on SME doesn't
+    prove the fallback string is actually returned. If someone reverts the
+    helper to a hard ``candidate_module.SYSTEM_PROMPT_FORECASTER`` access, the
+    second case below raises AttributeError and this test fails.
+    """
+
+    def test_uses_forecaster_prompt_when_present(self) -> None:
+        """When the module exports SYSTEM_PROMPT_FORECASTER, that value is used."""
+        module = SimpleNamespace(SYSTEM_PROMPT_FORECASTER="Custom forecaster prompt.")
+        assert _default_family_system_prompt(module) == "Custom forecaster prompt."
+
+    def test_falls_back_when_absent(self) -> None:
+        """When the symbol is missing (e.g. SME), the generic fallback is used."""
+        module = SimpleNamespace()
+        assert _default_family_system_prompt(module) == DEFAULT_REPLAY_SYSTEM_PROMPT

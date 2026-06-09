@@ -13,7 +13,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -21,6 +21,13 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
+
+# Closed set of prompt-schema families. Typed as a Literal so a registry typo
+# (e.g. ``family="reasonning"``) is a mypy error rather than a silent route to
+# the default branch — the exact silent-misroute class this field exists to kill.
+FamilyName = Literal[
+    "reasoning", "rag", "superforcaster", "factual_research", "default"
+]
 
 
 @dataclass(frozen=True)
@@ -40,7 +47,7 @@ class ToolSpec:
     """
 
     module: str
-    family: str
+    family: FamilyName
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {

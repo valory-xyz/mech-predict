@@ -1264,6 +1264,31 @@ def _replay_reasoning_tool(
 # ---------------------------------------------------------------------------
 
 
+# Generic system prompt used when a default-family module exports no
+# SYSTEM_PROMPT_FORECASTER. Note: *-sme tools build a dynamic, question-specific
+# persona at request time (``get_sme_role`` in prediction_request_sme.py), which
+# isn't reproducible offline — so replayed SME p_yes is not strictly comparable
+# to deployed SME. The superforcaster branch already substitutes a static prompt
+# for the same reason; do NOT "fix" this by aliasing SME's generation prompt to
+# SYSTEM_PROMPT_FORECASTER, as that would silently shift benchmark semantics.
+DEFAULT_REPLAY_SYSTEM_PROMPT = "You are a helpful assistant."
+
+
+def _default_family_system_prompt(candidate_module: Any) -> str:
+    """Pick the system prompt for a default-family replay.
+
+    Most default-family tools export ``SYSTEM_PROMPT_FORECASTER``; ``*-sme``
+    tools do not, so fall back to a generic prompt rather than ``AttributeError``
+    on import.
+
+    :param candidate_module: the imported candidate tool module.
+    :return: the module's ``SYSTEM_PROMPT_FORECASTER`` or the generic fallback.
+    """
+    return getattr(
+        candidate_module, "SYSTEM_PROMPT_FORECASTER", DEFAULT_REPLAY_SYSTEM_PROMPT
+    )
+
+
 def _baseline_family(tool_name: str) -> str:
     """Classify a tool by its prompt-schema family.
 
@@ -1392,12 +1417,7 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         system_prompt = candidate_module.ESTIMATE_SYSTEM
     else:
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
-        # Default-family tools format with user_prompt/additional_information.
-        # Most export SYSTEM_PROMPT_FORECASTER; *-sme tools do not, so fall
-        # back rather than AttributeError on import.
-        system_prompt = getattr(
-            candidate_module, "SYSTEM_PROMPT_FORECASTER", "You are a helpful assistant."
-        )
+        system_prompt = _default_family_system_prompt(candidate_module)
 
     if "claude" in model:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")

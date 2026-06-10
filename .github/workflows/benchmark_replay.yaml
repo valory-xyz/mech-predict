@@ -184,6 +184,12 @@ jobs:
           find benchmark/datasets/logs/ -name 'production_log_*.jsonl' -type f -print0 \
             | LC_ALL=C sort -z \
             | xargs -0 cat > "$LOG_FILE"
+          # Fail here, not downstream: an artifact with no production_log_*.jsonl
+          # shards (renamed/missing files) leaves an empty _combined.jsonl and
+          # this step would exit 0, surfacing later as enrich's "0 rows for
+          # baseline" — which misreads a data-pipeline problem as a tool mismatch.
+          # (if_no_artifact_found: fail only catches a wholly absent artifact.)
+          [ -s "$LOG_FILE" ] || { echo "::error::No production_log_*.jsonl shards found in benchmark/datasets/logs/"; exit 1; }
           echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
           echo "Combined pool: $LOG_FILE ($(wc -l < "$LOG_FILE") rows; deduped on row_id in enrich)"
 
@@ -200,19 +206,16 @@ jobs:
         env:
           PLATFORM: ${{ steps.parse.outputs.platform }}
         run: |
-          # --platform is optional; pass it only when set so the default stays
-          # all-platforms. Enrich samples to --sample-per-platform before the
-          # IPFS fetch and exits non-zero with a clear message on 0 rows.
-          PLATFORM_ARG=""
-          if [ -n "$PLATFORM" ]; then
-            PLATFORM_ARG="--platform $PLATFORM"
-          fi
+          # --platform is optional; ${PLATFORM:+...} expands to the flag only
+          # when PLATFORM is non-empty, so the default stays all-platforms.
+          # Enrich samples to --sample-per-platform before the IPFS fetch and
+          # exits non-zero with a clear message on 0 rows.
           uv run python -m benchmark.prompt_replay enrich \
             --production-log "${{ steps.log.outputs.path }}" \
             --tool "${{ steps.parse.outputs.tool }}" \
             --sample-per-platform "${{ steps.parse.outputs.sample }}" \
             --seed "${{ steps.parse.outputs.seed }}" \
-            $PLATFORM_ARG \
+            ${PLATFORM:+--platform "$PLATFORM"} \
             --output benchmark/results/ci_enriched/dataset.jsonl
 
       # Replay with PR's prompts

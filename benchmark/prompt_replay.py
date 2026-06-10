@@ -42,7 +42,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
 import requests
@@ -76,6 +76,25 @@ log = logging.getLogger(__name__)
 HTTP_TIMEOUT = 60
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_MODEL = "gpt-4.1-2025-04-14"
+
+# Platforms a tool can serve; also the allowed values for ``enrich --platform``.
+PLATFORMS = ("omen", "polymarket")
+
+# Reject buckets that DROP a row and are rendered in the Pre-filter "Scoping"
+# breakdown. Every renderer iterates this tuple so the breakdown always sums to
+# the rejected total — adding a bucket here updates all three sites at once.
+# ``not_valid_parse`` is also a drop but is deliberately excluded: it is the
+# load-bearing parse-reliability invariant and gets its own marked line, so it
+# is rendered separately (never fold it in here). ``no_row_id`` is NOT a drop
+# (those rows are kept) — it is a separate diagnostic, so it is not listed here.
+SCOPING_BUCKETS = (
+    "duplicate",
+    "wrong_tool",
+    "wrong_platform",
+    "no_deliver_id",
+    "no_outcome",
+    "older_than_cutoff",
+)
 
 # Regex to extract user_prompt and additional_information from the old
 # formatted PREDICTION_PROMPT.  The old format uses triple-backtick fences.
@@ -470,8 +489,8 @@ def _load_and_filter_rows(
     production_log: Path,
     tool_filter: str,
     last_days: Optional[int],
-    platform_filter: Optional[str] = None,
-) -> Tuple[list[dict[str, Any]], Dict[str, int]]:
+    platform_filter: Optional[Literal["omen", "polymarket"]] = None,
+) -> Tuple[list[dict[str, Any]], Dict[str, int], int]:
     """Load production log and filter for valid rows.
 
     Collapses cross-shard duplicates on ``row_id`` before filtering (see the
@@ -481,7 +500,8 @@ def _load_and_filter_rows(
     :param tool_filter: tool name to filter for.
     :param last_days: only include rows from the last N days.
     :param platform_filter: only include rows from this platform (default: all).
-    :return: (filtered rows, rejection counts per reason).
+    :return: (filtered rows, rejection counts per reason, no_row_id diagnostic
+        count of *kept* rows that lacked a row_id).
     """
     cutoff = None
     if last_days is not None:
@@ -496,18 +516,16 @@ def _load_and_filter_rows(
     # delivery into multiple daily shards (per-shard dedup only; cross-day dedup
     # is the consumer's job — the scorer does it globally by row_id, scorer.py).
     # When this function reads a multi-shard pool, ~4% of rows repeat, so we
-    # collapse on row_id (the canonical identity key, 1:1 with platform+deliver_id)
-    # keeping the first occurrence — matching the scorer's keep-oldest semantics
-    # when the combine step feeds shards in chronological order.
-    rejected: Dict[str, int] = {
-        "duplicate": 0,
-        "wrong_tool": 0,
-        "wrong_platform": 0,
-        "no_deliver_id": 0,
-        "not_valid_parse": 0,
-        "no_outcome": 0,
-        "older_than_cutoff": 0,
-    }
+    # collapse on row_id (the canonical identity key for production rows, derived
+    # from platform+deliver_id) keeping the FIRST occurrence. With the combine
+    # step feeding shards oldest-first, that is the oldest copy — the same order
+    # the scorer's rebuild() path uses (its incremental update() keeps whatever
+    # was scored first, which need not be the oldest).
+    rejected: Dict[str, int] = {k: 0 for k in (*SCOPING_BUCKETS, "not_valid_parse")}
+    # Diagnostic, NOT a drop: production rows always carry a row_id, so a nonzero
+    # count here means the flywheel schema regressed (and those rows silently
+    # bypassed dedup). Kept out of ``rejected`` so the rejected total stays exact.
+    no_row_id = 0
 
     seen_row_ids: set[str] = set()
     rows: list[dict[str, Any]] = []
@@ -518,12 +536,15 @@ def _load_and_filter_rows(
                 continue
             row = json.loads(line)
             # Dedup first, on the canonical row_id. Rows without a row_id (e.g.
-            # hand-built fixtures) can't be keyed, so they are never collapsed.
+            # hand-built fixtures) can't be keyed, so they are never collapsed —
+            # only counted, so a row_id regression is visible.
             row_id = row.get("row_id")
-            if row_id is not None:
-                if row_id in seen_row_ids:
-                    rejected["duplicate"] += 1
-                    continue
+            if row_id is None:
+                no_row_id += 1
+            elif row_id in seen_row_ids:
+                rejected["duplicate"] += 1
+                continue
+            else:
                 seen_row_ids.add(row_id)
             if row.get("tool_name") != tool_filter:
                 rejected["wrong_tool"] += 1
@@ -548,7 +569,7 @@ def _load_and_filter_rows(
                         rejected["older_than_cutoff"] += 1
                         continue
             rows.append(row)
-    return rows, rejected
+    return rows, rejected, no_row_id
 
 
 # ---------------------------------------------------------------------------
@@ -580,7 +601,7 @@ def enrich(
     last_days: Optional[int] = None,
     sample_per_platform: Optional[int] = None,
     seed: int = 42,
-    platform_filter: Optional[str] = None,
+    platform_filter: Optional[Literal["omen", "polymarket"]] = None,
 ) -> None:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -595,7 +616,7 @@ def enrich(
     :param seed: random seed for sampling.
     :param platform_filter: only include rows from this platform (default: all).
     """
-    rows, rejected = _load_and_filter_rows(
+    rows, rejected, no_row_id = _load_and_filter_rows(
         production_log, tool_filter, last_days, platform_filter
     )
     log.info(
@@ -603,17 +624,18 @@ def enrich(
         len(rows),
         tool_filter,
     )
-    log.info(
-        "Pre-filter rejections: duplicate=%d wrong_tool=%d wrong_platform=%d "
-        "no_deliver_id=%d not_valid_parse=%d no_outcome=%d older_than_cutoff=%d",
-        rejected["duplicate"],
-        rejected["wrong_tool"],
-        rejected["wrong_platform"],
-        rejected["no_deliver_id"],
-        rejected["not_valid_parse"],
-        rejected["no_outcome"],
-        rejected["older_than_cutoff"],
+    # Render every drop bucket (Scoping set + not_valid_parse) so the line
+    # accounts for the full rejected total; no_row_id is a separate diagnostic.
+    rejections_str = " ".join(
+        f"{k}={rejected[k]}" for k in (*SCOPING_BUCKETS, "not_valid_parse")
     )
+    log.info("Pre-filter rejections: %s no_row_id=%d", rejections_str, no_row_id)
+    if no_row_id:
+        log.warning(
+            "%d kept rows lacked a row_id (expected 0 — flywheel schema "
+            "regression? these bypassed dedup)",
+            no_row_id,
+        )
 
     # Sidecar JSON carries the rejection counts into the replay + PR-comment
     # stages, where "baseline is 100% valid by construction" would otherwise be
@@ -622,7 +644,7 @@ def enrich(
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path.write_text(
         json.dumps(
-            {"accepted": len(rows), "rejected": rejected},
+            {"accepted": len(rows), "rejected": rejected, "no_row_id": no_row_id},
             indent=2,
         ),
         encoding="utf-8",
@@ -705,12 +727,15 @@ def stratified_sample(
 ) -> list[dict[str, Any]]:
     """Sample rows with stratification by platform, outcome, and Brier bucket.
 
-    Each platform gets ``sample_per_platform`` rows (50:50 platform split).
-    When the caller pre-filtered to a single platform (``enrich --platform``),
-    only that platform group survives, so the cap is ``sample_per_platform``
-    rows total. Within each platform, rows are grouped by (outcome,
-    brier_bucket) and sampled proportionally, ensuring at least 1 row per
-    non-empty stratum.
+    Each platform gets up to ``sample_per_platform`` rows (50:50 platform
+    split). When the caller pre-filtered to a single platform (``enrich
+    --platform``), only that platform group survives, so the per-platform budget
+    is applied once — a ``--platform`` run draws ~``sample_per_platform`` rows,
+    not the ~2x of an all-platforms run. Within each platform, rows are grouped
+    by (outcome, brier_bucket) and sampled proportionally, ensuring at least 1
+    row per non-empty stratum — so when a platform has MORE non-empty strata
+    than the budget, the per-stratum floor wins and the count can slightly
+    exceed ``sample_per_platform`` (e.g. budget 5 over 6 strata → 6 rows).
 
     :param rows: list of row dicts with 'platform', 'final_outcome', 'p_yes'.
     :param sample_per_platform: max rows to sample per platform.
@@ -1176,20 +1201,17 @@ def _log_replay_summary(
     if filter_stats is not None:
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
+        # Scoping buckets + not_valid_parse make up the full rejected total;
+        # iterate SCOPING_BUCKETS so this can't drift out of sync.
+        breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (duplicate=%d, wrong_tool=%d, "
-            "wrong_platform=%d, no_deliver_id=%d, not_valid_parse=%d, "
-            "no_outcome=%d, older_than_cutoff=%d)",
+            "    Accepted: %d   Rejected: %d (%s, not_valid_parse=%d)  no_row_id=%d",
             filter_stats.get("accepted", 0),
             total_rej,
-            r.get("duplicate", 0),
-            r.get("wrong_tool", 0),
-            r.get("wrong_platform", 0),
-            r.get("no_deliver_id", 0),
+            breakdown,
             r.get("not_valid_parse", 0),
-            r.get("no_outcome", 0),
-            r.get("older_than_cutoff", 0),
+            filter_stats.get("no_row_id", 0),
         )
 
     log.info(
@@ -1772,7 +1794,7 @@ def main() -> None:
         "--platform",
         type=str,
         default=None,
-        choices=["omen", "polymarket"],
+        choices=list(PLATFORMS),
         help="Restrict to a single platform (default: all platforms)",
     )
 

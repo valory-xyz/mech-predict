@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 import pytest
 from benchmark.prompt_replay import (
@@ -20,6 +21,8 @@ from benchmark.prompt_replay import (
     _prepare_output_dir,
     enrich,
     extract_prompt_components,
+    main,
+    stratified_sample,
 )
 from benchmark.tools import TOOL_REGISTRY
 
@@ -65,7 +68,7 @@ class TestLoadAndFilterRows:
         """Rows matching every filter land in rows; counters stay at zero."""
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(), _row()])
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert len(rows) == 2
         assert sum(rejected.values()) == 0
 
@@ -73,7 +76,7 @@ class TestLoadAndFilterRows:
         """Rows with a different tool_name hit the wrong_tool bucket only."""
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(tool="other"), _row(tool="another")])
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert not rows
         assert rejected["wrong_tool"] == 2
         assert rejected["not_valid_parse"] == 0
@@ -90,7 +93,7 @@ class TestLoadAndFilterRows:
                 _row(status="valid"),
             ],
         )
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert len(rows) == 1
         assert rejected["not_valid_parse"] == 3
 
@@ -98,7 +101,7 @@ class TestLoadAndFilterRows:
         """Rows without final_outcome hit no_outcome, not not_valid_parse."""
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(outcome=None)])
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert not rows
         assert rejected["no_outcome"] == 1
         assert rejected["not_valid_parse"] == 0
@@ -107,17 +110,17 @@ class TestLoadAndFilterRows:
         """Rows without deliver_id hit no_deliver_id."""
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(deliver_id="")])
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert not rows
         assert rejected["no_deliver_id"] == 1
 
     def test_filter_order_gives_first_failing_reason(self, tmp_path: Path) -> None:
         """A row failing multiple predicates counts in the first one only.
 
-        Order: wrong_tool → wrong_platform → no_deliver_id → not_valid_parse →
-        no_outcome → cutoff. A row with wrong tool AND bad parse AND no outcome
-        increments wrong_tool only — so the total rejection count matches row
-        count exactly.
+        Order: duplicate → wrong_tool → wrong_platform → no_deliver_id →
+        not_valid_parse → no_outcome → cutoff. A row with wrong tool AND bad
+        parse AND no outcome increments wrong_tool only — so the total rejection
+        count matches row count exactly.
 
         :param tmp_path: pytest tmp_path fixture.
         """
@@ -126,7 +129,7 @@ class TestLoadAndFilterRows:
             path,
             [_row(tool="other", status="malformed", outcome=None)],
         )
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert not rows
         assert rejected["wrong_tool"] == 1
         assert sum(rejected.values()) == 1
@@ -142,7 +145,7 @@ class TestLoadAndFilterRows:
                 _row(platform="polymarket"),
             ],
         )
-        rows, rejected = _load_and_filter_rows(
+        rows, rejected, _ = _load_and_filter_rows(
             path, "superforcaster", None, "polymarket"
         )
         assert len(rows) == 1
@@ -157,7 +160,7 @@ class TestLoadAndFilterRows:
             path,
             [_row(platform="omen"), _row(platform="polymarket")],
         )
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert len(rows) == 2
         assert rejected["wrong_platform"] == 0
 
@@ -171,7 +174,7 @@ class TestLoadAndFilterRows:
         """
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(tool="other", platform="omen")])
-        rows, rejected = _load_and_filter_rows(
+        rows, rejected, _ = _load_and_filter_rows(
             path, "superforcaster", None, "polymarket"
         )
         assert not rows
@@ -196,19 +199,26 @@ class TestLoadAndFilterRows:
                 _row(row_id="prod_y", outcome=True),
             ],
         )
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert len(rows) == 2  # prod_x once + prod_y
         assert rejected["duplicate"] == 1
         kept = {r["row_id"]: r["final_outcome"] for r in rows}
         assert kept == {"prod_x": True, "prod_y": True}  # first prod_x wins
 
-    def test_rows_without_row_id_not_deduped(self, tmp_path: Path) -> None:
-        """Rows lacking a row_id are never collapsed (fixture/legacy contract)."""
+    def test_rows_without_row_id_not_deduped_but_counted(self, tmp_path: Path) -> None:
+        """Rows lacking a row_id are never collapsed, but counted as no_row_id.
+
+        Pins the diagnostic that surfaces a flywheel row_id-schema regression:
+        such rows bypass dedup (kept), so the count is the only signal.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = tmp_path / "log.jsonl"
         _write_jsonl(path, [_row(), _row()])  # identical, no row_id
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, no_row_id = _load_and_filter_rows(path, "superforcaster", None)
         assert len(rows) == 2
         assert rejected["duplicate"] == 0
+        assert no_row_id == 2
 
     def test_duplicate_counted_before_tool_filter(self, tmp_path: Path) -> None:
         """Dedup precedes the tool check: a repeat counts as duplicate, not wrong_tool.
@@ -224,7 +234,7 @@ class TestLoadAndFilterRows:
             path,
             [_row(tool="other", row_id="prod_z"), _row(tool="other", row_id="prod_z")],
         )
-        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        rows, rejected, _ = _load_and_filter_rows(path, "superforcaster", None)
         assert not rows
         assert rejected["duplicate"] == 1
         assert rejected["wrong_tool"] == 1
@@ -240,7 +250,14 @@ class TestEnrichZeroRows:
     """
 
     def test_raises_systemexit_naming_the_tool(self, tmp_path: Path) -> None:
-        """0 qualifying rows → SystemExit mentioning the baseline tool."""
+        """0 qualifying rows → SystemExit mentioning the baseline tool.
+
+        The filter_stats sidecar must still be written (enrich writes it before
+        the guard) so the zero-row run stays diagnosable — pin that here so a
+        future refactor moving the write below the guard can't silently drop it.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         log_path = tmp_path / "log.jsonl"
         _write_jsonl(log_path, [_row(tool="other"), _row(tool="another")])
         output = tmp_path / "out" / "dataset.jsonl"
@@ -248,6 +265,7 @@ class TestEnrichZeroRows:
             enrich(log_path, "superforcaster", output)
         assert "superforcaster" in str(exc.value)
         assert not output.exists()
+        assert (tmp_path / "out" / "dataset.jsonl.filter_stats.json").exists()
 
     def test_message_includes_platform_scope(self, tmp_path: Path) -> None:
         """When a platform filter empties the pool, the scope is in the message."""
@@ -258,6 +276,93 @@ class TestEnrichZeroRows:
             enrich(log_path, "superforcaster", output, platform_filter="polymarket")
         assert "platform=polymarket" in str(exc.value)
         assert not output.exists()
+        assert (tmp_path / "out" / "dataset.jsonl.filter_stats.json").exists()
+
+
+class TestStratifiedSampleSinglePlatform:
+    """`stratified_sample` applies the per-platform budget once for one platform."""
+
+    @staticmethod
+    def _pm(p_yes: float, outcome: bool, i: int) -> dict:
+        r = _row(platform="polymarket", outcome=outcome, row_id=f"r{i}")
+        r["p_yes"] = p_yes
+        return r
+
+    def test_budget_applied_once_not_doubled(self) -> None:
+        """One platform, single stratum → exactly sample_per_platform (not ~2x).
+
+        Pins the --platform semantics: the budget is applied once. A single
+        stratum avoids the per-stratum floor and proportional-rounding overshoot
+        (both of which can push the count above the budget — see the sibling
+        test), isolating the cap so a future two-platform floor (e.g.
+        ``sample_per_platform * 2``) that drew 10 here would trip it.
+        """
+        # One stratum only: all (outcome=yes, brier=good) via p_yes 0.9.
+        rows = [self._pm(0.9, True, i) for i in range(20)]
+        sampled = stratified_sample(rows, 5, seed=42)
+        assert len(sampled) == 5
+        assert {r["platform"] for r in sampled} == {"polymarket"}
+
+    def test_per_stratum_floor_can_exceed_budget(self) -> None:
+        """Documented edge: more non-empty strata than budget → floor wins.
+
+        With 6 strata (2 outcomes x 3 brier buckets) and budget 3, the ">=1 per
+        stratum" floor yields 6 rows — pinning the behaviour the docstring calls
+        out (so the count slightly exceeding sample_per_platform is intentional,
+        not a regression).
+        """
+        rows = []
+        i = 0
+        for outcome, ys in ((True, (0.95, 0.5, 0.1)), (False, (0.05, 0.5, 0.9))):
+            for p_yes in ys:  # good, moderate, poor for each outcome
+                rows += [self._pm(p_yes, outcome, i), self._pm(p_yes, outcome, i + 1)]
+                i += 2
+        sampled = stratified_sample(rows, 3, seed=42)
+        assert len(sampled) == 6  # 6 strata x floor 1, budget 3 overridden
+
+
+class TestEnrichCli:
+    """The ``main()`` argparse seam: --platform wires to enrich + is validated."""
+
+    def test_platform_arg_wires_to_enrich(self, monkeypatch: Any) -> None:
+        """`--platform polymarket` reaches enrich() as platform_filter.
+
+        All other tests call enrich() directly, so this is the only thing
+        pinning the args.platform → platform_filter kwarg in the dispatch.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        argv = [
+            "prompt_replay",
+            "enrich",
+            "--production-log",
+            "x.jsonl",
+            "--tool",
+            "superforcaster",
+            "--platform",
+            "polymarket",
+        ]
+        monkeypatch.setattr("sys.argv", argv)
+        with mock.patch("benchmark.prompt_replay.enrich") as enrich_mock:
+            main()
+        assert enrich_mock.call_args.kwargs["platform_filter"] == "polymarket"
+        assert enrich_mock.call_args.kwargs["tool_filter"] == "superforcaster"
+
+    def test_invalid_platform_rejected_by_choices(self, monkeypatch: Any) -> None:
+        """An unknown --platform value is rejected by argparse choices (exit 2)."""
+        argv = [
+            "prompt_replay",
+            "enrich",
+            "--production-log",
+            "x.jsonl",
+            "--platform",
+            "ethereum",
+        ]
+        monkeypatch.setattr("sys.argv", argv)
+        with mock.patch("benchmark.prompt_replay.enrich") as enrich_mock:
+            with pytest.raises(SystemExit):
+                main()
+        enrich_mock.assert_not_called()
 
 
 class TestLogReplaySummaryFilterStats:

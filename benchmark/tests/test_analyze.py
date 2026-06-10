@@ -35,12 +35,14 @@ from benchmark.analyze import (
     _da_lift,
     _delta_cell,
     _filter_by_active,
+    _lineage_root,
     _parse_tvm_key,
     _sample_label,
     _scope_tournament_to_active,
     generate_fleet_report,
     generate_report,
     load_active_tournament_cids,
+    load_tool_lineage,
     section_category,
     section_category_platform,
     section_diagnostics_comparison,
@@ -49,6 +51,7 @@ from benchmark.analyze import (
     section_period,
     section_platform_comparison,
     section_platform_snapshot,
+    section_promotion_demotion,
     section_reliability_comparison,
     section_sample_size_warnings,
     section_tool_category,
@@ -1761,6 +1764,242 @@ class TestTournamentCallouts:
         assert result.index("tool-best") < result.index("tool-worse")
 
 
+def _prod_cells(*cells: tuple) -> dict[str, Any]:
+    """Build a production scores dict from (tool, cid, brier, n[, log_loss])."""
+    tvm: dict[str, Any] = {}
+    total = 0
+    for c in cells:
+        tool, cid, brier, n = c[0], c[1], c[2], c[3]
+        log_loss = c[4] if len(c) > 4 else None
+        cell: dict[str, Any] = {
+            "brier": brier,
+            "n": n,
+            "valid_n": n,
+            "directional_accuracy": 0.7,
+            "brier_skill_score": 0.0,
+        }
+        if log_loss is not None:
+            cell["log_loss"] = log_loss
+        tvm[f"{tool} | {cid} | production_replay"] = cell
+        total += n
+    return {"total_rows": total, "overall": {}, "by_tool_version_mode": tvm}
+
+
+def _tourn_cells(*cells: tuple) -> dict[str, Any]:
+    """Build a tournament scores dict from (tool, cid, brier, n[, log_loss])."""
+    tvm: dict[str, Any] = {}
+    total = 0
+    for c in cells:
+        tool, cid, brier, n = c[0], c[1], c[2], c[3]
+        log_loss = c[4] if len(c) > 4 else None
+        cell: dict[str, Any] = {
+            "brier": brier,
+            "n": n,
+            "valid_n": n,
+            "directional_accuracy": 0.75,
+            "brier_skill_score": 0.1,
+        }
+        if log_loss is not None:
+            cell["log_loss"] = log_loss
+        tvm[f"{tool} | {cid} | tournament"] = cell
+        total += n
+    return {"total_rows": total, "overall": {}, "by_tool_version_mode": tvm}
+
+
+class TestToolLineage:
+    """Tests for load_tool_lineage and _lineage_root."""
+
+    def test_lineage_root_walks_to_top(self) -> None:
+        """A multi-level chain resolves to its top ancestor."""
+        parents = {"c": "b", "b": "a", "a": None}
+        assert _lineage_root("c", parents) == "a"
+
+    def test_lineage_root_of_unknown_tool_is_itself(self) -> None:
+        """A tool absent from the ledger is its own root (singleton)."""
+        assert _lineage_root("standalone", {}) == "standalone"
+
+    def test_lineage_root_is_cycle_safe(self) -> None:
+        """A malformed cyclic ledger terminates instead of looping."""
+        parents = {"x": "y", "y": "x"}
+        assert _lineage_root("x", parents) in {"x", "y"}
+
+    def test_load_tool_lineage_fails_open_on_missing_file(self, tmp_path: Any) -> None:
+        """A missing ledger fails open to an empty map."""
+        assert load_tool_lineage(tmp_path / "absent.json") == {}
+
+    def test_load_tool_lineage_parses_parents(self, tmp_path: Any) -> None:
+        """A well-formed ledger yields the tool -> parent map."""
+        path = tmp_path / "tool_lineage.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "tools": {
+                        "a": {"parent": None, "reason": "root"},
+                        "a-v1": {"parent": "a", "reason": "child"},
+                    },
+                }
+            )
+        )
+        assert load_tool_lineage(path) == {"a": None, "a-v1": "a"}
+
+    def test_load_tool_lineage_fails_open_on_malformed_json(
+        self, tmp_path: Any
+    ) -> None:
+        """Malformed JSON fails open to an empty map."""
+        path = tmp_path / "tool_lineage.json"
+        path.write_text("not-json")
+        assert load_tool_lineage(path) == {}
+
+
+class TestPromotionDemotion:
+    """Tests for section_promotion_demotion (lineage-scoped verdicts)."""
+
+    def test_empty_when_no_tournament_data(self) -> None:
+        """No tournament data -> empty string (same guard as callouts)."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        assert section_promotion_demotion(prod, None, lineage={}) == ""
+        assert section_promotion_demotion(prod, {"total_rows": 0}, lineage={}) == ""
+
+    def test_none_today_when_nothing_qualifies(self) -> None:
+        """Within-band candidate + healthy incumbent -> explicit none line."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.19, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "## Promotion / Demotion" in result
+        assert "No promotion or demotion candidates today." in result
+        assert "🟢" not in result and "🔴" not in result
+
+    def test_promote_fires_and_supersedes_incumbent(self) -> None:
+        """A candidate beating its incumbent promotes; incumbent demotes."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" in result
+        assert "🟢" in result
+        assert "Δ -0.1000" in result
+        assert "**DEMOTE**" in result
+        assert "superseded" in result
+
+    def test_promote_across_version_names_via_lineage(self) -> None:
+        """The key case: candidate and incumbent have DIFFERENT names.
+
+        ``factual_research-v2`` (tournament) must be weighed against its
+        deployed lineage ancestor ``factual_research`` (production) -- a
+        plain tool-name match would never connect them, so this exercises
+        the lineage walk.
+        """
+        prod = _prod_cells(("factual_research", "cid_fr", 0.28, 500))
+        tourn = _tourn_cells(("factual_research-v2", "cid_v2", 0.18, 50))
+        lineage = {
+            "factual_research-v2": "factual_research-v1",
+            "factual_research-v1": "factual_research",
+            "factual_research": None,
+        }
+        result = section_promotion_demotion(
+            prod, tourn, active_cids={"cid_v2"}, lineage=lineage
+        )
+        assert "**PROMOTE**" in result
+        assert "factual_research-v2" in result
+        assert "beats deployed `factual_research`" in result
+        assert "**DEMOTE**" in result
+
+    def test_promote_blocked_below_delta(self) -> None:
+        """A sub-threshold Brier gain does not promote."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.18, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" not in result
+        assert "No promotion or demotion candidates today." in result
+
+    def test_promote_blocked_below_candidate_min_n(self) -> None:
+        """A big Brier gain at candidate n < PROMOTE_MIN_N does not promote."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 10))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" not in result
+
+    def test_promote_blocked_when_incumbent_below_min_n(self) -> None:
+        """A tiny-n incumbent is not a trustworthy comparison -> no promote."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 10))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" not in result
+
+    def test_promote_blocked_when_logloss_disagrees(self) -> None:
+        """Brier improves but log-loss worsens -> treated as a fluke."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000, 0.50))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50, 0.60))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" not in result
+
+    def test_promote_proceeds_when_logloss_agrees(self) -> None:
+        """Brier and log-loss both improve -> promote fires."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000, 0.50))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50, 0.40))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" in result
+        assert "🟢" in result
+
+    def test_no_incumbent_in_lineage_left_to_callouts(self) -> None:
+        """A candidate whose lineage has no deployed member is not promoted."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-new", "vnew", 0.05, 50))
+        result = section_promotion_demotion(
+            prod, tourn, active_cids={"vnew"}, lineage={}
+        )
+        assert "**PROMOTE**" not in result
+        assert "No promotion or demotion candidates today." in result
+
+    def test_best_of_lineage_never_demoted(self) -> None:
+        """The core safeguard: a bad-but-best tool is NOT demoted.
+
+        A deployed tool with a poor absolute Brier (0.40) that is the only
+        / best version of its lineage and is beaten by no candidate is left
+        alone -- there is deliberately no absolute level-floor demotion, so
+        the rule can never degenerate to "demote every tool".
+        """
+        prod = _prod_cells(("tool-a", "cid_prod", 0.40, 1000))
+        tourn = _tourn_cells(("tool-other", "vx", 0.20, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"vx"}, lineage={})
+        assert "**DEMOTE**" not in result
+        assert "No promotion or demotion candidates today." in result
+
+    def test_sibling_domination_demotes_redundant_version(self) -> None:
+        """Two deployed versions of one lineage: the worse one is demoted."""
+        prod = _prod_cells(
+            ("alpha", "cid_old", 0.30, 500),
+            ("alpha-v2", "cid_new", 0.20, 500),
+        )
+        tourn = _tourn_cells(("tool-other", "vx", 0.25, 50))
+        lineage = {"alpha-v2": "alpha", "alpha": None}
+        result = section_promotion_demotion(
+            prod, tourn, active_cids={"vx"}, lineage=lineage
+        )
+        assert "**PROMOTE**" not in result
+        assert "**DEMOTE**" in result
+        assert "dominated by deployed sibling `alpha-v2`" in result
+        assert "🔴 `alpha`" in result
+
+    def test_different_lineages_never_demote_each_other(self) -> None:
+        """A worse tool in a DIFFERENT lineage is not demoted as redundant."""
+        prod = _prod_cells(
+            ("tool-good", "cid_g", 0.18, 500),
+            ("tool-bad", "cid_b", 0.40, 500),
+        )
+        tourn = _tourn_cells(("tool-other", "vx", 0.25, 50))
+        # Distinct lineages (no shared root) -> no cross-lineage demotion.
+        result = section_promotion_demotion(prod, tourn, active_cids={"vx"}, lineage={})
+        assert "**DEMOTE**" not in result
+
+    def test_scoping_excludes_inactive_candidate(self) -> None:
+        """A candidate not in active_cids is ignored by the promote gate."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids=set(), lineage={})
+        assert "**PROMOTE**" not in result
+
+
 class TestGenerateReportWithTournamentFiles:
     """Tests for generate_report dual-mode rendering."""
 
@@ -1892,6 +2131,22 @@ class TestGenerateReportWithTournamentFiles:
             scores_tournament=tourn,
         )
         assert "## Tournament Callouts" in report
+
+    def test_promotion_demotion_section_wired_in(self) -> None:
+        """generate_report renders the Promotion / Demotion section."""
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        report = generate_report(
+            prod,
+            [],
+            platform="omen",
+            include_tournament=True,
+            scores_tournament=tourn,
+            active_tournament_cids={"v2"},
+            valid_tools={},
+        )
+        assert "## Promotion / Demotion" in report
+        assert "**PROMOTE**" in report
 
     def test_within_band_candidate_still_listed(self) -> None:
         """A within-delta candidate is now surfaced (untagged), not omitted.

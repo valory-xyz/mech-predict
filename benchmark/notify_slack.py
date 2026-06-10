@@ -105,6 +105,8 @@ Examples (copy this style exactly):
 • promotion candidate: `superforcaster` (tournament `v0.20.0` vs production `v0.18.2`) — tournament Brier `0.1847` (n=47) vs production `0.2832`, Δ `-0.0985` improved
 • candidate: `factual_research` `untagged@bafybeib` — Brier `0.0896` (n=34), BSS vs mkt `+0.285` — no prod data
 
+*Promotion / Demotion:* REQUIRED — whenever the report contains a "## Promotion / Demotion" heading, output this section in full. Unlike the informational Tournament callouts above, these are gated, actionable verdicts. Reproduce every PROMOTE and DEMOTE bullet verbatim (they already carry the 🟢/🔴 prefix, tool + version labels in backticks, Brier, n, and Δ). Keep the PROMOTE list and DEMOTE list under their own *bold* sub-labels. If the section's only content is "No promotion or demotion candidates today.", output that single line so the reader sees the criteria ran. Never drop, merge, or re-rank this section.
+
 *Diagnostics:*
 If the report has a "Diagnostics Historical Comparison" section, for each tool that carries at least one row with a signed delta (not `insufficient data`, not `no prev window`), summarize up to two metrics with the largest movement. Use format: • `tool` — `metric` Current {ROLLING_WINDOW_DAYS}d `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`. Skip the section if no tool has a signed delta.
 
@@ -121,6 +123,7 @@ Rules:
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
 - No greetings or preamble.
 - The *Tournament callouts:* section is mandatory whenever a "## Tournament Callouts" heading appears in the report — output one bullet per table row and never drop the section, even on short reports or when no row has a 🟢/🔴 production tag.
+- The *Promotion / Demotion:* section is mandatory whenever a "## Promotion / Demotion" heading appears in the report — reproduce its PROMOTE / DEMOTE bullets verbatim, or its "No promotion or demotion candidates today." line, and never drop the section.
 - Edge over market: positive = tool beats market, negative = market beats tool. Read it as a system-level diagnostic — tools are still ranked by Brier.
 - "Accuracy" in the report means "Directional Accuracy" — it excludes predictions at exactly 0.5 (no signal).
 - Log Loss: like Brier but punishes confidently-wrong predictions harder.

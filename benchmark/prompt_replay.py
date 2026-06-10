@@ -344,23 +344,33 @@ def extract_prompt_components(
 ) -> Optional[dict[str, str]]:
     """Extract components from a formatted IPFS prompt, dispatching by tool.
 
+    Dispatch keys off :func:`_baseline_family` — the same registry-backed
+    classifier the replay path uses — so ``-v<n+1>`` siblings and other family
+    members (``superforcaster-polymarket-v1``, ``factual_research-v2``,
+    ``prediction-url-cot``) route to the right extractor instead of silently
+    falling through to the default ``prediction-online`` regexes. Sharing one
+    classifier across enrich (here) and replay is what prevents the drift that
+    previously left enrich parsing 0 rows for sibling baselines.
+
     :param formatted_prompt: the full IPFS prompt string.
     :param tool_name: tool name to determine extraction strategy.
     :return: dict of extracted components, or None if extraction fails.
     """
-    if tool_name.startswith("prediction-request-reasoning"):
+    family = _baseline_family(tool_name)
+
+    if family == "reasoning":
         return _extract_reasoning_prompt_components(formatted_prompt)
 
-    if tool_name.startswith("prediction-request-rag"):
+    if family == "rag":
         return _extract_rag_prompt_components(formatted_prompt)
 
-    if tool_name == "superforcaster":
+    if family == "superforcaster":
         return _extract_superforcaster_prompt_components(formatted_prompt)
 
-    if tool_name == "factual_research":
+    if family == "factual_research":
         return _extract_factual_research_prompt_components(formatted_prompt)
 
-    # Default: prediction-online format
+    # Default: prediction-online format (also covers *-sme)
     up_match = USER_PROMPT_RE.search(formatted_prompt)
     ai_match = ADDITIONAL_INFO_RE.search(formatted_prompt)
 
@@ -1254,29 +1264,76 @@ def _replay_reasoning_tool(
 # ---------------------------------------------------------------------------
 
 
+# Generic system prompt used when a default-family module exports no
+# SYSTEM_PROMPT_FORECASTER. Note: *-sme tools build a dynamic, question-specific
+# persona at request time (``get_sme_role`` in prediction_request_sme.py), which
+# isn't reproducible offline — so replayed SME p_yes is not strictly comparable
+# to deployed SME. The superforcaster branch already substitutes a static prompt
+# for the same reason; do NOT "fix" this by aliasing SME's generation prompt to
+# SYSTEM_PROMPT_FORECASTER, as that would silently shift benchmark semantics.
+DEFAULT_REPLAY_SYSTEM_PROMPT = "You are a helpful assistant."
+
+
+def _default_family_system_prompt(candidate_module: Any) -> str:
+    """Pick the system prompt for a default-family replay.
+
+    Most default-family tools export ``SYSTEM_PROMPT_FORECASTER``; ``*-sme``
+    tools do not, so fall back to a generic prompt rather than ``AttributeError``
+    on import.
+
+    :param candidate_module: the imported candidate tool module.
+    :return: the module's ``SYSTEM_PROMPT_FORECASTER`` or the generic fallback.
+    """
+    if hasattr(candidate_module, "SYSTEM_PROMPT_FORECASTER"):
+        return candidate_module.SYSTEM_PROMPT_FORECASTER
+    # Expected for *-sme; for any other default-family tool this likely means a
+    # missing/typo'd symbol, so make the substitution visible rather than silent.
+    log.warning(
+        "%s exports no SYSTEM_PROMPT_FORECASTER; replaying with the generic "
+        "system prompt. Expected for *-sme tools, suspicious otherwise.",
+        getattr(candidate_module, "__name__", candidate_module),
+    )
+    return DEFAULT_REPLAY_SYSTEM_PROMPT
+
+
 def _baseline_family(tool_name: str) -> str:
-    """Classify a baseline tool by its prompt-attribute schema.
+    """Classify a tool by its prompt-schema family.
 
-    The replay path keys off this family to decide which symbols
-    (``PREDICTION_PROMPT`` / ``SYSTEM_PROMPT`` / ``ESTIMATE_USER`` / etc.)
-    to read from the candidate module. Widened from exact-name match so
-    ``-v<n+1>`` siblings (housekeeping default for ``p_yes``-shifting fixes)
-    route to the same family as their parent, and so tool families that
-    don't export ``SYSTEM_PROMPT_FORECASTER`` (superforcaster siblings,
-    prediction-url-cot, ``*-sme``) reach a branch that matches what their
-    module actually exposes.
+    The family decides both which symbols the replay path reads from the
+    candidate module (``PREDICTION_PROMPT`` / ``SYSTEM_PROMPT`` /
+    ``ESTIMATE_USER`` / …) and which regex extractor the enrich path
+    (:func:`extract_prompt_components`) uses. Both sites call this one helper
+    so they cannot drift — the asymmetry that previously let enrichment parse
+    0 rows for sibling baselines.
 
-    :param tool_name: tool name from the enriched rows.
+    ``benchmark.tools.TOOL_REGISTRY`` is the source of truth: every registered
+    tool carries an explicit ``family``. The name heuristic below is only a
+    fallback for a ``-v<n+1>`` sibling that has not been added to the registry
+    yet, so it routes to its parent's family rather than silently to default.
+
+    :param tool_name: tool name from the enriched rows / baseline.
     :return: one of ``"reasoning"``, ``"rag"``, ``"superforcaster"``,
         ``"factual_research"``, ``"default"``.
     """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is not None:
+        return spec.family
+    # Unregistered name: the heuristic below is a guess. Warn so a misnamed or
+    # not-yet-registered tool is visible here rather than only as a silent
+    # ``Enriched 0/N`` drop downstream (the original bug's failure mode).
+    log.warning(
+        "Tool '%s' is not in TOOL_REGISTRY; guessing its prompt-schema family "
+        "from the name. Register it with an explicit family to avoid a silent "
+        "mis-route.",
+        tool_name,
+    )
     if tool_name.startswith("prediction-request-reasoning"):
         return "reasoning"
     if tool_name.startswith("prediction-request-rag") or tool_name.startswith(
         "prediction-url-cot"
     ):
         return "rag"
-    if tool_name.startswith("superforcaster") or tool_name.endswith("-sme"):
+    if tool_name.startswith("superforcaster"):
         return "superforcaster"
     if tool_name.startswith("factual_research"):
         return "factual_research"
@@ -1376,7 +1433,7 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         system_prompt = candidate_module.ESTIMATE_SYSTEM
     else:
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
-        system_prompt = candidate_module.SYSTEM_PROMPT_FORECASTER
+        system_prompt = _default_family_system_prompt(candidate_module)
 
     if "claude" in model:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")

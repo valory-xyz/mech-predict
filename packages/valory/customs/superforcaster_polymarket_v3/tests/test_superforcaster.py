@@ -381,6 +381,30 @@ class TestV3LLMClientAnthropicCompletions:
             client = LLMClient(api_keys=_make_v3_api_keys(), model="claude-fable-5")
         return client
 
+    def test_init_raises_keyerror_when_keychain_lacks_anthropic_key(self) -> None:
+        """A v1-era keychain (no anthropic key) raises KeyError in LLMClient.__init__.
+
+        Pins the construction-time failure mode flagged on PR #340: the real
+        ``KeyError: 'anthropic'`` for a deployment that hasn't been
+        provisioned with an anthropic key fires here, BEFORE any rotation
+        path runs. The decorator's bare ``except Exception`` then wraps it
+        into a result tuple whose first element is the stringified KeyError.
+        """
+
+        class _KeychainMissingAnthropic:
+            """KeyChain stand-in shaped like v1's (no ``anthropic`` entry)."""
+
+            def __getitem__(self, key: str) -> str:
+                if key == "anthropic":
+                    raise KeyError(key)
+                return "sk-test"
+
+        with pytest.raises(KeyError, match="anthropic"):
+            LLMClient(
+                api_keys=_KeychainMissingAnthropic(),
+                model="claude-fable-5",
+            )
+
     def test_extracts_system_messages_out(self) -> None:
         """``system`` entries are joined and passed via ``system=``, not ``messages=``."""
         client = self._client_with_anthropic_response(
@@ -563,8 +587,8 @@ class TestV3WithKeyRotationAnthropic:
         assert rotated_services == ["openai", "openrouter", "anthropic"]
         assert result[-1] is keys
 
-    def test_anthropic_pool_exhausted_raises(self) -> None:
-        """When the anthropic pool is exhausted, the error re-raises."""
+    def test_anthropic_pool_exhausted_returns_error_tuple(self) -> None:
+        """When the anthropic pool is exhausted, the error is wrapped — same as bare except."""
         keys = _make_v3_api_keys()
         keys.max_retries = lambda: {
             "openai": 5,
@@ -578,10 +602,9 @@ class TestV3WithKeyRotationAnthropic:
                 v3_module.anthropic.RateLimitError, "anthropic-burned"
             )
 
-        with pytest.raises(
-            v3_module.anthropic.RateLimitError, match="anthropic-burned"
-        ):
-            fake(api_keys=keys)
+        result = fake(api_keys=keys)
+        assert "anthropic-burned" in result[0]
+        assert result[1:] == ("", None, None, None, keys)
 
     def test_missing_anthropic_in_retries_left_does_not_crash_rotation(self) -> None:
         """Older ``max_retries()`` without ``anthropic`` doesn't crash the rotation lookup.
@@ -589,10 +612,11 @@ class TestV3WithKeyRotationAnthropic:
         Scoped to the rotation path's ``retries_left`` lookup ONLY. The
         production-path ``KeyError: 'anthropic'`` from a v1-era keychain
         actually fires earlier in ``LLMClient.__init__`` (where
-        ``self.api_keys["anthropic"]`` runs before any rotation). That
-        construction-time path is tracked separately in #345 (it would
-        need a real client init test); this test just pins that the
-        ``setdefault`` guard in the rotation decorator does its job.
+        ``self.api_keys["anthropic"]`` runs before any rotation) — pinned
+        by ``test_init_raises_keyerror_when_keychain_lacks_anthropic_key``
+        below. This test just confirms the ``setdefault`` guard in the
+        rotation decorator does its job and the wrapped error tuple still
+        carries the original message.
         """
         keys = _make_v3_api_keys()
         keys.max_retries = lambda: {"openai": 5, "openrouter": 5}
@@ -603,8 +627,9 @@ class TestV3WithKeyRotationAnthropic:
                 v3_module.anthropic.RateLimitError, "anthropic-burst"
             )
 
-        with pytest.raises(v3_module.anthropic.RateLimitError, match="anthropic-burst"):
-            fake(api_keys=keys)
+        result = fake(api_keys=keys)
+        assert "anthropic-burst" in result[0]
+        assert result[1:] == ("", None, None, None, keys)
 
 
 class TestV3RunEndToEnd:

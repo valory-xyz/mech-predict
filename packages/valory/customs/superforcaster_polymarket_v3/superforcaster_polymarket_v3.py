@@ -140,13 +140,18 @@ def with_key_rotation(func: Callable) -> Callable:
                 # one-provider rate limiting.
                 if isinstance(e, _ANTHROPIC_ERRORS):
                     if retries_left["anthropic"] <= 0:
-                        raise e
+                        # Consistent surface: wrap as result tuple like the
+                        # bare ``except Exception`` below does. Without this,
+                        # pool-exhaustion was the only path that propagated
+                        # the raw exception while every other failure became
+                        # a result string.
+                        return str(e), "", None, None, None, api_keys
                     retries_left["anthropic"] -= 1
                     api_keys.rotate("anthropic")
                     return execute()
                 # OpenAI / OpenRouter branch.
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
+                    return str(e), "", None, None, None, api_keys
                 if retries_left["openai"] > 0:
                     retries_left["openai"] -= 1
                     api_keys.rotate("openai")
@@ -507,6 +512,13 @@ def generate_prediction_with_retry(
                 raise ValueError("LLM returned empty content")
             return content, counter_callback
         except Exception as e:
+            # Don't retry deterministic truncation: ``stop_reason ==
+            # 'max_tokens'`` won't recover on retry with the same budget,
+            # so re-raise immediately and let the caller surface a real
+            # error instead of burning the retry budget on a guaranteed
+            # failure.
+            if "Response truncated" in str(e):
+                raise
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1

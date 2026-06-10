@@ -315,6 +315,8 @@ def _log_cooldown_status(
     :param n_days: the ``RECENT_CLOSE_DAYS`` value in effect.
     """
     horizon = timedelta(days=2 * n_days + 7)
+    cooldown = timedelta(days=n_days)
+    cutoff = now_dt - cooldown
     cur_tool_set = set(cur_tools)
     for tool_name, last_close in sorted(most_recent_close.items()):
         if tool_name not in cur_tool_set:
@@ -322,14 +324,17 @@ def _log_cooldown_status(
         age = now_dt - last_close
         if age > horizon:
             continue
-        days_since = age.days
-        status = "ACTIVE" if days_since <= n_days else "ELAPSED"
+        # Mirror the gate's predicate exactly (``last_close >= cutoff``) so
+        # the log never says ACTIVE on a close the gate is about to let
+        # fire. Floored ``age.days`` is fine for the human-readable count
+        # but must not drive the status decision.
+        status = "ACTIVE" if last_close >= cutoff else "ELAPSED"
         log.info(
             "cooldown %s: tool=%r platform=%r closed %d day(s) ago (N=%d)",
             status,
             tool_name,
             platform,
-            days_since,
+            age.days,
             n_days,
         )
 
@@ -447,15 +452,15 @@ def triage(
                 d.update(decision="silent", reason="sign_disagreement")
                 decisions.append(d)
                 continue
+        # Trigger label is shared by the recently-closed silence below, the
+        # duplicate_suppressed path, and the open_issue path; compute once.
+        trigger = "regression" if regressed else "level_floor"
         # Recently-closed silence: a tool whose issue closed within the last
         # RECENT_CLOSE_DAYS is silenced regardless of trigger (regression OR
         # level_floor) and regardless of how it closed (merge OR manual).
-        # Stacks ON TOP of the Brier-band re-arm below: even if the re-arm
-        # would have allowed a fire (e.g. genuine regression bypass), we
-        # honour the operator's "give engineers room before the next page"
-        # invariant. Gated on prior_open being false because while the
-        # issue is still open the duplicate_suppressed path below owns the
-        # suppression.
+        # Gives engineers room before the next page after a close. Gated on
+        # prior_open being false because while the issue is still open the
+        # duplicate_suppressed path below owns the suppression.
         if (
             (regressed or above_level)
             and not prior_open.get(tool)
@@ -464,7 +469,7 @@ def triage(
             d.update(
                 decision="silent",
                 reason="recently_closed",
-                trigger="regression" if regressed else "level_floor",
+                trigger=trigger,
                 issue_open=False,
             )
             decisions.append(d)
@@ -477,7 +482,6 @@ def triage(
         # this tool (regression or level signal), stay silent. The
         # ``trigger`` field records the original signal for state-file
         # bookkeeping and analytics.
-        trigger = "regression" if regressed else "level_floor"
         if prior_open.get(tool):
             d.update(
                 decision="silent",
@@ -746,13 +750,15 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     window_iso = _window_iso(now)
     state = _load_json(args.state)
-    # Live source-of-truth for duplicate-issue suppression: a tool whose
-    # issue is currently open on GitHub stays silent; one whose issue was
-    # closed (PR merged or human dismissed) re-arms the trigger
-    # immediately on the next run. The state file is consulted only as a
-    # fallback when the live gh query fails (returns None); it is also
-    # the source of the level_floor cooldown band so a closed level
-    # issue does not re-fire while the Brier is still in the band.
+    # Live sources-of-truth for the two close-related gates:
+    #  * ``open_now`` (open issues on GitHub) drives the duplicate-issue
+    #    suppression. The state file is consulted only as a fallback when
+    #    the gh query fails (returns ``None``).
+    #  * ``closed_issues`` (recently closed issues on GitHub) drives the
+    #    ``RECENT_CLOSE_DAYS`` cooldown silence. Same fail-open principle:
+    #    a transient gh failure skips the cooldown rather than refile.
+    # The state file is no longer consulted for cooldown bookkeeping; the
+    # gate runs entirely off the live gh closed-list result.
     open_now = _open_issue_tools(args.repo, args.label)
     if open_now:
         log.info("triage open issues on GitHub: %s", sorted(open_now))
@@ -777,6 +783,7 @@ def main() -> int:
             platform=platform,
             open_now=open_now,
             closed_issues=closed_issues,
+            now=now,
         )
         all_decisions.extend(decisions)
 

@@ -41,6 +41,7 @@ from benchmark.tool_improvement_triage import (
     RECENT_CLOSE_DAYS,
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
+    _closed_issue_pairs,
     _load_json,
     _open_issue,
     _open_issue_tools,
@@ -870,16 +871,19 @@ class TestLevelFloorAndRegressionCoverage:
         assert row["delta_brier"] is None
 
 
-def _closed_triples(*pairs: Any, days_ago: int) -> Any:
+def _closed_triples(*pairs: Any, days_ago: int = 0, hours_ago: int = 0) -> Any:
     """Helper: build a `(tool, platform, closed_at)` list for ``triage(closed_issues=...)``.
 
     :param pairs: (tool, platform) tuples to time-stamp identically.
     :param days_ago: how many days ago each close happened (used to land
         inside or outside the RECENT_CLOSE_DAYS window).
+    :param hours_ago: additional hours offset for fractional-day testing
+        (e.g. ``hours_ago=43`` lands the close in the ``(1d, 2d)`` band that
+        exercises the gate-vs-log status agreement on N=1).
     :return: list of (tool, platform, closed_at) triples.
     """
     closed_at = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc) - timedelta(
-        days=days_ago
+        days=days_ago, hours=hours_ago
     )
     return [(t, p, closed_at) for t, p in pairs]
 
@@ -1151,6 +1155,164 @@ class TestCooldownStatusLogging:
             "'b'" in r.getMessage() and "cooldown" in r.getMessage()
             for r in caplog.records
         )
+
+    def test_fractional_band_log_status_matches_gate(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Log status must agree with the gate in the (N, N+1)-day band.
+
+        Regression guard for the gate-vs-log mismatch flagged in PR #329
+        review: with N=1, a close ~43h ago lands in the (1d, 2d) band where
+        ``age.days == 1`` would falsely say ACTIVE while the gate actually
+        lets the issue fire. The fix mirrors the gate's predicate exactly
+        (``last_close >= cutoff``) so the log and the decision can never
+        disagree on a tool the operator is consulting the log about.
+        """
+        # 43 hours ago with N=1 -> outside the gate window (gate fires),
+        # but age.days == 1 -> floored-day status would have said ACTIVE.
+        closed = _closed_triples(("a", "polymarket"), hours_ago=43)
+        with caplog.at_level(logging.INFO, logger="benchmark.tool_improvement_triage"):
+            decisions = triage(
+                _scores(a=_stats(brier=0.300, log_loss=0.620)),
+                _scores(a=_stats(brier=0.295, log_loss=0.610)),
+                {},
+                open_now=[],
+                closed_issues=closed,
+                now=_NOW,
+            )
+        # Gate fires the issue (close is past the N=1 window).
+        assert decisions[0]["decision"] == "open_issue"
+        assert decisions[0]["reason"] == "level_floor"
+        # Log must agree: ELAPSED, not ACTIVE.
+        log_lines = [
+            r.getMessage() for r in caplog.records if "cooldown" in r.getMessage()
+        ]
+        assert len(log_lines) == 1
+        assert "cooldown ELAPSED" in log_lines[0]
+        assert "cooldown ACTIVE" not in log_lines[0]
+
+
+class TestClosedIssuePairs:
+    """``_closed_issue_pairs`` backtick title + ``closedAt`` parsing + gh-error fallback.
+
+    Mirrors :class:`TestOpenIssueToolsParser` for the closed-issue sibling
+    which adds ``closedAt`` ISO parsing on top of the title-regex flow. These
+    are the fail-open paths the cooldown design leans on.
+    """
+
+    def test_parses_tool_platform_and_closed_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(tool, platform, closed_at) triples are extracted with timezone-aware UTC."""
+        stdout = (
+            '[{"title": "[tool-improvement] `superforcaster`: Brier '
+            'regression on polymarket W-1", "closedAt": "2026-06-05T10:30:00Z"},'
+            ' {"title": "[tool-improvement] `factual_research`: Brier '
+            'above level on omen W-1", "closedAt": "2026-06-04T08:15:00Z"}]'
+        )
+        result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        triples = _closed_issue_pairs("r/r", "tool-improvement")
+        assert triples is not None
+        assert len(triples) == 2
+        assert triples[0][0] == "superforcaster"
+        assert triples[0][1] == "polymarket"
+        assert triples[0][2] == datetime(2026, 6, 5, 10, 30, 0, tzinfo=timezone.utc)
+        assert triples[1][0] == "factual_research"
+        assert triples[1][1] == "omen"
+
+    def test_skips_title_without_backticks(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A label-matching issue filed manually (no backticks) is skipped + warned."""
+        stdout = (
+            '[{"title": "[tool-improvement] superforcaster bad on polymarket",'
+            ' "closedAt": "2026-06-05T10:30:00Z"}]'
+        )
+        result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _closed_issue_pairs("r/r", "tool-improvement") == []
+        assert any(
+            "did not match the expected format" in r.message for r in caplog.records
+        )
+
+    def test_skips_unparseable_closed_at(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A malformed ``closedAt`` field is skipped + warned (cooldown stays fail-open)."""
+        stdout = (
+            '[{"title": "[tool-improvement] `superforcaster`: Brier '
+            'above level on polymarket W-1", "closedAt": "not-a-date"}]'
+        )
+        result = SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        with caplog.at_level(logging.WARNING):
+            assert _closed_issue_pairs("r/r", "tool-improvement") == []
+        assert any("unparseable closedAt" in r.message for r in caplog.records)
+
+    def test_gh_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-zero gh exit yields ``None`` so the caller skips the cooldown gate."""
+        # Distinct from "success with zero closed issues" which returns [].
+        result = SimpleNamespace(returncode=4, stdout="", stderr="auth required")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        assert _closed_issue_pairs("r/r", "tool-improvement") is None
+
+    def test_gh_timeout_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``subprocess.TimeoutExpired`` is caught and returns ``None`` (fail-open)."""
+
+        def fake_run(*_a: Any, **_k: Any) -> Any:
+            raise subprocess.TimeoutExpired(cmd="gh", timeout=30)
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        assert _closed_issue_pairs("r/r", "tool-improvement") is None
+
+    def test_gh_oserror_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``OSError`` (gh binary missing) is caught and returns ``None`` (fail-open)."""
+
+        def fake_run(*_a: Any, **_k: Any) -> Any:
+            raise OSError("gh: command not found")
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        assert _closed_issue_pairs("r/r", "tool-improvement") is None
+
+    def test_gh_invalid_json_returns_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unparseable JSON on stdout yields ``None`` so cooldown stays fail-open."""
+        result = SimpleNamespace(returncode=0, stdout="not json", stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        assert _closed_issue_pairs("r/r", "tool-improvement") is None
+
+    def test_gh_success_zero_issues_returns_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Successful gh with no closed issues yields ``[]`` (no cooldown anywhere)."""
+        result = SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: result,
+        )
+        assert _closed_issue_pairs("r/r", "tool-improvement") == []
 
 
 class TestMainExitCode:

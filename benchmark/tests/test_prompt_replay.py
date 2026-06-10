@@ -18,6 +18,7 @@ from benchmark.prompt_replay import (
     _load_and_filter_rows,
     _log_replay_summary,
     _prepare_output_dir,
+    enrich,
     extract_prompt_components,
 )
 from benchmark.tools import TOOL_REGISTRY
@@ -32,6 +33,8 @@ def _row(
     status: str = "valid",
     outcome: Any = True,
     predicted_at: str | None = None,
+    platform: str | None = None,
+    row_id: str | None = None,
 ) -> dict:
     r: dict = {
         "tool_name": tool,
@@ -41,6 +44,10 @@ def _row(
     }
     if predicted_at is not None:
         r["predicted_at"] = predicted_at
+    if platform is not None:
+        r["platform"] = platform
+    if row_id is not None:
+        r["row_id"] = row_id
     return r
 
 
@@ -107,9 +114,10 @@ class TestLoadAndFilterRows:
     def test_filter_order_gives_first_failing_reason(self, tmp_path: Path) -> None:
         """A row failing multiple predicates counts in the first one only.
 
-        Order: wrong_tool → no_deliver_id → not_valid_parse → no_outcome → cutoff.
-        A row with wrong tool AND bad parse AND no outcome increments wrong_tool
-        only — so the total rejection count matches row count exactly.
+        Order: wrong_tool → wrong_platform → no_deliver_id → not_valid_parse →
+        no_outcome → cutoff. A row with wrong tool AND bad parse AND no outcome
+        increments wrong_tool only — so the total rejection count matches row
+        count exactly.
 
         :param tmp_path: pytest tmp_path fixture.
         """
@@ -122,6 +130,134 @@ class TestLoadAndFilterRows:
         assert not rows
         assert rejected["wrong_tool"] == 1
         assert sum(rejected.values()) == 1
+
+    def test_wrong_platform_counted(self, tmp_path: Path) -> None:
+        """With a platform filter, off-platform rows hit wrong_platform only."""
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(
+            path,
+            [
+                _row(platform="omen"),
+                _row(platform="omen"),
+                _row(platform="polymarket"),
+            ],
+        )
+        rows, rejected = _load_and_filter_rows(
+            path, "superforcaster", None, "polymarket"
+        )
+        assert len(rows) == 1
+        assert rows[0]["platform"] == "polymarket"
+        assert rejected["wrong_platform"] == 2
+        assert rejected["wrong_tool"] == 0
+
+    def test_platform_filter_none_keeps_all_platforms(self, tmp_path: Path) -> None:
+        """Default (no platform filter) keeps every platform — additive contract."""
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(
+            path,
+            [_row(platform="omen"), _row(platform="polymarket")],
+        )
+        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        assert len(rows) == 2
+        assert rejected["wrong_platform"] == 0
+
+    def test_wrong_platform_ordered_after_wrong_tool(self, tmp_path: Path) -> None:
+        """A row failing both tool and platform counts as wrong_tool only.
+
+        Pins wrong_platform's position in the filter order (right after
+        wrong_tool): a foreign-tool row never reaches the platform check.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(path, [_row(tool="other", platform="omen")])
+        rows, rejected = _load_and_filter_rows(
+            path, "superforcaster", None, "polymarket"
+        )
+        assert not rows
+        assert rejected["wrong_tool"] == 1
+        assert rejected["wrong_platform"] == 0
+
+    def test_duplicate_row_ids_collapsed_keeping_first(self, tmp_path: Path) -> None:
+        """Cross-shard repeats (same row_id) collapse to the first occurrence.
+
+        Mirrors the flywheel emitting one delivery into multiple daily shards,
+        sometimes with a flipped outcome in the later shard. With shards fed
+        oldest-first, keep-first wins, matching the scorer's keep-oldest dedup.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(
+            path,
+            [
+                _row(row_id="prod_x", outcome=True),
+                _row(row_id="prod_x", outcome=False),  # later shard, flipped
+                _row(row_id="prod_y", outcome=True),
+            ],
+        )
+        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        assert len(rows) == 2  # prod_x once + prod_y
+        assert rejected["duplicate"] == 1
+        kept = {r["row_id"]: r["final_outcome"] for r in rows}
+        assert kept == {"prod_x": True, "prod_y": True}  # first prod_x wins
+
+    def test_rows_without_row_id_not_deduped(self, tmp_path: Path) -> None:
+        """Rows lacking a row_id are never collapsed (fixture/legacy contract)."""
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(path, [_row(), _row()])  # identical, no row_id
+        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        assert len(rows) == 2
+        assert rejected["duplicate"] == 0
+
+    def test_duplicate_counted_before_tool_filter(self, tmp_path: Path) -> None:
+        """Dedup precedes the tool check: a repeat counts as duplicate, not wrong_tool.
+
+        Two rows share a row_id but carry a foreign tool. The first is rejected
+        as wrong_tool (and its row_id remembered); the second is caught by the
+        dedup pass first, so it lands in ``duplicate`` rather than wrong_tool.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = tmp_path / "log.jsonl"
+        _write_jsonl(
+            path,
+            [_row(tool="other", row_id="prod_z"), _row(tool="other", row_id="prod_z")],
+        )
+        rows, rejected = _load_and_filter_rows(path, "superforcaster", None)
+        assert not rows
+        assert rejected["duplicate"] == 1
+        assert rejected["wrong_tool"] == 1
+
+
+class TestEnrichZeroRows:
+    """`enrich` fails loudly when the filtered pool is empty.
+
+    The guard fires after filtering but before the IPFS fetch, so these tests
+    need no network — a baseline with no qualifying rows must abort with a
+    clear message rather than silently skipping the dataset write and letting
+    the downstream replay step die on a FileNotFoundError.
+    """
+
+    def test_raises_systemexit_naming_the_tool(self, tmp_path: Path) -> None:
+        """0 qualifying rows → SystemExit mentioning the baseline tool."""
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(tool="other"), _row(tool="another")])
+        output = tmp_path / "out" / "dataset.jsonl"
+        with pytest.raises(SystemExit) as exc:
+            enrich(log_path, "superforcaster", output)
+        assert "superforcaster" in str(exc.value)
+        assert not output.exists()
+
+    def test_message_includes_platform_scope(self, tmp_path: Path) -> None:
+        """When a platform filter empties the pool, the scope is in the message."""
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(platform="omen"), _row(platform="omen")])
+        output = tmp_path / "out" / "dataset.jsonl"
+        with pytest.raises(SystemExit) as exc:
+            enrich(log_path, "superforcaster", output, platform_filter="polymarket")
+        assert "platform=polymarket" in str(exc.value)
+        assert not output.exists()
 
 
 class TestLogReplaySummaryFilterStats:

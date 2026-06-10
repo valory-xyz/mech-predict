@@ -42,9 +42,14 @@ repo uses (``prediction_request``, ``prediction_request_rag``,
   zero (claude-fable-5 rejects the parameter), and the first
   ``TextBlock`` picked from the response (adaptive-thinking models
   emit a ``ThinkingBlock`` first which we skip).
-* ``with_key_rotation`` catches both ``openai.*`` AND ``anthropic.*``
-  rate-limit / auth / permission errors and rotates whichever pool has
-  retries left.
+* ``with_key_rotation`` catches ``openai.RateLimitError`` and
+  ``anthropic.RateLimitError`` only and rotates the failing provider's
+  pool (provider-gated so an error on one SDK doesn't burn the other
+  pool's budget). Auth / permission / bad-request errors and the
+  ``KeyError: 'anthropic'`` raised when a v1-era keychain lacks the
+  anthropic key fall into the bare ``except Exception`` and are wrapped
+  into the result tuple — see the decorator's docstring for the
+  deployment note.
 * ``component.yaml`` declares BOTH ``openai==1.93.0`` AND
   ``anthropic==0.23.1`` (no ``pyproject.toml`` bump).
 """

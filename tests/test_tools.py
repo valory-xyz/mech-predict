@@ -78,6 +78,9 @@ SUPERFORCASTER_CONFIG = _component_config("valory/customs/superforcaster")
 SUPERFORCASTER_POLYMARKET_V1_CONFIG = _component_config(
     "valory/customs/superforcaster_polymarket_v1"
 )
+SUPERFORCASTER_POLYMARKET_V3_CONFIG = _component_config(
+    "valory/customs/superforcaster_polymarket_v3"
+)
 FACTUAL_RESEARCH_CONFIG = _component_config("valory/customs/factual_research")
 
 # Prompts
@@ -183,6 +186,20 @@ class TestSuperforcasterPolymarketV1(BaseIsolatedToolTest):
     """Test Superforcaster (Polymarket v1, uncalibrated)."""
 
     component_yaml = SUPERFORCASTER_POLYMARKET_V1_CONFIG
+    prompts = [PREDICTION_PROMPT]
+
+
+class TestSuperforcasterPolymarketV3(BaseIsolatedToolTest):
+    """Test Superforcaster (Polymarket v3, claude-fable-5 default).
+
+    Imports the v3 component in an isolated venv built from its
+    ``component.yaml``, exercising the new ``anthropic==0.23.1``
+    dependency end-to-end and proving the v3 wire-name dispatches
+    through the dual-SDK LLMClientManager. v1 prompt is reused
+    because v3 is a one-axis model swap of v1 (sibling of v2).
+    """
+
+    component_yaml = SUPERFORCASTER_POLYMARKET_V3_CONFIG
     prompts = [PREDICTION_PROMPT]
 
 

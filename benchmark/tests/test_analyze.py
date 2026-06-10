@@ -1820,12 +1820,12 @@ class TestToolLineage:
 
     def test_lineage_root_is_cycle_safe(self) -> None:
         """A malformed cyclic ledger terminates instead of looping."""
-        parents = {"x": "y", "y": "x"}
+        parents: dict[str, str | None] = {"x": "y", "y": "x"}
         assert _lineage_root("x", parents) in {"x", "y"}
 
     def test_load_tool_lineage_fails_open_on_missing_file(self, tmp_path: Any) -> None:
         """A missing ledger fails open to an empty map."""
-        assert load_tool_lineage(tmp_path / "absent.json") == {}
+        assert not load_tool_lineage(tmp_path / "absent.json")
 
     def test_load_tool_lineage_parses_parents(self, tmp_path: Any) -> None:
         """A well-formed ledger yields the tool -> parent map."""
@@ -1849,7 +1849,7 @@ class TestToolLineage:
         """Malformed JSON fails open to an empty map."""
         path = tmp_path / "tool_lineage.json"
         path.write_text("not-json")
-        assert load_tool_lineage(path) == {}
+        assert not load_tool_lineage(path)
 
 
 class TestPromotionDemotion:

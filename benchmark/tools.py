@@ -87,6 +87,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "packages.valory.customs.superforcaster_polymarket_v2"
             ".superforcaster_polymarket_v2"
         ),
+        family="superforcaster",
     ),
     # napthaai/prediction_request_reasoning
     "prediction-request-reasoning": ToolSpec(

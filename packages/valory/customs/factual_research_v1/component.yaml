@@ -1,0 +1,38 @@
+name: factual_research_v1
+author: valory
+version: 0.1.0
+type: custom
+description: 'A tool for making binary predictions on markets. Returns the standard
+  mech prediction output (p_yes, p_no, confidence, info_utility). Variant of factual_research
+  that adds an as-of-date freshness guard at the estimate stage: it date-stamps every
+  figure in the briefing, flags prior-period figures as stale, and projects a not-yet-reported
+  resolving metric forward from the latest baseline instead of anchoring on the stale
+  figure - addressing the stale-figure overconfidence on earnings/revenue-threshold
+  markets reported in issue #314.'
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
+  factual_research_v1.py: bafybeifmp4aqi6q7g7d2plufplscl4dujehsdrllpfxcw56zbmn34ystry
+  tests/__init__.py: bafybeibu5izhcixkot5uv2k6uwj736qcpvdbepyk2ardyrhhc6vmhvgwnu
+  tests/test_factual_research.py: bafybeiamkm2aassfi6ui3lz4kbehoefigikxmwlsywv7iwfcesbvxj4nq4
+fingerprint_ignore_patterns: []
+entry_point: factual_research_v1.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

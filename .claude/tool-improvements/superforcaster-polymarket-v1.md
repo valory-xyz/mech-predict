@@ -3,6 +3,7 @@
 - **Trigger:** regression on `polymarket` W-1 (`2026-06-02T04:17:54Z` -> `2026-06-09T04:17:54Z`); headline Brier `0.2323` (n=656) vs W-2 `0.1470` (n=222) (delta +0.0853); trigger=`regression`.
 - **PR:** branch `tool-improvement/superforcaster-polymarket-v2-criterion-specificity`.
 - **Status:** draft PR opened (path a).
+- **Revision 2026-06-10:** CI-fix — added `family="superforcaster"` to `superforcaster-polymarket-v2` `ToolSpec` in `benchmark/tools.py`. `ToolSpec.family` became a required field (no default) after a repo update; the PR was missing it, causing a `TypeError` at import time in the Enrich dataset step (run 27252299875 / job 80479168011). Fix was present on branch as commit `aad9d158` before agent run; agent posted explanatory comment #4666451627.
 
 ### Confirmed hypothesis
 

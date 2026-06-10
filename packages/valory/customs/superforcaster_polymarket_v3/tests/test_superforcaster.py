@@ -583,8 +583,17 @@ class TestV3WithKeyRotationAnthropic:
         ):
             fake(api_keys=keys)
 
-    def test_missing_anthropic_key_in_max_retries_does_not_crash(self) -> None:
-        """Older KeyChain.max_retries() without ``anthropic`` doesn't crash on lookup."""
+    def test_missing_anthropic_in_retries_left_does_not_crash_rotation(self) -> None:
+        """Older ``max_retries()`` without ``anthropic`` doesn't crash the rotation lookup.
+
+        Scoped to the rotation path's ``retries_left`` lookup ONLY. The
+        production-path ``KeyError: 'anthropic'`` from a v1-era keychain
+        actually fires earlier in ``LLMClient.__init__`` (where
+        ``self.api_keys["anthropic"]`` runs before any rotation). That
+        construction-time path is tracked separately in #345 (it would
+        need a real client init test); this test just pins that the
+        ``setdefault`` guard in the rotation decorator does its job.
+        """
         keys = _make_v3_api_keys()
         keys.max_retries = lambda: {"openai": 5, "openrouter": 5}
 
@@ -651,6 +660,13 @@ class TestV3RunEndToEnd:
         # (constructed LLMClientManager with model="claude-fable-5").
         construct_call = MockManager.call_args
         assert construct_call.args[1] == "claude-fable-5"
+        # Regression for the 4096-default bug: run() must forward
+        # max_tokens=4096 on the Anthropic branch (NOT the OpenAI default
+        # of 500 that v1's settings hard-coded). Without this guard the
+        # ``or 4096`` fallback in LLMClient.completions() resolves to
+        # ``500 or 4096 -> 500`` and fable-5 truncates almost every call.
+        completions_call = mock_llm_client.completions.call_args
+        assert completions_call.kwargs.get("max_tokens") == 4096
 
     def test_run_with_unknown_model_returns_allowed_models_error(self) -> None:
         """``model`` outside ``ALLOWED_MODELS`` produces a clean error tuple, not an SDK error.

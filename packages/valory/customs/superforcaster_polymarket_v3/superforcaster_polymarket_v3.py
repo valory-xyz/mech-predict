@@ -82,7 +82,8 @@ DEFAULT_DELIVERY_RATE = 100
 # Anthropic exception classes the rotation branch treats as recoverable.
 # Used only by ``isinstance(e, _ANTHROPIC_ERRORS)`` to decide which pool to
 # rotate; the ``except`` clause itself lists all classes inline so mypy can
-# verify they're BaseException subclasses (a tuple alias triggers misc/B030).
+# verify they're BaseException subclasses (a non-literal tuple in except
+# triggers mypy [misc] AND flake8-bugbear B030 — two separate rules).
 _ANTHROPIC_ERRORS = (anthropic.RateLimitError,)
 
 
@@ -619,7 +620,16 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
     with LLMClientManager(kwargs["api_keys"], model) as llm_client:
-        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
+        # Provider-aware default: claude-fable-5's ThinkingBlock shares the
+        # max_tokens budget with the JSON output, so v1's OpenAI default
+        # of 500 truncates almost every response. Use 4096 on the Anthropic
+        # branch so the fallback in LLMClient.completions() can fire.
+        default_max_tokens = (
+            4096
+            if _provider_for(model) == "anthropic"
+            else DEFAULT_OPENAI_SETTINGS["max_tokens"]
+        )
+        max_tokens = kwargs.get("max_tokens", default_max_tokens)
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 

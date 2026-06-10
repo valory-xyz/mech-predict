@@ -91,16 +91,12 @@ class TestLLMClientManager:
 
             def create_and_record(key_suffix: str) -> None:
                 mock_keys: Any = {"openai": f"sk-{key_suffix}"}
-                mgr = LLMClientManager(
-                    api_keys=mock_keys, model="gpt-4o-2024-08-06"
-                )
+                mgr = LLMClientManager(api_keys=mock_keys, model="gpt-4o-2024-08-06")
                 with mgr as client:
                     clients_seen.append(id(client))
 
             with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [
-                    pool.submit(create_and_record, s) for s in ("a", "b")
-                ]
+                futures = [pool.submit(create_and_record, s) for s in ("a", "b")]
                 for f in as_completed(futures):
                     f.result()
 

@@ -46,6 +46,10 @@
       "parent": "factual_research-v1",
       "reason": "For Polymarket markets, read the resolution rules the trader forwards in request_context['description'] (trader PR #989) and inject them into the reframe and estimate stages (rules only, no prices; the tool never fetches)."
     },
+    "factual_research-v3": {
+      "parent": "factual_research-v2",
+      "reason": "Swap the LLM backend from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5 via JSON-schema prompt injection + Pydantic model_validate_json on the response (the Anthropic SDK's forced-tool-use mechanism is NOT used). Same prompts, pipeline order, Polymarket resolution-rules handling, and guardrails as v2 — one-axis change to measure the model's contribution to the v2 baseline."
+    },
     "gemini-2.0-flash": {
       "parent": null,
       "reason": "Original tool, baseline entry."

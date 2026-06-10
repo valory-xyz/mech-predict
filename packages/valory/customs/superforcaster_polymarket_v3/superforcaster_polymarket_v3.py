@@ -74,9 +74,31 @@ N_MODEL_CALLS = 1
 DEFAULT_DELIVERY_RATE = 100
 
 
+# Anthropic exception classes the rotation branch treats as recoverable.
+# Used only by ``isinstance(e, _ANTHROPIC_ERRORS)`` to decide which pool to
+# rotate; the ``except`` clause itself lists all classes inline so mypy can
+# verify they're BaseException subclasses (a tuple alias triggers misc/B030).
+_ANTHROPIC_ERRORS = (anthropic.RateLimitError,)
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
-    Decorator that retries a function with API key rotation on failure.
+    Decorator that retries on rate limits and wraps anything else as a result.
+
+    Catches ``openai.RateLimitError`` and ``anthropic.RateLimitError`` ONLY and
+    rotates the failing provider's key pool. Any other exception (including
+    ``openai.AuthenticationError`` / ``PermissionDeniedError``,
+    ``anthropic.AuthenticationError`` / ``BadRequestError``, and
+    ``KeyError: 'anthropic'`` from a keychain that pre-dates v3) is wrapped
+    into a result tuple by the bare ``except Exception`` branch — see the
+    deployment note below.
+
+    Deployment note: this tool requires both ``openai`` and ``anthropic``
+    keys to be present in the KeyChain. A keychain provisioned only for v1
+    will raise ``KeyError: 'anthropic'`` on the dispatch path and produce a
+    result whose first element is the string ``"'anthropic'"``, NOT a valid
+    prediction JSON. Mech deployments updating from v1 must add the
+    anthropic key.
 
     :param func: The function to be decorated.
     :type func: Callable
@@ -89,31 +111,42 @@ def with_key_rotation(func: Callable) -> Callable:
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
+        # Older KeyChain.max_retries() implementations may not include an
+        # ``anthropic`` entry; default to 0 so we don't crash on lookup but
+        # still allow OpenAI-side rotation to proceed normally.
+        retries_left.setdefault("anthropic", 0)
+        retries_left.setdefault("openai", 0)
+        retries_left.setdefault("openrouter", 0)
 
         def execute() -> MechResponseWithKeys:
             """Retry the function with a new key."""
             try:
                 result: MechResponse = func(*args, **kwargs)
                 return result + (api_keys,)
-            except (openai.RateLimitError, anthropic.RateLimitError) as e:
-                # Try with a new key again. Rotate whichever pool has retries
-                # left so we degrade gracefully when the active provider is
-                # rate-limited but the other still has slack.
-                openai_exhausted = (
-                    retries_left.get("openai", 0) <= 0
-                    and retries_left.get("openrouter", 0) <= 0
-                )
-                anthropic_exhausted = retries_left.get("anthropic", 0) <= 0
-                if openai_exhausted and anthropic_exhausted:
-                    raise e
-                if not openai_exhausted:
-                    retries_left["openai"] -= 1
-                    retries_left["openrouter"] -= 1
-                    api_keys.rotate("openai")
-                    api_keys.rotate("openrouter")
-                if not anthropic_exhausted:
+            except (
+                openai.RateLimitError,
+                anthropic.RateLimitError,
+            ) as e:
+                # Provider-gated rotation: rotate ONLY the pool that actually
+                # failed. Rotating the other provider's keys on an error it
+                # didn't cause would burn its retry budget for nothing and
+                # trigger an early "all exhausted" re-raise under sustained
+                # one-provider rate limiting.
+                if isinstance(e, _ANTHROPIC_ERRORS):
+                    if retries_left["anthropic"] <= 0:
+                        raise e
                     retries_left["anthropic"] -= 1
                     api_keys.rotate("anthropic")
+                    return execute()
+                # OpenAI / OpenRouter branch.
+                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                    raise e
+                if retries_left["openai"] > 0:
+                    retries_left["openai"] -= 1
+                    api_keys.rotate("openai")
+                if retries_left["openrouter"] > 0:
+                    retries_left["openrouter"] -= 1
+                    api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
                 return str(e), "", None, None, None, api_keys
@@ -205,7 +238,7 @@ class LLMClient:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         stop: Any = None,
-        max_tokens: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[OpenAIResponse]:
         """Generate a completion.
 
@@ -223,7 +256,16 @@ class LLMClient:
         :param top_p: nucleus-sampling cap (OpenAI branch only).
         :param n: number of completions (OpenAI branch only; pinned to 1).
         :param stop: stop sequence (OpenAI branch only).
-        :param max_tokens: cap on generated tokens.
+        :param max_tokens: cap on generated tokens. On the Anthropic
+            branch this defaults to 4096 (not the v1 OpenAI default of
+            500) because claude-fable-5's ``ThinkingBlock`` shares the
+            ``max_tokens`` budget with the JSON output — small caps
+            routinely truncate the response.
+        :raises ValueError: on the Anthropic branch when the response is
+            truncated (``stop_reason == "max_tokens"``) or has no
+            ``TextBlock``. Both conditions previously returned ``None``
+            content (or partial JSON) silently and bypassed the caller's
+            retry loop.
         :return: ``OpenAIResponse`` carrying ``.content`` (text) and
             ``.usage`` (prompt/completion-token counts).
         """
@@ -238,10 +280,17 @@ class LLMClient:
                     system_parts.append(msg["content"])
                 else:
                     user_assistant.append(msg)
+            # ``max_tokens`` default lifted from 500 -> 4096 on the
+            # Anthropic branch. claude-fable-5 is adaptive-thinking; the
+            # ``ThinkingBlock`` shares the ``max_tokens`` budget with the
+            # JSON output, so v1's OpenAI default of 500 truncates almost
+            # every response (the truncation is invisible: either
+            # ``text_block is None`` or partial JSON like ``{"p_yes": 0.6``).
+            anthropic_max_tokens = max_tokens or 4096
             kwargs: Dict[str, Any] = {
                 "model": model,
                 "messages": user_assistant,
-                "max_tokens": max_tokens or 500,
+                "max_tokens": anthropic_max_tokens,
                 "timeout": 150,
             }
             if system_parts:
@@ -253,13 +302,38 @@ class LLMClient:
             if temperature is not None and temperature != 0:
                 kwargs["temperature"] = temperature
             resp = self.client.messages.create(**kwargs)
+            # Truncation guard: if the model hit max_tokens we MUST raise
+            # so the caller's retry loop engages. Without this a truncation
+            # that lands on syntactically valid JSON parses as success with
+            # incomplete reasoning, and one that doesn't returns None text
+            # silently. Both flow on-chain with no error signal.
+            if resp.stop_reason == "max_tokens":
+                text_len = sum(
+                    len(b.text)
+                    for b in resp.content
+                    if getattr(b, "type", None) == "text"
+                )
+                raise ValueError(
+                    f"Response truncated (stop_reason='max_tokens', "
+                    f"max_tokens={anthropic_max_tokens}, text_len={text_len}); "
+                    f"raise max_tokens for this call site"
+                )
             # Pick the first TextBlock; adaptive-thinking models emit a
             # ``ThinkingBlock`` before the ``TextBlock`` which we skip.
             text_block = next(
                 (b for b in resp.content if getattr(b, "type", None) == "text"),
                 None,
             )
-            response.content = text_block.text if text_block is not None else None
+            # If there's no TextBlock at all (thinking-only response, or
+            # an unexpected content shape), we must raise — returning None
+            # would silently propagate to the caller and bypass retry.
+            if text_block is None:
+                raise ValueError(
+                    f"Model emitted no text block; stop_reason="
+                    f"{resp.stop_reason!r}, content_types="
+                    f"{[getattr(b, 'type', None) for b in resp.content]!r}"
+                )
+            response.content = text_block.text
             response.usage.prompt_tokens = resp.usage.input_tokens
             response.usage.completion_tokens = resp.usage.output_tokens
             return response
@@ -419,6 +493,12 @@ def generate_prediction_with_retry(
                 )
 
             content = response.content if response else None
+            # Empty content must engage the retry loop, NOT return None
+            # as the prediction. The Anthropic branch can produce this
+            # state if a future code path stops raising on missing-text
+            # (today the LLMClient raises in that case); guard here too.
+            if content is None:
+                raise ValueError("LLM returned empty content")
             return content, counter_callback
         except Exception as e:
             print(f"Attempt {attempt + 1} failed with error: {e}")
@@ -496,6 +576,14 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     model = kwargs.get("model")
     if model is None:
         raise ValueError("Model not supplied.")
+    if model not in ALLOWED_MODELS:
+        # With two SDKs a typo'd model string routes through
+        # ``_provider_for()`` to the wrong client and fails deep in the
+        # retry loop with an opaque SDK error. Enforce the allow-list
+        # here so the wire-name error is unambiguous.
+        raise ValueError(
+            f"Model {model!r} is not in ALLOWED_MODELS={ALLOWED_MODELS!r}."
+        )
 
     delivery_rate = int(kwargs.get("delivery_rate", DEFAULT_DELIVERY_RATE))
     counter_callback: Optional[Callable[..., Any]] = kwargs.get(

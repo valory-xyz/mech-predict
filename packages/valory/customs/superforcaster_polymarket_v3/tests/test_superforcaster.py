@@ -17,11 +17,22 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for superforcaster: thread-safe client, offline tiktoken, and source_content."""
+"""Unit tests for superforcaster_polymarket v3.
+
+The first half of this file (``TestOpenAIClientManager``,
+``TestSuperforcasterSourceContent``) imports from v1 and intentionally
+re-validates v1's surface — v3 is a one-axis swap of v1, so any
+regression in the shared code surfaces here. v3-only behaviour
+(``LLMClientManager`` dispatch by model name, the Anthropic branch of
+``LLMClient.completions``, the key-rotation decorator's anthropic
+branch, the v3 ``run()`` end-to-end) is exercised by the classes after
+the ``# v3-specific tests`` divider.
+"""
 
 import inspect
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -292,3 +303,370 @@ class TestV3LLMClientManager:
     def test_allowed_tools_targets_v3(self) -> None:
         """The wire-name for this variant is superforcaster-polymarket-v3."""
         assert ALLOWED_TOOLS == ["superforcaster-polymarket-v3"]
+
+
+def _make_anthropic_text_response(
+    text: str,
+    *,
+    stop_reason: str = "end_turn",
+    input_tokens: int = 7,
+    output_tokens: int = 13,
+) -> MagicMock:
+    """Build a mock anthropic ``Messages.create`` response.
+
+    Shapes the response like the real ``anthropic.types.Message``: a
+    ``content`` list of blocks (where each has a ``type`` and either
+    ``text`` or thinking content), ``stop_reason``, and ``usage`` with
+    ``input_tokens`` / ``output_tokens``.
+
+    :param text: the JSON string the TextBlock returns.
+    :param stop_reason: ``"end_turn"`` (normal), ``"max_tokens"`` (trip
+        the truncation guard), ``"refusal"``, etc.
+    :param input_tokens: input token count for the usage block.
+    :param output_tokens: output token count for the usage block.
+    :return: a MagicMock shaped like ``anthropic.types.Message``.
+    """
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = text
+    response = MagicMock()
+    response.content = [text_block]
+    response.stop_reason = stop_reason
+    response.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return response
+
+
+def _make_anthropic_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an anthropic APIStatusError-family exception for tests.
+
+    Skips the real constructor (which requires a live httpx.Response) and
+    sets up just the attributes the decorator under test touches.
+
+    :param cls: the anthropic exception subclass to instantiate.
+    :param message: the `str(exc)` payload.
+    :return: an instance of `cls` usable as a raise target in tests.
+    """
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+class TestV3LLMClientAnthropicCompletions:
+    """Coverage for the Anthropic branch of ``LLMClient.completions``.
+
+    The class above (``TestV3LLMClientManager``) covers dispatch wiring
+    only. These tests pin the Anthropic-side contract end-to-end:
+
+    - ``system`` messages are extracted out of the list and joined.
+    - ``temperature=0`` is NOT forwarded (fable-5 returns 400 on it).
+    - ``max_tokens`` defaults to 4096 on the Anthropic branch (not v1's
+      OpenAI default of 500 — that truncated almost every fable-5 call).
+    - ``stop_reason == "max_tokens"`` raises ValueError so the caller's
+      retry loop engages instead of returning truncated JSON silently.
+    - No ``TextBlock`` raises ValueError for the same reason.
+    - ``ThinkingBlock`` is skipped — only the first ``TextBlock`` parses.
+    - ``counter_callback`` receives the Anthropic ``input_tokens`` /
+      ``output_tokens`` attribute names, NOT OpenAI's
+      ``prompt_tokens`` / ``completion_tokens``.
+    """
+
+    @staticmethod
+    def _client_with_anthropic_response(resp: Any) -> LLMClient:
+        """Build a v3 LLMClient with a mocked anthropic.Anthropic backing."""
+        with patch(f"{v3_module.__name__}.Anthropic") as MockAnthropic:
+            mock_instance = MagicMock()
+            mock_instance.messages.create.return_value = resp
+            MockAnthropic.return_value = mock_instance
+            client = LLMClient(api_keys=_make_v3_api_keys(), model="claude-fable-5")
+        return client
+
+    def test_extracts_system_messages_out(self) -> None:
+        """``system`` entries are joined and passed via ``system=``, not ``messages=``."""
+        client = self._client_with_anthropic_response(
+            _make_anthropic_text_response('{"p_yes": 0.5}')
+        )
+        client.completions(
+            model="claude-fable-5",
+            messages=[
+                {"role": "system", "content": "SYS-A"},
+                {"role": "user", "content": "U1"},
+                {"role": "system", "content": "SYS-B"},
+            ],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == "SYS-A\n\nSYS-B"
+        assert kwargs["messages"] == [{"role": "user", "content": "U1"}]
+
+    def test_temperature_zero_not_forwarded(self) -> None:
+        """``temperature=0`` is dropped (fable-5 rejects it with HTTP 400)."""
+        client = self._client_with_anthropic_response(
+            _make_anthropic_text_response('{"p_yes": 0.5}')
+        )
+        client.completions(
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            temperature=0,
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert "temperature" not in kwargs
+
+    def test_default_max_tokens_is_4096_on_anthropic_branch(self) -> None:
+        """Default ``max_tokens`` is 4096 on the Anthropic branch, not v1's 500."""
+        client = self._client_with_anthropic_response(
+            _make_anthropic_text_response('{"p_yes": 0.5}')
+        )
+        client.completions(
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            # max_tokens not supplied → expect 4096 default.
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["max_tokens"] == 4096
+
+    def test_max_tokens_truncation_raises(self) -> None:
+        """``stop_reason == "max_tokens"`` raises so the retry loop engages."""
+        client = self._client_with_anthropic_response(
+            _make_anthropic_text_response('{"p_yes": 0.5', stop_reason="max_tokens")
+        )
+        with pytest.raises(ValueError, match="Response truncated"):
+            client.completions(
+                model="claude-fable-5",
+                messages=[{"role": "user", "content": "U1"}],
+                max_tokens=10,
+            )
+
+    def test_no_text_block_raises(self) -> None:
+        """A response with no ``TextBlock`` raises so retry engages."""
+        thinking_block = MagicMock()
+        thinking_block.type = "thinking"
+        thinking_block.thinking = "internal monologue only"
+        resp = MagicMock()
+        resp.content = [thinking_block]
+        resp.stop_reason = "end_turn"
+        resp.usage = MagicMock(input_tokens=5, output_tokens=10)
+        client = self._client_with_anthropic_response(resp)
+        with pytest.raises(ValueError, match="no text block"):
+            client.completions(
+                model="claude-fable-5",
+                messages=[{"role": "user", "content": "U1"}],
+            )
+
+    def test_thinking_block_is_skipped(self) -> None:
+        """A ThinkingBlock-then-TextBlock response returns the TextBlock text."""
+        thinking_block = MagicMock()
+        thinking_block.type = "thinking"
+        thinking_block.thinking = "internal monologue"
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = '{"p_yes": 0.7, "p_no": 0.3}'
+        resp = MagicMock()
+        resp.content = [thinking_block, text_block]
+        resp.stop_reason = "end_turn"
+        resp.usage = MagicMock(input_tokens=5, output_tokens=10)
+        client = self._client_with_anthropic_response(resp)
+        result = client.completions(
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        assert result is not None
+        assert result.content == '{"p_yes": 0.7, "p_no": 0.3}'
+
+    def test_usage_uses_anthropic_token_names(self) -> None:
+        """``usage.prompt_tokens``/``completion_tokens`` come from Anthropic's ``input_tokens``/``output_tokens``."""
+        client = self._client_with_anthropic_response(
+            _make_anthropic_text_response(
+                '{"p_yes": 0.5}', input_tokens=111, output_tokens=222
+            )
+        )
+        result = client.completions(
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        assert result is not None
+        assert result.usage.prompt_tokens == 111
+        assert result.usage.completion_tokens == 222
+
+
+class TestV3WithKeyRotationAnthropic:
+    """Anthropic-side coverage for v3's ``@with_key_rotation`` decorator.
+
+    The existing OpenAI-only rotation tests on the v1-inherited test
+    surface don't exercise the v3 dispatch. These pin:
+
+    - ``anthropic.RateLimitError`` rotates ONLY the anthropic pool (not
+      openai/openrouter), regressing the cross-pool waste bug.
+    - An ``openai.RateLimitError`` doesn't burn anthropic budget.
+    - Anthropic-pool exhausted re-raises so the framework marks the
+      task failed.
+    - Older keychains without an ``anthropic`` entry don't crash on
+      dict lookup; the call re-raises cleanly.
+    """
+
+    def test_rotates_anthropic_pool_on_rate_limit(self) -> None:
+        """``anthropic.RateLimitError`` rotates ONLY the anthropic key."""
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": 1,
+        }
+        keys.rotate = MagicMock()
+        call_count = {"n": 0}
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _make_anthropic_error(
+                    v3_module.anthropic.RateLimitError, "anthropic-burst"
+                )
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert call_count["n"] == 2
+        rotated_services = [c.args[0] for c in keys.rotate.call_args_list]
+        assert rotated_services == ["anthropic"]
+        assert result[-1] is keys
+
+    def test_openai_error_does_not_burn_anthropic_budget(self) -> None:
+        """Cross-pool isolation — an openai error leaves anthropic budget intact."""
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 1,
+            "openrouter": 1,
+            "anthropic": 1,
+        }
+        keys.rotate = MagicMock()
+        call_count = {"n": 0}
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First failure: openai-side rate limit. anthropic budget
+                # must still be 1 after this.
+                raise _make_anthropic_error(
+                    v3_module.openai.RateLimitError, "openai-burst"
+                )
+            if call_count["n"] == 2:
+                # Second failure: anthropic-side. Must be able to rotate
+                # the anthropic key because the budget wasn't burned.
+                raise _make_anthropic_error(
+                    v3_module.anthropic.RateLimitError, "anthropic-burst"
+                )
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert call_count["n"] == 3
+        rotated_services = [c.args[0] for c in keys.rotate.call_args_list]
+        assert rotated_services == ["openai", "openrouter", "anthropic"]
+        assert result[-1] is keys
+
+    def test_anthropic_pool_exhausted_raises(self) -> None:
+        """When the anthropic pool is exhausted, the error re-raises."""
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": 0,
+        }
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                v3_module.anthropic.RateLimitError, "anthropic-burned"
+            )
+
+        with pytest.raises(
+            v3_module.anthropic.RateLimitError, match="anthropic-burned"
+        ):
+            fake(api_keys=keys)
+
+    def test_missing_anthropic_key_in_max_retries_does_not_crash(self) -> None:
+        """Older KeyChain.max_retries() without ``anthropic`` doesn't crash on lookup."""
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {"openai": 5, "openrouter": 5}
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                v3_module.anthropic.RateLimitError, "anthropic-burst"
+            )
+
+        with pytest.raises(v3_module.anthropic.RateLimitError, match="anthropic-burst"):
+            fake(api_keys=keys)
+
+
+class TestV3RunEndToEnd:
+    """End-to-end ``run()`` smoke tests on v3 with ``claude-fable-5``.
+
+    The v1-inherited tests above never call v3's ``run()`` with the new
+    default model, so a wrong-API-key wiring bug would ship undetected.
+    These tests patch ``LLMClientManager`` to a static prediction-JSON
+    return and verify ``run()`` produces a valid prediction with both
+    ``model="claude-fable-5"`` and the ALLOWED_MODELS enforcement.
+    """
+
+    PREDICTION_JSON = (
+        '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.6}'
+    )
+
+    def test_run_with_claude_fable_5_returns_valid_prediction(self) -> None:
+        """``run(model="claude-fable-5", …)`` produces a valid prediction JSON."""
+        prompt = (
+            'With the given question "Will X happen?" and the `yes` option '
+            "represented by `Yes` and the `no` option represented by `No`, "
+            "what are the respective probabilities of `p_yes` and `p_no`?"
+        )
+
+        mock_response = MagicMock()
+        mock_response.content = self.PREDICTION_JSON
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=20)
+
+        with (
+            patch(f"{v3_module.__name__}.LLMClientManager") as MockManager,
+            patch(f"{v3_module.__name__}.fetch_additional_sources") as MockFetchSources,
+        ):
+            mock_llm_client = MagicMock()
+            mock_llm_client.completions.return_value = mock_response
+            MockManager.return_value.__enter__.return_value = mock_llm_client
+            MockManager.return_value.__exit__.return_value = None
+            MockFetchSources.return_value = MagicMock(
+                json=MagicMock(return_value={"organic": []})
+            )
+
+            result = v3_module.run(
+                tool="superforcaster-polymarket-v3",
+                model="claude-fable-5",
+                prompt=prompt,
+                api_keys=_make_v3_api_keys(),
+                delivery_rate=10000,
+            )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.6
+        assert parsed["confidence"] == 0.8
+        # Verify the dispatcher actually selected the anthropic branch
+        # (constructed LLMClientManager with model="claude-fable-5").
+        construct_call = MockManager.call_args
+        assert construct_call.args[1] == "claude-fable-5"
+
+    def test_run_with_unknown_model_returns_allowed_models_error(self) -> None:
+        """``model`` outside ``ALLOWED_MODELS`` produces a clean error tuple, not an SDK error.
+
+        ``@with_key_rotation`` catches the inner ``ValueError`` and wraps it
+        into the standard mech response tuple, so we assert on the first
+        element rather than ``pytest.raises``. Without the ALLOWED_MODELS
+        guard the failure would surface deep in the SDK with an opaque
+        error string like ``model: claude-typo-3 not found``.
+        """
+        result = v3_module.run(
+            tool="superforcaster-polymarket-v3",
+            model="claude-typo-3",
+            prompt="P",
+            api_keys=_make_v3_api_keys(),
+            delivery_rate=10000,
+        )
+        assert "ALLOWED_MODELS" in result[0]
+        assert "claude-typo-3" in result[0]

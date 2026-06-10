@@ -1766,12 +1766,10 @@ class TestTournamentCallouts:
 
 
 def _score_cells(mode: str, da: float, bss: float, *cells: tuple) -> dict[str, Any]:
-    """Build a scores dict from (tool, cid, brier, n[, log_loss]) cells.
-
-    Shared by the production and tournament builders so a field added to
-    one cannot silently diverge from the other; the two differ only in the
-    ``mode`` key and the diagnostic stand-in values (``da``/``bss``).
-    """
+    """Build a scores dict from (tool, cid, brier, n[, log_loss]) cells."""
+    # Shared body for _prod_cells / _tourn_cells so a field added to one
+    # cannot silently diverge from the other; they differ only in mode and
+    # the diagnostic stand-ins (da/bss).
     tvm: dict[str, Any] = {}
     total = 0
     for c in cells:

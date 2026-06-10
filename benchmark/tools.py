@@ -126,6 +126,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module="packages.valory.customs.factual_research_v2.factual_research_v2",
         family="factual_research",
     ),
+    # valory/factual_research_v3 — same prompts + Polymarket-rules pipeline as
+    # v2, swaps the LLM backend from OpenAI gpt-4.1 to Anthropic claude-fable-5
+    # via forced tool-use structured output. Family unchanged (parent +
+    # siblings share the same ESTIMATE_USER / REFRAME_USER / SYNTHESIS_USER
+    # templates and resolution_rules kwarg).
+    "factual_research-v3": ToolSpec(
+        module="packages.valory.customs.factual_research_v3.factual_research_v3",
+        family="factual_research",
+    ),
     # nickcom007/prediction_request_sme — default schema: PREDICTION_PROMPT uses
     # {user_prompt}/{additional_information} and the module exports no
     # SYSTEM_PROMPT_FORECASTER. (It is NOT superforcaster-shaped despite

@@ -1,0 +1,41 @@
+name: factual_research_v3
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Returns the standard
+  mech prediction output (p_yes, p_no, confidence, info_utility). Variant of factual_research-v2
+  that swaps the default LLM model from OpenAI gpt-4.1 to Anthropic claude-fable-5
+  while keeping every other v2 behaviour intact (prompts, pipeline order, Polymarket
+  resolution-rules handling, hard guardrails). The OpenAI fallback path is preserved
+  so the tool can still serve the older model when requested. Follows the dual-SDK
+  convention every other claude-using tool in this repo uses (prediction_request,
+  prediction_request_rag, prediction_request_reasoning, prediction_url_cot).
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
+  factual_research_v3.py: bafybeiejp6whcaqem4dppa52wcur3n3wxwssydcyull6xqpsw2646ptpou
+  tests/__init__.py: bafybeibu5izhcixkot5uv2k6uwj736qcpvdbepyk2ardyrhhc6vmhvgwnu
+  tests/test_factual_research.py: bafybeidrcpkfw2nspo4i2phisbip73yyiw2mezmdauf2673uct3noarxaa
+fingerprint_ignore_patterns: []
+entry_point: factual_research_v3.py
+callable: run
+params:
+  default_model: claude-fable-5
+dependencies:
+  openai:
+    version: ==1.93.0
+  anthropic:
+    version: ==0.23.1
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

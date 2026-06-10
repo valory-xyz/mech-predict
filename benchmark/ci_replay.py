@@ -400,7 +400,7 @@ def format_report(
         parts.append("")
 
     # Footer
-    footer_parts = [f"{baseline['n']} markets"]
+    footer_parts = [f"{baseline['n']} deliveries"]
     if meta.get("seed"):
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):

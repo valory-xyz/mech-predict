@@ -1109,7 +1109,7 @@ def _log_replay_summary(
     :param candidate_path: path to the candidate JSONL file.
     :param baseline_brier_sum: sum of baseline Brier scores.
     :param candidate_brier_sum: sum of candidate Brier scores.
-    :param total: total number of markets.
+    :param total: total number of deliveries.
     :param n_scored: number of candidate predictions scored.
     :param baseline_path: path to the baseline JSONL file.
     :param status_counts: candidate ``prediction_parse_status`` bucket counts.
@@ -1139,7 +1139,7 @@ def _log_replay_summary(
     candidate_acc = candidate_correct / n_scored if n_scored else 0
 
     log.info("=" * 60)
-    log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
+    log.info("RESULTS: %d deliveries (%d candidate scored)", total, n_scored)
 
     # Parse reliability — baseline is always 100% (valid-only by enrich filter),
     # so this surfaces candidate drift only.

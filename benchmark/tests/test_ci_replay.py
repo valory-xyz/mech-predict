@@ -394,13 +394,13 @@ class TestFormatReportFooter:
         assert "@LOCKhart07" in footer
         assert "[@LOCKhart07]" not in footer
 
-    def test_footer_order_markets_seed_triggered_by(self) -> None:
-        """Footer parts stay in the existing order: markets → seed → triggered-by."""
+    def test_footer_order_deliveries_seed_triggered_by(self) -> None:
+        """Footer parts stay in the existing order: deliveries → seed → triggered-by."""
         report = self._report(
             seed="1337",
             triggered_by="LOCKhart07",
             trigger_comment_url="https://example.com/c",
         )
         footer = report.splitlines()[-1]
-        assert footer.index("markets") < footer.index("seed 1337")
+        assert footer.index("deliveries") < footer.index("seed 1337")
         assert footer.index("seed 1337") < footer.index("LOCKhart07")

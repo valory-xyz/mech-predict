@@ -479,6 +479,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -511,6 +512,22 @@ def generate_prediction_with_retry(
             if content is None:
                 raise ValueError("LLM returned empty content")
             return content, counter_callback
+        except (
+            openai.RateLimitError,
+            openai.AuthenticationError,
+            openai.PermissionDeniedError,
+            anthropic.RateLimitError,
+            anthropic.AuthenticationError,
+            anthropic.PermissionDeniedError,
+        ):
+            # SDK-level auth / rate-limit / permission errors must propagate
+            # to ``@with_key_rotation`` so the decorator can rotate the key
+            # or surface a meaningful error string. Retrying inside this
+            # loop just burns 3 attempts on the same condition and hides
+            # the real failure behind "Failed to generate prediction
+            # after retries". This is exactly the CI symptom we hit on
+            # claude-fable-5 (new model, key tier may not yet authorize it).
+            raise
         except Exception as e:
             # Don't retry deterministic truncation: ``stop_reason ==
             # 'max_tokens'`` won't recover on retry with the same budget,
@@ -519,10 +536,15 @@ def generate_prediction_with_retry(
             # failure.
             if "Response truncated" in str(e):
                 raise
+            last_error = e
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+    # Surface the last underlying error so the failure is diagnosable
+    # (was opaque "Failed to generate prediction after retries" before).
+    raise Exception(
+        f"Failed to generate prediction after retries; last error: {last_error}"
+    )
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:

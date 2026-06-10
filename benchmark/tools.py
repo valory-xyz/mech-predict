@@ -122,6 +122,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module="packages.valory.customs.factual_research.factual_research",
         family="factual_research",
     ),
+    # valory/factual_research_v1 — declares family="factual_research" (same as
+    # its parent) so prompt_replay dispatch reads the correct schema/regex pair.
+    "factual_research-v1": ToolSpec(
+        module="packages.valory.customs.factual_research_v1.factual_research_v1",
+        family="factual_research",
+    ),
     # nickcom007/prediction_request_sme — default schema: PREDICTION_PROMPT uses
     # {user_prompt}/{additional_information} and the module exports no
     # SYSTEM_PROMPT_FORECASTER. (It is NOT superforcaster-shaped despite

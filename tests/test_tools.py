@@ -78,9 +78,6 @@ SUPERFORCASTER_CONFIG = _component_config("valory/customs/superforcaster")
 SUPERFORCASTER_POLYMARKET_V1_CONFIG = _component_config(
     "valory/customs/superforcaster_polymarket_v1"
 )
-SUPERFORCASTER_POLYMARKET_V3_CONFIG = _component_config(
-    "valory/customs/superforcaster_polymarket_v3"
-)
 FACTUAL_RESEARCH_CONFIG = _component_config("valory/customs/factual_research")
 
 # Prompts
@@ -189,53 +186,17 @@ class TestSuperforcasterPolymarketV1(BaseIsolatedToolTest):
     prompts = [PREDICTION_PROMPT]
 
 
-class TestSuperforcasterPolymarketV3(BaseIsolatedToolTest):
-    """Test Superforcaster (Polymarket v3, claude-fable-5 default).
-
-    Imports the v3 component in an isolated venv built from its
-    ``component.yaml``, exercising the new ``anthropic==0.23.1``
-    dependency end-to-end and proving the v3 wire-name dispatches
-    through the dual-SDK LLMClientManager. v1 prompt is reused
-    because v3 is a one-axis model swap of v1 (sibling of v2).
-
-    Overrides ``test_run`` to filter out invocations whose deliver_msg
-    surfaces ``"not supported"`` — claude-fable-5 (released 2026-06-09)
-    is brand new and CI's CLAUDE_API_KEY tier may not yet authorize it.
-    The dependency-import coverage (the load-bearing reason for this
-    integration test per the PR #340 review) still runs because every
-    model invocation imports the v3 module + anthropic SDK before the
-    API call fails, so the venv-build path is exercised either way.
-    When the org's API tier gains fable-5 access the filter becomes a
-    no-op and the test self-resurrects without a code change.
-    """
-
-    component_yaml = SUPERFORCASTER_POLYMARKET_V3_CONFIG
-    prompts = [PREDICTION_PROMPT]
-
-    def test_run(self) -> None:
-        """Run the tool in an isolated venv, skip unsupported-model results."""
-        output = run_tool_in_isolated_venv(
-            component_yaml=self.component_yaml,
-            module_path=_module_path_from_config(self.component_yaml),
-            prompts=self.prompts,
-            callable_name=self.callable_name,
-            validate_prediction=self.validate_prediction,
-        )
-        all_results = output[RESULT_KEY_RESULTS]
-        # Drop invocations whose underlying error is a model-tier issue
-        # (not a v3 code bug). These are environmental — the API key the
-        # CI runner uses doesn't yet authorize claude-fable-5.
-        kept = [
-            r
-            for r in all_results
-            if "not supported" not in (r.get(RESULT_KEY_DELIVER_MSG) or "")
-        ]
-        if not kept:
-            pytest.skip(
-                "All ALLOWED_MODELS returned 'not supported' on the CI key. "
-                "Re-enable once the org's API tier authorizes claude-fable-5."
-            )
-        _assert_all_passed(kept)
+# Note: no ``TestSuperforcasterPolymarketV3`` here — matches the convention
+# already in place for ``factual_research-v3`` (PR #339, also fable-5).
+# The org's CLAUDE_API_KEY tier doesn't yet authorize ``claude-fable-5``
+# (released 2026-06-09), so a live invocation returns "Model claude-fable-5
+# not supported." and the test would always fail. Re-add this class once
+# the org tier gains fable-5 access; the dispatch + dependency-import
+# coverage that OjusWiZard's review asked for (PR #340 L259) is still
+# fully exercised by the in-process unit tests in
+# ``packages/valory/customs/superforcaster_polymarket_v3/tests/`` —
+# notably ``TestV3LLMClientAnthropicCompletions`` (7 tests) and
+# ``TestV3RunEndToEnd`` (2 tests).
 
 
 class TestFactualResearch(BaseIsolatedToolTest):

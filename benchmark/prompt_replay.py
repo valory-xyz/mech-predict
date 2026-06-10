@@ -42,7 +42,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
 import requests
@@ -76,6 +76,25 @@ log = logging.getLogger(__name__)
 HTTP_TIMEOUT = 60
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_MODEL = "gpt-4.1-2025-04-14"
+
+# Platforms a tool can serve; also the allowed values for ``enrich --platform``.
+PLATFORMS = ("omen", "polymarket")
+
+# Reject buckets that DROP a row and are rendered in the Pre-filter "Scoping"
+# breakdown. Every renderer iterates this tuple so the breakdown always sums to
+# the rejected total — adding a bucket here updates all three sites at once.
+# ``not_valid_parse`` is also a drop but is deliberately excluded: it is the
+# load-bearing parse-reliability invariant and gets its own marked line, so it
+# is rendered separately (never fold it in here). ``no_row_id`` is NOT a drop
+# (those rows are kept) — it is a separate diagnostic, so it is not listed here.
+SCOPING_BUCKETS = (
+    "duplicate",
+    "wrong_tool",
+    "wrong_platform",
+    "no_deliver_id",
+    "no_outcome",
+    "older_than_cutoff",
+)
 
 # Regex to extract user_prompt and additional_information from the old
 # formatted PREDICTION_PROMPT.  The old format uses triple-backtick fences.
@@ -470,13 +489,19 @@ def _load_and_filter_rows(
     production_log: Path,
     tool_filter: str,
     last_days: Optional[int],
-) -> Tuple[list[dict[str, Any]], Dict[str, int]]:
+    platform_filter: Optional[Literal["omen", "polymarket"]] = None,
+) -> Tuple[list[dict[str, Any]], Dict[str, int], int]:
     """Load production log and filter for valid rows.
+
+    Collapses cross-shard duplicates on ``row_id`` before filtering (see the
+    rejection-bucket comment below), so a multi-shard pool is safe to pass in.
 
     :param production_log: path to production_log.jsonl.
     :param tool_filter: tool name to filter for.
     :param last_days: only include rows from the last N days.
-    :return: (filtered rows, rejection counts per reason).
+    :param platform_filter: only include rows from this platform (default: all).
+    :return: (filtered rows, rejection counts per reason, no_row_id diagnostic
+        count of *kept* rows that lacked a row_id).
     """
     cutoff = None
     if last_days is not None:
@@ -487,14 +512,22 @@ def _load_and_filter_rows(
     # it is the invariant downstream Parse-reliability reporting depends on
     # (baseline is 100% valid by construction *because* these rows are dropped
     # here). If that invariant regresses, we want this count to make it loud.
-    rejected: Dict[str, int] = {
-        "wrong_tool": 0,
-        "no_deliver_id": 0,
-        "not_valid_parse": 0,
-        "no_outcome": 0,
-        "older_than_cutoff": 0,
-    }
+    # The "duplicate" bucket counts cross-shard repeats: the flywheel re-emits a
+    # delivery into multiple daily shards (per-shard dedup only; cross-day dedup
+    # is the consumer's job — the scorer does it globally by row_id, scorer.py).
+    # When this function reads a multi-shard pool, ~4% of rows repeat, so we
+    # collapse on row_id (the canonical identity key for production rows, derived
+    # from platform+deliver_id) keeping the FIRST occurrence. With the combine
+    # step feeding shards oldest-first, that is the oldest copy — the same order
+    # the scorer's rebuild() path uses (its incremental update() keeps whatever
+    # was scored first, which need not be the oldest).
+    rejected: Dict[str, int] = {k: 0 for k in (*SCOPING_BUCKETS, "not_valid_parse")}
+    # Diagnostic, NOT a drop: production rows always carry a row_id, so a nonzero
+    # count here means the flywheel schema regressed (and those rows silently
+    # bypassed dedup). Kept out of ``rejected`` so the rejected total stays exact.
+    no_row_id = 0
 
+    seen_row_ids: set[str] = set()
     rows: list[dict[str, Any]] = []
     with open(production_log, encoding="utf-8") as f:
         for line in f:
@@ -502,8 +535,22 @@ def _load_and_filter_rows(
             if not line:
                 continue
             row = json.loads(line)
+            # Dedup first, on the canonical row_id. Rows without a row_id (e.g.
+            # hand-built fixtures) can't be keyed, so they are never collapsed —
+            # only counted, so a row_id regression is visible.
+            row_id = row.get("row_id")
+            if row_id is None:
+                no_row_id += 1
+            elif row_id in seen_row_ids:
+                rejected["duplicate"] += 1
+                continue
+            else:
+                seen_row_ids.add(row_id)
             if row.get("tool_name") != tool_filter:
                 rejected["wrong_tool"] += 1
+                continue
+            if platform_filter is not None and row.get("platform") != platform_filter:
+                rejected["wrong_platform"] += 1
                 continue
             if not row.get("deliver_id"):
                 rejected["no_deliver_id"] += 1
@@ -522,7 +569,7 @@ def _load_and_filter_rows(
                         rejected["older_than_cutoff"] += 1
                         continue
             rows.append(row)
-    return rows, rejected
+    return rows, rejected, no_row_id
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +601,7 @@ def enrich(
     last_days: Optional[int] = None,
     sample_per_platform: Optional[int] = None,
     seed: int = 42,
+    platform_filter: Optional[Literal["omen", "polymarket"]] = None,
 ) -> None:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -566,22 +614,28 @@ def enrich(
     :param last_days: only include rows from the last N days.
     :param sample_per_platform: stratified sample N per platform before IPFS fetch.
     :param seed: random seed for sampling.
+    :param platform_filter: only include rows from this platform (default: all).
     """
-    rows, rejected = _load_and_filter_rows(production_log, tool_filter, last_days)
+    rows, rejected, no_row_id = _load_and_filter_rows(
+        production_log, tool_filter, last_days, platform_filter
+    )
     log.info(
         "Loaded %d %s rows with deliver_id + valid predictions + known outcome",
         len(rows),
         tool_filter,
     )
-    log.info(
-        "Pre-filter rejections: wrong_tool=%d no_deliver_id=%d "
-        "not_valid_parse=%d no_outcome=%d older_than_cutoff=%d",
-        rejected["wrong_tool"],
-        rejected["no_deliver_id"],
-        rejected["not_valid_parse"],
-        rejected["no_outcome"],
-        rejected["older_than_cutoff"],
+    # Render every drop bucket (Scoping set + not_valid_parse) so the line
+    # accounts for the full rejected total; no_row_id is a separate diagnostic.
+    rejections_str = " ".join(
+        f"{k}={rejected[k]}" for k in (*SCOPING_BUCKETS, "not_valid_parse")
     )
+    log.info("Pre-filter rejections: %s no_row_id=%d", rejections_str, no_row_id)
+    if no_row_id:
+        log.warning(
+            "%d kept rows lacked a row_id (expected 0 — flywheel schema "
+            "regression? these bypassed dedup)",
+            no_row_id,
+        )
 
     # Sidecar JSON carries the rejection counts into the replay + PR-comment
     # stages, where "baseline is 100% valid by construction" would otherwise be
@@ -590,7 +644,7 @@ def enrich(
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path.write_text(
         json.dumps(
-            {"accepted": len(rows), "rejected": rejected},
+            {"accepted": len(rows), "rejected": rejected, "no_row_id": no_row_id},
             indent=2,
         ),
         encoding="utf-8",
@@ -598,8 +652,8 @@ def enrich(
     log.info("Wrote filter stats: %s", stats_path)
 
     if not rows:
-        log.warning("No rows to enrich")
-        return
+        scope = f" [platform={platform_filter}]" if platform_filter else ""
+        raise SystemExit(f"0 rows for baseline {tool_filter!r}{scope} across the pool")
 
     # Stratified sample BEFORE IPFS fetch to avoid unnecessary downloads.
     if sample_per_platform is not None:
@@ -673,9 +727,15 @@ def stratified_sample(
 ) -> list[dict[str, Any]]:
     """Sample rows with stratification by platform, outcome, and Brier bucket.
 
-    Each platform gets ``sample_per_platform`` rows (50:50 platform split).
-    Within each platform, rows are grouped by (outcome, brier_bucket) and
-    sampled proportionally, ensuring at least 1 row per non-empty stratum.
+    Each platform gets up to ``sample_per_platform`` rows (50:50 platform
+    split). When the caller pre-filtered to a single platform (``enrich
+    --platform``), only that platform group survives, so the per-platform budget
+    is applied once — a ``--platform`` run draws ~``sample_per_platform`` rows,
+    not the ~2x of an all-platforms run. Within each platform, rows are grouped
+    by (outcome, brier_bucket) and sampled proportionally, ensuring at least 1
+    row per non-empty stratum — so when a platform has MORE non-empty strata
+    than the budget, the per-stratum floor wins and the count can slightly
+    exceed ``sample_per_platform`` (e.g. budget 5 over 6 strata → 6 rows).
 
     :param rows: list of row dicts with 'platform', 'final_outcome', 'p_yes'.
     :param sample_per_platform: max rows to sample per platform.
@@ -1074,7 +1134,7 @@ def _log_replay_summary(
     :param candidate_path: path to the candidate JSONL file.
     :param baseline_brier_sum: sum of baseline Brier scores.
     :param candidate_brier_sum: sum of candidate Brier scores.
-    :param total: total number of markets.
+    :param total: total number of deliveries.
     :param n_scored: number of candidate predictions scored.
     :param baseline_path: path to the baseline JSONL file.
     :param status_counts: candidate ``prediction_parse_status`` bucket counts.
@@ -1104,7 +1164,7 @@ def _log_replay_summary(
     candidate_acc = candidate_correct / n_scored if n_scored else 0
 
     log.info("=" * 60)
-    log.info("RESULTS: %d markets (%d candidate scored)", total, n_scored)
+    log.info("RESULTS: %d deliveries (%d candidate scored)", total, n_scored)
 
     # Parse reliability — baseline is always 100% (valid-only by enrich filter),
     # so this surfaces candidate drift only.
@@ -1141,17 +1201,17 @@ def _log_replay_summary(
     if filter_stats is not None:
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
+        # Scoping buckets + not_valid_parse make up the full rejected total;
+        # iterate SCOPING_BUCKETS so this can't drift out of sync.
+        breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (wrong_tool=%d, no_deliver_id=%d, "
-            "not_valid_parse=%d, no_outcome=%d, older_than_cutoff=%d)",
+            "    Accepted: %d   Rejected: %d (%s, not_valid_parse=%d)  no_row_id=%d",
             filter_stats.get("accepted", 0),
             total_rej,
-            r.get("wrong_tool", 0),
-            r.get("no_deliver_id", 0),
+            breakdown,
             r.get("not_valid_parse", 0),
-            r.get("no_outcome", 0),
-            r.get("older_than_cutoff", 0),
+            filter_stats.get("no_row_id", 0),
         )
 
     log.info(
@@ -1730,6 +1790,13 @@ def main() -> None:
         default=42,
         help="Random seed for stratified sampling (default: 42)",
     )
+    enrich_parser.add_argument(
+        "--platform",
+        type=str,
+        default=None,
+        choices=list(PLATFORMS),
+        help="Restrict to a single platform (default: all platforms)",
+    )
 
     # --- replay ---
     replay_parser = subparsers.add_parser(
@@ -1791,6 +1858,7 @@ def main() -> None:
             last_days=args.last_days,
             sample_per_platform=args.sample_per_platform,
             seed=args.seed,
+            platform_filter=args.platform,
         )
     elif args.command == "replay":
         replay(

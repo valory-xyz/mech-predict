@@ -95,7 +95,15 @@ Rules:
 - Only include rows where min(n_b, n_c) ≥ {VERSION_DELTA_LOW_SAMPLE_STRICT} and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
 - Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
 
-*Tournament callouts:* If the report has a "Tournament Callouts" section, list each callout as a single bullet: tool name, release-tag labels for both tournament and production versions (in backticks, e.g. `v0.17.2` and `v0.17.0`), tournament Brier + n, production Brier + n, Brier Δ. Lead promotion candidates with "promotion candidate:" and tournament regressions with "watch:". Tournament callouts are never sample-gated, so include every bullet — but if a bullet carries a `⚠ low data` marker, append " (low data, still accumulating)" to that bullet so the reader knows the sample is small and growing; never drop a low-data callout. Skip this section entirely only if no Tournament Callouts section is present in the report.
+*Tournament callouts:* REQUIRED — whenever the report contains a "## Tournament Callouts" heading you MUST output this section in full; never omit, shorten, or merge it, even when every row is a plain "candidate:" with no production comparison. (The ONLY time you skip it is when the report has no "## Tournament Callouts" heading at all.) The heading introduces a standings table of every active tournament candidate (one row per tool/version) with columns Tool, Version, n (resolved markets), Brier, BSS vs mkt, and vs Production. Output exactly ONE bullet per table row — never sample-gate, never drop a candidate. Choose each bullet's prefix by reading that row's "vs Production" cell:
+- 🟢 tag (tournament beats production) → "promotion candidate:" — give the tool, both version labels in backticks (tournament and production), tournament Brier + n, and production Brier + Δ.
+- 🔴 tag (tournament worse than production) → "watch:" — same fields.
+- any other cell ("— no prod baseline", "— no prod data", or "— rolled out") → "candidate:" — give the tool, version in backticks, Brier + n, and BSS vs mkt, then append the "vs Production" note verbatim so the reader knows why there is no Δ.
+Before writing, count the table's data rows (N) and output EXACTLY N bullets — one per row, none dropped or truncated. First scan ALL rows for 🟢/🔴 tags: those promotion/watch rows are the highest-value and must never be omitted, even when they sit at the bottom of the table (the table is sorted by Brier, so a 🟢 row can be last). Order: promotion candidates (🟢) first, then watches (🔴), then the remaining "candidate:" rows sorted by BSS vs mkt descending — this is a re-ordering of the table, not the table's own row order. If a row's n carries a `⚠` marker, keep the bullet and append " (low data, still accumulating)".
+
+Examples (copy this style exactly):
+• promotion candidate: `superforcaster` (tournament `v0.20.0` vs production `v0.18.2`) — tournament Brier `0.1847` (n=47) vs production `0.2832`, Δ `-0.0985` improved
+• candidate: `factual_research` `untagged@bafybeib` — Brier `0.0896` (n=34), BSS vs mkt `+0.285` — no prod data
 
 *Diagnostics:*
 If the report has a "Diagnostics Historical Comparison" section, for each tool that carries at least one row with a signed delta (not `insufficient data`, not `no prev window`), summarize up to two metrics with the largest movement. Use format: • `tool` — `metric` Current {ROLLING_WINDOW_DAYS}d `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`. Skip the section if no tool has a signed delta.
@@ -112,6 +120,7 @@ Rules:
 - Wrap tool names, Brier scores, and Edge scores in backticks.
 - Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
 - No greetings or preamble.
+- The *Tournament callouts:* section is mandatory whenever a "## Tournament Callouts" heading appears in the report — output one bullet per table row and never drop the section, even on short reports or when no row has a 🟢/🔴 production tag.
 - Edge over market: positive = tool beats market, negative = market beats tool. Read it as a system-level diagnostic — tools are still ranked by Brier.
 - "Accuracy" in the report means "Directional Accuracy" — it excludes predictions at exactly 0.5 (no signal).
 - Log Loss: like Brier but punishes confidently-wrong predictions harder.

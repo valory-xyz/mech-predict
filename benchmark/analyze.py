@@ -22,7 +22,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 from benchmark import release_map
 
@@ -2256,8 +2256,15 @@ CALLOUT_MIN_N = 30
 # otherwise degenerate to "demote every tool" on hard markets). There is
 # deliberately no absolute level-floor demotion: a bad-but-best tool is an
 # improvement target (the issue triage owns ``BRIER_LEVEL_THRESHOLD``), not
-# a demotion target. ``PROMOTE_MIN_DELTA`` sits above the n=100 Brier noise
-# floor (~0.037) and mirrors ``BRIER_REGRESSION_THRESHOLD`` in the triage.
+# a demotion target. ``PROMOTE_MIN_DELTA`` (0.04) is a pragmatic compromise,
+# not a statistical guarantee: it clears the ~0.037 Brier noise floor at
+# n=100, but the gate also admits comparisons down to ``PROMOTE_MIN_N`` = 30,
+# where the floor is materially wider (~1.8x, roughly 0.067). The number
+# happens to equal ``BRIER_REGRESSION_THRESHOLD`` in the issue triage, but the
+# semantics differ: that one gates regressions on rolling-window production
+# data; this one gates improvements on all-time tournament data. Treat the
+# recommendation as directional, not significance-tested -- the controlled
+# candidate-vs-parent check is the downstream PR-CI cached replay.
 PROMOTE_MIN_DELTA = 0.04
 PROMOTE_MIN_N = 30
 
@@ -2572,10 +2579,13 @@ def section_tournament_callouts(
 def load_tool_lineage(path: Path = TOOL_LINEAGE_JSON) -> dict[str, str | None]:
     """Load the tool -> parent map from the lineage ledger.
 
-    Returns ``{tool_name: parent_name_or_None}``. Fails open to an empty
-    map (every tool then treated as its own lineage root) when the ledger
-    is missing or malformed, so a read error degrades to singleton
-    lineages rather than silently hiding a promotion or demotion.
+    Returns ``{tool_name: parent_name_or_None}``. On a missing or malformed
+    ledger it degrades to singleton lineages (every tool its own root) and
+    logs a warning, mirroring :func:`load_active_tournament_cids`. This is
+    safe for correctness -- it never produces a false recommendation -- but
+    it does suppress cross-name comparisons (e.g. ``factual_research-v2`` vs
+    ``factual_research``), so the warning is what makes that degraded state
+    attributable in run logs rather than reading as a quiet "no candidates".
 
     :param path: path to ``tool_lineage.json``. Defaults to the ledger at
         the repo root.
@@ -2583,10 +2593,21 @@ def load_tool_lineage(path: Path = TOOL_LINEAGE_JSON) -> dict[str, str | None]:
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "Lineage scoping degraded to singleton lineages: could not load"
+            " %s (%s). Cross-name promotions/demotions are suppressed.",
+            path,
+            exc,
+        )
         return {}
     tools = raw.get("tools", {}) if isinstance(raw, dict) else {}
     if not isinstance(tools, dict):
+        log.warning(
+            "Lineage scoping degraded to singleton lineages: %s has no"
+            " 'tools' dict. Cross-name promotions/demotions are suppressed.",
+            path,
+        )
         return {}
     out: dict[str, str | None] = {}
     for name, meta in tools.items():
@@ -2611,11 +2632,32 @@ def _lineage_root(tool: str, parents: dict[str, str | None]) -> str:
         if not parent:
             return cur
         cur = parent
+    # Cyclic ledger: a bad parent chain would otherwise merge unrelated
+    # lineages under one synthetic root. Surface it so the operator can
+    # distrust any promote/demote pairing this run produced for *cur*.
+    log.warning(
+        "Cycle in tool_lineage.json reached from %r; using %r as root."
+        " Lineage groupings touching this cycle may be wrong.",
+        tool,
+        cur,
+    )
     return cur
 
 
-# A deployed lineage member: (tool, cid, brier, valid_n, log_loss, label).
-_DeployedMember = tuple[str, str, float, int, float | None, str]
+class _DeployedMember(NamedTuple):
+    """A deployed tool's latest-tagged production record, for lineage grouping.
+
+    Named fields rather than a bare tuple so the promote/demote logic reads
+    by name (``m.brier``, ``m.cid``) and a future field reorder cannot
+    silently produce wrong rendered output via positional access.
+    """
+
+    tool: str
+    cid: str
+    brier: float
+    valid_n: int
+    log_loss: float | None
+    label: str
 
 
 def _deployed_lineage_members(
@@ -2653,13 +2695,13 @@ def _deployed_lineage_members(
             continue
         root = _lineage_root(tool, parents)
         by_root.setdefault(root, []).append(
-            (
-                tool,
-                cid,
-                brier,
-                stats.get("valid_n", 0) or 0,
-                stats.get("log_loss"),
-                release_map.resolve(cid, rm),
+            _DeployedMember(
+                tool=tool,
+                cid=cid,
+                brier=brier,
+                valid_n=stats.get("valid_n", 0) or 0,
+                log_loss=stats.get("log_loss"),
+                label=release_map.resolve(cid, rm),
             )
         )
     return by_root
@@ -2700,11 +2742,15 @@ def _promotion_candidates(
     superseded: dict[str, tuple[str, float, str]] = {}
 
     # Best (lowest-Brier) qualifying candidate first, so bullet order is
-    # deterministic and the strongest case leads.
+    # deterministic and the strongest case leads. The key string breaks
+    # exact-Brier ties (bare Brier would render in dict-insertion order).
+    # Keep the ``is not None`` ternary -- a Brier of exactly 0.0 is falsy,
+    # so ``brier or inf`` would mis-sort a perfect score last.
     ordered = sorted(
         tournament_tvm.items(),
         key=lambda kv: (
-            kv[1].get("brier") if kv[1].get("brier") is not None else float("inf")
+            kv[1].get("brier") if kv[1].get("brier") is not None else float("inf"),
+            kv[0],
         ),
     )
     for key, t_stats in ordered:
@@ -2723,28 +2769,32 @@ def _promotion_candidates(
         incumbents = [
             m
             for m in deployed_by_root.get(root, [])
-            if m[1] != cand_cid and m[3] >= PROMOTE_MIN_N
+            if m.cid != cand_cid and m.valid_n >= PROMOTE_MIN_N
         ]
         if not incumbents:
             continue
-        inc_tool, _inc_cid, inc_brier, _inc_n, inc_ll, inc_label = min(
-            incumbents, key=lambda m: m[2]
-        )
-        if t_brier - inc_brier > -PROMOTE_MIN_DELTA:
+        inc = min(incumbents, key=lambda m: m.brier)
+        # One PROMOTE + one DEMOTE per incumbent: candidates are Brier-sorted,
+        # so the first (strongest) to clear the gate claims the incumbent and
+        # any weaker rival -- including another CID of the same tool -- is
+        # skipped (avoids "2 promotions, 1 demotion" for one decision).
+        if inc.tool in superseded:
+            continue
+        if t_brier - inc.brier > -PROMOTE_MIN_DELTA:
             continue
         t_ll = t_stats.get("log_loss")
-        if t_ll is not None and inc_ll is not None and t_ll - inc_ll >= 0:
-            # Brier improved but log-loss disagrees -> treat as noise.
+        if t_ll is not None and inc.log_loss is not None and t_ll - inc.log_loss >= 0:
+            # Brier improved but log-loss does not also improve (tie or
+            # worse) -> not a confirmed gain, treat as noise.
             continue
         cand_label = release_map.resolve(cand_cid, rm)
-        delta = t_brier - inc_brier
+        delta = t_brier - inc.brier
         promote_lines.append(
             f"- 🟢 `{cand_tool}` `{cand_label}` (tournament Brier"
-            f" {t_brier:.4f}, n={valid_n}) beats deployed `{inc_tool}`"
-            f" `{inc_label}` {inc_brier:.4f} by Δ {delta:+.4f}."
+            f" {t_brier:.4f}, n={valid_n}) beats deployed `{inc.tool}`"
+            f" `{inc.label}` {inc.brier:.4f} by Δ {delta:+.4f}."
         )
-        # First candidate (Brier-sorted) to beat an incumbent wins it.
-        superseded.setdefault(inc_tool, (inc_label, inc_brier, cand_tool))
+        superseded[inc.tool] = (inc.label, inc.brier, cand_tool)
     return promote_lines, superseded
 
 
@@ -2781,21 +2831,21 @@ def _demotion_candidates(
         demoted.add(tool)
 
     for _root, members in sorted(deployed_by_root.items()):
-        eligible = [m for m in members if m[3] >= PROMOTE_MIN_N]
+        eligible = [m for m in members if m.valid_n >= PROMOTE_MIN_N]
         if len(eligible) < 2:
             continue
-        best = min(eligible, key=lambda m: m[2])
-        for tool, _cid, brier, valid_n, _ll, label in eligible:
-            if tool == best[0] or tool in demoted:
+        best = min(eligible, key=lambda m: m.brier)
+        for m in eligible:
+            if m.tool == best.tool or m.tool in demoted:
                 continue
-            if brier - best[2] >= PROMOTE_MIN_DELTA:
+            if m.brier - best.brier >= PROMOTE_MIN_DELTA:
                 lines.append(
-                    f"- 🔴 `{tool}` `{label}` (Brier {brier:.4f},"
-                    f" n={valid_n}) — dominated by deployed sibling"
-                    f" `{best[0]}` `{best[5]}` {best[2]:.4f}"
-                    f" (Δ {brier - best[2]:+.4f}); redundant."
+                    f"- 🔴 `{m.tool}` `{m.label}` (Brier {m.brier:.4f},"
+                    f" n={m.valid_n}) — dominated by deployed sibling"
+                    f" `{best.tool}` `{best.label}` {best.brier:.4f}"
+                    f" (Δ {m.brier - best.brier:+.4f}); redundant."
                 )
-                demoted.add(tool)
+                demoted.add(m.tool)
     return lines
 
 
@@ -2861,8 +2911,8 @@ def section_promotion_demotion(
         "",
         "_Actionable, lineage-scoped recommendations (advisory; rollout"
         " stays a manual deployment PR). PROMOTE = a tournament candidate"
-        f" beats the deployed version of its lineage by Brier ≥"
-        f" {PROMOTE_MIN_DELTA:.2f} (n ≥ {PROMOTE_MIN_N}, log-loss agreeing)."
+        " beats the deployed version of its lineage by a Brier reduction of"
+        f" ≥ {PROMOTE_MIN_DELTA:.2f} (n ≥ {PROMOTE_MIN_N}, log-loss agreeing)."
         " DEMOTE = the superseded version, or one dominated by a better"
         " sibling in the same lineage. Tools are only ever compared within"
         " their own lineage, so the best version of each lineage is never"

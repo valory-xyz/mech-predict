@@ -85,6 +85,7 @@ class TestBuildSystemPrompt:
             "*Summary:*",
             "*Tool × Category:*",
             "*Tournament callouts:*",
+            "*Promotion / Demotion:*",
             "*Diagnostics:*",
             "*Reliability:*",
             "*Recommended actions:*",

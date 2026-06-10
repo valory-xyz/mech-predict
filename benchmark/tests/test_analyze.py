@@ -28,6 +28,7 @@ from benchmark.analyze import (
     OMEN_CATEGORIES,
     PLATFORM_LABELS,
     POLYMARKET_ACTIVE_CATEGORIES,
+    PROMOTE_MIN_DELTA,
     ROLLING_WINDOW_DAYS,
     SAMPLE_SIZE_WARNING,
     _active_tools_for_platform,
@@ -1764,8 +1765,13 @@ class TestTournamentCallouts:
         assert result.index("tool-best") < result.index("tool-worse")
 
 
-def _prod_cells(*cells: tuple) -> dict[str, Any]:
-    """Build a production scores dict from (tool, cid, brier, n[, log_loss])."""
+def _score_cells(mode: str, da: float, bss: float, *cells: tuple) -> dict[str, Any]:
+    """Build a scores dict from (tool, cid, brier, n[, log_loss]) cells.
+
+    Shared by the production and tournament builders so a field added to
+    one cannot silently diverge from the other; the two differ only in the
+    ``mode`` key and the diagnostic stand-in values (``da``/``bss``).
+    """
     tvm: dict[str, Any] = {}
     total = 0
     for c in cells:
@@ -1775,35 +1781,24 @@ def _prod_cells(*cells: tuple) -> dict[str, Any]:
             "brier": brier,
             "n": n,
             "valid_n": n,
-            "directional_accuracy": 0.7,
-            "brier_skill_score": 0.0,
+            "directional_accuracy": da,
+            "brier_skill_score": bss,
         }
         if log_loss is not None:
             cell["log_loss"] = log_loss
-        tvm[f"{tool} | {cid} | production_replay"] = cell
+        tvm[f"{tool} | {cid} | {mode}"] = cell
         total += n
     return {"total_rows": total, "overall": {}, "by_tool_version_mode": tvm}
+
+
+def _prod_cells(*cells: tuple) -> dict[str, Any]:
+    """Build a production scores dict from (tool, cid, brier, n[, log_loss])."""
+    return _score_cells("production_replay", 0.7, 0.0, *cells)
 
 
 def _tourn_cells(*cells: tuple) -> dict[str, Any]:
     """Build a tournament scores dict from (tool, cid, brier, n[, log_loss])."""
-    tvm: dict[str, Any] = {}
-    total = 0
-    for c in cells:
-        tool, cid, brier, n = c[0], c[1], c[2], c[3]
-        log_loss = c[4] if len(c) > 4 else None
-        cell: dict[str, Any] = {
-            "brier": brier,
-            "n": n,
-            "valid_n": n,
-            "directional_accuracy": 0.75,
-            "brier_skill_score": 0.1,
-        }
-        if log_loss is not None:
-            cell["log_loss"] = log_loss
-        tvm[f"{tool} | {cid} | tournament"] = cell
-        total += n
-    return {"total_rows": total, "overall": {}, "by_tool_version_mode": tvm}
+    return _score_cells("tournament", 0.75, 0.1, *cells)
 
 
 class TestToolLineage:
@@ -1999,6 +1994,84 @@ class TestPromotionDemotion:
         result = section_promotion_demotion(prod, tourn, active_cids=set(), lineage={})
         assert "**PROMOTE**" not in result
 
+    def test_active_cids_none_disables_scoping(self) -> None:
+        """active_cids=None (the read-failure path) considers every candidate."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids=None, lineage={})
+        assert "**PROMOTE**" in result
+
+    def test_promote_at_exact_delta_boundary(self) -> None:
+        """A candidate beating the incumbent by exactly the delta promotes.
+
+        Pins the ``>`` vs ``>=`` boundary: at delta == -PROMOTE_MIN_DELTA the
+        gate fires, so a future flip to a strict comparator would fail here.
+        """
+        incumbent = 0.20
+        candidate = incumbent - PROMOTE_MIN_DELTA  # exactly on the threshold
+        prod = _prod_cells(("tool-a", "cid_prod", incumbent, 1000))
+        tourn = _tourn_cells(("tool-a", "v2", candidate, 50))
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" in result
+
+    def test_candidate_cid_equal_to_deployed_cid_not_self_promoted(self) -> None:
+        """A candidate whose CID is already the deployed one cannot promote itself.
+
+        Exercises the ``m.cid != cand_cid`` guard: with only the rolled-out
+        CID in the lineage there is no other incumbent to beat.
+        """
+        shared = "cid_shared"
+        prod = _prod_cells(("tool-a", shared, 0.20, 1000))
+        tourn = _tourn_cells(("tool-a", shared, 0.05, 50))
+        result = section_promotion_demotion(
+            prod, tourn, active_cids={shared}, lineage={}
+        )
+        assert "**PROMOTE**" not in result
+        assert "No promotion or demotion candidates today." in result
+
+    def test_one_sided_log_loss_does_not_block_promotion(self) -> None:
+        """A missing incumbent log-loss leaves the agreement guard inactive.
+
+        The guard only fires when BOTH log-losses are present; a candidate
+        with a poor log-loss but an incumbent that has none still promotes
+        on Brier alone (production rows carry log-loss in practice, so this
+        is the degraded-data path).
+        """
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000))  # no log_loss
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50, 9.9))  # awful log_loss
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" in result
+
+    def test_log_loss_tie_blocks_promotion(self) -> None:
+        """An exact log-loss tie blocks promotion (>= boundary is conservative)."""
+        prod = _prod_cells(("tool-a", "cid_prod", 0.20, 1000, 0.50))
+        tourn = _tourn_cells(("tool-a", "v2", 0.10, 50, 0.50))  # identical log-loss
+        result = section_promotion_demotion(prod, tourn, active_cids={"v2"}, lineage={})
+        assert "**PROMOTE**" not in result
+
+    def test_two_candidates_one_incumbent_single_promote_strongest(self) -> None:
+        """Two qualifying candidates for one incumbent -> 1 PROMOTE + 1 DEMOTE.
+
+        The stronger (lower-Brier) candidate claims the incumbent; the
+        weaker one is skipped, so the report never reads "2 promotions, 1
+        demotion" for a single decision.
+        """
+        prod = _prod_cells(("base", "cid_base", 0.30, 1000))
+        tourn = _tourn_cells(
+            ("base-v2", "cid_v2", 0.20, 50),  # weaker
+            ("base-v3", "cid_v3", 0.10, 50),  # stronger
+        )
+        lineage = {"base-v3": "base", "base-v2": "base", "base": None}
+        result = section_promotion_demotion(
+            prod, tourn, active_cids={"cid_v2", "cid_v3"}, lineage=lineage
+        )
+        assert result.count("🟢") == 1
+        assert result.count("🔴") == 1
+        assert "base-v3" in result  # the stronger candidate won
+        assert "superseded by promotion candidate `base-v3`" in result
+        # base-v2 must not appear as a second PROMOTE bullet.
+        assert "base-v2" not in result.split("**DEMOTE**", maxsplit=1)[0]
+
 
 class TestGenerateReportWithTournamentFiles:
     """Tests for generate_report dual-mode rendering."""
@@ -2133,9 +2206,17 @@ class TestGenerateReportWithTournamentFiles:
         assert "## Tournament Callouts" in report
 
     def test_promotion_demotion_section_wired_in(self) -> None:
-        """generate_report renders the Promotion / Demotion section."""
-        prod = _scores_with_tool("tool-a", 0.20, 1000)
-        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        """generate_report renders the Promotion / Demotion section.
+
+        Goes through the real ``load_tool_lineage()`` (no lineage override
+        is plumbed through ``generate_report``), so the tool name is chosen
+        to be one that cannot collide with a real ``tool_lineage.json``
+        entry -- a collision would make it a non-singleton lineage and
+        could change the assertion.
+        """
+        tool = "wiretest-nonexistent-tool"
+        prod = _scores_with_tool(tool, 0.20, 1000)
+        tourn = _tournament_scores_with_version(tool, "v2", 0.10, 50)
         report = generate_report(
             prod,
             [],

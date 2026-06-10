@@ -285,7 +285,9 @@ class TestLogReplaySummaryFilterStats:
         stats = {
             "accepted": 2,
             "rejected": {
+                "duplicate": 5,
                 "wrong_tool": 4,
+                "wrong_platform": 3,
                 "no_deliver_id": 0,
                 "not_valid_parse": 1,
                 "no_outcome": 2,
@@ -312,6 +314,10 @@ class TestLogReplaySummaryFilterStats:
         text = caplog.text
         assert "Pre-filter" in text
         assert "not_valid_parse=1" in text
+        # New full-pool/--platform buckets must render, else the breakdown no
+        # longer accounts for the rejected total.
+        assert "duplicate=5" in text
+        assert "wrong_platform=3" in text
 
     def test_block_omitted_when_stats_none(self, tmp_path: Path, caplog: Any) -> None:
         """When no sidecar is provided the summary logs exactly as before."""

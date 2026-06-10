@@ -1178,11 +1178,14 @@ def _log_replay_summary(
         total_rej = sum(r.values()) if r else 0
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (wrong_tool=%d, no_deliver_id=%d, "
-            "not_valid_parse=%d, no_outcome=%d, older_than_cutoff=%d)",
+            "    Accepted: %d   Rejected: %d (duplicate=%d, wrong_tool=%d, "
+            "wrong_platform=%d, no_deliver_id=%d, not_valid_parse=%d, "
+            "no_outcome=%d, older_than_cutoff=%d)",
             filter_stats.get("accepted", 0),
             total_rej,
+            r.get("duplicate", 0),
             r.get("wrong_tool", 0),
+            r.get("wrong_platform", 0),
             r.get("no_deliver_id", 0),
             r.get("not_valid_parse", 0),
             r.get("no_outcome", 0),

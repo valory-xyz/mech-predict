@@ -73,7 +73,9 @@ def _stats(
     *,
     accepted: int = 100,
     not_valid_parse: int = 0,
+    duplicate: int = 0,
     wrong_tool: int = 0,
+    wrong_platform: int = 0,
     no_deliver_id: int = 0,
     no_outcome: int = 0,
     older_than_cutoff: int = 0,
@@ -81,7 +83,9 @@ def _stats(
     return {
         "accepted": accepted,
         "rejected": {
+            "duplicate": duplicate,
             "wrong_tool": wrong_tool,
+            "wrong_platform": wrong_platform,
             "no_deliver_id": no_deliver_id,
             "not_valid_parse": not_valid_parse,
             "no_outcome": no_outcome,
@@ -134,11 +138,22 @@ class TestReliabilityBlock:
         lines = _format_reliability_block(
             candidate,
             [],
-            _stats(accepted=5, wrong_tool=12, no_outcome=4, older_than_cutoff=7),
+            _stats(
+                accepted=5,
+                duplicate=8,
+                wrong_tool=12,
+                wrong_platform=9,
+                no_outcome=4,
+                older_than_cutoff=7,
+            ),
         )
         text = "\n".join(lines)
         assert "Scoping:" in text
         assert "wrong_tool=12" in text
+        # The full-pool/--platform buckets must surface too, else the rendered
+        # breakdown no longer sums to the rejected total shown on the line above.
+        assert "duplicate=8" in text
+        assert "wrong_platform=9" in text
         assert "no_outcome=4" in text
         assert "older_than_cutoff=7" in text
         # Scoping alone must not raise the invariant marker.

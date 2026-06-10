@@ -283,7 +283,9 @@ def _format_reliability_block(
         if total_rej > 0:
             scoping = ", ".join(
                 [
+                    f"duplicate={r.get('duplicate', 0)}",
                     f"wrong_tool={r.get('wrong_tool', 0)}",
+                    f"wrong_platform={r.get('wrong_platform', 0)}",
                     f"no_deliver_id={r.get('no_deliver_id', 0)}",
                     f"no_outcome={r.get('no_outcome', 0)}",
                     f"older_than_cutoff={r.get('older_than_cutoff', 0)}",

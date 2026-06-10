@@ -72,24 +72,37 @@ class TestLLMClientManager:
                     )
 
     def test_concurrent_contexts_are_independent(self) -> None:
-        """Two concurrent LLMClientManager contexts get independent clients."""
+        """Two concurrent LLMClientManager contexts get independent clients.
+
+        Patches LLMClient ONCE outside the threads (``with patch(...)`` is not
+        thread-safe — two concurrent enter blocks racing on the same module
+        attribute can leave both threads observing the SAME mock instance,
+        which made the previous shape of this test flaky on CI). Using
+        ``side_effect`` to return a fresh MagicMock per call guarantees each
+        ``__enter__`` gets a distinct client without relying on patch
+        sequencing.
+        """
         clients_seen: list = []
 
-        def create_and_record(key_suffix: str) -> None:
-            mock_keys: Any = {"openai": f"sk-{key_suffix}"}
-            mgr = LLMClientManager(api_keys=mock_keys, model="gpt-4o-2024-08-06")
-            with patch(
-                "packages.valory.customs.prediction_request.prediction_request.LLMClient"
-            ) as MockClient:
-                mock_instance = MagicMock(name=f"client-{key_suffix}")
-                MockClient.return_value = mock_instance
+        with patch(
+            "packages.valory.customs.prediction_request.prediction_request.LLMClient"
+        ) as MockClient:
+            MockClient.side_effect = lambda *args, **kwargs: MagicMock()
+
+            def create_and_record(key_suffix: str) -> None:
+                mock_keys: Any = {"openai": f"sk-{key_suffix}"}
+                mgr = LLMClientManager(
+                    api_keys=mock_keys, model="gpt-4o-2024-08-06"
+                )
                 with mgr as client:
                     clients_seen.append(id(client))
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(create_and_record, s) for s in ("a", "b")]
-            for f in as_completed(futures):
-                f.result()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(create_and_record, s) for s in ("a", "b")
+                ]
+                for f in as_completed(futures):
+                    f.result()
 
         assert (
             len(set(clients_seen)) == 2

@@ -48,7 +48,7 @@
     },
     "factual_research-v3": {
       "parent": "factual_research-v2",
-      "reason": "Swap the LLM backend from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5 via forced tool-use structured output. Same prompts, pipeline order, Polymarket resolution-rules handling, and guardrails as v2 — one-axis change to measure the model's contribution to the v2 baseline."
+      "reason": "Swap the LLM backend from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5 via JSON-schema prompt injection + Pydantic model_validate_json on the response (the Anthropic SDK's forced-tool-use mechanism is NOT used). Same prompts, pipeline order, Polymarket resolution-rules handling, and guardrails as v2 — one-axis change to measure the model's contribution to the v2 baseline."
     },
     "gemini-2.0-flash": {
       "parent": null,

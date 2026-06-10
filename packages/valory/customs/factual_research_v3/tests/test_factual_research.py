@@ -611,6 +611,251 @@ class TestParseCompletionRetry:
         assert mock_sleep.call_count == 0
 
 
+def _make_anthropic_text_response(
+    text: str,
+    *,
+    stop_reason: str = "end_turn",
+    input_tokens: int = 11,
+    output_tokens: int = 22,
+) -> MagicMock:
+    """Build a mock anthropic ``Messages.create`` response.
+
+    Shapes the response like the real ``anthropic.types.Message``: a
+    ``content`` list of blocks (where each has a ``type`` and either
+    ``text`` or thinking content), ``stop_reason``, and ``usage`` with
+    ``input_tokens`` / ``output_tokens``.
+
+    :param text: the JSON string the TextBlock returns.
+    :param stop_reason: ``"end_turn"`` (normal), ``"max_tokens"`` (trip
+        the truncation guard), etc.
+    :param input_tokens: input token count for the usage block.
+    :param output_tokens: output token count for the usage block.
+    :return: a MagicMock shaped like ``anthropic.types.Message``.
+    """
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = text
+    response = MagicMock()
+    response.content = [text_block]
+    response.stop_reason = stop_reason
+    response.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return response
+
+
+class TestParseCompletionAnthropicBranch:
+    """Coverage for the v3 Anthropic branch of ``_parse_completion``.
+
+    This is the entire point of v3 — swap OpenAI for Anthropic — yet the
+    OpenAI-only tests above leave the Anthropic ``client.messages.create``
+    path completely untested. These tests pin the contract:
+
+    - The call shape: ``system`` is extracted out of ``messages``, joined,
+      and the JSON-schema directive appended.
+    - ``temperature`` is NOT forwarded to ``messages.create()`` because
+      ``claude-fable-5`` rejects it with HTTP 400.
+    - ``ThinkingBlock`` blocks are skipped — only the first ``TextBlock``
+      is parsed.
+    - ``stop_reason == "max_tokens"`` raises a ValueError so the caller
+      sees truncation instead of silently-incomplete JSON.
+    - ``ValidationError`` from ``model_validate_json`` triggers retry.
+    - ``counter_callback`` is invoked with ``input_tokens`` /
+      ``output_tokens`` (Anthropic attribute names — NOT OpenAI's
+      ``prompt_tokens`` / ``completion_tokens``).
+    """
+
+    @staticmethod
+    def _sub_q_json() -> str:
+        """Return a valid SubQuestions JSON string."""
+        return json.dumps({"sub_questions": ["Q1", "Q2", "Q3"]})
+
+    def test_extracts_system_and_appends_json_directive(self) -> None:
+        """``system`` messages are joined out of the list + JSON directive appended."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _make_anthropic_text_response(
+            self._sub_q_json()
+        )
+
+        _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[
+                {"role": "system", "content": "SYS-A"},
+                {"role": "user", "content": "U1"},
+                {"role": "system", "content": "SYS-B"},
+            ],
+            response_format=SubQuestions,
+            retries=1,
+            delay=0,
+        )
+
+        kwargs = mock_client.messages.create.call_args.kwargs
+        # system messages joined + JSON schema directive appended at end.
+        assert "SYS-A" in kwargs["system"]
+        assert "SYS-B" in kwargs["system"]
+        assert "JSON" in kwargs["system"]
+        # Only the non-system message survives in messages=.
+        assert kwargs["messages"] == [{"role": "user", "content": "U1"}]
+
+    def test_temperature_not_forwarded_on_anthropic_branch(self) -> None:
+        """``claude-fable-5`` rejects ``temperature``; it must not be in kwargs."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _make_anthropic_text_response(
+            self._sub_q_json()
+        )
+
+        _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            response_format=SubQuestions,
+            temperature=0.7,  # Caller passed a value; must still be dropped.
+            retries=1,
+            delay=0,
+        )
+
+        kwargs = mock_client.messages.create.call_args.kwargs
+        assert "temperature" not in kwargs
+
+    def test_thinking_block_is_skipped(self) -> None:
+        """Adaptive-thinking models emit a ``ThinkingBlock`` first; we skip it."""
+        thinking_block = MagicMock()
+        thinking_block.type = "thinking"
+        thinking_block.thinking = "internal monologue"
+        text_block = MagicMock()
+        text_block.type = "text"
+        text_block.text = self._sub_q_json()
+        response = MagicMock()
+        response.content = [thinking_block, text_block]
+        response.stop_reason = "end_turn"
+        response.usage = MagicMock(input_tokens=5, output_tokens=10)
+
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = response
+
+        result, _ = _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            response_format=SubQuestions,
+            retries=1,
+            delay=0,
+        )
+
+        assert isinstance(result, SubQuestions)
+        assert result.sub_questions == ["Q1", "Q2", "Q3"]
+
+    @patch(f"{FR_MODULE}.time.sleep")
+    def test_max_tokens_truncation_raises_then_retries(
+        self, mock_sleep: MagicMock
+    ) -> None:
+        """``stop_reason == "max_tokens"`` raises and retries up to ``retries`` times.
+
+        Regresses the silent-truncation bug: if the model emits valid-looking
+        but incomplete JSON because ``ThinkingBlock`` consumed the budget,
+        the call must NOT succeed quietly. The truncation guard raises
+        ValueError, which the retry tuple catches.
+
+        :param mock_sleep: patched ``time.sleep`` for retry-delay assertions.
+        """
+        truncated = _make_anthropic_text_response(
+            self._sub_q_json(), stop_reason="max_tokens"
+        )
+        good = _make_anthropic_text_response(self._sub_q_json(), stop_reason="end_turn")
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [truncated, truncated, good]
+
+        result, _ = _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            response_format=SubQuestions,
+            retries=3,
+            delay=1,
+        )
+
+        assert mock_client.messages.create.call_count == 3
+        assert isinstance(result, SubQuestions)
+        assert mock_sleep.call_count == 2
+
+    @patch(f"{FR_MODULE}.time.sleep")
+    def test_validation_error_triggers_retry(self, mock_sleep: MagicMock) -> None:
+        """Pydantic ValidationError on the Anthropic branch is retryable.
+
+        :param mock_sleep: patched ``time.sleep`` for retry-delay assertions.
+        """
+        bad = _make_anthropic_text_response('{"sub_questions": "not-a-list"}')
+        good = _make_anthropic_text_response(self._sub_q_json())
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = [bad, good]
+
+        result, _ = _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            response_format=SubQuestions,
+            retries=2,
+            delay=1,
+        )
+
+        assert mock_client.messages.create.call_count == 2
+        assert isinstance(result, SubQuestions)
+        assert mock_sleep.call_count == 1
+
+    def test_counter_callback_uses_anthropic_token_attrs(self) -> None:
+        """``counter_callback`` gets ``input_tokens`` / ``output_tokens`` — NOT openai names."""
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = _make_anthropic_text_response(
+            self._sub_q_json(), input_tokens=111, output_tokens=222
+        )
+        callback = MagicMock()
+
+        _parse_completion(
+            client=mock_client,
+            model="claude-fable-5",
+            messages=[{"role": "user", "content": "U1"}],
+            response_format=SubQuestions,
+            counter_callback=callback,
+            retries=1,
+            delay=0,
+        )
+
+        callback.assert_called_once()
+        call_kwargs = callback.call_args.kwargs
+        assert call_kwargs["input_tokens"] == 111
+        assert call_kwargs["output_tokens"] == 222
+        assert call_kwargs["model"] == "claude-fable-5"
+
+
+class TestStripJsonFences:
+    """Coverage for the ``_strip_json_fences`` helper used on the Anthropic branch."""
+
+    def test_bare_string_passes_through(self) -> None:
+        """Strings without fences are returned unchanged."""
+        assert module._strip_json_fences('{"x": 1}') == '{"x": 1}'
+
+    def test_strips_bare_triple_backtick_fence(self) -> None:
+        """Bare triple-backtick fences (no language tag) are stripped."""
+        s = '```\n{"x": 1}\n```'
+        assert json.loads(module._strip_json_fences(s)) == {"x": 1}
+
+    def test_strips_json_language_tag_fence(self) -> None:
+        """Triple-backtick fences with a json language tag are stripped."""
+        s = '```json\n{"x": 1}\n```'
+        assert json.loads(module._strip_json_fences(s)) == {"x": 1}
+
+    def test_strips_trailing_whitespace_after_closing_fence(self) -> None:
+        """Trailing newline after the closing fence is tolerated.
+
+        The function's leading ``text.strip()`` removes whitespace from
+        both ends before the endswith check, so a closing-fence-plus-
+        newline still parses; this pins that behaviour against regression.
+        """
+        s = '```json\n{"x": 1}\n```\n'
+        assert json.loads(module._strip_json_fences(s)) == {"x": 1}
+
+
 class TestNoGlobalClient:
     """Verify the module does not use a global client variable."""
 
@@ -762,6 +1007,23 @@ def _make_openai_error(cls: type, message: str = "simulated") -> Exception:
     return err
 
 
+def _make_anthropic_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an anthropic APIStatusError-family exception for tests.
+
+    Counterpart to ``_make_openai_error`` for the anthropic SDK's exception
+    hierarchy. Same shape: ``cls.__new__`` skips the live httpx response
+    requirement, then sets only the attributes the decorator touches.
+
+    :param cls: the anthropic exception subclass to instantiate.
+    :param message: the `str(exc)` payload.
+    :return: an instance of `cls` usable as a raise target in tests.
+    """
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
 class TestWithKeyRotation:
     """Direct tests for the @with_key_rotation decorator contract.
 
@@ -883,14 +1145,138 @@ class TestWithKeyRotation:
         assert "simulated truncation" in parsed["error"]
 
 
+class TestWithKeyRotationAnthropic:
+    """Anthropic-side coverage for the v3 ``@with_key_rotation`` decorator.
+
+    Mirrors the OpenAI-side tests in ``TestWithKeyRotation``, but exercises
+    the ``anthropic.*`` exception branches that fire on the v3 Anthropic
+    code path. The existing class covered only the OpenAI branches, which
+    is the legacy path; v3's default model is ``claude-fable-5`` so the
+    Anthropic branches are what production actually hits.
+    """
+
+    @pytest.mark.parametrize(
+        "exc_cls",
+        [
+            module.anthropic.RateLimitError,
+            module.anthropic.AuthenticationError,
+            module.anthropic.PermissionDeniedError,
+        ],
+    )
+    def test_rotates_anthropic_pool_on_recoverable_error(self, exc_cls: type) -> None:
+        """Anthropic rate-limit / auth / permission errors rotate ONLY the anthropic key."""
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": 1,
+        }
+        keys.rotate = MagicMock()
+        call_count = {"n": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _make_anthropic_error(exc_cls, "simulated-anthropic")
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert call_count["n"] == 2  # one failure + one success
+        # Provider-gated: only anthropic should rotate, NOT openai/openrouter.
+        rotated_services = [c.args[0] for c in keys.rotate.call_args_list]
+        assert rotated_services == ["anthropic"]
+        assert result[-1] is keys
+
+    def test_openai_error_does_not_burn_anthropic_budget(self) -> None:
+        """An openai error rotates openai/openrouter ONLY — anthropic budget is preserved.
+
+        Regresses the cross-pool waste bug: pre-fix, every error decremented
+        both pools' retry counters. With this test, an openai failure that
+        recovers must leave anthropic's retry budget unchanged so a later
+        anthropic failure on the same call still has its full retries.
+        """
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 1,
+            "openrouter": 1,
+            "anthropic": 1,
+        }
+        keys.rotate = MagicMock()
+        call_count = {"n": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise _make_openai_error(module.openai.RateLimitError, "openai-burst")
+            if call_count["n"] == 2:
+                # On retry #1 we expect anthropic budget intact (still 1)
+                # AND openai/openrouter budget decremented (now 0). Raise an
+                # anthropic error to prove anthropic can still rotate.
+                raise _make_anthropic_error(
+                    module.anthropic.RateLimitError, "anthropic-burst"
+                )
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert call_count["n"] == 3
+        rotated_services = [c.args[0] for c in keys.rotate.call_args_list]
+        # openai+openrouter rotated on call 1, anthropic on call 2.
+        assert rotated_services == ["openai", "openrouter", "anthropic"]
+        assert result[-1] is keys
+
+    def test_anthropic_exhausted_raises(self) -> None:
+        """When the anthropic pool is exhausted, the anthropic error re-raises."""
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": 0,
+        }
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                module.anthropic.RateLimitError, "anthropic-burned"
+            )
+
+        with pytest.raises(module.anthropic.RateLimitError, match="anthropic-burned"):
+            fake(api_keys=keys)
+
+    def test_missing_anthropic_key_in_max_retries_does_not_crash(self) -> None:
+        """Older KeyChain.max_retries() without ``anthropic`` must default to 0.
+
+        Regresses the missing-key trap: if a v2-era deployment's keychain
+        returns ``{"openai": 5, "openrouter": 5}`` (no ``anthropic`` entry),
+        an ``anthropic.RateLimitError`` must NOT crash on dict lookup — it
+        should re-raise cleanly because the anthropic pool is empty by
+        construction.
+        """
+        keys = _make_mock_api_keys()
+        keys.max_retries = lambda: {"openai": 5, "openrouter": 5}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> Tuple[Any, ...]:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                module.anthropic.RateLimitError, "anthropic-burst"
+            )
+
+        with pytest.raises(module.anthropic.RateLimitError, match="anthropic-burst"):
+            fake(api_keys=keys)
+
+
 # ---------------------------------------------------------------------------
-# Group: resolution rules (v2)
+# Group: resolution rules (v3)
 # ---------------------------------------------------------------------------
 #
 # As of trader PR #989 the trader fetches the Polymarket resolution rules and
-# forwards them on the mech request as request_context["description"]. v2 only
-# READS that field — it never contacts Polymarket — so these tests pass the
-# rules in via request_context and prove they reach the right pipeline stages.
+# forwards them on the mech request as request_context["description"]. v3
+# inherits v2's behaviour: it only READS that field — it never contacts
+# Polymarket — so these tests pass the rules in via request_context and prove
+# they reach the right pipeline stages on the OpenAI fallback path. The
+# Anthropic branch dispatches the same prompts, so this coverage applies to
+# both providers.
 
 # Sentinel substring standing in for real resolution-rules text.
 _RULES_SENTINEL = "RESOLVES_YES_IFF_SENTINEL"

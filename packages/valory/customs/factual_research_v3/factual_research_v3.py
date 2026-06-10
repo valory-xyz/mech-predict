@@ -52,10 +52,13 @@ model`` we instantiate ``anthropic.Anthropic`` and call
 OpenAI ``client.beta.chat.completions.parse()`` Structured-Outputs path.
 
 On the Anthropic branch the structured-output guarantee is recovered via
-JSON-in-prompt + ``Pydantic.model_validate_json(...)`` with the same
-retry-on-``ValidationError`` machinery v2 already has. Trade-off accepted
-to match the repo convention and stay on ``anthropic==0.23.1`` (the
-repo-pinned version every other claude-using tool uses).
+JSON-in-prompt + ``Pydantic.model_validate_json(...)``. v3 adds
+``pydantic.ValidationError`` to the existing retry tuple in
+``_parse_completion`` — v2's tuple only retried on the bare ``ValueError``
+from the ``p_yes + p_no`` sum check, so the Anthropic JSON-parse path
+needs explicit coverage. Trade-off accepted to match the repo convention
+and stay on ``anthropic==0.23.1`` (the repo-pinned version every other
+claude-using tool uses).
 
 Note: ``claude-fable-5`` is an adaptive-thinking model. The Anthropic
 branch deliberately omits ``temperature`` because the model rejects it
@@ -87,7 +90,11 @@ from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
 # ---------------------------------------------------------------------------
-# Pydantic schemas for OpenAI Structured Outputs
+# Pydantic schemas for structured LLM output. Used by BOTH providers: the
+# OpenAI branch passes the class to ``client.beta.chat.completions.parse``
+# (Structured Outputs); the Anthropic branch serializes
+# ``model_json_schema()`` into the system prompt and validates the
+# response text via ``model_validate_json``.
 # ---------------------------------------------------------------------------
 
 
@@ -227,6 +234,17 @@ DEFAULT_DELIVERY_RATE = 100
 # ---------------------------------------------------------------------------
 
 
+# Anthropic exception classes that with_key_rotation treats as recoverable.
+# Used only by ``isinstance(e, _ANTHROPIC_ERRORS)`` to decide which pool to
+# rotate; the ``except`` clause itself lists all classes inline so mypy can
+# verify they're BaseException subclasses (a tuple alias triggers misc/B030).
+_ANTHROPIC_ERRORS = (
+    anthropic.RateLimitError,
+    anthropic.AuthenticationError,
+    anthropic.PermissionDeniedError,
+)
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """Decorator that retries a function with API key rotation on failure."""
 
@@ -236,6 +254,14 @@ def with_key_rotation(func: Callable) -> Callable:
     ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
+        # Older KeyChain.max_retries() implementations may not include an
+        # ``anthropic`` entry; default to 0 so we don't crash on lookup but
+        # still allow OpenAI-side rotation to proceed normally. Without
+        # this, an ``anthropic.RateLimitError`` raised on a v2-era deployment
+        # would re-raise immediately even with OpenAI retries available.
+        retries_left.setdefault("anthropic", 0)
+        retries_left.setdefault("openai", 0)
+        retries_left.setdefault("openrouter", 0)
 
         def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
@@ -254,27 +280,31 @@ def with_key_rotation(func: Callable) -> Callable:
                 anthropic.AuthenticationError,
                 anthropic.PermissionDeniedError,
             ) as e:
-                # Rotate on rate limits AND on auth/permission failures: a revoked
-                # key is as unusable as a throttled one, and rotating it out is
-                # the decorator's whole job. The keychain carries separate openai
-                # and anthropic keys so we attempt to rotate whichever service
-                # has retries left; we keep openrouter in the openai pool because
-                # tools in this repo route claude-*via* openrouter at times.
-                openai_exhausted = (
-                    retries_left.get("openai", 0) <= 0
-                    and retries_left.get("openrouter", 0) <= 0
-                )
-                anthropic_exhausted = retries_left.get("anthropic", 0) <= 0
-                if openai_exhausted and anthropic_exhausted:
-                    raise e
-                if not openai_exhausted:
-                    retries_left["openai"] -= 1
-                    retries_left["openrouter"] -= 1
-                    api_keys.rotate("openai")
-                    api_keys.rotate("openrouter")
-                if not anthropic_exhausted:
+                # Rotate ONLY the pool that actually failed (matches
+                # ``isinstance(e, ...)``) — rotating the other provider
+                # would burn its retry budget on an error it didn't cause.
+                # When the failing pool is exhausted but the other pool
+                # still has retries, we re-raise: the next call to func()
+                # would hit the same exhausted provider again, not the
+                # healthy one (the model arg is fixed). The keychain
+                # carries separate openai/openrouter and anthropic key
+                # lists; openrouter rides with openai because tools in
+                # this repo sometimes route claude-* through openrouter.
+                if isinstance(e, _ANTHROPIC_ERRORS):
+                    if retries_left["anthropic"] <= 0:
+                        raise e
                     retries_left["anthropic"] -= 1
                     api_keys.rotate("anthropic")
+                    return execute()
+                # OpenAI / OpenRouter branch.
+                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                    raise e
+                if retries_left["openai"] > 0:
+                    retries_left["openai"] -= 1
+                    api_keys.rotate("openai")
+                if retries_left["openrouter"] > 0:
+                    retries_left["openrouter"] -= 1
+                    api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
                 error_json = json.dumps(
@@ -633,6 +663,26 @@ def _parse_completion(
                     max_tokens=max_tokens,
                     timeout=150,
                 )
+                # Truncation guard: ``claude-fable-5``'s adaptive-thinking
+                # ``ThinkingBlock`` shares the ``max_tokens`` budget with
+                # the JSON output. If thinking consumes most of the budget,
+                # the JSON can be truncated mid-object. Two failure modes
+                # to prevent: (a) silently-valid truncation parses as
+                # incomplete reasoning, (b) invalid truncation triggers
+                # retries with the same budget that also truncate. Raise
+                # explicitly so the caller sees a real error instead of a
+                # null prediction.
+                if response.stop_reason == "max_tokens":
+                    text_len = sum(
+                        len(b.text)
+                        for b in response.content
+                        if getattr(b, "type", None) == "text"
+                    )
+                    raise ValueError(
+                        f"Response truncated (stop_reason='max_tokens', "
+                        f"max_tokens={max_tokens}, text_len={text_len}); "
+                        f"raise max_tokens for this call site"
+                    )
                 # Pick the first TextBlock; adaptive-thinking models like
                 # claude-fable-5 emit a ThinkingBlock before the TextBlock,
                 # which we skip.
@@ -1047,7 +1097,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             messages=reframe_messages,
             response_format=SubQuestions,
             temperature=0,
-            max_tokens=600,
+            # Raised from 600 -> 1024: fable-5's ThinkingBlock shares the
+            # budget with the JSON output; 600 risks truncating the
+            # SubQuestions array mid-object and tripping the new
+            # ``stop_reason == "max_tokens"`` guard in ``_parse_completion``.
+            max_tokens=1024,
             counter_callback=counter_callback,
         )
 

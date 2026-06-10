@@ -128,9 +128,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     # valory/factual_research_v3 — same prompts + Polymarket-rules pipeline as
     # v2, swaps the LLM backend from OpenAI gpt-4.1 to Anthropic claude-fable-5
-    # via forced tool-use structured output. Family unchanged (parent +
-    # siblings share the same ESTIMATE_USER / REFRAME_USER / SYNTHESIS_USER
-    # templates and resolution_rules kwarg).
+    # via JSON-schema prompt injection + Pydantic model_validate_json on the
+    # response (the Anthropic SDK's forced-tool-use mechanism is NOT used).
+    # Family unchanged (parent + siblings share the same ESTIMATE_USER /
+    # REFRAME_USER / SYNTHESIS_USER templates and resolution_rules kwarg).
     "factual_research-v3": ToolSpec(
         module="packages.valory.customs.factual_research_v3.factual_research_v3",
         family="factual_research",

@@ -8,7 +8,7 @@
         "custom/napthaai/resolve_market_reasoning/0.1.0": "bafybeibjmyiqm5nnw75y6q7x4vymurg5w74zsko3ewzvarshgq4npxew3y",
         "custom/nickcom007/prediction_request_sme/0.1.0": "bafybeifssc6ed7itkvqot6qunlpd3prghwsf5dh26kin3xduci3sohulqq",
         "custom/valory/prediction_langchain/0.1.0": "bafybeifuxvvldtt7o5zmrgdscbqofnkgtmemv5yv5gxzeptnxsiymwvs6a",
-        "custom/valory/prediction_request/0.1.0": "bafybeic5mml6a3ovi63c7rcymmv2ot5pqgtvolhn5m5lhywcfpafphjk3i",
+        "custom/valory/prediction_request/0.1.0": "bafybeieqpji2z666rh6ujeldooq23uutpjujvggd3e5dagtjdxjrtty36e",
         "custom/valory/prepare_tx/0.1.0": "bafybeida74hcfsfgh644o27qlq2lmue5aj7kvjfsbjermwv42euyf525ya",
         "custom/valory/resolve_market/0.1.0": "bafybeigxgcjsvi2zovoxgz5ra7x7sqz5qfx3p5kxmhgftrr7fxonjmhspi",
         "custom/valory/superforcaster/0.1.0": "bafybeidkraklf5c6rkv6g7y7lqj2woy4j5u5dmupjez6mtjhdek3lzbmki",
@@ -19,10 +19,11 @@
         "custom/valory/superforcaster_full_search/0.1.0": "bafybeihba6ch6g7gndfwv75dtpfrpnvg4dw6wq6lxexch5h3n3vjafuxsm",
         "custom/valory/superforcaster_calibrated_full_search/0.1.0": "bafybeialuhbtfumvlbdtzimfn7wdacqwccn2ny5cbhi4tkri6iih6pfgxe",
         "custom/valory/superforcaster_polymarket_v1/0.1.0": "bafybeiawfhy3w5aclmxm5zxebwd5l7paseqlgmihwbqfyhcdpn2kccgtrq",
+        "custom/valory/superforcaster_polymarket_v3/0.1.0": "bafybeie27dautkzse2ust2jwk6pwmke2bpx2pccqdxesg4rgfb7pocblfy",
         "custom/valory/factual_research_v1/0.1.0": "bafybeicg52wve2ytam3eisks7gumvrswm2v6bkuafburdlmh6d553nrvee",
         "custom/valory/factual_research_v2/0.1.0": "bafybeidgo3jesmvuwa64ooij7mywk7hf7ls5len2sf7cbcjwt3t6r5u6qm",
-        "agent/valory/mech_predict/0.1.0": "bafybeidln7xkyowihe4co6wqqjgk4atd5ys54cukpzzvny2ftt6wsfbzjm",
-        "service/valory/mech_predict/0.1.0": "bafybeidqstj6s6oa7put2ew4chwpbod5a5ogxce2qtdwuxpxuc4kan3su4"
+        "agent/valory/mech_predict/0.1.0": "bafybeibhwh3ym52554qlnw3f7y3swng5y664hn6kimvtaow6mjktrozfpu",
+        "service/valory/mech_predict/0.1.0": "bafybeiev33iia6jb6czalbaw7jboodyos3gdwlhixb5rl6den2qsr56tcq"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

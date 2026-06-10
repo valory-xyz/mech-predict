@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 from benchmark.io import load_existing_ids as load_existing_row_ids
 from benchmark.io import load_jsonl as load_dataset
@@ -83,6 +84,7 @@ def run_single(
     model: str,
     api_keys: KeyChain,
     timeout: int = TASK_DEADLINE,
+    request_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one tool on one question and return parsed result.
 
@@ -92,6 +94,9 @@ def run_single(
     :param model: LLM model identifier.
     :param api_keys: KeyChain with API credentials.
     :param timeout: per-tool timeout in seconds.
+    :param request_context: optional mech request_context dict (market_id,
+        type, …) mirroring what the trader sends in production. Forwarded to
+        tools that read it (e.g. factual_research-v2); omitted when None.
     :return: dict with p_yes, p_no, confidence, prediction_parse_status,
         latency_s, error.
     """
@@ -106,6 +111,8 @@ def run_single(
         "counter_callback": None,
         "delivery_rate": 100,
     }
+    if request_context is not None:
+        kwargs["request_context"] = request_context
 
     start = time.monotonic()
     use_alarm = _can_use_sigalrm()
@@ -158,6 +165,103 @@ def run_single(
 # ---------------------------------------------------------------------------
 # Build output row
 # ---------------------------------------------------------------------------
+
+
+POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
+POLYMARKET_PLATFORM = "polymarket"
+GAMMA_TIMEOUT = 15
+
+
+def _fetch_polymarket_description(condition_id: str) -> str | None:
+    """Fetch a Polymarket market's resolution rules (Gamma ``description``).
+
+    The benchmark stands in for the trader here: in production the trader
+    fetches the resolution rules from Gamma and forwards them on the mech
+    request (trader PR #989), and ``factual_research-v2`` only reads them. To
+    reproduce that input under replay we fetch the same text by ``condition_id``
+    and return ONLY the description — never prices, volume, or liquidity.
+
+    Returns None on any failure (network error, non-200, no match, condition-id
+    mismatch, or an empty/missing description), exactly mirroring the tool's
+    production fallback to v1 behaviour.
+
+    :param condition_id: CTF condition id hex (``0x…``); a leading ``poly_``
+        prefix is stripped.
+    :return: the resolution-rules text, or None.
+    """
+    cid = condition_id.strip()
+    if cid.startswith("poly_"):
+        cid = cid[len("poly_") :]
+    if not cid:
+        return None
+
+    # Gamma's default query hides closed markets, so a resolved (benchmark)
+    # market needs closed=true; an open (production) market is returned by the
+    # default query. Try open first, then closed — the rules are identical.
+    for params in ({"condition_ids": cid}, {"condition_ids": cid, "closed": "true"}):
+        try:
+            resp = requests.get(
+                f"{POLYMARKET_GAMMA_URL}/markets",
+                params=params,
+                timeout=GAMMA_TIMEOUT,
+            )
+            if resp.status_code != 200:
+                continue
+            markets = resp.json()
+        except Exception as exc:  # noqa: BLE001 — any failure → degrade to v1
+            log.warning("Gamma description fetch failed for %s: %s", cid, exc)
+            continue
+
+        if not markets:
+            continue
+        market = markets[0] if isinstance(markets, list) else markets
+
+        # Only trust a response that echoes back the exact condition id asked
+        # for; a mismatch means the filter was ignored and the rules would
+        # belong to some other market.
+        returned_cid = str(market.get("conditionId", "")).lower()
+        if not returned_cid or returned_cid != cid.lower():
+            continue
+
+        description = (market.get("description") or "").strip()
+        if description:
+            return description
+
+    return None
+
+
+def build_request_context(dataset_row: dict[str, Any]) -> dict[str, Any] | None:
+    """Build a mech-style request_context from a dataset row.
+
+    Mirrors the trader's ``Bet.to_request_context()`` so tools that read it in
+    production (e.g. factual_research-v2) receive the same input under replay:
+    ``market_id`` + ``type``, plus the Polymarket resolution rules under
+    ``description`` (Omen rows carry none). The description is taken from the
+    row when present, else fetched from Gamma the way the trader would. NO
+    market price/liquidity is ever included — those tools must never see odds.
+    Returns None when the row lacks a market id or platform.
+
+    :param dataset_row: one dataset row with ``market_id`` and ``platform``
+        (optionally a pre-baked ``description``).
+    :return: request_context dict, or None.
+    """
+    market_id = dataset_row.get("market_id")
+    platform = dataset_row.get("platform")
+    if not market_id or not platform:
+        return None
+
+    context: dict[str, Any] = {"market_id": market_id, "type": platform}
+
+    if platform == POLYMARKET_PLATFORM:
+        # Prefer a pre-baked description (deterministic, offline); otherwise
+        # simulate the trader and fetch it from Gamma.
+        description = dataset_row.get("description") or _fetch_polymarket_description(
+            str(market_id)
+        )
+        if description:
+            context["description"] = description
+
+    return context
 
 
 def build_output_row(
@@ -277,6 +381,7 @@ def replay(
                     model=model,
                     api_keys=api_keys,
                     timeout=timeout,
+                    request_context=build_request_context(row),
                 )
 
                 output_row = build_output_row(row, tool_name, model, result)

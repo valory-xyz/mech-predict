@@ -2390,49 +2390,102 @@ def _scope_tournament_to_active(
     return {**tvm_scores, "by_tool_version_mode": kept}
 
 
+def _prod_comparison_cell(
+    tool: str,
+    cand_cid: str,
+    t_brier: float | None,
+    scores_prod: dict[str, Any],
+    rm: dict[str, Any],
+) -> str:
+    """Render the ``vs Production`` cell for one tournament candidate.
+
+    The production baseline is the latest-tagged production CID for the
+    same tool. The comparison is informational, **not** a gate: when no
+    such baseline exists the cell says so and the row is still rendered by
+    the caller (a new tool with no production predecessor must stay
+    visible). A non-trivial Brier delta is tagged 🟢 (tournament better by
+    at least ``CALLOUT_DELTA``) or 🔴 (worse by at least ``CALLOUT_DELTA``);
+    deltas inside the noise band are left untagged.
+
+    :param tool: runtime tool name.
+    :param cand_cid: the candidate's tournament CID.
+    :param t_brier: the candidate's tournament Brier, or None when it has
+        no resolved markets yet.
+    :param scores_prod: production scores dict.
+    :param rm: release map.
+    :return: a markdown cell string (no surrounding pipes).
+    """
+    prod_cid = _most_recent_prod_cid(tool, scores_prod, rm)
+    if prod_cid is None:
+        return "— no prod baseline"
+    if prod_cid == cand_cid:
+        # Candidate has rolled out; comparing a version against itself is
+        # eval-pipeline noise, not a promotion signal.
+        return "— rolled out"
+    prod_tvm = scores_prod.get("by_tool_version_mode", {})
+    p_stats = prod_tvm.get(f"{tool} | {prod_cid} | production_replay") or {}
+    p_brier = p_stats.get("brier")
+    if p_brier is None or t_brier is None:
+        return "— no prod data"
+    prod_label = release_map.resolve(prod_cid, rm)
+    delta = t_brier - p_brier
+    if delta <= -CALLOUT_DELTA:
+        tag = " 🟢"
+    elif delta >= CALLOUT_DELTA:
+        tag = " 🔴"
+    else:
+        tag = ""
+    return f"`{prod_label}` {p_brier:.4f} · Δ {delta:+.4f}{tag}"
+
+
 def section_tournament_callouts(
     scores_prod: dict[str, Any],
     scores_tournament: dict[str, Any] | None,
     release_map_data: dict[str, Any] | None = None,
     active_cids: set[str] | None = None,
 ) -> str:
-    """Flag tool versions whose tournament Brier diverges from prod.
+    """Tabulate every active tournament candidate, all-time.
 
-    A row qualifies when the absolute Brier delta exceeds
-    ``CALLOUT_DELTA``. Negative deltas become promotion candidates
-    (tournament better); positive deltas become tournament regressions
-    (tournament worse — a warning before the version reaches production).
+    One row per candidate CID still under tournament evaluation, sorted by
+    Brier (best first). Every active candidate is surfaced — a production
+    baseline to compare against is rendered when one exists, but its
+    absence does **not** hide the row. A brand-new tool with no production
+    predecessor (e.g. a tournament-only variant) still appears, ranked by
+    its Brier and its skill against the market baseline. This is
+    deliberate: new tools that could beat the incumbents must be visible
+    before they have a production counterpart.
 
-    Tournament is **not** sample-size gated when ``active_cids`` is
-    provided: a candidate's all-time record is shown from its very first
-    resolved market and grows each day, with rows below ``CALLOUT_MIN_N``
-    carrying a ``⚠ low data`` marker so the reader (and the Slack summary)
-    can weight them accordingly.
+    Per row:
 
-    When ``active_cids`` is ``None`` (scoping unavailable — e.g.
-    ``tournament_tools.json`` failed to load) the ``CALLOUT_MIN_N`` gate
-    is re-applied as a hard floor so the degraded path stays bounded:
-    without scoping AND without the gate, every long-inactive low-n CID
-    would surface. The pairing ensures fail-open mode is strictly
-    quieter (not noisier) than the scoped path.
+    - ``BSS vs mkt`` — the candidate's Brier skill score against the
+      market-implied baseline (carried on every tournament row), so a
+      no-prod tool still has a real comparator.
+    - ``vs Production`` — the candidate's Brier against the **latest-tagged
+      production CID** for the same tool, tagged 🟢 (better by at least
+      ``CALLOUT_DELTA``) or 🔴 (worse by at least ``CALLOUT_DELTA``), or
+      left untagged inside the noise band. Renders an em-dash note when no
+      production baseline exists or the candidate has already rolled out.
 
-    When ``active_cids`` is provided, only candidates still in the
-    tournament (CIDs in ``tournament_tools.json``) are considered; promoted
-    or dropped candidates fall off.
+    Sample size is surfaced, never gating: a candidate with fewer than
+    ``CALLOUT_MIN_N`` resolved markets carries a ``⚠`` marker so the reader
+    (and the Slack summary) can weight it as still-accumulating.
 
-    The production baseline is the **specific production CID with the
-    latest release tag** for the same tool — not the tool-level
-    aggregate. That way a rollout scenario (v2 partially in prod,
-    tournament evaluating v2) compares against the right thing and
-    doesn't get washed out by older versions' numbers.
+    When ``active_cids`` is provided, only candidates whose CID is in it
+    (i.e. still listed in ``tournament_tools.json``) appear; promoted or
+    dropped CIDs fall off. When ``active_cids`` is ``None`` (scoping
+    unavailable — e.g. ``tournament_tools.json`` failed to load) the
+    ``CALLOUT_MIN_N`` gate is re-applied as a hard floor so the degraded,
+    unscoped path stays bounded rather than listing every long-inactive
+    low-n CID.
 
     :param scores_prod: production scores dict.
     :param scores_tournament: tournament scores dict, or None.
     :param release_map_data: optional pre-loaded release map.
     :param active_cids: CIDs still under tournament evaluation, or None
         when scoping is unavailable (fail-open: re-arms the
-        ``CALLOUT_MIN_N`` gate to keep callout volume bounded).
-    :return: markdown section, or empty string when no callouts qualify.
+        ``CALLOUT_MIN_N`` gate to keep volume bounded).
+    :return: markdown table section, or empty string when no active
+        candidate qualifies.
     """
     if not _has_tournament_data(scores_tournament):
         return ""
@@ -2442,86 +2495,59 @@ def section_tournament_callouts(
 
     assert scores_tournament is not None  # narrowed by _has_tournament_data
     tournament_tvm = scores_tournament.get("by_tool_version_mode", {})
-    prod_tvm = (scores_prod or {}).get("by_tool_version_mode", {})
 
-    # Callout tuple layout:
-    #   tool, cand_cid, cand_label, t_stats, prod_cid, prod_label, p_stats
-    Callout = tuple[str, str, str, dict[str, Any], str, str, dict[str, Any]]
-    promotions: list[Callout] = []
-    regressions: list[Callout] = []
+    # Row layout: (sort_brier, tool, rendered_markdown_row).
+    rows: list[tuple[float, str, str]] = []
 
     for key, t_stats in tournament_tvm.items():
         tool, cand_cid, mode = _parse_tvm_key(key)
         if mode != "tournament":
             continue
         if active_cids is None:
-            # Fail-open: scoping unavailable, so re-arm the min-n gate
-            # to keep callout volume bounded (matches pre-PR behavior
-            # for the degraded path).
-            if t_stats.get("n", 0) < CALLOUT_MIN_N:
+            # Fail-open: scoping unavailable, so re-arm the min-n gate to
+            # keep volume bounded (degraded path stays strictly quieter).
+            if t_stats.get("valid_n", 0) < CALLOUT_MIN_N:
                 continue
         elif cand_cid not in active_cids:
             # Candidate no longer under tournament evaluation.
             continue
+
+        valid_n = t_stats.get("valid_n", 0)
         t_brier = t_stats.get("brier")
-        if t_brier is None:
-            continue
-
-        prod_cid = _most_recent_prod_cid(tool, scores_prod or {}, release_map_data)
-        if prod_cid is None:
-            # Tournament-only tool — no prod baseline to compare against.
-            continue
-        if cand_cid == prod_cid:
-            # Candidate has rolled out; comparing two samples of the same
-            # version is eval-pipeline noise, not a promotion signal.
-            continue
-        p_stats = prod_tvm.get(f"{tool} | {prod_cid} | production_replay") or {}
-        p_brier = p_stats.get("brier")
-        if p_brier is None:
-            continue
-
+        low = " ⚠" if valid_n < CALLOUT_MIN_N else ""
+        brier_str = f"{t_brier:.4f}" if t_brier is not None else "—"
+        bss = t_stats.get("brier_skill_score")
+        bss_str = f"{bss:+.3f}" if bss is not None else "—"
         cand_label = release_map.resolve(cand_cid, release_map_data)
-        prod_label = release_map.resolve(prod_cid, release_map_data)
-
-        delta = t_brier - p_brier
-        entry: Callout = (
-            tool,
-            cand_cid,
-            cand_label,
-            t_stats,
-            prod_cid,
-            prod_label,
-            p_stats,
+        prod_cell = _prod_comparison_cell(
+            tool, cand_cid, t_brier, scores_prod or {}, release_map_data
         )
-        if delta <= -CALLOUT_DELTA:
-            promotions.append(entry)
-        elif delta >= CALLOUT_DELTA:
-            regressions.append(entry)
 
-    if not promotions and not regressions:
+        row = (
+            f"| {tool} | `{cand_label}` | {valid_n}{low} | {brier_str}"
+            f" | {bss_str} | {prod_cell} |"
+        )
+        # None Brier (no resolved markets yet) sorts last.
+        sort_brier = t_brier if t_brier is not None else float("inf")
+        rows.append((sort_brier, tool, row))
+
+    if not rows:
         return ""
 
-    def _bullet(entry: Callout) -> str:
-        tool, _cand_cid, cand_label, t_stats, _prod_cid, prod_label, p_stats = entry
-        delta = t_stats["brier"] - p_stats["brier"]
-        low = " ⚠ low data" if t_stats["n"] < CALLOUT_MIN_N else ""
-        return (
-            f"- `{tool}` `{cand_label}` (tournament, n={t_stats['n']}){low} Brier"
-            f" {t_stats['brier']:.4f} vs `{prod_label}` (production,"
-            f" n={p_stats['n']}) Brier {p_stats['brier']:.4f}. Δ {delta:+.4f}."
-        )
+    rows.sort(key=lambda r: (r[0], r[1]))
 
-    lines = ["## Tournament Callouts", ""]
-    if promotions:
-        lines.append("**Promotion candidates:**")
-        lines.append("")
-        lines.extend(_bullet(e) for e in promotions)
-        lines.append("")
-    if regressions:
-        lines.append("**Tournament regressions:**")
-        lines.append("")
-        lines.extend(_bullet(e) for e in regressions)
-    return "\n".join(lines).rstrip()
+    lines = [
+        "## Tournament Callouts",
+        "",
+        "_All active tournament candidates, all-time. Sorted by Brier"
+        f" (best first). n = resolved markets; ⚠ = n < {CALLOUT_MIN_N}"
+        " (still accumulating)._",
+        "",
+        "| Tool | Version | n | Brier | BSS vs mkt | vs Production |",
+        "|------|---------|--:|------:|----------:|---------------|",
+    ]
+    lines.extend(row for _, _, row in rows)
+    return "\n".join(lines)
 
 
 def generate_report(  # pylint: disable=too-many-statements

@@ -34,7 +34,6 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
-
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
@@ -1167,6 +1166,8 @@ class TestCooldownStatusLogging:
         lets the issue fire. The fix mirrors the gate's predicate exactly
         (``last_close >= cutoff``) so the log and the decision can never
         disagree on a tool the operator is consulting the log about.
+
+        :param caplog: pytest log capture fixture.
         """
         # 43 hours ago with N=1 -> outside the gate window (gate fires),
         # but age.days == 1 -> floored-day status would have said ACTIVE.

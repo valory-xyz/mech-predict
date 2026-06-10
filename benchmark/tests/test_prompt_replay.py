@@ -812,7 +812,13 @@ _FAMILY_TEMPLATES = {
         ("PREDICTION_PROMPT", {"question": "q", "today": "t", "sources": "s"}),
     ],
     "factual_research": [
-        ("ESTIMATE_USER", {"question": "q", "today": "t", "briefing": "b"}),
+        # ``resolution_rules`` is required by factual_research-v2 (Polymarket
+        # rules block) and tolerated as an unused placeholder by the parent
+        # + v1 templates, so one fixture covers all three.
+        (
+            "ESTIMATE_USER",
+            {"question": "q", "today": "t", "briefing": "b", "resolution_rules": "r"},
+        ),
     ],
     "default": [
         ("PREDICTION_PROMPT", {"user_prompt": "q", "additional_information": "a"}),

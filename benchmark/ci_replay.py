@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from benchmark.io import load_jsonl
+from benchmark.prompt_replay import SCOPING_BUCKETS
 
 # Status buckets emitted by parse_response. Listed in a fixed order so the PR
 # comment breakdown is diffable across runs.
@@ -276,20 +277,20 @@ def _format_reliability_block(
             f"- Pre-filter (enrich): {accepted} accepted, {total_rej} rejected, "
             f"not_valid_parse={not_valid} {pf_marker}"
         )
-        # Scoping breakdown only when any rows were rejected — otherwise four
+        # Scoping breakdown only when any rows were rejected — otherwise the
         # zeroes just add noise to the happy path. Must stay adjacent to the
         # Pre-filter bullet above: markdown nests the indented sub-bullet
-        # under the most recent top-level bullet.
+        # under the most recent top-level bullet. Iterate SCOPING_BUCKETS so the
+        # breakdown always accounts for the rejected total shown above (minus
+        # not_valid_parse, which has its own marked line).
         if total_rej > 0:
-            scoping = ", ".join(
-                [
-                    f"wrong_tool={r.get('wrong_tool', 0)}",
-                    f"no_deliver_id={r.get('no_deliver_id', 0)}",
-                    f"no_outcome={r.get('no_outcome', 0)}",
-                    f"older_than_cutoff={r.get('older_than_cutoff', 0)}",
-                ]
-            )
+            scoping = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
             lines.append(f"  - Scoping: {scoping}")
+        # no_row_id is a kept-row diagnostic (always 0 in healthy production);
+        # surface it only when nonzero so a flywheel row_id regression is loud.
+        no_row_id = filter_stats.get("no_row_id", 0)
+        if no_row_id:
+            lines.append(f"  - ⚠️ no_row_id: {no_row_id} (rows bypassed dedup)")
         # Post-filter baseline is 100% by construction (enrich drops non-valid
         # rows), so surface the *pre-filter* ratio to tell reviewers how noisy
         # production actually was — per PR #231 review. Rendered last so the
@@ -398,7 +399,7 @@ def format_report(
         parts.append("")
 
     # Footer
-    footer_parts = [f"{baseline['n']} markets"]
+    footer_parts = [f"{baseline['n']} deliveries"]
     if meta.get("seed"):
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):

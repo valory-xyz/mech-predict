@@ -51,7 +51,7 @@ repo uses (``prediction_request``, ``prediction_request_rag``,
   into the result tuple — see the decorator's docstring for the
   deployment note.
 * ``component.yaml`` declares BOTH ``openai==1.93.0`` AND
-  ``anthropic==0.23.1`` (no ``pyproject.toml`` bump).
+  ``anthropic==0.109.1`` (matching the ``pyproject.toml`` pin).
 """
 
 import functools

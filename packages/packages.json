@@ -63,8 +63,8 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeihc4ruh25s7wuunfy2b3k2n4eypyhvtry3usgom44wsymagbcr3ki",
         "skill/valory/termination_abci/0.1.0": "bafybeibnnzry5kknci3z46gcjgutv4jid3ir6xn6a5adq3tx6v2e25augq",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeiaefr3eiajklnb6m4jtl7rpxr5t2lmrpizfy7gqkjem3qiewo7cz4",
-        "skill/valory/mech_abci/0.1.0": "bafybeicmu7ljnomrdrarvm2ep3325rdvajwdk5eqyoukjbcsmy5uyjs6wi",
-        "skill/valory/task_execution/0.1.0": "bafybeigy6h6po63cshmsjl57nioupmu3jppiivfdqm4jbnrkaszlwilubu",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeifehpnj7k5pawmzdpvnybpukinhe7n6ymgcnunooyzfyykeocig3q"
+        "skill/valory/mech_abci/0.1.0": "bafybeicaxrvsspr5pablbah57yhwfcms3nengun67eozbhemzn34cqzqde",
+        "skill/valory/task_execution/0.1.0": "bafybeibgegj5oajp3sqecsyf6jovlii4u63eatm33sf4y56s5zd7vq7gf4",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeifimk7xd34j6buty4r37ny7rkbnduaavmaue6lzz5ftvris5vzfja"
     }
 }

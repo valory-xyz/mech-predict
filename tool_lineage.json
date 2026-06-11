@@ -137,6 +137,10 @@
     "superforcaster_full_search": {
       "parent": null,
       "reason": "Original tool, baseline entry."
+    },
+    "superforcaster-polymarket-v3": {
+      "parent": "superforcaster-polymarket-v1",
+      "reason": "Swap the default LLM model from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5. Same prompt, pipeline, output format and retry logic as v1 \u2014 one-axis change to measure the model's contribution to v1's baseline. Sibling of v2 (which is a prompt-only resolution-criterion specificity variant), both depart from v1."
     }
   }
 }

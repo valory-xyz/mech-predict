@@ -159,8 +159,6 @@ dependencies:
     version: ==0.8.6
   openai:
     version: ==1.93.0
-  openfactverification-kongzii:
-    version: ==0.1.0
   httpx:
     version: ==0.25.2
   tqdm:

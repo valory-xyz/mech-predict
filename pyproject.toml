@@ -63,7 +63,6 @@ dependencies = [
     "replicate==0.15.7",
     "langgraph==1.0.10",
     "google-generativeai==0.8.6",
-    "openfactverification-kongzii>=0.1.0,<0.2",
     # lxml exception: kept as an exact pin because `readability-lxml==0.8.1`
     # transitively requests `lxml[html_clean]` (underscore), and only
     # lxml 6.0.2 happens to register the extra under both the underscore

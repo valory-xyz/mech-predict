@@ -402,11 +402,8 @@ jobs:
     needs: [tournament-fetch, check-secrets]
     if: needs.check-secrets.outputs.has_keys == 'true'
     runs-on: ubuntu-22.04
-    # Bumped from 90 → 150 to accommodate the growing tournament_tools.json
-    # set (now 4 tools, two of which scrape top organic pages so per-eval
-    # latency is higher than the snippet-only path) plus the possibility of
-    # workflow_dispatch bumping max_markets above the 30/platform default.
-    timeout-minutes: 150
+    # GitHub-hosted runner max (6h).
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4

@@ -331,8 +331,8 @@ def format_report(
         candidate_failures.jsonl. When non-empty, bodies are inlined in a
         collapsed <details> block.
     :param filter_stats: optional ``{accepted, rejected}`` dict from
-        filter_stats.json sidecar. When present, a Pre-filter block is
-        rendered so an upstream filter regression would be visible.
+        filter_stats.json sidecar. When present, a Production parse rate line
+        is rendered showing how many in-scope production deliveries parsed.
     :return: markdown string.
     """
     tool = meta.get("tool", "unknown")

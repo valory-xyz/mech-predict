@@ -229,16 +229,13 @@ treatment of conjunctive or disjunctive conditions (only if applicable), and oth
 biases when reviewing your reasoning. Consider priors/base rates, and the extent to which
 case-specific information justifies the deviation between your tentative forecast and the prior.
 Critically: identify the exact resolution criterion -- the specific condition that must literally
-be true for this market to resolve YES. Then determine which of two cases applies:
-(A) The evidence directly and specifically confirms the criterion -- a source explicitly states
-the exact word was used, the exact threshold was crossed, or the exact event occurred: allow
-your estimate to reflect this direct confirmation; do not apply a downward correction.
-(B) The evidence is topically relevant but does not directly confirm the criterion -- sources
-discuss the topic or context but none confirms the specific required condition: for
-narrow-scope criteria (an exact word or phrase at a specific event, a precise numeric
-threshold on a specific date, a condition limited to a defined window), apply a downward
-correction -- such exact conditions are met far less often than general topical relevance
-suggests; do not conflate "topic is mentioned" with "the specific criterion will be satisfied".
+be true for this market to resolve YES. For each piece of evidence, ask: does this evidence
+bear on whether the criterion itself will be satisfied, or does it only establish that the topic
+is relevant? Topical relevance is not criterion evidence. Derive p_yes by reasoning explicitly
+about the probability that the criterion is satisfied: consider the base rate for this type of
+condition, any case-specific factors that raise or lower that probability, and whether any
+evidence directly confirms or denies criterion satisfaction. Ground your estimate in that
+reasoning chain -- do not substitute topical signal strength for a criterion probability.
 Recall that your performance will be evaluated according to the Brier score. Be precise with tail
 probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
 or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors

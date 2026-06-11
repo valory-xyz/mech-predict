@@ -46,7 +46,8 @@ jobs:
         && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # GitHub-hosted runner max (6h).
+    timeout-minutes: 360
 
     steps:
       # Acknowledge the trigger (issue_comment only)

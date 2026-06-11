@@ -285,16 +285,16 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-request-rag",
+    "prediction-request-rag-v1",
     # LEGACY
-    "prediction-request-rag-claude",
+    "prediction-request-rag-claude-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 DEFAULT_NUM_URLS = 3
@@ -462,8 +462,8 @@ def multi_queries(
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
-    temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
-    max_tokens: int = LLM_SETTINGS["claude-4-sonnet-20250514"]["default_max_tokens"],
+    temperature: float = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: int = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
 ) -> Tuple[List[str], Optional[Callable]]:
     """Generate multiple queries for fetching information from the web."""
     if not client:
@@ -841,8 +841,8 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
     source_content_mode: str = "cleaned",
     num_urls: int = DEFAULT_NUM_URLS,
     num_queries: int = DEFAULT_NUM_QUERIES,
-    temperature: float = LLM_SETTINGS["claude-4-sonnet-20250514"]["temperature"],
-    max_tokens: int = LLM_SETTINGS["claude-4-sonnet-20250514"]["default_max_tokens"],
+    temperature: float = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: int = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
 ) -> Tuple[str, Dict[str, Any], Optional[Callable[..., None]]]:
     """Fetch additional information to help answer the user prompt."""
     # generate multiple queries for fetching information from the web
@@ -1021,7 +1021,7 @@ def run(
         return max_cost
 
     if "claude" in tool:  # maintain backwards compatibility
-        model = "claude-4-sonnet-20250514"
+        model = "claude-sonnet-4-6"
     print(f"MODEL for prediction request rag: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider="openai") as (
         llm_client,

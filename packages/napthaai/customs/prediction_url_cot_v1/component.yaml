@@ -1,4 +1,4 @@
-name: prediction_url_cot
+name: prediction_url_cot_v1
 author: napthaai
 version: 0.1.0
 type: custom
@@ -7,14 +7,14 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeiflni5dkn5fqe7fnu4lgbqxzfrgochhqfbgzwz3vlf5grijp3nkpm
-  prediction_url_cot.py: bafybeifxblnmj6kqhduchdsbnxhqzb5qio4gava2rjpzffo22frrxdyopu
+  prediction_url_cot_v1.py: bafybeie3d7dy5wnfcn57zhdkym477vdq2nwodyonwp547wgghjnmisvnhm
   tests/__init__.py: bafybeia2zevyo6fxbwf7dj4vkhd3fnsvog5sqvepqg4qjgzydlhsuwnn7q
-  tests/test_prediction_url_cot.py: bafybeiakbfpefbuhdfwkrcdlgzglatcl24fvtlmmgi3m5ooplfowtcjkcm
+  tests/test_prediction_url_cot_v1.py: bafybeigdcyn5y25jmkht5cuwp3adm6im3uu3wys44ggj6yhbidgibbx6mi
 fingerprint_ignore_patterns: []
-entry_point: prediction_url_cot.py
+entry_point: prediction_url_cot_v1.py
 callable: run
 params:
-  default_model: claude-4-sonnet-20250514
+  default_model: claude-sonnet-4-6
 dependencies:
   google-api-python-client:
     version: ==2.95.0
@@ -31,7 +31,7 @@ dependencies:
   lxml_html_clean:
     version: ==0.4.4
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1
   tiktoken:
     version: ==0.12.0
   pypdf:

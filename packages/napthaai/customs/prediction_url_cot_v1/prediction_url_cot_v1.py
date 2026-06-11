@@ -263,16 +263,16 @@ class LLMClient:
 
 
 LLM_SETTINGS = {
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-url-cot",
+    "prediction-url-cot-v1",
     # LEGACY
-    "prediction-url-cot-claude",
+    "prediction-url-cot-claude-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 NUM_QUERIES = 5
@@ -404,10 +404,10 @@ def multi_queries(
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
-    temperature: Optional[float] = LLM_SETTINGS["claude-4-sonnet-20250514"][
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"][
         "temperature"
     ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-4-sonnet-20250514"][
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"][
         "default_max_tokens"
     ],
 ) -> Tuple[List[str], Optional[Callable]]:
@@ -781,10 +781,10 @@ def fetch_additional_information(
     source_content_mode: str = "cleaned",
     num_urls: Optional[int] = NUM_URLS_PER_QUERY,
     num_queries: int = NUM_QUERIES,
-    temperature: Optional[float] = LLM_SETTINGS["claude-4-sonnet-20250514"][
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"][
         "temperature"
     ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-4-sonnet-20250514"][
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"][
         "default_max_tokens"
     ],
     n_docs: int = N_DOCS,
@@ -917,7 +917,7 @@ def run(  # pylint: disable=too-many-statements
     if model is None:
         raise ValueError("Model must be specified in kwargs")
     if "claude" in tool:  # maintain backwards compatibility
-        model = "claude-4-sonnet-20250514"
+        model = "claude-sonnet-4-6"
     print(f"MODEL for prediction url cot: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider) as (
         llm_client,

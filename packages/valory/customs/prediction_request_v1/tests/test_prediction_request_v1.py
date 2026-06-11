@@ -28,8 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import packages.valory.customs.prediction_request.prediction_request as module
-from packages.valory.customs.prediction_request.prediction_request import (
+import packages.valory.customs.prediction_request_v1.prediction_request_v1 as module
+from packages.valory.customs.prediction_request_v1.prediction_request_v1 import (
     ExtendedDocument,
     LLMClientManager,
     count_tokens,
@@ -49,7 +49,7 @@ class TestLLMClientManager:
         mock_keys: Any = {"openai": "sk-test"}
         mgr = LLMClientManager(api_keys=mock_keys, model="gpt-4o-2024-08-06")
         with patch(
-            "packages.valory.customs.prediction_request.prediction_request.LLMClient"
+            "packages.valory.customs.prediction_request_v1.prediction_request_v1.LLMClient"
         ) as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
@@ -85,7 +85,7 @@ class TestLLMClientManager:
         clients_seen: list = []
 
         with patch(
-            "packages.valory.customs.prediction_request.prediction_request.LLMClient"
+            "packages.valory.customs.prediction_request_v1.prediction_request_v1.LLMClient"
         ) as MockClient:
             MockClient.side_effect = lambda *args, **kwargs: MagicMock()
 
@@ -123,14 +123,14 @@ class TestFunctionsAcceptClient:
         )
 
         result = count_tokens(
-            "hello world", "claude-4-sonnet-20250514", client=mock_client
+            "hello world", "claude-sonnet-4-6", client=mock_client
         )
         assert result == 42
         mock_client.client.messages.count_tokens.assert_called_once()
 
     def test_count_tokens_claude_without_client_uses_fallback(self) -> None:
         """count_tokens for Claude models without client uses cl100k_base fallback."""
-        token_count = count_tokens("hello world", "claude-4-sonnet-20250514")
+        token_count = count_tokens("hello world", "claude-sonnet-4-6")
         assert isinstance(token_count, int)
         assert token_count > 0
 
@@ -150,7 +150,7 @@ class TestFunctionsAcceptClient:
         assert params[0] == "client"
 
 
-MODULE = "packages.valory.customs.prediction_request.prediction_request"
+MODULE = "packages.valory.customs.prediction_request_v1.prediction_request_v1"
 
 
 def _make_html_future(url: str, html: str) -> tuple:
@@ -456,7 +456,7 @@ class TestRunFlagBehavior:
         mock_gen.return_value = ("prediction", None)
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("true"),
@@ -482,7 +482,7 @@ class TestRunFlagBehavior:
         mock_gen.return_value = ("prediction", None)
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("false"),
@@ -513,7 +513,7 @@ class TestRunFlagBehavior:
         mock_keys.get = lambda key, default="": services.get(key, [default])[0]
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=mock_keys,
@@ -540,7 +540,7 @@ class TestRunFlagBehavior:
         mock_keys.get = lambda key, default="": services.get(key, [default])[0]
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=mock_keys,

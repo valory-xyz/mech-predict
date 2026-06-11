@@ -17,7 +17,7 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for prediction_request_rag: thread-safe client, offline tiktoken, and source_content."""
+"""Unit tests for prediction_url_cot: thread-safe client, offline tiktoken, and source_content."""
 
 import inspect
 from concurrent.futures import Future
@@ -27,8 +27,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-import packages.napthaai.customs.prediction_request_rag.prediction_request_rag as module
-from packages.napthaai.customs.prediction_request_rag.prediction_request_rag import (
+import packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1 as module
+from packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1 import (
     ExtendedDocument,
     LLMClientManager,
     count_tokens,
@@ -49,7 +49,7 @@ class TestLLMClientManager:
             api_keys=mock_keys, model="gpt-4o-2024-08-06", embedding_provider="openai"
         )
         with patch(
-            "packages.napthaai.customs.prediction_request_rag.prediction_request_rag.LLMClient"
+            "packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1.LLMClient"
         ) as MockClient:
             mock_llm = MagicMock(name="llm")
             mock_embed = MagicMock(name="embed")
@@ -89,7 +89,7 @@ class TestFunctionsAcceptClient:
 
     def test_count_tokens_claude_without_client_uses_fallback(self) -> None:
         """count_tokens for Claude models without client uses cl100k_base fallback."""
-        token_count = count_tokens("hello world", "claude-4-sonnet-20250514")
+        token_count = count_tokens("hello world", "claude-sonnet-4-6")
         assert isinstance(token_count, int)
         assert token_count > 0
 
@@ -104,7 +104,7 @@ class TestFunctionsAcceptClient:
         assert params[0] == "client"
 
 
-RAG_MODULE = "packages.napthaai.customs.prediction_request_rag.prediction_request_rag"
+COT_MODULE = "packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1"
 
 
 def _make_html_future(url: str, html: str) -> tuple:
@@ -130,9 +130,9 @@ def _make_pdf_future(url: str) -> tuple:
 
 
 class TestExtractTextsCapture:
-    """Verify extract_texts captures source content correctly."""
+    """Verify extract_texts captures raw source content correctly."""
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_cleaned_mode_stores_extracted_text(self, mock_batches: MagicMock) -> None:
         """In cleaned mode (default), extracted text is stored instead of raw HTML."""
         html = "<html><body>Hello world</body></html>"
@@ -146,7 +146,7 @@ class TestExtractTextsCapture:
         assert "Hello world" in raw_sc["pages"]["http://example.com"]
         assert not raw_sc["pdfs"]
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_raw_mode_stores_html(self, mock_batches: MagicMock) -> None:
         """In raw mode, raw HTML is stored."""
         html = "<html><body>Hello world</body></html>"
@@ -157,8 +157,8 @@ class TestExtractTextsCapture:
         assert raw_sc["mode"] == "raw"
         assert raw_sc["pages"]["http://example.com"] == html
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.extract_text_from_pdf")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_pdf_captured(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -174,8 +174,8 @@ class TestExtractTextsCapture:
         assert raw_sc["pdfs"]["http://example.com/doc.pdf"] == "pdf content"
         assert not raw_sc["pages"]
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.extract_text_from_pdf")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_failed_pdf_stores_empty_string(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -187,8 +187,8 @@ class TestExtractTextsCapture:
 
         assert raw_sc["pdfs"]["http://example.com/doc.pdf"] == ""
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.extract_text_from_pdf")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_mixed_html_and_pdf(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -209,7 +209,7 @@ class TestExtractTextsCapture:
         assert "http://example.com" in raw_sc["pages"]
         assert "http://example.com/doc.pdf" in raw_sc["pdfs"]
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{COT_MODULE}.process_in_batches")
     def test_non_200_not_captured(self, mock_batches: MagicMock) -> None:
         """Non-200 responses are not stored in raw_source_content."""
         response = MagicMock(spec=requests.Response)
@@ -227,15 +227,8 @@ class TestExtractTextsCapture:
 class TestFetchReplayPath:
     """Verify fetch_additional_information replays from structured source_content."""
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
-    def test_cleaned_mode_uses_text_directly(
-        self,
-        mock_queries: MagicMock,
-        mock_embeddings: MagicMock,
-        mock_similar: MagicMock,
-    ) -> None:
+    @patch(f"{COT_MODULE}.multi_queries")
+    def test_cleaned_mode_uses_text_directly(self, mock_queries: MagicMock) -> None:
         """In cleaned mode, cached text is used directly without re-extraction."""
         source_content = {
             "mode": "cleaned",
@@ -245,18 +238,12 @@ class TestFetchReplayPath:
             "pdfs": {},
         }
         mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(text="test content here", url="http://example.com")
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(text="test content here", url="http://example.com")
-        ]
 
         result, raw_sc, _ = fetch_additional_information(
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
-            model="gpt-4.1-2025-04-14",
+            model="claude-sonnet-4-6",
             google_api_key=None,
             google_engine_id=None,
             serper_api_key=None,
@@ -268,15 +255,8 @@ class TestFetchReplayPath:
         assert "test content here" in result
         assert "http://example.com" in result
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
-    def test_raw_mode_re_extracts(
-        self,
-        mock_queries: MagicMock,
-        mock_embeddings: MagicMock,
-        mock_similar: MagicMock,
-    ) -> None:
+    @patch(f"{COT_MODULE}.multi_queries")
+    def test_raw_mode_re_extracts(self, mock_queries: MagicMock) -> None:
         """In raw mode, HTML is re-extracted via extract_text."""
         source_content = {
             "mode": "raw",
@@ -286,18 +266,12 @@ class TestFetchReplayPath:
             "pdfs": {},
         }
         mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(text="test content", url="http://example.com")
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(text="test content", url="http://example.com")
-        ]
 
         result, raw_sc, _ = fetch_additional_information(
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
-            model="gpt-4.1-2025-04-14",
+            model="claude-sonnet-4-6",
             google_api_key=None,
             google_engine_id=None,
             serper_api_key=None,
@@ -308,15 +282,8 @@ class TestFetchReplayPath:
         assert raw_sc is source_content
         assert "http://example.com" in result
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
-    def test_pdfs_replayed(
-        self,
-        mock_queries: MagicMock,
-        mock_embeddings: MagicMock,
-        mock_similar: MagicMock,
-    ) -> None:
+    @patch(f"{COT_MODULE}.multi_queries")
+    def test_pdfs_replayed(self, mock_queries: MagicMock) -> None:
         """Pdfs in source_content are loaded as ExtendedDocuments."""
         source_content = {
             "pages": {},
@@ -325,24 +292,12 @@ class TestFetchReplayPath:
             },
         }
         mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(
-                text="pdf extracted text for testing",
-                url="http://example.com/doc.pdf",
-            )
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(
-                text="pdf extracted text for testing",
-                url="http://example.com/doc.pdf",
-            )
-        ]
 
         result, _, _ = fetch_additional_information(
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
-            model="gpt-4.1-2025-04-14",
+            model="claude-sonnet-4-6",
             google_api_key=None,
             google_engine_id=None,
             serper_api_key=None,
@@ -352,24 +307,25 @@ class TestFetchReplayPath:
 
         assert "pdf extracted text for testing" in result
 
-    @patch(f"{RAG_MODULE}.multi_queries")
-    def test_empty_source_content_raises(self, mock_queries: MagicMock) -> None:
-        """Empty source_content raises ValueError (no valid documents)."""
+    @patch(f"{COT_MODULE}.multi_queries")
+    def test_empty_source_content(self, mock_queries: MagicMock) -> None:
+        """Empty source_content produces empty result without error."""
         source_content: dict = {"pages": {}, "pdfs": {}}
         mock_queries.return_value = (["test query"], None)
 
-        with pytest.raises(ValueError, match="No valid documents"):
-            fetch_additional_information(
-                client=MagicMock(),
-                client_embedding=MagicMock(),
-                prompt="test",
-                model="gpt-4.1-2025-04-14",
-                google_api_key=None,
-                google_engine_id=None,
-                serper_api_key=None,
-                search_provider="google",
-                source_content=source_content,
-            )
+        result, _, _ = fetch_additional_information(
+            client=MagicMock(),
+            client_embedding=MagicMock(),
+            prompt="test",
+            model="claude-sonnet-4-6",
+            google_api_key=None,
+            google_engine_id=None,
+            serper_api_key=None,
+            search_provider="google",
+            source_content=source_content,
+        )
+
+        assert result == ""
 
 
 def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
@@ -396,9 +352,9 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
 class TestRunFlagBehavior:
     """Verify return_source_content flag controls source_content in used_params."""
 
-    @patch(f"{RAG_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
-    @patch(f"{RAG_MODULE}.fetch_additional_information")
-    @patch(f"{RAG_MODULE}.LLMClientManager")
+    @patch(f"{COT_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
+    @patch(f"{COT_MODULE}.fetch_additional_information")
+    @patch(f"{COT_MODULE}.LLMClientManager")
     def test_flag_on_includes_source_content(
         self,
         mock_mgr: MagicMock,
@@ -418,13 +374,13 @@ class TestRunFlagBehavior:
         )
 
         mock_llm.completions.return_value = MagicMock(
-            content="<p_yes>0.5</p_yes><p_no>0.5</p_no><confidence>0.5</confidence><info_utility>0.5</info_utility>",
+            content="<p_yes>0.5</p_yes>",
             usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
 
         result = run(
-            tool="prediction-request-rag",
-            model="gpt-4.1-2025-04-14",
+            tool="prediction-url-cot-v1",
+            model="claude-sonnet-4-6",
             prompt="test",
             api_keys=_make_mock_api_keys("true"),
         )
@@ -432,9 +388,9 @@ class TestRunFlagBehavior:
         used_params = result[4]
         assert "source_content" in used_params
 
-    @patch(f"{RAG_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
-    @patch(f"{RAG_MODULE}.fetch_additional_information")
-    @patch(f"{RAG_MODULE}.LLMClientManager")
+    @patch(f"{COT_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
+    @patch(f"{COT_MODULE}.fetch_additional_information")
+    @patch(f"{COT_MODULE}.LLMClientManager")
     def test_flag_off_excludes_source_content(
         self,
         mock_mgr: MagicMock,
@@ -450,13 +406,13 @@ class TestRunFlagBehavior:
         mock_fetch.return_value = ("additional info", {"pages": {}}, None)
 
         mock_llm.completions.return_value = MagicMock(
-            content="<p_yes>0.5</p_yes><p_no>0.5</p_no><confidence>0.5</confidence><info_utility>0.5</info_utility>",
+            content="<p_yes>0.5</p_yes>",
             usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
 
         result = run(
-            tool="prediction-request-rag",
-            model="gpt-4.1-2025-04-14",
+            tool="prediction-url-cot-v1",
+            model="claude-sonnet-4-6",
             prompt="test",
             api_keys=_make_mock_api_keys("false"),
         )

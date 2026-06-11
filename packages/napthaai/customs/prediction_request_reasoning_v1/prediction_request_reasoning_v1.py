@@ -290,16 +290,16 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-request-reasoning",
+    "prediction-request-reasoning-v1",
     # LEGACY
-    "prediction-request-reasoning-claude",
+    "prediction-request-reasoning-claude-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 DEFAULT_NUM_URLS = 3
@@ -1228,7 +1228,7 @@ def run(  # pylint: disable=too-many-statements
         return max_cost
 
     if "claude" in tool:  # maintain backwards compatibility
-        model = "claude-4-sonnet-20250514"
+        model = "claude-sonnet-4-6"
     print(f"MODEL for prediction request reasoning: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider="openai") as (
         llm_client,

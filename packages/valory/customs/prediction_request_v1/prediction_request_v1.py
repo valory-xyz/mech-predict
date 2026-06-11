@@ -448,27 +448,27 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-offline",
-    "prediction-online",
-    # "prediction-online-summarized-info",
+    "prediction-offline-v1",
+    "prediction-online-v1",
+    # "prediction-online-summarized-info-v1",
     # LEGACY
-    "claude-prediction-offline",
-    "claude-prediction-online",
+    "claude-prediction-offline-v1",
+    "claude-prediction-online-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 # the default number of URLs to fetch online information for
 DEFAULT_NUM_URLS = defaultdict(lambda: 3)
-DEFAULT_NUM_URLS["prediction-online-summarized-info"] = 7
+DEFAULT_NUM_URLS["prediction-online-summarized-info-v1"] = 7
 # the default number of words to fetch online information for
 DEFAULT_NUM_WORDS: Dict[str, Optional[int]] = defaultdict(lambda: 300)
-DEFAULT_NUM_WORDS["prediction-online-summarized-info"] = None
+DEFAULT_NUM_WORDS["prediction-online-summarized-info-v1"] = None
 # how much of the initial content will be kept during summarization
 DEFAULT_COMPRESSION_FACTOR = 0.05
 # the vocabulary to use for the summarization
@@ -1123,7 +1123,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return max_cost
 
     if "claude" in tool:  # maintain backwards compatibility
-        engine = "claude-4-sonnet-20250514"
+        engine = "claude-sonnet-4-6"
     print(f"ENGINE used for {tool}: {engine}")
     with LLMClientManager(kwargs["api_keys"], engine) as llm_client:
         user_prompt = kwargs["prompt"]  # question
@@ -1155,7 +1155,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         active_prompt = PREDICTION_PROMPT
         additional_information = ""
         source_content: Dict[str, Any] = {}
-        if tool in ["prediction-online", "claude-prediction-online"]:
+        if tool in ["prediction-online-v1", "claude-prediction-online-v1"]:
             additional_information, source_content, counter_callback = (
                 fetch_additional_information(
                     llm_client,
@@ -1178,7 +1178,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             # used improved prompt in all models except the Claude ones
             active_prompt = OFFLINE_PREDICTION_PROMPT
 
-        if additional_information and tool == "prediction-online-summarized-info":
+        if additional_information and tool == "prediction-online-summarized-info-v1":
             additional_information = summarize(
                 additional_information, compression_factor
             )

@@ -50,25 +50,25 @@ skills:
 - valory/transaction_settlement_abci:0.1.0:bafybeibv3tycpdhphlblu62zpcbjsj7hnwkutexxqagorkelhjlt4t4fii
 - valory/websocket_client:0.1.0:bafybeid6oyycsrvk4duftffs5mrfgmcepibt3qe4om3kfzhwhilfq3ynay
 customs:
-- valory/resolve_market:0.1.0:bafybeigxgcjsvi2zovoxgz5ra7x7sqz5qfx3p5kxmhgftrr7fxonjmhspi
+- valory/resolve_market:0.1.0:bafybeiaozazbggoglwrnfyn5v2qebyn4y4jpaxxbdodi3bd5eyieo4a55i
 - valory/resolve_market_jury:0.1.0:bafybeigdv6zbbuf2flnti7hfwbotagnqz43g76v2jfhcuk4ancucxmg5gi
-- valory/prediction_request:0.1.0:bafybeieqpji2z666rh6ujeldooq23uutpjujvggd3e5dagtjdxjrtty36e
-- napthaai/resolve_market_reasoning:0.1.0:bafybeibjmyiqm5nnw75y6q7x4vymurg5w74zsko3ewzvarshgq4npxew3y
-- napthaai/prediction_request_rag:0.1.0:bafybeicbht6wr4lgcadxedcqsekmm5yechqba2pj3gy6fyvqa6nu5epvpa
-- napthaai/prediction_request_reasoning:0.1.0:bafybeifq3zndol4reyix7aivttvof4xh5adkcmiv7o4bswazgbeym6jqsq
-- valory/prepare_tx:0.1.0:bafybeida74hcfsfgh644o27qlq2lmue5aj7kvjfsbjermwv42euyf525ya
-- napthaai/prediction_url_cot:0.1.0:bafybeibap2akjuqysqdrwvrpac5uwssoes4najrbq6dhg3mvecp3wkxmsy
-- valory/prediction_langchain:0.1.0:bafybeifuxvvldtt7o5zmrgdscbqofnkgtmemv5yv5gxzeptnxsiymwvs6a
+- valory/prediction_request_v1:0.1.0:bafybeigc632jofeuvax4c4v52de74hrpsfsyiudobbkk6ryh4iukj4gztq
+- napthaai/resolve_market_reasoning:0.1.0:bafybeidji6or6kpmawho64tc7qetinykhrklvv2gmnqfcd6ejmg43j3i7q
+- napthaai/prediction_request_rag_v1:0.1.0:bafybeib62kyn5piaup7zhobbgkupkhght4frohhx35enqvsbzqq42uti7e
+- napthaai/prediction_request_reasoning_v1:0.1.0:bafybeih6euompjmuclgrpyuuzzms4rc6y3luht26awan75hcrxwrnemswq
+- valory/prepare_tx:0.1.0:bafybeidpvkwtn5m5yjp5mr2tn6f52btmlki32syahvkkuvlw3oq5eee3di
+- napthaai/prediction_url_cot_v1:0.1.0:bafybeig3dhs3wgxdqbqwm3tnxzbgx4nlyzwrnzrhhtmdmi4nomavedk3au
+- valory/prediction_langchain:0.1.0:bafybeidtixb6gkctowphterybnlxwvb6rrzj2z2wwbcfyalgfb2at3r63q
 - victorpolisetty/gemini_request:0.1.0:bafybeiamjk5mfycjqkstkzymggako2jt7yjros2zx4l54zyuei2xkj4gqu
 - victorpolisetty/dalle_request:0.1.0:bafybeiadatvfc6opcsmhpxxzmsqpwgbckblciqypx2iwe5uwove6nmki3e
 - valory/superforcaster:0.1.0:bafybeidkraklf5c6rkv6g7y7lqj2woy4j5u5dmupjez6mtjhdek3lzbmki
 - valory/superforcaster_polymarket_v1:0.1.0:bafybeiawfhy3w5aclmxm5zxebwd5l7paseqlgmihwbqfyhcdpn2kccgtrq
-- valory/superforcaster_polymarket_v3:0.1.0:bafybeigwcghcfq4d7zbjixg3d4mqvyo6ci4wp4jfstuyhm5357bhz2aeoy
+- valory/superforcaster_polymarket_v3:0.1.0:bafybeicghoipp43ld56ikew2p3tvwkmzrzm6fdg2y4qjkwrsj77cwioxgy
 - dvilela/corcel_request:0.1.0:bafybeic74xc32orfiffumv3cxe7o4vktzobk6gszjecuhto4or7k5ppi5y
 - dvilela/gemini_prediction:0.1.0:bafybeifpoil2wjh6hr7sqoomlilhsyt3ktpy6tjzmisrlopxcjbkr3hhfq
-- nickcom007/prediction_request_sme:0.1.0:bafybeifssc6ed7itkvqot6qunlpd3prghwsf5dh26kin3xduci3sohulqq
+- nickcom007/prediction_request_sme:0.1.0:bafybeifsk4og24t22agcrj7mm6fz3wxwfbdg554yjhc6odpxal5ofg22ti
 - valory/factual_research:0.1.0:bafybeidcxmqemvzm7cz2ydyjsmu53zflsqpcj2gpco5kwn3ldvf22rqx4i
-- valory/factual_research_v3:0.1.0:bafybeih2ciwkf7edrmwlb5knk4nw5dedh7cz2lo6d6ecyehxlt6q7i7i3a
+- valory/factual_research_v3:0.1.0:bafybeigzkzvdmomb3zpcticgaftu2cvo4wssah76gry5y6tjv3ng7eh3de
 default_ledger: ethereum
 required_ledgers:
 - ethereum
@@ -102,7 +102,7 @@ dependencies:
   aiohttp:
     version: <4.0.0,>=3.8.5
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1
   beautifulsoup4:
     version: ==4.12.2
   docstring-parser:

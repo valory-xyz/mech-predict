@@ -1,4 +1,4 @@
-name: prediction_request
+name: prediction_request_v1
 author: valory
 version: 0.1.0
 type: custom
@@ -7,11 +7,11 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibbn67pnrrm4qm3n3kbelvbs3v7fjlrjniywmw2vbizarippidtvi
-  prediction_request.py: bafybeiebxf3enw4ob4ru4dluqx3rpkfapeofxv6zgiost4sema2ykla7oe
+  prediction_request_v1.py: bafybeicqmhvtmrvxkeerkv6n3h5jfyjb3ib4jduzxwqdkjjuit4ynr25ka
   tests/__init__.py: bafybeib7h3aalw6bzylqazc3mefunk3n3d65pyzfck4qb33slesscud25m
-  tests/test_prediction_request.py: bafybeiao3uc52gfwgb6l5kpjf2c4aig2lbiiqqa35mun4ds54mprnb4tyu
+  tests/test_prediction_request_v1.py: bafybeibdwpkmvusvuvh7mwy7636wsci76oocammjydlviaw33ayhezo55y
 fingerprint_ignore_patterns: []
-entry_point: prediction_request.py
+entry_point: prediction_request_v1.py
 callable: run
 params:
   default_model: gpt-4.1-2025-04-14
@@ -45,4 +45,4 @@ dependencies:
   numpy:
     version: '>=1.19.0'
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1

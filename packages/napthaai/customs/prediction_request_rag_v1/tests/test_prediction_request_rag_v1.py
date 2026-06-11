@@ -104,7 +104,9 @@ class TestFunctionsAcceptClient:
         assert params[0] == "client"
 
 
-RAG_MODULE = "packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_v1"
+RAG_MODULE = (
+    "packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_v1"
+)
 
 
 def _make_html_future(url: str, html: str) -> tuple:

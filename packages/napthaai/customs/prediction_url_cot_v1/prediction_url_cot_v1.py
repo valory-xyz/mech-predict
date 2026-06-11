@@ -404,12 +404,8 @@ def multi_queries(
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
-    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"][
-        "temperature"
-    ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"][
-        "default_max_tokens"
-    ],
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
 ) -> Tuple[List[str], Optional[Callable]]:
     """Generate multiple queries for fetching information from the web."""
     if not client:
@@ -781,12 +777,8 @@ def fetch_additional_information(
     source_content_mode: str = "cleaned",
     num_urls: Optional[int] = NUM_URLS_PER_QUERY,
     num_queries: int = NUM_QUERIES,
-    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"][
-        "temperature"
-    ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"][
-        "default_max_tokens"
-    ],
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
     n_docs: int = N_DOCS,
 ) -> Tuple[str, Dict[str, Any], Optional[Callable]]:
     """Fetch additional information from the web."""

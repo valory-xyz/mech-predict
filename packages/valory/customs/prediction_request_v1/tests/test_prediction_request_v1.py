@@ -122,9 +122,7 @@ class TestFunctionsAcceptClient:
             input_tokens=42
         )
 
-        result = count_tokens(
-            "hello world", "claude-sonnet-4-6", client=mock_client
-        )
+        result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
         assert result == 42
         mock_client.client.messages.count_tokens.assert_called_once()
 

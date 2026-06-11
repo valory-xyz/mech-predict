@@ -6,10 +6,10 @@ description: A tool for making binary predictions on markets using OpenAI API.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeibbn67pnrrm4qm3n3kbelvbs3v7fjlrjniywmw2vbizarippidtvi
+  __init__.py: bafybeifzgdvca4otrxpkemcj5334vc3uqo4k22mqxp3z3pvqzkw6tqunse
   prediction_request_v1.py: bafybeicqmhvtmrvxkeerkv6n3h5jfyjb3ib4jduzxwqdkjjuit4ynr25ka
   tests/__init__.py: bafybeib7h3aalw6bzylqazc3mefunk3n3d65pyzfck4qb33slesscud25m
-  tests/test_prediction_request_v1.py: bafybeibdwpkmvusvuvh7mwy7636wsci76oocammjydlviaw33ayhezo55y
+  tests/test_prediction_request_v1.py: bafybeiatguru62lvwkevmpr2rk2hfea7dqduqdfyjr3yw4p3cuspvv6m5i
 fingerprint_ignore_patterns: []
 entry_point: prediction_request_v1.py
 callable: run

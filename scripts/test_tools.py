@@ -26,13 +26,13 @@ from timeit import default_timer as timer
 
 from dotenv import load_dotenv  # type: ignore
 
-from packages.napthaai.customs.prediction_request_rag.prediction_request_rag import (
+from packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_v1 import (
     run as prediction_request_rag_run,
 )
-from packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning import (
+from packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1 import (
     run as prediction_request_reasoning_run,
 )
-from packages.napthaai.customs.prediction_url_cot.prediction_url_cot import (
+from packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1 import (
     run as prediction_url_cot_run,
 )
 from packages.napthaai.customs.resolve_market_reasoning.resolve_market_reasoning import (
@@ -41,7 +41,7 @@ from packages.napthaai.customs.resolve_market_reasoning.resolve_market_reasoning
 from packages.nickcom007.customs.prediction_request_sme.prediction_request_sme import (
     run as prediction_request_sme_run,
 )
-from packages.valory.customs.prediction_request.prediction_request import (
+from packages.valory.customs.prediction_request_v1.prediction_request_v1 import (
     run as prediction_request_run,
 )
 from packages.valory.customs.superforcaster.superforcaster import (
@@ -52,38 +52,38 @@ from packages.valory.skills.task_execution.utils.apis import KeyChain
 load_dotenv(override=True)
 
 TOOLS_TO_RUN_FUNCTION = {
-    "prediction-offline": prediction_request_run,
-    "prediction-online": prediction_request_run,
-    "claude-prediction-online": prediction_request_run,
-    "claude-prediction-offline": prediction_request_run,
+    "prediction-offline-v1": prediction_request_run,
+    "prediction-online-v1": prediction_request_run,
+    "claude-prediction-online-v1": prediction_request_run,
+    "claude-prediction-offline-v1": prediction_request_run,
     "prediction-online-sme": prediction_request_sme_run,
     "prediction-offline-sme": prediction_request_sme_run,
-    "prediction-request-rag": prediction_request_rag_run,
-    "prediction-request-rag-claude": prediction_request_rag_run,
-    "prediction-request-reasoning": prediction_request_reasoning_run,
-    "prediction-request-reasoning-claude": prediction_request_reasoning_run,
-    "prediction-url-cot": prediction_url_cot_run,
-    "prediction-url-cot-claude": prediction_url_cot_run,
+    "prediction-request-rag-v1": prediction_request_rag_run,
+    "prediction-request-rag-claude-v1": prediction_request_rag_run,
+    "prediction-request-reasoning-v1": prediction_request_reasoning_run,
+    "prediction-request-reasoning-claude-v1": prediction_request_reasoning_run,
+    "prediction-url-cot-v1": prediction_url_cot_run,
+    "prediction-url-cot-claude-v1": prediction_url_cot_run,
     "superforcaster": superforcaster_run,
     "resolve-market-reasoning-gpt-4.1": resolve_market_reasoning_run,
 }
 
 TOOLS_TO_TEST = [
-    "prediction-offline",
-    "prediction-online",
-    "claude-prediction-online",
-    "claude-prediction-offline",
-    "prediction-request-rag",
-    "prediction-request-rag-claude",
-    "prediction-request-reasoning",
-    "prediction-request-reasoning-claude",
+    "prediction-offline-v1",
+    "prediction-online-v1",
+    "claude-prediction-online-v1",
+    "claude-prediction-offline-v1",
+    "prediction-request-rag-v1",
+    "prediction-request-rag-claude-v1",
+    "prediction-request-reasoning-v1",
+    "prediction-request-reasoning-claude-v1",
     "resolve-market-reasoning-gpt-4.1",
-    "prediction-url-cot",
-    "prediction-url-cot-claude",
+    "prediction-url-cot-v1",
+    "prediction-url-cot-claude-v1",
 ]
 
 MODEL_GPT = "gpt-4.1-2025-04-14"
-MODEL_CLAUDE = "claude-4-sonnet-20250514"
+MODEL_CLAUDE = "claude-sonnet-4-6"
 
 MARKETS = [
     """Will any women's football club publicly announce, before or on August 27, 2025, the signing of a player for a transfer fee exceeding £1.1 million?""",

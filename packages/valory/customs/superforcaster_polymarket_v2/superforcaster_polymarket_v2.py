@@ -229,12 +229,16 @@ treatment of conjunctive or disjunctive conditions (only if applicable), and oth
 biases when reviewing your reasoning. Consider priors/base rates, and the extent to which
 case-specific information justifies the deviation between your tentative forecast and the prior.
 Critically: identify the exact resolution criterion -- the specific condition that must literally
-be true for this market to resolve YES. Assess whether the evidence directly confirms this
-criterion or only establishes topical relevance. For narrow-scope criteria (an exact word or
-phrase spoken at a specific event, a precise threshold on a specific date, a condition limited
-to a defined window), apply an explicit base-rate correction: such exact conditions are met
-far less often than general topical relevance suggests -- do not conflate "evidence mentions
-the topic" with "the specific criterion will be satisfied".
+be true for this market to resolve YES. Then determine which of two cases applies:
+(A) The evidence directly and specifically confirms the criterion -- a source explicitly states
+the exact word was used, the exact threshold was crossed, or the exact event occurred: allow
+your estimate to reflect this direct confirmation; do not apply a downward correction.
+(B) The evidence is topically relevant but does not directly confirm the criterion -- sources
+discuss the topic or context but none confirms the specific required condition: for
+narrow-scope criteria (an exact word or phrase at a specific event, a precise numeric
+threshold on a specific date, a condition limited to a defined window), apply a downward
+correction -- such exact conditions are met far less often than general topical relevance
+suggests; do not conflate "topic is mentioned" with "the specific criterion will be satisfied".
 Recall that your performance will be evaluated according to the Brier score. Be precise with tail
 probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
 or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors

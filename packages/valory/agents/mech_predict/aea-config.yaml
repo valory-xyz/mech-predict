@@ -63,10 +63,12 @@ customs:
 - victorpolisetty/dalle_request:0.1.0:bafybeiadatvfc6opcsmhpxxzmsqpwgbckblciqypx2iwe5uwove6nmki3e
 - valory/superforcaster:0.1.0:bafybeidkraklf5c6rkv6g7y7lqj2woy4j5u5dmupjez6mtjhdek3lzbmki
 - valory/superforcaster_polymarket_v1:0.1.0:bafybeiawfhy3w5aclmxm5zxebwd5l7paseqlgmihwbqfyhcdpn2kccgtrq
+- valory/superforcaster_polymarket_v3:0.1.0:bafybeifstfsg3h6x24wclzc3f2ci35i5sd5kpfkhk3ekcr653u5iiz4h2m
 - dvilela/corcel_request:0.1.0:bafybeic74xc32orfiffumv3cxe7o4vktzobk6gszjecuhto4or7k5ppi5y
 - dvilela/gemini_prediction:0.1.0:bafybeifpoil2wjh6hr7sqoomlilhsyt3ktpy6tjzmisrlopxcjbkr3hhfq
 - nickcom007/prediction_request_sme:0.1.0:bafybeifssc6ed7itkvqot6qunlpd3prghwsf5dh26kin3xduci3sohulqq
 - valory/factual_research:0.1.0:bafybeidcxmqemvzm7cz2ydyjsmu53zflsqpcj2gpco5kwn3ldvf22rqx4i
+- valory/factual_research_v3:0.1.0:bafybeih2ciwkf7edrmwlb5knk4nw5dedh7cz2lo6d6ecyehxlt6q7i7i3a
 default_ledger: ethereum
 required_ledgers:
 - ethereum

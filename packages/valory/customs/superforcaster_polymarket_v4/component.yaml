@@ -1,0 +1,32 @@
+name: superforcaster_polymarket_v4
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets using the Serper API
+  and LLMs. Returns the standard mech prediction output (p_yes, p_no, confidence,
+  info_utility). One-axis model swap of superforcaster-polymarket-v2 that changes
+  the default LLM from OpenAI gpt-4.1 to the gpt-5.4 reasoning model (reasoning_effort
+  medium) while keeping v2's resolution-criterion specificity prompt, Serper pipeline,
+  output format and retry logic byte-identical. Sends max_completion_tokens instead
+  of max_tokens and omits temperature, as gpt-5.4 requires.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v4.py: bafybeidoponn56qfr5ahjtlpoe5cjs7hdvowl66mh2i7sbhdzvx6bdso4y
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster.py: bafybeibsyodvk6lqmky6vtm3ohdzefxj4dbsnozqrhi4edxpzuole4r5my
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v4.py
+callable: run
+params:
+  default_model: gpt-5.4
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5

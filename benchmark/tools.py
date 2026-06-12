@@ -100,6 +100,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v4 — one-axis model swap of v2:
+    # v2's criterion-specificity prompt + pipeline, with the gpt-4.1 backend
+    # swapped for the gpt-5.4 reasoning model (reasoning_effort medium).
+    "superforcaster-polymarket-v4": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning
     "prediction-request-reasoning": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",

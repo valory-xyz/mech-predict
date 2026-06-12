@@ -19,6 +19,7 @@
 
 """This module implements a Mech tool for binary predictions."""
 
+import copy
 import functools
 import json
 import re
@@ -299,14 +300,15 @@ class LLMClient:
             # anthropic can't take system prompt in messages
             # default value if not found
             system_prompt = SYSTEM_PROMPT_FORECASTER
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "system":
-                    system_prompt = messages[i]["content"]
-                    del messages[i]
+            messages_copy = copy.deepcopy(messages)
+            for i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[i]["role"] == "system":
+                    system_prompt = messages_copy[i]["content"]
+                    del messages_copy[i]
 
             response_provider = self.client.messages.create(
                 model=model,
-                messages=messages,
+                messages=messages_copy,
                 system=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,

@@ -11,7 +11,7 @@ Usage:
     # Step 1: enrich with stratified sample (5 per platform, ~1 min)
     python -m benchmark.prompt_replay enrich \
       --production-log "benchmark-results (7)/production_log.jsonl" \
-      --tool prediction-online --last-days 7 \
+      --tool prediction-online-v1 --last-days 7 \
       --sample-per-platform 5 --seed 42 \
       --output benchmark/results/prediction_online_enriched_5x5.jsonl
 

@@ -49,7 +49,7 @@ class TestLLMClientManager:
         """__enter__ returns a (client, client_embedding) tuple."""
         mock_keys = {"openai": "sk-test"}
         mgr = LLMClientManager(
-            api_keys=mock_keys, model="gpt-4o-2024-08-06", embedding_provider="openai"
+            api_keys=mock_keys, model="gpt-4.1-2025-04-14", embedding_provider="openai"
         )
         with patch(
             "packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1.LLMClient"

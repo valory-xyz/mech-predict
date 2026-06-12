@@ -618,6 +618,38 @@ class TestLLMClientAnthropicCompletions:
         assert result.usage.prompt_tokens == 111
         assert result.usage.completion_tokens == 222
 
+    def test_caller_messages_list_not_mutated(self) -> None:
+        """The system-prompt strip works on a copy, leaving the caller's list intact.
+
+        Regression for the retry-path bug: stripping ``messages`` in place
+        meant a ``with_key_rotation`` re-call ran without the system prompt,
+        silently falling back to ``SYSTEM_PROMPT_FORECASTER``.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+        client.completions(model="claude-sonnet-4-6", messages=messages)
+        assert messages == [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+
+    def test_missing_system_message_uses_default_prompt(self) -> None:
+        """With no ``system`` entry, the default ``SYSTEM_PROMPT_FORECASTER`` is used.
+
+        Guards the unbound-``system_prompt`` path: a user-only message list
+        must fall back to the default forecaster prompt rather than raise.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == module.SYSTEM_PROMPT_FORECASTER
+
 
 class TestWithKeyRotationAnthropic:
     """Cover the ``anthropic.RateLimitError`` branch of ``with_key_rotation``."""

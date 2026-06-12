@@ -224,22 +224,6 @@ class LLMClient:
             response.usage.completion_tokens = response_provider.usage.output_tokens
             return response
 
-        if self.llm_provider == "openai":
-            response_provider = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                n=1,
-                timeout=150,
-                stop=None,
-            )
-            response = LLMResponse()
-            response.content = response_provider.choices[0].message.content
-            response.usage.prompt_tokens = response_provider.usage.prompt_tokens
-            response.usage.completion_tokens = response_provider.usage.completion_tokens
-            return response
-
         if self.llm_provider in ["openai", "openrouter"]:
             response_provider = self.client.chat.completions.create(
                 model=model,

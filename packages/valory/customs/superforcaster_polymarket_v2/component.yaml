@@ -2,16 +2,16 @@ name: superforcaster_polymarket_v2
 author: valory
 version: 0.1.0
 type: custom
-description: Extends superforcaster-polymarket-v1 with an explicit resolution-criterion
-  specificity check; applies a base-rate correction for narrow-scope criteria (exact
-  phrase, threshold, or time-window conditions).
+description: A tool for making binary predictions on markets using the Serper API
+  and LLMs. Extends v1 with an explicit resolution-criterion specificity check for
+  narrow-scope criteria.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
   superforcaster_polymarket_v2.py: bafybeiergairblrcn6idlq6jwtids3ooq5wulsosejcqnu7tzoraypgtvu
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster.py: bafybeiecpixajbp4vxbt2uuu2etzrjguvcbm4jh2m5h4mhx4pgjb46qtg4
+  tests/test_superforcaster.py: bafybeibms6bcbtyhat4fxem6y6lglkzimqgijhxfdfdjadkj45jnyekj44
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_polymarket_v2.py
 callable: run

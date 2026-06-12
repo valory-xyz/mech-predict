@@ -26,8 +26,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1 as module
-from packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1 import (
+import packages.valory.customs.superforcaster_polymarket_v2.superforcaster_polymarket_v2 as module
+from packages.valory.customs.superforcaster_polymarket_v2.superforcaster_polymarket_v2 import (
     OpenAIClientManager,
     generate_prediction_with_retry,
     run,
@@ -41,7 +41,7 @@ class TestOpenAIClientManager:
         """__enter__ returns a fresh OpenAIClient, __exit__ closes it."""
         mgr = OpenAIClientManager(api_key="sk-test")
         with patch(
-            "packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1.OpenAIClient"
+            "packages.valory.customs.superforcaster_polymarket_v2.superforcaster_polymarket_v2.OpenAIClient"
         ) as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
@@ -70,7 +70,7 @@ class TestOpenAIClientManager:
 
 
 SF_MODULE = (
-    "packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1"
+    "packages.valory.customs.superforcaster_polymarket_v2.superforcaster_polymarket_v2"
 )
 
 FAKE_SERPER_RESPONSE = {
@@ -149,7 +149,7 @@ class TestSuperforcasterSourceContent:
         _install_mock_client(mock_client_mgr)
 
         result = run(
-            tool="superforcaster-polymarket-v1",
+            tool="superforcaster-polymarket-v2",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -172,7 +172,7 @@ class TestSuperforcasterSourceContent:
 
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
-            tool="superforcaster-polymarket-v1",
+            tool="superforcaster-polymarket-v2",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -198,7 +198,7 @@ class TestSuperforcasterSourceContent:
         _install_mock_client(mock_client_mgr)
 
         result = run(
-            tool="superforcaster-polymarket-v1",
+            tool="superforcaster-polymarket-v2",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),

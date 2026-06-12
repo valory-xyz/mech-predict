@@ -6,8 +6,8 @@ description: A tool for making binary predictions on markets.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeiflni5dkn5fqe7fnu4lgbqxzfrgochhqfbgzwz3vlf5grijp3nkpm
-  prediction_url_cot_v1.py: bafybeig4ekwo5cqp62bbgzt7zss5vootoodkv7htlgm4ezmhfec425t62i
+  __init__.py: bafybeiculnaspkdsin45mnu6tvo4qgvsny4cmyh44vosdcpu57dp4szseu
+  prediction_url_cot_v1.py: bafybeihtlki5evgzelh7lqloca7dxuweulqoejvyqb3z3jxccioazsqlm4
   tests/__init__.py: bafybeia2zevyo6fxbwf7dj4vkhd3fnsvog5sqvepqg4qjgzydlhsuwnn7q
   tests/test_prediction_url_cot_v1.py: bafybeihec7i5i6etdszf2u2ilzvimknqcnwsp5mi3y7jmzurfxhz2dvfui
 fingerprint_ignore_patterns: []

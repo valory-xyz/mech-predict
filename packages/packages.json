@@ -2,9 +2,9 @@
     "dev": {
         "custom/dvilela/corcel_request/0.1.0": "bafybeic74xc32orfiffumv3cxe7o4vktzobk6gszjecuhto4or7k5ppi5y",
         "custom/dvilela/gemini_prediction/0.1.0": "bafybeifpoil2wjh6hr7sqoomlilhsyt3ktpy6tjzmisrlopxcjbkr3hhfq",
-        "custom/napthaai/prediction_request_rag_v1/0.1.0": "bafybeib7idrnfgzjqfoovv5qm3adm2wk3almb3vagf4jmga2fa2dvog62i",
-        "custom/napthaai/prediction_request_reasoning_v1/0.1.0": "bafybeiaqecybxflhsvjqjcis4klszt4jg2c5dea4rf65qdkv3zvnnpqjsq",
-        "custom/napthaai/prediction_url_cot_v1/0.1.0": "bafybeibkujc5h5ez37o4bzyrmoqor25f6zhnrjkrybwqnydpxfbyh33m7m",
+        "custom/napthaai/prediction_request_rag_v1/0.1.0": "bafybeiaefwlyfntzuzbijambdjxlralf2cc7qsgflodsg6cscquzbgpmna",
+        "custom/napthaai/prediction_request_reasoning_v1/0.1.0": "bafybeih2jhghproy3fqb3qwhiebyogextkglexfctf2lnzlo2i2h4fyd6u",
+        "custom/napthaai/prediction_url_cot_v1/0.1.0": "bafybeiac2pffevdr4w2p3b7jbesfda5ps3ktrh3clnj2aaqojpeuwyzbs4",
         "custom/napthaai/resolve_market_reasoning/0.1.0": "bafybeidji6or6kpmawho64tc7qetinykhrklvv2gmnqfcd6ejmg43j3i7q",
         "custom/nickcom007/prediction_request_sme/0.1.0": "bafybeifsk4og24t22agcrj7mm6fz3wxwfbdg554yjhc6odpxal5ofg22ti",
         "custom/valory/prediction_langchain/0.1.0": "bafybeidtixb6gkctowphterybnlxwvb6rrzj2z2wwbcfyalgfb2at3r63q",
@@ -23,8 +23,8 @@
         "custom/valory/factual_research_v1/0.1.0": "bafybeicg52wve2ytam3eisks7gumvrswm2v6bkuafburdlmh6d553nrvee",
         "custom/valory/factual_research_v2/0.1.0": "bafybeidgo3jesmvuwa64ooij7mywk7hf7ls5len2sf7cbcjwt3t6r5u6qm",
         "custom/valory/factual_research_v3/0.1.0": "bafybeiboyjc2u42lcsi7er6hywwdz27ae6r57y3jnqck5nk7tj4qosoyqa",
-        "agent/valory/mech_predict/0.1.0": "bafybeicw2zq4h5eikiqb3z3v2blscx5jhco6qvvidumki4babh3rf7jmzq",
-        "service/valory/mech_predict/0.1.0": "bafybeigavfcpj7f2kcm7eqkkvdglxn7mfhrj266itjqcilxdkbhcqxa64u"
+        "agent/valory/mech_predict/0.1.0": "bafybeidbfym6j7nwwpewweg6pmpvi56tm7owpm4vh42jlhqbapazrrr3be",
+        "service/valory/mech_predict/0.1.0": "bafybeifqye5lbne5lppsk7k7wneakgy7yeu22wdcaw7gnaq3wvu4pqu36a"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

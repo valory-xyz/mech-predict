@@ -207,7 +207,7 @@ python benchmark/sweep.py \
 python benchmark/sweep.py \
   --last-n 500 \
   --tools superforcaster \
-  --candidate-model claude-4-sonnet-20250514
+  --candidate-model claude-sonnet-4-6
 ```
 
 The baseline comes from the production log (whatever model was running). The candidate

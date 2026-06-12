@@ -7,8 +7,8 @@ description: A tool for making binary predictions on markets using an extra reas
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeib36ew6vbztldut5xayk5553rylrq7yv4cpqyhwc5ktvd4cx67vwu
-  prediction_request_reasoning_v1.py: bafybeieohdbg5picd3xoc74477f64afk6otu6kql642wpdgnxkdc2w3gmm
+  __init__.py: bafybeibcbvmr7v5n2vintaunxjix2jxopbvjij5hytewh3xtlca4mfwhky
+  prediction_request_reasoning_v1.py: bafybeibnn5fqshbt6qv34krclzqhhiv5v2d6pdckzckl3oon3vnzjf6ddm
   tests/__init__.py: bafybeieu3toasuyaehkqounrtylk5bjer7qgvnt6ccjcsi6jlfig7wfrka
   tests/test_prediction_request_reasoning_v1.py: bafybeicq2x2btmc2qwvlhsei7tq4rp7j6udev56filtgyatggwgmtjkkka
 fingerprint_ignore_patterns: []

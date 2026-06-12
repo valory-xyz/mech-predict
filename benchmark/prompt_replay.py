@@ -841,7 +841,7 @@ def call_llm(
 ) -> Optional[str]:
     """Send a prompt to the LLM and return the response content.
 
-    :param model: model identifier (e.g. gpt-4.1-2025-04-14, claude-4-sonnet-20250514).
+    :param model: model identifier (e.g. gpt-4.1-2025-04-14, claude-sonnet-4-6).
     :param system_prompt: system message content.
     :param user_prompt: user message content.
     :param api_key: API key for the provider.

@@ -848,9 +848,18 @@ class TestRegistryFamilyFormatRoundTrip:
     to superforcaster, whose ``format(question=, today=, sources=)`` blows up on
     SME's ``{user_prompt}``/``{additional_information}`` template. This test
     imports each module and runs the round-trip, so a mis-declared family fails.
+
+    vLLM-backend tools (``backend == "vllm"``) are excluded: the replay path
+    routes them by backend, not family — they render their own prompt via the
+    module's ``build_forecaster_prompt`` and never read a family template — so
+    they carry a required-but-inert ``family`` and deliberately export none of
+    the family prompt symbols. Asserting the family contract on them is wrong.
     """
 
-    @pytest.mark.parametrize("tool_name", sorted(TOOL_REGISTRY))
+    @pytest.mark.parametrize(
+        "tool_name",
+        sorted(n for n, s in TOOL_REGISTRY.items() if s.backend != "vllm"),
+    )
     def test_family_template_formats_with_family_kwargs(self, tool_name: str) -> None:
         """The family's template(s) exist and format with the family kwargs.
 

@@ -604,7 +604,7 @@ class TestWithKeyRotationAnthropic:
 
 
 class TestCountTokensAnthropic:
-    """Cover the with-client Anthropic ``count_tokens`` path (untested in the napthaai forks)."""
+    """Cover the with-client Anthropic ``count_tokens`` path (previously untested in the napthaai forks)."""
 
     def test_with_client_uses_anthropic_tokenizer(self) -> None:
         """With an anthropic client, the Anthropic ``count_tokens`` result is returned."""
@@ -621,8 +621,8 @@ class TestCountTokensAnthropic:
         """A network error from the Anthropic tokenizer falls back instead of raising."""
         mock_client = MagicMock()
         mock_client.llm_provider = "anthropic"
-        mock_client.client.messages.count_tokens.side_effect = ConnectionError(
-            "net down"
+        mock_client.client.messages.count_tokens.side_effect = _make_anthropic_error(
+            module.anthropic.APIConnectionError, "net down"
         )
         result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
         assert isinstance(result, int)

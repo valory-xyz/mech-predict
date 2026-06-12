@@ -102,7 +102,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error: {type(e).__name__}: {e}")
                 return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
@@ -367,7 +367,7 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
             print(
                 "Anthropic tokenizer method not available, using fallback encoding for Claude models"
             )
-        except (ConnectionError, TimeoutError) as e:
+        except (anthropic.APIConnectionError, ConnectionError, TimeoutError) as e:
             # Handle network-related issues
             print(f"Network error when counting tokens: {e}, using fallback encoding")
         except Exception as e:

@@ -48,10 +48,17 @@ cascade:
 Duplicate-issue suppression: once a tool has an open ``tool-improvement``
 issue on GitHub, the triage stays silent for that tool. ``prior_open``
 is seeded from the live ``gh issue list`` query at the start of
-``main()`` rather than from yesterday's state file alone, so a PR that
-fixes the issue (closing it) re-arms the trigger immediately; a PR
-still under review keeps the tool quiet for as long as the issue
-remains open.
+``main()`` rather than from yesterday's state file alone; a PR that
+fixes the issue (closing it) re-arms the trigger after the
+``RECENT_CLOSE_DAYS`` cooldown elapses, and a PR still under review
+keeps the tool quiet for as long as the issue remains open.
+
+Recently-closed cooldown: any ``(tool, platform)`` with a close in the
+last ``RECENT_CLOSE_DAYS`` days is silenced regardless of trigger. The
+log line per tool with a close in the recent past explicitly states
+whether the cooldown is ACTIVE or has ELAPSED, so an operator can see
+why a known-bad tool isn't firing today (or why it is firing again
+after a recent close).
 
 For each ``open_issue`` decision, the script calls ``gh issue create``
 with the ``tool-improvement`` label. The label routes the issue to
@@ -76,13 +83,14 @@ from typing import Any, Dict, List, Optional, Tuple
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
 BRIER_LEVEL_THRESHOLD = 0.25
-# Hysteresis floor for level_floor re-arm: a tool that previously
-# opened a level_floor issue stays suppressed (even after the GitHub
-# issue is closed) until its Brier drops below this band. Without it,
-# closing a level_floor issue with the Brier still above the trigger
-# would re-fire on the next run -- the level trigger is a standing
-# condition, unlike the regression trigger whose delta self-limits.
-BRIER_LEVEL_RE_ARM = 0.22
+# Time-based silence applied to every closed ``tool-improvement`` issue:
+# any new fire for the same ``(tool, platform)`` is suppressed for this many
+# days after the most recent close (merge OR manual), regardless of trigger.
+# Replaces the previous Brier-band re-arm hysteresis: a partial fix that
+# leaves the Brier above ``BRIER_LEVEL_THRESHOLD`` is allowed to re-fire
+# the day after the window elapses, rather than being silenced forever by
+# a stuck cooldown marker (the dead-zone failure mode of the re-arm band).
+RECENT_CLOSE_DAYS = 1
 VALID_N_PER_WINDOW_FLOOR = 105
 RELIABILITY_FLOOR = 0.80
 ROLLING_WINDOW_DAYS = 7
@@ -171,12 +179,174 @@ def _open_issue_tools(repo: str, label: str) -> Optional[List[Tuple[str, str]]]:
     return pairs
 
 
+def _closed_issue_pairs(
+    repo: str, label: str
+) -> Optional[List[Tuple[str, str, datetime]]]:
+    """Return `(tool, platform, closed_at)` triples for closed tool-improvement issues.
+
+    Caller buckets the result by ``closed_at`` against ``RECENT_CLOSE_DAYS``
+    to drive the recently-closed silence (issues within the window suppress
+    re-fire of the same ``(tool, platform)``).
+
+    Returns ``None`` on transient gh-CLI failure so callers can skip the
+    cooldown rather than open a noisy issue against a half-resolved state.
+
+    :param repo: GitHub ``owner/repo`` slug.
+    :param label: issue label to filter on (e.g. ``"tool-improvement"``).
+    :return: list of ``(tool, platform, closed_at)`` triples, or ``None`` on
+        gh error. ``closed_at`` is a timezone-aware UTC ``datetime``.
+    """
+    cmd = [
+        "gh",
+        "issue",
+        "list",
+        "--repo",
+        repo,
+        "--label",
+        label,
+        "--state",
+        "closed",
+        "--json",
+        "title,closedAt",
+        "--limit",
+        "1000",
+    ]
+    try:
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning(
+            "gh issue list (closed) failed (%s); skipping recently-closed cooldown",
+            exc,
+        )
+        return None
+    if r.returncode != 0:
+        log.warning(
+            "gh issue list (closed) rc=%d stderr=%r; "
+            "skipping recently-closed cooldown",
+            r.returncode,
+            r.stderr[:200],
+        )
+        return None
+    try:
+        rows = json.loads(r.stdout or "[]")
+    except ValueError as exc:
+        log.warning(
+            "gh issue list (closed) returned unparseable JSON (%s); "
+            "skipping recently-closed cooldown",
+            exc,
+        )
+        return None
+    triples: List[Tuple[str, str, datetime]] = []
+    for row in rows:
+        title = row.get("title") or ""
+        m = _TITLE_RE.search(title)
+        if not m:
+            log.warning(
+                "closed tool-improvement issue title did not match the expected "
+                "format; skipping (no suppression): %r",
+                title[:120],
+            )
+            continue
+        closed_at_raw = row.get("closedAt") or ""
+        try:
+            closed_at = datetime.fromisoformat(closed_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            log.warning(
+                "closed tool-improvement issue has unparseable closedAt=%r; "
+                "skipping",
+                closed_at_raw,
+            )
+            continue
+        triples.append((m.group(1), m.group(2), closed_at))
+    return triples
+
+
+def _most_recent_close_per_tool(
+    closed_issues: Optional[List[Tuple[str, str, datetime]]],
+    platform: str,
+) -> Dict[str, datetime]:
+    """Return ``{tool: most_recent_close_at}`` for ``platform``.
+
+    Per ``(tool, platform)`` we keep only the most recent close timestamp so a
+    long-lived tool with several historical closes is summarised by its
+    latest close (the one that governs the cooldown window).
+
+    :param closed_issues: list of ``(tool, platform, closed_at)`` triples from
+        the live gh query, or ``None`` if the query was skipped / failed.
+    :param platform: the platform under triage; entries on other platforms are
+        ignored.
+    :return: mapping from tool name to its most recent close ``datetime``
+        (timezone-aware UTC). Empty dict if ``closed_issues`` is ``None`` or
+        has no entries for ``platform``.
+    """
+    if closed_issues is None:
+        return {}
+    most_recent: Dict[str, datetime] = {}
+    for tool_name, tool_platform, closed_at in closed_issues:
+        if tool_platform != platform:
+            continue
+        existing = most_recent.get(tool_name)
+        if existing is None or closed_at > existing:
+            most_recent[tool_name] = closed_at
+    return most_recent
+
+
+def _log_cooldown_status(
+    most_recent_close: Dict[str, datetime],
+    cur_tools: List[str],
+    platform: str,
+    now_dt: datetime,
+    n_days: int,
+) -> None:
+    """Log per-tool cooldown status for any current tool with a recent close.
+
+    For each tool present in the current rolling scores AND in
+    ``most_recent_close``, emit one INFO log line stating whether the
+    ``RECENT_CLOSE_DAYS`` cooldown is ACTIVE or has ELAPSED. The status is
+    bounded to closes within ``2 * n_days + 7`` days so the operator sees the
+    transition without permanent log noise from ancient closes.
+
+    :param most_recent_close: ``{tool: closed_at}`` from
+        :func:`_most_recent_close_per_tool` for the current platform.
+    :param cur_tools: tool names present in today's rolling scores; the log is
+        scoped to these so retired tools don't add noise.
+    :param platform: platform under triage (rendered in the log message).
+    :param now_dt: reference "now" used to compute days-since-close.
+    :param n_days: the ``RECENT_CLOSE_DAYS`` value in effect.
+    """
+    horizon = timedelta(days=2 * n_days + 7)
+    cooldown = timedelta(days=n_days)
+    cutoff = now_dt - cooldown
+    cur_tool_set = set(cur_tools)
+    for tool_name, last_close in sorted(most_recent_close.items()):
+        if tool_name not in cur_tool_set:
+            continue
+        age = now_dt - last_close
+        if age > horizon:
+            continue
+        # Mirror the gate's predicate exactly (``last_close >= cutoff``) so
+        # the log never says ACTIVE on a close the gate is about to let
+        # fire. Floored ``age.days`` is fine for the human-readable count
+        # but must not drive the status decision.
+        status = "ACTIVE" if last_close >= cutoff else "ELAPSED"
+        log.info(
+            "cooldown %s: tool=%r platform=%r closed %d day(s) ago (N=%d)",
+            status,
+            tool_name,
+            platform,
+            age.days,
+            n_days,
+        )
+
+
 def triage(
     cur: Dict[str, Any],
     prev: Dict[str, Any],
     prior_state: Dict[str, Any],
     platform: str = "polymarket",
     open_now: Optional[List[Any]] = None,
+    closed_issues: Optional[List[Tuple[str, str, datetime]]] = None,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     # ``open_now`` may be a list of bare tool names (legacy single-
@@ -186,9 +356,9 @@ def triage(
     # ``A`` does not suppress the same tool on platform ``B``.
     # Suppression source-of-truth: ``open_now`` (the live gh result)
     # when provided; falls back to ``prior_state`` only when the caller
-    # did not run the live query. Closing the GitHub issue therefore
-    # re-arms the trigger on the next run regardless of state-file
-    # content -- with one exception, the level_floor cooldown below.
+    # did not run the live query. Closing the GitHub issue re-arms the
+    # trigger after the ``RECENT_CLOSE_DAYS`` cooldown elapses (or
+    # immediately if the cooldown is already past).
     if open_now is not None:
         prior_open = {}
         for entry in open_now:
@@ -203,19 +373,27 @@ def triage(
             t: v.get("issue_open", False)
             for t, v in (prior_state.get("by_tool") or {}).items()
         }
-    # Hysteresis cooldown: a tool whose most recent open_issue carried
-    # trigger="level_floor" remains suppressed (from the state file)
-    # until its current Brier drops below BRIER_LEVEL_RE_ARM. Read from
-    # the dedicated ``trigger`` field, NOT from ``reason``: ``reason``
-    # gets clobbered with ``duplicate_suppressed`` every day the GitHub
-    # issue is open, but ``trigger`` carries the original signal that
-    # caused the issue to open and survives the entire suppressed period
-    # (and the cooldown period after the issue is closed).
-    level_cooldown = {
-        t
-        for t, v in (prior_state.get("by_tool") or {}).items()
-        if v.get("trigger") == "level_floor"
+    # Recently-closed silence: any issue closed within the last
+    # RECENT_CLOSE_DAYS suppresses re-fire of the same (tool, platform)
+    # regardless of trigger. Replaces the previous Brier-band re-arm
+    # hysteresis: a partial fix that leaves the Brier above
+    # ``BRIER_LEVEL_THRESHOLD`` is allowed to re-fire the day after the
+    # window elapses, rather than being silenced forever by a stuck
+    # cooldown marker (the dead-zone failure mode of the re-arm band).
+    # ``closed_issues=None`` (caller skipped the query) means we apply no
+    # silence -- same fail-open principle as ``open_now=None``.
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(days=RECENT_CLOSE_DAYS)
+    most_recent_close = _most_recent_close_per_tool(closed_issues, platform)
+    recently_closed_set = {
+        tool_name
+        for tool_name, last_close in most_recent_close.items()
+        if last_close >= cutoff
     }
+    cur_tools = list((cur.get("by_tool") or {}).keys())
+    _log_cooldown_status(
+        most_recent_close, cur_tools, platform, now_dt, RECENT_CLOSE_DAYS
+    )
     decisions: List[Dict[str, Any]] = []
     for tool in sorted((cur.get("by_tool") or {}).keys()):
         c = cur["by_tool"][tool]
@@ -274,25 +452,24 @@ def triage(
                 d.update(decision="silent", reason="sign_disagreement")
                 decisions.append(d)
                 continue
-        # Level-floor hysteresis (checked BEFORE the no_regression guard
-        # so a Brier in the (BRIER_LEVEL_RE_ARM, BRIER_LEVEL_THRESHOLD]
-        # band actually keeps the cooldown alive instead of falling
-        # through to no_regression and silently clearing the marker).
-        # Gated on prior_open being false: cooldown is a "stay-silent
-        # AFTER close" mechanism; while the issue is still open, the
-        # duplicate_suppressed path below owns the suppression. Regression
-        # bypasses the cooldown so a genuinely regressing tool still fires.
-        in_cooldown = (
-            not regressed
+        # Trigger label is shared by the recently-closed silence below, the
+        # duplicate_suppressed path, and the open_issue path; compute once.
+        trigger = "regression" if regressed else "level_floor"
+        # Recently-closed silence: a tool whose issue closed within the last
+        # RECENT_CLOSE_DAYS is silenced regardless of trigger (regression OR
+        # level_floor) and regardless of how it closed (merge OR manual).
+        # Gives engineers room before the next page after a close. Gated on
+        # prior_open being false because while the issue is still open the
+        # duplicate_suppressed path below owns the suppression.
+        if (
+            (regressed or above_level)
             and not prior_open.get(tool)
-            and tool in level_cooldown
-            and bc >= BRIER_LEVEL_RE_ARM
-        )
-        if in_cooldown:
+            and tool in recently_closed_set
+        ):
             d.update(
                 decision="silent",
-                reason="level_floor_cooldown",
-                trigger="level_floor",
+                reason="recently_closed",
+                trigger=trigger,
                 issue_open=False,
             )
             decisions.append(d)
@@ -302,10 +479,9 @@ def triage(
             decisions.append(d)
             continue
         # Duplicate-issue suppression: if an issue is already open for
-        # this tool (regression or level signal), stay silent. Preserve
-        # the original ``trigger`` field across the suppressed period so
-        # the cooldown above can read it after the issue closes.
-        trigger = "regression" if regressed else "level_floor"
+        # this tool (regression or level signal), stay silent. The
+        # ``trigger`` field records the original signal for state-file
+        # bookkeeping and analytics.
         if prior_open.get(tool):
             d.update(
                 decision="silent",
@@ -574,16 +750,25 @@ def main() -> int:
     now = datetime.now(timezone.utc)
     window_iso = _window_iso(now)
     state = _load_json(args.state)
-    # Live source-of-truth for duplicate-issue suppression: a tool whose
-    # issue is currently open on GitHub stays silent; one whose issue was
-    # closed (PR merged or human dismissed) re-arms the trigger
-    # immediately on the next run. The state file is consulted only as a
-    # fallback when the live gh query fails (returns None); it is also
-    # the source of the level_floor cooldown band so a closed level
-    # issue does not re-fire while the Brier is still in the band.
+    # Live sources-of-truth for the two close-related gates:
+    #  * ``open_now`` (open issues on GitHub) drives the duplicate-issue
+    #    suppression. The state file is consulted only as a fallback when
+    #    the gh query fails (returns ``None``).
+    #  * ``closed_issues`` (recently closed issues on GitHub) drives the
+    #    ``RECENT_CLOSE_DAYS`` cooldown silence. Same fail-open principle:
+    #    a transient gh failure skips the cooldown rather than refile.
+    # The state file is no longer consulted for cooldown bookkeeping; the
+    # gate runs entirely off the live gh closed-list result.
     open_now = _open_issue_tools(args.repo, args.label)
     if open_now:
         log.info("triage open issues on GitHub: %s", sorted(open_now))
+    closed_issues = _closed_issue_pairs(args.repo, args.label)
+    if closed_issues:
+        log.info(
+            "triage closed-issue history (last %d shown): %s",
+            min(10, len(closed_issues)),
+            sorted((t, p, c.strftime("%Y-%m-%d")) for t, p, c in closed_issues[:10]),
+        )
 
     all_decisions: List[Dict[str, Any]] = []
     n_opened = n_failed = n_collapse = n_silent = 0
@@ -591,7 +776,15 @@ def main() -> int:
         cur = _load_json(RESULTS_DIR / f"rolling_scores_{platform}.json")
         prev = _load_json(RESULTS_DIR / f"prev_rolling_scores_{platform}.json")
         platform_scores = _load_json(RESULTS_DIR / f"scores_{platform}.json")
-        decisions = triage(cur, prev, state, platform=platform, open_now=open_now)
+        decisions = triage(
+            cur,
+            prev,
+            state,
+            platform=platform,
+            open_now=open_now,
+            closed_issues=closed_issues,
+            now=now,
+        )
         all_decisions.extend(decisions)
 
         for d in decisions:

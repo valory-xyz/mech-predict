@@ -314,6 +314,18 @@ If you are adding a tool that has no predecessor (a brand-new tool, not a varian
 - Do NOT modify `agent-deployments`. Routing a CID to live traffic is a separate human PR.
 - Do NOT delete old variants. The previous version keeps running until a human explicitly retires it.
 
+#### Prediction tools: description must satisfy the trader's `is_prediction_tool` predicate
+
+Applies to **prediction tools only** (binary-predictor `output.schema`). Resolver / image / market-creator / other tools have separate contracts and are unaffected.
+
+The trader's `is_prediction_tool` predicate (in `valory-xyz/trader` at `decision_maker_abci/utils/tool_suitability.py`) runs every `ToolSelectionRound`. A tool that fails is silently dropped from the candidate set; the policy never learns it. Treat the predicate as an **abstract contract**, not its current regex: a binary-predictor schema must be corroborated by a plain-prose sentence in the description. The regex implementing this has already been widened twice and may change again.
+
+- **Pattern that works**: lead the description with one short sentence stating what the tool predicts. e.g. `"A tool for making binary predictions on markets."`, `"Estimates the probability of a binary event."`. Variant-specific detail follows; the lead sentence makes the rest safe.
+- **Anti-pattern**: predictor stems only inside identifiers (`prediction_request`, `prediction_url_cot`). Whether the regex treats those as standalone depends on Python's `\b`/`\w` semantics — don't rely on that.
+- **Anti-pattern**: pure-metadata descriptions (`"Variant of X that swaps the LLM..."`) — describes the delta, not the function.
+
+Verify before publishing: run `explain_prediction_tool(tool_metadata_dict)` from a `valory-xyz/trader` clone — verdict must be `(True, ...)`. Precedent: `mech-predict#284` fixed the same class of bug for `superforcaster` + the SME variants.
+
 ### API Key Management
 
 The `KeyChain` class (in `packages/valory/skills/task_execution/utils/apis.py`) handles:

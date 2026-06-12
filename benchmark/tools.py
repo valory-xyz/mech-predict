@@ -13,7 +13,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, TYPE_CHECKING
+from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -22,12 +22,32 @@ if TYPE_CHECKING:
 # Tool registry
 # ---------------------------------------------------------------------------
 
+# Closed set of prompt-schema families. Typed as a Literal so a registry typo
+# (e.g. ``family="reasonning"``) is a mypy error rather than a silent route to
+# the default branch — the exact silent-misroute class this field exists to kill.
+FamilyName = Literal[
+    "reasoning", "rag", "superforcaster", "factual_research", "default"
+]
+
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Specification for a prediction tool."""
+    """Specification for a prediction tool.
+
+    ``family`` is the single source of truth for prompt-schema dispatch. It
+    decides both (a) which attribute symbols the replay path reads from the
+    tool's module (``PREDICTION_PROMPT`` / ``SYSTEM_PROMPT`` / ``ESTIMATE_USER``
+    / …) and the kwargs it formats them with, and (b) which regex extractor the
+    enrich path uses to parse the IPFS prompt. Both ``prompt_replay`` dispatch
+    sites read this field via ``_baseline_family`` so they cannot drift.
+
+    It is required (no default) on purpose: a silent wrong default is exactly
+    the failure mode that left enrichment parsing 0 rows for sibling baselines.
+    A new ``-v<n+1>`` variant must declare the same family as its parent.
+    """
 
     module: str
+    family: FamilyName
     # Inference backend the replay harness must use for this tool's candidate
     # call. "openai" (default) → OpenAI/Anthropic SDK against the hosted APIs;
     # "vllm" → a self-hosted, OpenAI-compatible vLLM server reached via a
@@ -39,19 +59,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     # valory/prediction_request
     "prediction-online": ToolSpec(
         module="packages.valory.customs.prediction_request.prediction_request",
+        family="default",
     ),
     "prediction-offline": ToolSpec(
         module="packages.valory.customs.prediction_request.prediction_request",
+        family="default",
     ),
     "claude-prediction-online": ToolSpec(
         module="packages.valory.customs.prediction_request.prediction_request",
+        family="default",
     ),
     "claude-prediction-offline": ToolSpec(
         module="packages.valory.customs.prediction_request.prediction_request",
+        family="default",
     ),
     # valory/superforcaster
     "superforcaster": ToolSpec(
         module="packages.valory.customs.superforcaster.superforcaster",
+        family="superforcaster",
     ),
     # valory/superforcaster_polymarket_v1
     "superforcaster-polymarket-v1": ToolSpec(
@@ -59,31 +84,73 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "packages.valory.customs.superforcaster_polymarket_v1"
             ".superforcaster_polymarket_v1"
         ),
+        family="superforcaster",
+    ),
+    # valory/superforcaster_polymarket_v3 — sibling of v2; both depart from v1.
+    # v3 swaps the default LLM model from gpt-4.1 to claude-fable-5 via the
+    # dual-SDK convention; family is unchanged (the parent + sibling all share
+    # the same superforcaster PREDICTION_PROMPT schema).
+    "superforcaster-polymarket-v3": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v3"
+            ".superforcaster_polymarket_v3"
+        ),
+        family="superforcaster",
     ),
     # napthaai/prediction_request_reasoning
     "prediction-request-reasoning": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
+        family="reasoning",
     ),
     "prediction-request-reasoning-claude": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
+        family="reasoning",
     ),
     # napthaai/prediction_request_rag
     "prediction-request-rag": ToolSpec(
         module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
+        family="rag",
     ),
     "prediction-request-rag-claude": ToolSpec(
         module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
+        family="rag",
     ),
-    # napthaai/prediction_url_cot
+    # napthaai/prediction_url_cot — rag-shaped (PREDICTION_PROMPT + SYSTEM_PROMPT,
+    # <user_prompt> XML layout), NOT the default backtick format.
     "prediction-url-cot": ToolSpec(
         module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
+        family="rag",
     ),
     "prediction-url-cot-claude": ToolSpec(
         module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
+        family="rag",
     ),
     # valory/factual_research
     "factual_research": ToolSpec(
         module="packages.valory.customs.factual_research.factual_research",
+        family="factual_research",
+    ),
+    # valory/factual_research_v1 — declares family="factual_research" (same as
+    # its parent) so prompt_replay dispatch reads the correct schema/regex pair.
+    "factual_research-v1": ToolSpec(
+        module="packages.valory.customs.factual_research_v1.factual_research_v1",
+        family="factual_research",
+    ),
+    # valory/factual_research_v2 — declares family="factual_research" (same as
+    # its parent) so prompt_replay dispatch reads the correct schema/regex pair.
+    "factual_research-v2": ToolSpec(
+        module="packages.valory.customs.factual_research_v2.factual_research_v2",
+        family="factual_research",
+    ),
+    # valory/factual_research_v3 — same prompts + Polymarket-rules pipeline as
+    # v2, swaps the LLM backend from OpenAI gpt-4.1 to Anthropic claude-fable-5
+    # via JSON-schema prompt injection + Pydantic model_validate_json on the
+    # response (the Anthropic SDK's forced-tool-use mechanism is NOT used).
+    # Family unchanged (parent + siblings share the same ESTIMATE_USER /
+    # REFRAME_USER / SYNTHESIS_USER templates and resolution_rules kwarg).
+    "factual_research-v3": ToolSpec(
+        module="packages.valory.customs.factual_research_v3.factual_research_v3",
+        family="factual_research",
     ),
     # valory/finetuned_prediction — DeepSeek-R1-Distill-Qwen-14B served by a
     # self-hosted vLLM (OpenAI-compatible). Both modes share one module; the
@@ -91,17 +158,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "predict-base": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
+        family="default",
     ),
     "predict-fine-tuned": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
+        family="default",
     ),
-    # nickcom007/prediction_request_sme
+    # nickcom007/prediction_request_sme — default schema: PREDICTION_PROMPT uses
+    # {user_prompt}/{additional_information} and the module exports no
+    # SYSTEM_PROMPT_FORECASTER. (It is NOT superforcaster-shaped despite
+    # exporting only PREDICTION_PROMPT.)
     "prediction-offline-sme": ToolSpec(
         module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",
+        family="default",
     ),
     "prediction-online-sme": ToolSpec(
         module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",
+        family="default",
     ),
 }
 

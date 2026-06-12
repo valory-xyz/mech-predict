@@ -230,16 +230,15 @@ def _format_reliability_block(
     failure_rows: list[dict[str, Any]],
     filter_stats: Optional[dict[str, Any]] = None,
 ) -> list[str]:
-    """Render the Reliability section: candidate parse rate + pre-filter stats.
+    """Render the Reliability section: candidate parse rate + production parse rate.
 
-    Baseline parse rate is 100% by construction (the enrich step drops
-    non-valid rows), so it is not reported as part of a baseline-vs-candidate
-    comparison. The two observations here are one-sided:
+    The two observations here are one-sided:
 
     - candidate parse rate: did the PR's code produce parseable responses?
-    - pre-filter: did the upstream enrich filter's "drop non-valid" invariant
-      hold? (non-zero ``not_valid_parse`` rejects = silent regression of the
-      invariant that made baseline 100% trustworthy in the first place)
+    - production parse rate: of the in-scope production deliveries, how many
+      parsed before enrich dropped the rest. Tells reviewers how noisy
+      production was. The scored baseline is 100% valid by construction (enrich
+      drops the non-parseable rows), so only that pre-drop ratio is informative.
 
     :param candidate: metrics dict including ``parse_reliability``.
     :param failure_rows: rows from ``candidate_failures.jsonl`` (may be empty).
@@ -269,37 +268,24 @@ def _format_reliability_block(
     if filter_stats is not None:
         r = filter_stats.get("rejected", {}) or {}
         accepted = filter_stats.get("accepted", 0)
-        total_rej = sum(r.values())
         not_valid = r.get("not_valid_parse", 0)
-        pf_marker = "✅" if not_valid == 0 else "⚠️"
-        lines.append(
-            f"- Pre-filter (enrich): {accepted} accepted, {total_rej} rejected, "
-            f"not_valid_parse={not_valid} {pf_marker}"
-        )
-        # Scoping breakdown only when any rows were rejected — otherwise four
-        # zeroes just add noise to the happy path. Must stay adjacent to the
-        # Pre-filter bullet above: markdown nests the indented sub-bullet
-        # under the most recent top-level bullet.
-        if total_rej > 0:
-            scoping = ", ".join(
-                [
-                    f"wrong_tool={r.get('wrong_tool', 0)}",
-                    f"no_deliver_id={r.get('no_deliver_id', 0)}",
-                    f"no_outcome={r.get('no_outcome', 0)}",
-                    f"older_than_cutoff={r.get('older_than_cutoff', 0)}",
-                ]
-            )
-            lines.append(f"  - Scoping: {scoping}")
-        # Post-filter baseline is 100% by construction (enrich drops non-valid
-        # rows), so surface the *pre-filter* ratio to tell reviewers how noisy
-        # production actually was — per PR #231 review. Rendered last so the
-        # Scoping sub-bullet above stays nested under Pre-filter, not here.
+        # Production parse rate: of the in-scope production deliveries, how many
+        # parsed. enrich drops the non-parseable ones (that is what keeps the
+        # scored baseline 100% valid), so they are the only rejections that
+        # belong in this ratio. The scoping rejections (wrong_tool,
+        # wrong_platform, ...) are just rows for other tools/platforms and carry
+        # no reliability signal, so they are not reported.
         denom = accepted + not_valid
         if denom > 0:
             lines.append(
-                f"- Baseline pre-filter parse rate: {accepted}/{denom} "
+                f"- Production parse rate: {accepted}/{denom} "
                 f"({accepted / denom * 100:.1f}%)"
             )
+        # no_row_id is a kept-row diagnostic (always 0 in healthy production);
+        # surface it only when nonzero so a flywheel row_id regression is loud.
+        no_row_id = filter_stats.get("no_row_id", 0)
+        if no_row_id:
+            lines.append(f"- ⚠️ no_row_id: {no_row_id} (rows bypassed dedup)")
 
     lines.append("")
 
@@ -345,24 +331,30 @@ def format_report(
         candidate_failures.jsonl. When non-empty, bodies are inlined in a
         collapsed <details> block.
     :param filter_stats: optional ``{accepted, rejected}`` dict from
-        filter_stats.json sidecar. When present, a Pre-filter block is
-        rendered so an upstream filter regression would be visible.
+        filter_stats.json sidecar. When present, a Production parse rate line
+        is rendered showing how many in-scope production deliveries parsed.
     :return: markdown string.
     """
     tool = meta.get("tool", "unknown")
+
+    # Platforms present in the scored data. A run scoped to one platform
+    # (`--platform polymarket`) suppresses the per-platform breakdown below, so
+    # naming the platform in the header is the only place the scope is visible.
+    b_platforms = baseline.get("by_platform", {})
+    c_platforms = candidate.get("by_platform", {})
+    all_platforms = sorted(set(b_platforms) | set(c_platforms))
+    platform_label = (
+        all_platforms[0].title() if len(all_platforms) == 1 else "All platforms"
+    )
+
     parts: list[str] = [
         f"<!-- benchmark-result:{tool} -->",
-        f"## Benchmark: {tool}",
+        f"## Benchmark: {tool} — {platform_label}",
         "",
         _metrics_table(baseline, candidate),
         "",
     ]
     parts.extend(_format_reliability_block(candidate, failure_rows or [], filter_stats))
-
-    # Per-platform breakdown
-    b_platforms = baseline.get("by_platform", {})
-    c_platforms = candidate.get("by_platform", {})
-    all_platforms = sorted(set(b_platforms) | set(c_platforms))
 
     if len(all_platforms) > 1:
         detail_lines = ["<details><summary>Per-platform breakdown</summary>", ""]
@@ -398,7 +390,7 @@ def format_report(
         parts.append("")
 
     # Footer
-    footer_parts = [f"{baseline['n']} markets"]
+    footer_parts = [f"{baseline['n']} deliveries"]
     if meta.get("seed"):
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):

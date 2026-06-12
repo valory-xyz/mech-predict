@@ -17,6 +17,10 @@ on:
         description: 'Sample size per platform'
         required: false
         default: '50'
+      platform:
+        description: 'Restrict to a single platform (omen|polymarket; empty = all)'
+        required: false
+        default: ''
       seed:
         description: 'Random seed'
         required: false
@@ -42,7 +46,8 @@ jobs:
         && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # GitHub-hosted runner max (6h).
+    timeout-minutes: 360
 
     steps:
       # Acknowledge the trigger (issue_comment only)
@@ -68,6 +73,7 @@ jobs:
           INPUT_TOOL: ${{ github.event.inputs.tool }}
           INPUT_PHASE: ${{ github.event.inputs.phase }}
           INPUT_SAMPLE: ${{ github.event.inputs.sample }}
+          INPUT_PLATFORM: ${{ github.event.inputs.platform }}
           INPUT_SEED: ${{ github.event.inputs.seed }}
           INPUT_PR: ${{ github.event.inputs.pr }}
           INPUT_CANDIDATE_TOOL: ${{ github.event.inputs.candidate_tool }}
@@ -79,6 +85,7 @@ jobs:
             TOOL="$INPUT_TOOL"
             PHASE="$INPUT_PHASE"
             SAMPLE="$INPUT_SAMPLE"
+            PLATFORM="$INPUT_PLATFORM"
             SEED="$INPUT_SEED"
             PR="$INPUT_PR"
             CANDIDATE_TOOL="$INPUT_CANDIDATE_TOOL"
@@ -87,6 +94,7 @@ jobs:
             TOOL=$(echo "$COMMENT_BODY" | awk '{print $2}')
             PHASE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--phase )\S+' || echo "prediction-only")
             SAMPLE=$(echo "$COMMENT_BODY" | grep -oP '(?<=--sample )\d+' || echo "50")
+            PLATFORM=$(echo "$COMMENT_BODY" | grep -oP '(?<=--platform )[a-z]+' || echo "")
             SEED=$(echo "$COMMENT_BODY" | grep -oP '(?<=--seed )\d+' || echo "42")
             CANDIDATE_TOOL=$(echo "$COMMENT_BODY" | grep -oP '(?<=--candidate-tool )\S+' || echo "")
             PR="$ISSUE_NUMBER"
@@ -104,16 +112,24 @@ jobs:
             echo "::error::Invalid candidate-tool name: '$CANDIDATE_TOOL'. Must match [a-z0-9_-]+"
             exit 1
           fi
+          # Platform is optional; when set it must be one of the known platforms.
+          # enrich --platform also enforces this via argparse choices, but we
+          # reject early here so a typo fails fast with a clear message.
+          if [ -n "$PLATFORM" ] && [ "$PLATFORM" != "omen" ] && [ "$PLATFORM" != "polymarket" ]; then
+            echo "::error::Invalid platform: '$PLATFORM'. Must be 'omen' or 'polymarket'"
+            exit 1
+          fi
 
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
           echo "phase=$PHASE" >> "$GITHUB_OUTPUT"
           echo "sample=$SAMPLE" >> "$GITHUB_OUTPUT"
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "seed=$SEED" >> "$GITHUB_OUTPUT"
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
           echo "candidate_tool=$CANDIDATE_TOOL" >> "$GITHUB_OUTPUT"
           echo "triggered_by=$TRIGGERED_BY" >> "$GITHUB_OUTPUT"
 
-          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Seed: $SEED, PR: $PR, Candidate: ${CANDIDATE_TOOL:-<same as tool>}"
+          echo "Tool: $TOOL, Phase: $PHASE, Sample: $SAMPLE, Platform: ${PLATFORM:-<all>}, Seed: $SEED, PR: $PR, Candidate: ${CANDIDATE_TOOL:-<same as tool>}"
 
       # Checkout — PR head for issue_comment, current branch for workflow_dispatch
       - name: Checkout PR head
@@ -145,13 +161,38 @@ jobs:
           workflow: benchmark_flywheel.yaml
           if_no_artifact_found: fail
 
-      # Find the production log file
-      - name: Locate production log
+      # Combine the full pool of daily log shards into one file. Enrich
+      # stratified-samples before the IPFS fetch, so a large pool costs nothing
+      # extra; it just gives sparse baselines (e.g. superforcaster-polymarket-v1)
+      # enough rows to sample.
+      #
+      # The shards are NOT disjoint: the flywheel re-emits a delivery into
+      # multiple daily shards (it only dedups within a day; cross-day dedup is
+      # the consumer's job), so the raw concatenation repeats ~4% of rows
+      # (verified on flywheel run 27251720632: 204,267 rows -> 196,270 distinct
+      # row_ids). Dedup is done downstream by enrich's _load_and_filter_rows on
+      # the canonical row_id key — matching how the scorer dedups — so here we
+      # just need a deterministic union. We sort the shard list (sort -z) so the
+      # files are concatenated in chronological (filename) order: enrich keeps the
+      # first occurrence of each row_id, so oldest-shard-wins, matching the
+      # scorer's keep-oldest semantics. Stable order also keeps the hashFiles
+      # cache key and the seeded sample reproducible across runs. The glob is
+      # scoped to production_log_*.jsonl so the output can't re-include itself.
+      - name: Combine production logs
         id: log
         run: |
-          LOG_FILE=$(find benchmark/datasets/logs/ -name '*.jsonl' -type f -print0 | xargs -0 ls -t | head -1)
+          LOG_FILE=benchmark/datasets/logs/_combined.jsonl
+          find benchmark/datasets/logs/ -name 'production_log_*.jsonl' -type f -print0 \
+            | LC_ALL=C sort -z \
+            | xargs -0 cat > "$LOG_FILE"
+          # Fail here, not downstream: an artifact with no production_log_*.jsonl
+          # shards (renamed/missing files) leaves an empty _combined.jsonl and
+          # this step would exit 0, surfacing later as enrich's "0 rows for
+          # baseline" — which misreads a data-pipeline problem as a tool mismatch.
+          # (if_no_artifact_found: fail only catches a wholly absent artifact.)
+          [ -s "$LOG_FILE" ] || { echo "::error::No production_log_*.jsonl shards found in benchmark/datasets/logs/"; exit 1; }
           echo "path=$LOG_FILE" >> "$GITHUB_OUTPUT"
-          echo "Found production log: $LOG_FILE ($(wc -l < "$LOG_FILE") rows)"
+          echo "Combined pool: $LOG_FILE ($(wc -l < "$LOG_FILE") rows; deduped on row_id in enrich)"
 
       # Enrich with caching
       - name: Cache enriched dataset
@@ -159,16 +200,23 @@ jobs:
         uses: actions/cache@v4
         with:
           path: benchmark/results/ci_enriched/
-          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
+          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.platform }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
 
       - name: Enrich dataset
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          PLATFORM: ${{ steps.parse.outputs.platform }}
         run: |
+          # --platform is optional; ${PLATFORM:+...} expands to the flag only
+          # when PLATFORM is non-empty, so the default stays all-platforms.
+          # Enrich samples to --sample-per-platform before the IPFS fetch and
+          # exits non-zero with a clear message on 0 rows.
           uv run python -m benchmark.prompt_replay enrich \
             --production-log "${{ steps.log.outputs.path }}" \
             --tool "${{ steps.parse.outputs.tool }}" \
             --sample-per-platform "${{ steps.parse.outputs.sample }}" \
             --seed "${{ steps.parse.outputs.seed }}" \
+            ${PLATFORM:+--platform "$PLATFORM"} \
             --output benchmark/results/ci_enriched/dataset.jsonl
 
       # Replay with PR's prompts

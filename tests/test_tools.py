@@ -186,6 +186,19 @@ class TestSuperforcasterPolymarketV1(BaseIsolatedToolTest):
     prompts = [PREDICTION_PROMPT]
 
 
+# Note: no ``TestSuperforcasterPolymarketV3`` here — matches the convention
+# already in place for ``factual_research-v3`` (PR #339, also fable-5).
+# The org's CLAUDE_API_KEY tier doesn't yet authorize ``claude-fable-5``
+# (released 2026-06-09), so a live invocation returns "Model claude-fable-5
+# not supported." and the test would always fail. Re-add this class once
+# the org tier gains fable-5 access; the dispatch + dependency-import
+# coverage that OjusWiZard's review asked for (PR #340 L259) is still
+# fully exercised by the in-process unit tests in
+# ``packages/valory/customs/superforcaster_polymarket_v3/tests/`` —
+# notably ``TestV3LLMClientAnthropicCompletions`` (7 tests) and
+# ``TestV3RunEndToEnd`` (2 tests).
+
+
 class TestFactualResearch(BaseIsolatedToolTest):
     """Test Factual Research."""
 

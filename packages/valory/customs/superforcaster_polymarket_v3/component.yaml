@@ -1,0 +1,36 @@
+name: superforcaster_polymarket_v3
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Returns the standard
+  mech prediction output (p_yes, p_no, confidence, info_utility). Variant of superforcaster-polymarket-v1
+  that swaps the default LLM model from OpenAI gpt-4.1 to Anthropic claude-fable-5
+  while keeping v1's prompt, output format and retry logic byte-identical. The OpenAI
+  fallback path is preserved so the tool can still serve the older model when requested.
+  Sibling of v2 (which is a prompt-only resolution-criterion specificity variant);
+  both depart from v1. Follows the dual-SDK convention every other claude-using tool
+  in this repo uses (prediction_request, prediction_request_rag, prediction_request_reasoning,
+  prediction_url_cot).
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v3.py: bafybeictlleyllsuu2weh4uajtjcucgshh3l7sabol4cjpge44rhbgqtxa
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster.py: bafybeidhzamokjfkii4v5xgfk54j3huvn3lgvcmqny7rs74otggahxhg54
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v3.py
+callable: run
+params:
+  default_model: claude-fable-5
+dependencies:
+  openai:
+    version: ==1.93.0
+  anthropic:
+    version: ==0.23.1
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5

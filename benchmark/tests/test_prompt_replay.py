@@ -18,6 +18,7 @@ from benchmark.prompt_replay import (
     _prepare_output_dir,
     _replay_vllm_candidate,
     extract_prompt_components,
+    replay,
 )
 from benchmark.tools import TOOL_REGISTRY
 
@@ -570,3 +571,27 @@ class TestReplayVllmCandidate:
         assert result is None
         # The client is still closed (VLLMClientManager __exit__) on failure.
         fake_client.close.assert_called_once()
+
+
+class TestVllmCandidateBaselineGuard:
+    """`replay` rejects a vLLM candidate against a non-superforcaster baseline.
+
+    The vLLM path renders a superforcaster-shaped ``<background>`` prompt from
+    the baseline's extracted fields, so it must fail fast (not silently feed a
+    malformed prompt) when the baseline belongs to another family.
+    """
+
+    def test_non_superforcaster_baseline_rejected(self, tmp_path: Path) -> None:
+        """A reasoning-family baseline + vLLM candidate raises ValueError.
+
+        :param tmp_path: pytest tmp_path fixture for the enriched dataset.
+        """
+        dataset = tmp_path / "dataset.jsonl"
+        _write_jsonl(dataset, [{"tool_name": "prediction-request-reasoning"}])
+        with pytest.raises(ValueError, match="superforcaster-family baseline"):
+            replay(
+                dataset=dataset,
+                output_dir=tmp_path / "out",
+                model="qwen-14b-fine-tuned",
+                candidate_tool="predict-fine-tuned",
+            )

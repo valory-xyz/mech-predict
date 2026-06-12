@@ -1462,6 +1462,18 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     # self-hosted vLLM, and parse their own output — so they skip the family
     # template-pull / hosted-API key selection / structured-output path below.
     is_vllm_candidate = TOOL_REGISTRY[candidate_tool_name].backend == VLLM_BACKEND
+    # The vLLM path renders a superforcaster-shaped <background> forecaster prompt
+    # from the baseline's extracted question + sources, so it only makes sense
+    # against a superforcaster-family baseline. Other families extract those
+    # fields differently (or not at all → KeyError downstream); fail fast and
+    # explicit rather than silently feeding a malformed prompt to the model.
+    if is_vllm_candidate and not is_superforcaster:
+        raise ValueError(
+            f"vLLM candidate '{candidate_tool_name}' requires a "
+            f"superforcaster-family baseline (it renders a <background> "
+            f"forecaster prompt from the baseline's extracted sources), but the "
+            f"baseline tool is '{tool_name}' (family '{family}')."
+        )
 
     # Pull prompt templates from the candidate module per the baseline family's
     # attribute schema. New-version tools must mirror the parent's symbols.

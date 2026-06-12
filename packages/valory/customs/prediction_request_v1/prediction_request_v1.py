@@ -274,16 +274,10 @@ class LLMClient:
         self.api_keys = api_keys
         self.llm_provider = llm_provider
         if self.llm_provider == "anthropic":
-            import anthropic
-
             self.client = anthropic.Anthropic(api_key=self.api_keys["anthropic"])  # type: ignore
         if self.llm_provider == "openai":
-            import openai
-
             self.client = openai.OpenAI(api_key=self.api_keys["openai"])  # type: ignore
         if self.llm_provider == "openrouter":
-            import openai
-
             self.client = openai.OpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=self.api_keys["openrouter"],  # type: ignore

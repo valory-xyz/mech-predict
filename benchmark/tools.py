@@ -28,6 +28,11 @@ class ToolSpec:
     """Specification for a prediction tool."""
 
     module: str
+    # Inference backend the replay harness must use for this tool's candidate
+    # call. "openai" (default) → OpenAI/Anthropic SDK against the hosted APIs;
+    # "vllm" → a self-hosted, OpenAI-compatible vLLM server reached via a
+    # base_url + key supplied from CI secrets (VLLM_ENDPOINT / VLLM_API_KEY).
+    backend: str = "openai"
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -79,6 +84,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     # valory/factual_research
     "factual_research": ToolSpec(
         module="packages.valory.customs.factual_research.factual_research",
+    ),
+    # valory/finetuned_prediction — DeepSeek-R1-Distill-Qwen-14B served by a
+    # self-hosted vLLM (OpenAI-compatible). Both modes share one module; the
+    # replay's --model selects which served checkpoint the vLLM call targets.
+    "predict-base": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
+    ),
+    "predict-fine-tuned": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
     ),
     # nickcom007/prediction_request_sme
     "prediction-offline-sme": ToolSpec(

@@ -176,6 +176,11 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.BENCHMARK_ANTHROPIC_API_KEY }}
+          # Self-hosted, OpenAI-compatible vLLM server for vLLM-backed candidates
+          # (e.g. --candidate-tool predict-fine-tuned). The endpoint URL is kept
+          # in a secret too, so the private server is never exposed in the repo.
+          VLLM_ENDPOINT: ${{ secrets.BENCHMARK_VLLM_ENDPOINT }}
+          VLLM_API_KEY: ${{ secrets.BENCHMARK_VLLM_API_KEY }}
           CANDIDATE_TOOL: ${{ steps.parse.outputs.candidate_tool }}
         run: |
           # New-version PRs pass --candidate-tool so candidate code runs on

@@ -1283,6 +1283,108 @@ def _baseline_family(tool_name: str) -> str:
     return "default"
 
 
+# ---------------------------------------------------------------------------
+# vLLM-served candidates (e.g. predict-fine-tuned)
+# ---------------------------------------------------------------------------
+
+# Backend tag set on the candidate's ToolSpec (benchmark/tools.py) to route it
+# through the self-hosted vLLM path instead of the hosted OpenAI/Anthropic SDK.
+VLLM_BACKEND = "vllm"
+# CI-secret env vars carrying the OpenAI-compatible vLLM server location + key.
+# The URL is kept secret (private endpoint) rather than hardcoded in the repo.
+VLLM_ENDPOINT_ENV = "VLLM_ENDPOINT"
+VLLM_API_KEY_ENV = "VLLM_API_KEY"
+# Fallback key for an auth-less vLLM server (OpenAI SDK still requires a token).
+VLLM_DUMMY_API_KEY = "EMPTY"
+
+
+def _replay_vllm_candidate(
+    row: Dict[str, Any],
+    candidate_module: Any,
+    base_url: str,
+    api_key: str,
+    model: str,
+) -> Optional[str]:
+    """Replay one row through a vLLM-served candidate (e.g. predict-fine-tuned).
+
+    The question + cached web sources come from the superforcaster baseline row
+    (``extracted_*`` fields), so the candidate is scored on the SAME markets and
+    SAME embedded evidence as the baseline. Prompt rendering, chat framing,
+    request settings, and the client/call itself are all taken from the
+    candidate tool's own module (``VLLMClientManager`` +
+    ``generate_prediction_with_retry``, mirroring its ``run()``), so the
+    replayed request is a single source of truth with production and cannot
+    drift (n=1, stop=None, retries, COMPLETION_TIMEOUT all live there).
+
+    :param row: an enriched superforcaster-family row.
+    :param candidate_module: the imported finetuned_prediction module.
+    :param base_url: the OpenAI-compatible vLLM endpoint (from a CI secret).
+    :param api_key: the vLLM server key (from a CI secret).
+    :param model: the served-model name to target.
+    :return: the raw model completion, or None when the call failed.
+    """
+    content = candidate_module.build_forecaster_prompt(
+        row["extracted_user_prompt"],
+        row.get("extracted_today", ""),
+        row["extracted_additional_information"],
+    )
+    messages = candidate_module.build_messages(content)
+    settings = candidate_module.DEFAULT_SETTINGS
+    try:
+        with candidate_module.VLLMClientManager(api_key, base_url) as client:
+            completion, _ = candidate_module.generate_prediction_with_retry(
+                client=client,
+                model=model,
+                messages=messages,
+                temperature=settings["temperature"],
+                max_tokens=settings["max_tokens"],
+            )
+        return completion
+    except Exception as exc:  # pylint: disable=broad-except
+        # A single failed call (the tool raises after its retries) must not
+        # abort the whole replay; record it as a parse failure (p_yes=None) so
+        # the run continues and the row is logged.
+        log.warning("vLLM candidate call failed: %s", exc)
+        return None
+
+
+def _parse_vllm_candidate(
+    response_text: Optional[str], candidate_module: Any
+) -> Dict[str, Any]:
+    """Parse a vLLM candidate completion into the harness scoring dict.
+
+    Delegates to the candidate tool's own ``canonical_prediction`` (which strips
+    the ``<think>`` block, validates ``p_yes``, and derives ``p_no``) so parsing
+    matches production exactly.
+
+    :param response_text: the raw model completion (or None on call failure).
+    :param candidate_module: the imported finetuned_prediction module.
+    :return: ``{p_yes, p_no, prediction_parse_status, confidence}``.
+    """
+    if response_text is None:
+        return {
+            "p_yes": None,
+            "p_no": None,
+            "prediction_parse_status": "error",
+            "confidence": None,
+        }
+    canonical = candidate_module.canonical_prediction(response_text)
+    if canonical is None:
+        return {
+            "p_yes": None,
+            "p_no": None,
+            "prediction_parse_status": "malformed",
+            "confidence": None,
+        }
+    obj = json.loads(canonical)
+    return {
+        "p_yes": obj["p_yes"],
+        "p_no": obj["p_no"],
+        "prediction_parse_status": "valid",
+        "confidence": obj.get("confidence"),
+    }
+
+
 def replay(  # pylint: disable=too-many-statements,too-many-locals
     dataset: Path,
     output_dir: Path,
@@ -1355,10 +1457,38 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     candidate_module = importlib.import_module(
         TOOL_REGISTRY[candidate_tool_name].module
     )
+    # vLLM candidates (e.g. predict-fine-tuned) are scored on the superforcaster
+    # baseline's markets + cached sources but render their OWN prompt, call a
+    # self-hosted vLLM, and parse their own output — so they skip the family
+    # template-pull / hosted-API key selection / structured-output path below.
+    is_vllm_candidate = TOOL_REGISTRY[candidate_tool_name].backend == VLLM_BACKEND
+    # The vLLM path renders a superforcaster-shaped <background> forecaster prompt
+    # from the baseline's extracted question + sources, so it only makes sense
+    # against a superforcaster-family baseline. Other families extract those
+    # fields differently (or not at all → KeyError downstream); fail fast and
+    # explicit rather than silently feeding a malformed prompt to the model.
+    if is_vllm_candidate and not is_superforcaster:
+        raise ValueError(
+            f"vLLM candidate '{candidate_tool_name}' requires a "
+            f"superforcaster-family baseline (it renders a <background> "
+            f"forecaster prompt from the baseline's extracted sources), but the "
+            f"baseline tool is '{tool_name}' (family '{family}')."
+        )
 
     # Pull prompt templates from the candidate module per the baseline family's
     # attribute schema. New-version tools must mirror the parent's symbols.
-    if is_reasoning_tool:
+    if is_vllm_candidate:
+        # Resolve the served-model name from the tool's own MODEL_BY_TOOL (as in
+        # production), not from --model: the /benchmark comment needs no --model,
+        # and the report labels the candidate with its served checkpoint (e.g.
+        # qwen-14b-fine-tuned). The vLLM candidate builds its prompt via its own
+        # build_forecaster_prompt, so PREDICTION_PROMPT / system_prompt are
+        # unused here — left empty (not None) to keep the str type the non-vLLM
+        # branches expect.
+        model = candidate_module.resolve_model(candidate_tool_name)
+        PREDICTION_PROMPT = ""
+        system_prompt = ""
+    elif is_reasoning_tool:
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         REASONING_PROMPT = candidate_module.REASONING_PROMPT
         parser_reasoning_response = candidate_module.parser_reasoning_response
@@ -1378,7 +1508,18 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         system_prompt = candidate_module.SYSTEM_PROMPT_FORECASTER
 
-    if "claude" in model:
+    vllm_base_url = ""
+    if is_vllm_candidate:
+        vllm_base_url = os.environ.get(VLLM_ENDPOINT_ENV, "")
+        if not vllm_base_url:
+            log.error(
+                "%s not set for vLLM candidate '%s'",
+                VLLM_ENDPOINT_ENV,
+                candidate_tool_name,
+            )
+            return
+        api_key = os.environ.get(VLLM_API_KEY_ENV, "") or VLLM_DUMMY_API_KEY
+    elif "claude" in model:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             log.error("ANTHROPIC_API_KEY not set")
@@ -1457,7 +1598,15 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
 
             # --- Candidate: phase-aware prompt formatting + LLM call ---
             fresh_reasoning = None
-            if is_reasoning_tool:
+            if is_vllm_candidate:
+                response_text = _replay_vllm_candidate(
+                    row=row,
+                    candidate_module=candidate_module,
+                    base_url=vllm_base_url,
+                    api_key=api_key,
+                    model=model,
+                )
+            elif is_reasoning_tool:
                 response_text, fresh_reasoning = _replay_reasoning_tool(
                     row=row,
                     phase=phase,
@@ -1518,7 +1667,12 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
             if fresh_reasoning is not None:
                 row["_fresh_reasoning"] = fresh_reasoning
 
-            parsed = parse_response(response_text, tool_name)
+            # vLLM candidates parse via their own canonical_prediction; all other
+            # candidates use the baseline family's parser.
+            if is_vllm_candidate:
+                parsed = _parse_vllm_candidate(response_text, candidate_module)
+            else:
+                parsed = parse_response(response_text, tool_name)
 
             candidate_row = {
                 "row_id": _make_row_id("candidate", row["tool_name"], question, model),

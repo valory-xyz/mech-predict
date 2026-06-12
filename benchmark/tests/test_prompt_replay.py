@@ -480,8 +480,10 @@ class TestParseVllmCandidate:
 class TestReplayVllmCandidate:
     """`_replay_vllm_candidate` calls the vLLM server with production framing.
 
-    It must reuse the candidate tool's own prompt builder + chat framing (a
-    single user message, NO system message) and deterministic settings, target
+    It must drive the call through the candidate tool's OWN client path
+    (``VLLMClientManager`` + ``generate_prediction_with_retry``) so the request
+    is a single source of truth with the tool's ``run()`` — same prompt builder,
+    same single-user-message framing, same n=1 / stop=None / settings — target
     the supplied base_url, and degrade to None (not raise) on a call failure.
     """
 
@@ -494,7 +496,11 @@ class TestReplayVllmCandidate:
         }
 
     def test_calls_vllm_with_production_framing(self, monkeypatch: Any) -> None:
-        """The call uses base_url, the served model, and no system message.
+        """The reused client path targets base_url with production parameters.
+
+        Patches the shared ``openai.OpenAI`` the tool's ``VLLMClient`` builds, so
+        the assertions cover the exact request that path emits (n=1, stop=None,
+        single user message, deterministic settings).
 
         :param monkeypatch: pytest fixture used to stub ``openai.OpenAI``.
         """
@@ -527,14 +533,22 @@ class TestReplayVllmCandidate:
         assert create_kwargs["model"] == "qwen-14b-fine-tuned"
         assert create_kwargs["temperature"] == 0.0
         assert create_kwargs["max_tokens"] == 1024
+        # Reused client path locks production single-completion semantics.
+        assert create_kwargs["n"] == 1
+        assert create_kwargs["stop"] is None
         # Training-parity framing: exactly one user message, no system message.
         messages = create_kwargs["messages"]
         assert [m["role"] for m in messages] == ["user"]
         assert "<background>forecast</background>" in messages[0]["content"]
+        # VLLMClientManager closes the underlying client on context exit.
         fake_client.close.assert_called_once()
 
     def test_call_failure_returns_none(self, monkeypatch: Any) -> None:
         """A server/SDK error degrades to None so the replay run continues.
+
+        The tool's ``generate_prediction_with_retry`` raises after exhausting
+        its retries; the helper must catch that and return None. ``time.sleep``
+        is stubbed so the retry backoff doesn't slow the test.
 
         :param monkeypatch: pytest fixture used to stub ``openai.OpenAI``.
         """
@@ -543,6 +557,7 @@ class TestReplayVllmCandidate:
         monkeypatch.setattr(
             "benchmark.prompt_replay.openai.OpenAI", lambda **kwargs: fake_client
         )
+        monkeypatch.setattr(finetuned_prediction.time, "sleep", lambda *_a: None)
 
         result = _replay_vllm_candidate(
             row=self._row(),
@@ -553,5 +568,5 @@ class TestReplayVllmCandidate:
         )
 
         assert result is None
-        # Even on failure the client is closed (finally block).
+        # The client is still closed (VLLMClientManager __exit__) on failure.
         fake_client.close.assert_called_once()

@@ -1296,8 +1296,6 @@ VLLM_ENDPOINT_ENV = "VLLM_ENDPOINT"
 VLLM_API_KEY_ENV = "VLLM_API_KEY"
 # Fallback key for an auth-less vLLM server (OpenAI SDK still requires a token).
 VLLM_DUMMY_API_KEY = "EMPTY"
-# Per-request ceiling; matches the tool's COMPLETION_TIMEOUT contract.
-VLLM_REQUEST_TIMEOUT = 150
 
 
 def _replay_vllm_candidate(
@@ -1311,15 +1309,18 @@ def _replay_vllm_candidate(
 
     The question + cached web sources come from the superforcaster baseline row
     (``extracted_*`` fields), so the candidate is scored on the SAME markets and
-    SAME embedded evidence as the baseline. The prompt rendering, chat framing,
-    and request settings are taken from the candidate tool's own module so the
-    replayed call is byte-identical to what the deployed mech tool sends.
+    SAME embedded evidence as the baseline. Prompt rendering, chat framing,
+    request settings, and the client/call itself are all taken from the
+    candidate tool's own module (``VLLMClientManager`` +
+    ``generate_prediction_with_retry``, mirroring its ``run()``), so the
+    replayed request is a single source of truth with production and cannot
+    drift (n=1, stop=None, retries, COMPLETION_TIMEOUT all live there).
 
     :param row: an enriched superforcaster-family row.
     :param candidate_module: the imported finetuned_prediction module.
     :param base_url: the OpenAI-compatible vLLM endpoint (from a CI secret).
     :param api_key: the vLLM server key (from a CI secret).
-    :param model: the served-model name to target (replay ``--model``).
+    :param model: the served-model name to target.
     :return: the raw model completion, or None when the call failed.
     """
     content = candidate_module.build_forecaster_prompt(
@@ -1329,23 +1330,22 @@ def _replay_vllm_candidate(
     )
     messages = candidate_module.build_messages(content)
     settings = candidate_module.DEFAULT_SETTINGS
-    client = openai.OpenAI(api_key=api_key, base_url=base_url)
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=settings["temperature"],
-            max_tokens=settings["max_tokens"],
-            timeout=VLLM_REQUEST_TIMEOUT,
-        )
-        return response.choices[0].message.content
+        with candidate_module.VLLMClientManager(api_key, base_url) as client:
+            completion, _ = candidate_module.generate_prediction_with_retry(
+                client=client,
+                model=model,
+                messages=messages,
+                temperature=settings["temperature"],
+                max_tokens=settings["max_tokens"],
+            )
+        return completion
     except Exception as exc:  # pylint: disable=broad-except
-        # A single failed call must not abort the whole replay; record it as a
-        # parse failure (p_yes=None) so the run continues and the row is logged.
+        # A single failed call (the tool raises after its retries) must not
+        # abort the whole replay; record it as a parse failure (p_yes=None) so
+        # the run continues and the row is logged.
         log.warning("vLLM candidate call failed: %s", exc)
         return None
-    finally:
-        client.close()
 
 
 def _parse_vllm_candidate(

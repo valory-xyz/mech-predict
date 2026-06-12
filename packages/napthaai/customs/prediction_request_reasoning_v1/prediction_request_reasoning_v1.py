@@ -224,7 +224,7 @@ class LLMClient:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         stop: Any = None,
-        max_tokens: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[LLMResponse]:
         """Generate a completion from the specified LLM provider using the given model and messages."""
         if self.llm_provider == "anthropic":
@@ -1023,11 +1023,23 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
                 model=model, messages=[{"role": "user", "content": text}]
             )
             return response.input_tokens
-        except (AttributeError, Exception):
-            # Fallback if the method doesn't exist or fails
-            print("Using fallback enconding for Claude models")
-            enc = get_encoding("cl100k_base")
-            return len(enc.encode(text))
+        except AttributeError:
+            # Fallback if the method doesn't exist
+            print(
+                "Anthropic tokenizer method not available, using fallback encoding for Claude models"
+            )
+        except (ConnectionError, TimeoutError) as e:
+            # Handle network-related issues
+            print(f"Network error when counting tokens: {e}, using fallback encoding")
+        except Exception as e:
+            # Log unexpected errors but still provide fallback
+            print(
+                f"Unexpected error with Anthropic tokenizer: {type(e).__name__}: {e}, using fallback encoding"
+            )
+
+        # Fallback encoding for Claude
+        enc = get_encoding("cl100k_base")
+        return len(enc.encode(text))
 
     # Claude models without a client still need a fallback encoding
     if "claude" in model.lower():

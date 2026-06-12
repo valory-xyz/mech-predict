@@ -515,6 +515,21 @@ class TestLLMClientAnthropicCompletions:
             {"role": "user", "content": "U1"},
         ]
 
+    def test_missing_system_message_uses_default_prompt(self) -> None:
+        """With no ``system`` entry, the default ``SYSTEM_PROMPT`` is used instead of crashing.
+
+        Regression for the unbound-``system_prompt`` path: a user-only
+        message list previously raised ``UnboundLocalError`` that the broad
+        ``except`` shipped on-chain as the prediction string.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == module.SYSTEM_PROMPT
+
 
 class TestWithKeyRotationAnthropic:
     """Cover the ``anthropic.RateLimitError`` branch of ``with_key_rotation``."""

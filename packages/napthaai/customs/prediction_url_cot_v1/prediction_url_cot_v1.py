@@ -19,6 +19,7 @@
 
 """This module implements a tool prediction url cot."""
 
+import copy
 import functools
 import json
 import re
@@ -101,6 +102,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
+                print(f"Unexpected error: {e}")
                 return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
@@ -199,14 +201,15 @@ class LLMClient:
         """Generate a completion from the specified LLM provider using the given model and messages."""
         if self.llm_provider == "anthropic":
             # anthropic can't take system prompt in messages
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "system":
-                    system_prompt = messages[i]["content"]
-                    del messages[i]
+            messages_copy = copy.deepcopy(messages)
+            for i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[i]["role"] == "system":
+                    system_prompt = messages_copy[i]["content"]
+                    del messages_copy[i]
 
             response_provider = self.client.messages.create(  # pylint: disable=no-member
                 model=model,
-                messages=messages,
+                messages=messages_copy,
                 system=system_prompt,  # pylint: disable=possibly-used-before-assignment
                 temperature=temperature,
                 max_tokens=max_tokens,

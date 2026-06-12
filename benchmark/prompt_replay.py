@@ -359,7 +359,7 @@ def _extract_factual_research_prompt_components(
 
 def extract_prompt_components(
     formatted_prompt: str,
-    tool_name: str = "prediction-online",
+    tool_name: str = "prediction-online-v1",
 ) -> Optional[dict[str, str]]:
     """Extract components from a formatted IPFS prompt, dispatching by tool.
 
@@ -410,7 +410,7 @@ def extract_prompt_components(
 def _fetch_and_extract_prompts(
     rows: list[dict[str, Any]],
     ipfs_hashes: dict[str, Optional[str]],
-    tool_name: str = "prediction-online",
+    tool_name: str = "prediction-online-v1",
 ) -> list[dict[str, Any]]:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -1763,8 +1763,8 @@ def main() -> None:
     enrich_parser.add_argument(
         "--tool",
         type=str,
-        default="prediction-online",
-        help="Tool name to filter (default: prediction-online)",
+        default="prediction-online-v1",
+        help="Tool name to filter (default: prediction-online-v1)",
     )
     enrich_parser.add_argument(
         "--output",

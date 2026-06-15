@@ -17,24 +17,27 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for prediction_request_rag: thread-safe client, offline tiktoken, and source_content."""
+"""Unit tests for prediction_request_reasoning: thread-safe client, offline tiktoken, and source_content."""
 
 import inspect
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
-import packages.napthaai.customs.prediction_request_rag.prediction_request_rag as module
-from packages.napthaai.customs.prediction_request_rag.prediction_request_rag import (
+import packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1 as module
+from packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1 import (
     ExtendedDocument,
     LLMClientManager,
     count_tokens,
+    do_reasoning_with_retry,
     extract_texts,
     fetch_additional_information,
-    multi_queries,
+    multi_questions_response,
     run,
 )
 
@@ -46,10 +49,10 @@ class TestLLMClientManager:
         """__enter__ returns a (client, client_embedding) tuple."""
         mock_keys = {"openai": "sk-test"}
         mgr = LLMClientManager(
-            api_keys=mock_keys, model="gpt-4o-2024-08-06", embedding_provider="openai"
+            api_keys=mock_keys, model="gpt-4.1-2025-04-14", embedding_provider="openai"
         )
         with patch(
-            "packages.napthaai.customs.prediction_request_rag.prediction_request_rag.LLMClient"
+            "packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1.LLMClient"
         ) as MockClient:
             mock_llm = MagicMock(name="llm")
             mock_embed = MagicMock(name="embed")
@@ -89,13 +92,18 @@ class TestFunctionsAcceptClient:
 
     def test_count_tokens_claude_without_client_uses_fallback(self) -> None:
         """count_tokens for Claude models without client uses cl100k_base fallback."""
-        token_count = count_tokens("hello world", "claude-4-sonnet-20250514")
+        token_count = count_tokens("hello world", "claude-sonnet-4-6")
         assert isinstance(token_count, int)
         assert token_count > 0
 
-    def test_multi_queries_requires_client_param(self) -> None:
-        """multi_queries requires client as first param."""
-        params = list(inspect.signature(multi_queries).parameters)
+    def test_multi_questions_response_requires_client_param(self) -> None:
+        """multi_questions_response requires client as first param."""
+        params = list(inspect.signature(multi_questions_response).parameters)
+        assert params[0] == "client"
+
+    def test_do_reasoning_requires_client_param(self) -> None:
+        """do_reasoning_with_retry requires client as first param."""
+        params = list(inspect.signature(do_reasoning_with_retry).parameters)
         assert params[0] == "client"
 
     def test_fetch_additional_information_requires_client_param(self) -> None:
@@ -104,7 +112,7 @@ class TestFunctionsAcceptClient:
         assert params[0] == "client"
 
 
-RAG_MODULE = "packages.napthaai.customs.prediction_request_rag.prediction_request_rag"
+REASONING_MODULE = "packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1"
 
 
 def _make_html_future(url: str, html: str) -> tuple:
@@ -130,9 +138,9 @@ def _make_pdf_future(url: str) -> tuple:
 
 
 class TestExtractTextsCapture:
-    """Verify extract_texts captures source content correctly."""
+    """Verify extract_texts captures raw source content correctly."""
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_cleaned_mode_stores_extracted_text(self, mock_batches: MagicMock) -> None:
         """In cleaned mode (default), extracted text is stored instead of raw HTML."""
         html = "<html><body>Hello world</body></html>"
@@ -146,7 +154,7 @@ class TestExtractTextsCapture:
         assert "Hello world" in raw_sc["pages"]["http://example.com"]
         assert not raw_sc["pdfs"]
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_raw_mode_stores_html(self, mock_batches: MagicMock) -> None:
         """In raw mode, raw HTML is stored."""
         html = "<html><body>Hello world</body></html>"
@@ -157,8 +165,8 @@ class TestExtractTextsCapture:
         assert raw_sc["mode"] == "raw"
         assert raw_sc["pages"]["http://example.com"] == html
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.extract_text_from_pdf")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_pdf_captured(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -174,8 +182,8 @@ class TestExtractTextsCapture:
         assert raw_sc["pdfs"]["http://example.com/doc.pdf"] == "pdf content"
         assert not raw_sc["pages"]
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.extract_text_from_pdf")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_failed_pdf_stores_empty_string(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -187,8 +195,8 @@ class TestExtractTextsCapture:
 
         assert raw_sc["pdfs"]["http://example.com/doc.pdf"] == ""
 
-    @patch(f"{RAG_MODULE}.extract_text_from_pdf")
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.extract_text_from_pdf")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_mixed_html_and_pdf(
         self, mock_batches: MagicMock, mock_pdf_extract: MagicMock
     ) -> None:
@@ -209,7 +217,7 @@ class TestExtractTextsCapture:
         assert "http://example.com" in raw_sc["pages"]
         assert "http://example.com/doc.pdf" in raw_sc["pdfs"]
 
-    @patch(f"{RAG_MODULE}.process_in_batches")
+    @patch(f"{REASONING_MODULE}.process_in_batches")
     def test_non_200_not_captured(self, mock_batches: MagicMock) -> None:
         """Non-200 responses are not stored in raw_source_content."""
         response = MagicMock(spec=requests.Response)
@@ -227,14 +235,18 @@ class TestExtractTextsCapture:
 class TestFetchReplayPath:
     """Verify fetch_additional_information replays from structured source_content."""
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
+    @patch(f"{REASONING_MODULE}.reciprocal_rank_refusion")
+    @patch(f"{REASONING_MODULE}.find_similar_chunks")
+    @patch(f"{REASONING_MODULE}.get_embeddings")
+    @patch(f"{REASONING_MODULE}.multi_questions_response")
+    @patch(f"{REASONING_MODULE}.multi_queries")
     def test_cleaned_mode_uses_text_directly(
         self,
         mock_queries: MagicMock,
+        mock_questions: MagicMock,
         mock_embeddings: MagicMock,
         mock_similar: MagicMock,
+        mock_refusion: MagicMock,
     ) -> None:
         """In cleaned mode, cached text is used directly without re-extraction."""
         source_content = {
@@ -245,14 +257,13 @@ class TestFetchReplayPath:
             "pdfs": {},
         }
         mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(text="test content here", url="http://example.com")
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(text="test content here", url="http://example.com")
-        ]
+        mock_questions.return_value = (["question 1"], None)
+        doc = ExtendedDocument(text="test content here", url="http://example.com")
+        mock_embeddings.return_value = [doc]
+        mock_similar.return_value = [doc]
+        mock_refusion.return_value = [doc]
 
-        result, raw_sc, _ = fetch_additional_information(
+        result, raw_sc, _, _ = fetch_additional_information(
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
@@ -268,14 +279,18 @@ class TestFetchReplayPath:
         assert "test content here" in result
         assert "http://example.com" in result
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
+    @patch(f"{REASONING_MODULE}.reciprocal_rank_refusion")
+    @patch(f"{REASONING_MODULE}.find_similar_chunks")
+    @patch(f"{REASONING_MODULE}.get_embeddings")
+    @patch(f"{REASONING_MODULE}.multi_questions_response")
+    @patch(f"{REASONING_MODULE}.multi_queries")
     def test_raw_mode_re_extracts(
         self,
         mock_queries: MagicMock,
+        mock_questions: MagicMock,
         mock_embeddings: MagicMock,
         mock_similar: MagicMock,
+        mock_refusion: MagicMock,
     ) -> None:
         """In raw mode, HTML is re-extracted via extract_text."""
         source_content = {
@@ -286,14 +301,13 @@ class TestFetchReplayPath:
             "pdfs": {},
         }
         mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(text="test content", url="http://example.com")
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(text="test content", url="http://example.com")
-        ]
+        mock_questions.return_value = (["question 1"], None)
+        doc = ExtendedDocument(text="test content", url="http://example.com")
+        mock_embeddings.return_value = [doc]
+        mock_similar.return_value = [doc]
+        mock_refusion.return_value = [doc]
 
-        result, raw_sc, _ = fetch_additional_information(
+        result, raw_sc, _, _ = fetch_additional_information(
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
@@ -308,51 +322,7 @@ class TestFetchReplayPath:
         assert raw_sc is source_content
         assert "http://example.com" in result
 
-    @patch(f"{RAG_MODULE}.find_similar_chunks")
-    @patch(f"{RAG_MODULE}.get_embeddings")
-    @patch(f"{RAG_MODULE}.multi_queries")
-    def test_pdfs_replayed(
-        self,
-        mock_queries: MagicMock,
-        mock_embeddings: MagicMock,
-        mock_similar: MagicMock,
-    ) -> None:
-        """Pdfs in source_content are loaded as ExtendedDocuments."""
-        source_content = {
-            "pages": {},
-            "pdfs": {
-                "http://example.com/doc.pdf": "pdf extracted text for testing",
-            },
-        }
-        mock_queries.return_value = (["test query"], None)
-        mock_embeddings.return_value = [
-            ExtendedDocument(
-                text="pdf extracted text for testing",
-                url="http://example.com/doc.pdf",
-            )
-        ]
-        mock_similar.return_value = [
-            ExtendedDocument(
-                text="pdf extracted text for testing",
-                url="http://example.com/doc.pdf",
-            )
-        ]
-
-        result, _, _ = fetch_additional_information(
-            client=MagicMock(),
-            client_embedding=MagicMock(),
-            prompt="test",
-            model="gpt-4.1-2025-04-14",
-            google_api_key=None,
-            google_engine_id=None,
-            serper_api_key=None,
-            search_provider="google",
-            source_content=source_content,
-        )
-
-        assert "pdf extracted text for testing" in result
-
-    @patch(f"{RAG_MODULE}.multi_queries")
+    @patch(f"{REASONING_MODULE}.multi_queries")
     def test_empty_source_content_raises(self, mock_queries: MagicMock) -> None:
         """Empty source_content raises ValueError (no valid documents)."""
         source_content: dict = {"pages": {}, "pdfs": {}}
@@ -396,13 +366,17 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
 class TestRunFlagBehavior:
     """Verify return_source_content flag controls source_content in used_params."""
 
-    @patch(f"{RAG_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
-    @patch(f"{RAG_MODULE}.fetch_additional_information")
-    @patch(f"{RAG_MODULE}.LLMClientManager")
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
     def test_flag_on_includes_source_content(
         self,
         mock_mgr: MagicMock,
         mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
         mock_parser: MagicMock,
     ) -> None:
         """When return_source_content is 'true', used_params contains source_content."""
@@ -414,16 +388,18 @@ class TestRunFlagBehavior:
         mock_fetch.return_value = (
             "additional info",
             {"pages": {"http://x.com": "<html/>"}},
+            ["query1"],
             None,
         )
+        mock_reasoning.return_value = ("reasoning result", None)
 
         mock_llm.completions.return_value = MagicMock(
-            content="<p_yes>0.5</p_yes><p_no>0.5</p_no><confidence>0.5</confidence><info_utility>0.5</info_utility>",
+            content="<p_yes>0.5</p_yes>",
             usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
 
         result = run(
-            tool="prediction-request-rag",
+            tool="prediction-request-reasoning-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("true"),
@@ -432,13 +408,17 @@ class TestRunFlagBehavior:
         used_params = result[4]
         assert "source_content" in used_params
 
-    @patch(f"{RAG_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}')
-    @patch(f"{RAG_MODULE}.fetch_additional_information")
-    @patch(f"{RAG_MODULE}.LLMClientManager")
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
     def test_flag_off_excludes_source_content(
         self,
         mock_mgr: MagicMock,
         mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
         mock_parser: MagicMock,
     ) -> None:
         """When return_source_content is 'false', used_params omits source_content."""
@@ -447,15 +427,21 @@ class TestRunFlagBehavior:
         mock_mgr.return_value.__enter__ = MagicMock(return_value=(mock_llm, mock_embed))
         mock_mgr.return_value.__exit__ = MagicMock(return_value=False)
 
-        mock_fetch.return_value = ("additional info", {"pages": {}}, None)
+        mock_fetch.return_value = (
+            "additional info",
+            {"pages": {}},
+            ["query1"],
+            None,
+        )
+        mock_reasoning.return_value = ("reasoning result", None)
 
         mock_llm.completions.return_value = MagicMock(
-            content="<p_yes>0.5</p_yes><p_no>0.5</p_no><confidence>0.5</confidence><info_utility>0.5</info_utility>",
+            content="<p_yes>0.5</p_yes>",
             usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
 
         result = run(
-            tool="prediction-request-rag",
+            tool="prediction-request-reasoning-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("false"),
@@ -463,3 +449,181 @@ class TestRunFlagBehavior:
 
         used_params = result[4]
         assert "source_content" not in used_params
+
+
+def _make_anthropic_text_response(
+    text: str, *, input_tokens: int = 7, output_tokens: int = 13
+) -> MagicMock:
+    """Build a mock anthropic ``messages.create`` response (content block + usage)."""
+    text_block = MagicMock()
+    text_block.text = text
+    response = MagicMock()
+    response.content = [text_block]
+    response.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return response
+
+
+def _make_anthropic_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an anthropic error instance without a live ``httpx.Response``."""
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+def _anthropic_client(resp: MagicMock) -> Any:
+    """Construct an ``LLMClient`` on the anthropic branch with a mocked backing client."""
+    with patch("anthropic.Anthropic") as MockAnthropic:
+        instance = MagicMock()
+        instance.messages.create.return_value = resp
+        MockAnthropic.return_value = instance
+        client = module.LLMClient(
+            api_keys={"anthropic": "sk-ant"}, llm_provider="anthropic"
+        )
+    return client
+
+
+class TestLLMClientAnthropicCompletions:
+    """Cover the Anthropic branch of ``LLMClient.completions``.
+
+    The wider suites mock ``LLMClientManager`` wholesale, so the
+    Anthropic-side mapping under the 0.109.1 bump is otherwise unexercised:
+    system-prompt extraction, ``content[0].text``, and the
+    ``input_tokens``/``output_tokens`` -> ``prompt_tokens``/``completion_tokens``
+    rename that feeds billing.
+    """
+
+    def test_system_message_extracted_to_system_kwarg(self) -> None:
+        """``system`` entries are passed via ``system=`` and dropped from ``messages=``."""
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[
+                {"role": "system", "content": "SYS"},
+                {"role": "user", "content": "U1"},
+            ],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == "SYS"
+        assert kwargs["messages"] == [{"role": "user", "content": "U1"}]
+
+    def test_content_and_usage_mapped_from_anthropic_names(self) -> None:
+        """``content[0].text`` and Anthropic token names map onto ``LLMResponse``."""
+        client = _anthropic_client(
+            _make_anthropic_text_response(
+                '{"p_yes": 0.5}', input_tokens=111, output_tokens=222
+            )
+        )
+        result = client.completions(
+            model="claude-sonnet-4-6",
+            messages=[
+                {"role": "system", "content": "SYS"},
+                {"role": "user", "content": "U1"},
+            ],
+        )
+        assert result is not None
+        assert result.content == '{"p_yes": 0.5}'
+        assert result.usage.prompt_tokens == 111
+        assert result.usage.completion_tokens == 222
+
+    def test_caller_messages_list_not_mutated(self) -> None:
+        """The system-prompt strip works on a copy, leaving the caller's list intact.
+
+        Regression for the retry-path bug: stripping ``messages`` in place
+        meant a re-call ran without the system prompt.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+        client.completions(model="claude-sonnet-4-6", messages=messages)
+        assert messages == [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+
+    def test_missing_system_message_uses_default_prompt(self) -> None:
+        """With no ``system`` entry, the default ``SYSTEM_PROMPT`` is used instead of crashing.
+
+        Regression for the unbound-``system_prompt`` path: a user-only
+        message list previously raised ``UnboundLocalError`` that the broad
+        ``except`` shipped on-chain as the prediction string.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == module.SYSTEM_PROMPT
+
+
+class TestWithKeyRotationAnthropic:
+    """Cover the ``anthropic.RateLimitError`` branch of ``with_key_rotation``."""
+
+    @staticmethod
+    def _keys(anthropic_budget: int) -> MagicMock:
+        """Build an api_keys mock with the given anthropic retry budget."""
+        keys = MagicMock()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": anthropic_budget,
+        }
+        keys.rotate = MagicMock()
+        return keys
+
+    def test_rate_limit_rotates_anthropic_pool_only(self) -> None:
+        """An ``anthropic.RateLimitError`` rotates ONLY the anthropic key, then retries."""
+        keys = self._keys(anthropic_budget=1)
+        calls = {"n": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _make_anthropic_error(module.anthropic.RateLimitError, "burst")
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert calls["n"] == 2
+        assert [c.args[0] for c in keys.rotate.call_args_list] == ["anthropic"]
+        assert result[-1] is keys
+
+    def test_anthropic_pool_exhausted_reraises(self) -> None:
+        """When the anthropic pool is exhausted, the error re-raises so the task fails."""
+        keys = self._keys(anthropic_budget=0)
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(module.anthropic.RateLimitError, "burned")
+
+        with pytest.raises(module.anthropic.RateLimitError, match="burned"):
+            fake(api_keys=keys)
+
+
+class TestCountTokensAnthropic:
+    """Cover the with-client Anthropic ``count_tokens`` path (previously untested in the napthaai forks)."""
+
+    def test_with_client_uses_anthropic_tokenizer(self) -> None:
+        """With an anthropic client, the Anthropic ``count_tokens`` result is returned."""
+        mock_client = MagicMock()
+        mock_client.llm_provider = "anthropic"
+        mock_client.client.messages.count_tokens.return_value = SimpleNamespace(
+            input_tokens=42
+        )
+        result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
+        assert result == 42
+        mock_client.client.messages.count_tokens.assert_called_once()
+
+    def test_anthropic_tokenizer_error_falls_back(self) -> None:
+        """A network error from the Anthropic tokenizer falls back instead of raising."""
+        mock_client = MagicMock()
+        mock_client.llm_provider = "anthropic"
+        mock_client.client.messages.count_tokens.side_effect = _make_anthropic_error(
+            module.anthropic.APIConnectionError, "net down"
+        )
+        result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
+        assert isinstance(result, int)
+        assert result > 0

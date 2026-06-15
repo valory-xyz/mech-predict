@@ -11,7 +11,7 @@ Usage:
     # Step 1: enrich with stratified sample (5 per platform, ~1 min)
     python -m benchmark.prompt_replay enrich \
       --production-log "benchmark-results (7)/production_log.jsonl" \
-      --tool prediction-online --last-days 7 \
+      --tool prediction-online-v1 --last-days 7 \
       --sample-per-platform 5 --seed 42 \
       --output benchmark/results/prediction_online_enriched_5x5.jsonl
 
@@ -359,7 +359,7 @@ def _extract_factual_research_prompt_components(
 
 def extract_prompt_components(
     formatted_prompt: str,
-    tool_name: str = "prediction-online",
+    tool_name: str = "prediction-online-v1",
 ) -> Optional[dict[str, str]]:
     """Extract components from a formatted IPFS prompt, dispatching by tool.
 
@@ -410,7 +410,7 @@ def extract_prompt_components(
 def _fetch_and_extract_prompts(
     rows: list[dict[str, Any]],
     ipfs_hashes: dict[str, Optional[str]],
-    tool_name: str = "prediction-online",
+    tool_name: str = "prediction-online-v1",
 ) -> list[dict[str, Any]]:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -841,7 +841,7 @@ def call_llm(
 ) -> Optional[str]:
     """Send a prompt to the LLM and return the response content.
 
-    :param model: model identifier (e.g. gpt-4.1-2025-04-14, claude-4-sonnet-20250514).
+    :param model: model identifier (e.g. gpt-4.1-2025-04-14, claude-sonnet-4-6).
     :param system_prompt: system message content.
     :param user_prompt: user message content.
     :param api_key: API key for the provider.
@@ -1763,8 +1763,8 @@ def main() -> None:
     enrich_parser.add_argument(
         "--tool",
         type=str,
-        default="prediction-online",
-        help="Tool name to filter (default: prediction-online)",
+        default="prediction-online-v1",
+        help="Tool name to filter (default: prediction-online-v1)",
     )
     enrich_parser.add_argument(
         "--output",

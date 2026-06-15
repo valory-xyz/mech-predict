@@ -81,6 +81,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v2
+    "superforcaster-polymarket-v2": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v2"
+            ".superforcaster_polymarket_v2"
+        ),
+        family="superforcaster",
+    ),
     # valory/superforcaster_polymarket_v3 — sibling of v2; both depart from v1.
     # v3 swaps the default LLM model from gpt-4.1 to claude-fable-5 via the
     # dual-SDK convention; family is unchanged (the parent + sibling all share

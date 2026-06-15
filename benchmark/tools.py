@@ -51,21 +51,21 @@ class ToolSpec:
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
-    # valory/prediction_request
-    "prediction-online": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
+    # valory/prediction_request_v1
+    "prediction-online-v1": ToolSpec(
+        module="packages.valory.customs.prediction_request_v1.prediction_request_v1",
         family="default",
     ),
-    "prediction-offline": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
+    "prediction-offline-v1": ToolSpec(
+        module="packages.valory.customs.prediction_request_v1.prediction_request_v1",
         family="default",
     ),
-    "claude-prediction-online": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
+    "claude-prediction-online-v1": ToolSpec(
+        module="packages.valory.customs.prediction_request_v1.prediction_request_v1",
         family="default",
     ),
-    "claude-prediction-offline": ToolSpec(
-        module="packages.valory.customs.prediction_request.prediction_request",
+    "claude-prediction-offline-v1": ToolSpec(
+        module="packages.valory.customs.prediction_request_v1.prediction_request_v1",
         family="default",
     ),
     # valory/superforcaster
@@ -100,32 +100,32 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
-    # napthaai/prediction_request_reasoning
-    "prediction-request-reasoning": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
+    # napthaai/prediction_request_reasoning_v1
+    "prediction-request-reasoning-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",
         family="reasoning",
     ),
-    "prediction-request-reasoning-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_reasoning.prediction_request_reasoning",
+    "prediction-request-reasoning-claude-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",
         family="reasoning",
     ),
-    # napthaai/prediction_request_rag
-    "prediction-request-rag": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
+    # napthaai/prediction_request_rag_v1
+    "prediction-request-rag-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_v1",
         family="rag",
     ),
-    "prediction-request-rag-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_request_rag.prediction_request_rag",
+    "prediction-request-rag-claude-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_v1",
         family="rag",
     ),
-    # napthaai/prediction_url_cot — rag-shaped (PREDICTION_PROMPT + SYSTEM_PROMPT,
+    # napthaai/prediction_url_cot_v1 — rag-shaped (PREDICTION_PROMPT + SYSTEM_PROMPT,
     # <user_prompt> XML layout), NOT the default backtick format.
-    "prediction-url-cot": ToolSpec(
-        module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
+    "prediction-url-cot-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1",
         family="rag",
     ),
-    "prediction-url-cot-claude": ToolSpec(
-        module="packages.napthaai.customs.prediction_url_cot.prediction_url_cot",
+    "prediction-url-cot-claude-v1": ToolSpec(
+        module="packages.napthaai.customs.prediction_url_cot_v1.prediction_url_cot_v1",
         family="rag",
     ),
     # valory/factual_research

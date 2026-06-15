@@ -24,13 +24,13 @@ import os
 
 from dotenv import load_dotenv  # type: ignore
 
-from packages.valory.customs.prediction_request.prediction_request import run
+from packages.valory.customs.prediction_request_v1.prediction_request_v1 import run
 from packages.valory.skills.task_execution.utils.apis import KeyChain
 
 load_dotenv(override=True)
 
 
-TOOL = "prediction-online"
+TOOL = "prediction-online-v1"
 MODEL = "gpt-4.1-2025-04-14"
 PROMPT = """
 With the given question

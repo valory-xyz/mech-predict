@@ -65,14 +65,18 @@ def _module_path_from_config(component_yaml: str) -> str:
 
 
 # Component configs (component.yaml paths)
-PREDICTION_REQUEST_CONFIG = _component_config("valory/customs/prediction_request")
-PREDICTION_REQUEST_RAG_CONFIG = _component_config(
-    "napthaai/customs/prediction_request_rag"
+# The prediction tools below were forked to _v1 in the anthropic SDK bump
+# (originals deleted); these point at the live _v1 packages.
+PREDICTION_REQUEST_V1_CONFIG = _component_config("valory/customs/prediction_request_v1")
+PREDICTION_REQUEST_RAG_V1_CONFIG = _component_config(
+    "napthaai/customs/prediction_request_rag_v1"
 )
-PREDICTION_REQUEST_REASONING_CONFIG = _component_config(
-    "napthaai/customs/prediction_request_reasoning"
+PREDICTION_REQUEST_REASONING_V1_CONFIG = _component_config(
+    "napthaai/customs/prediction_request_reasoning_v1"
 )
-PREDICTION_URL_COT_CONFIG = _component_config("napthaai/customs/prediction_url_cot")
+PREDICTION_URL_COT_V1_CONFIG = _component_config(
+    "napthaai/customs/prediction_url_cot_v1"
+)
 DALLE_REQUEST_CONFIG = _component_config("victorpolisetty/customs/dalle_request")
 SUPERFORCASTER_CONFIG = _component_config("valory/customs/superforcaster")
 SUPERFORCASTER_POLYMARKET_V1_CONFIG = _component_config(
@@ -137,30 +141,30 @@ class BaseIsolatedToolTest:
 
 
 class TestPredictionOnline(BaseIsolatedToolTest):
-    """Test Prediction Online."""
+    """Test Prediction Online (v1)."""
 
-    component_yaml = PREDICTION_REQUEST_CONFIG
+    component_yaml = PREDICTION_REQUEST_V1_CONFIG
     prompts = [PREDICTION_PROMPT]
 
 
 class TestPredictionRAG(BaseIsolatedToolTest):
-    """Test Prediction RAG."""
+    """Test Prediction RAG (v1)."""
 
-    component_yaml = PREDICTION_REQUEST_RAG_CONFIG
+    component_yaml = PREDICTION_REQUEST_RAG_V1_CONFIG
     prompts = [PREDICTION_RAG_PROMPT]
 
 
 class TestPredictionReasoning(BaseIsolatedToolTest):
-    """Test Prediction Reasoning."""
+    """Test Prediction Reasoning (v1)."""
 
-    component_yaml = PREDICTION_REQUEST_REASONING_CONFIG
+    component_yaml = PREDICTION_REQUEST_REASONING_V1_CONFIG
     prompts = [PREDICTION_PROMPT]
 
 
 class TestPredictionCOT(BaseIsolatedToolTest):
-    """Test Prediction COT."""
+    """Test Prediction COT (v1)."""
 
-    component_yaml = PREDICTION_URL_COT_CONFIG
+    component_yaml = PREDICTION_URL_COT_V1_CONFIG
     prompts = [PREDICTION_PROMPT]
 
 

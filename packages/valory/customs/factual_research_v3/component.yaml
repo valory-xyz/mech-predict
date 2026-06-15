@@ -14,7 +14,7 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibrhuo2o5tu43vxc7a7uvniee52emt2erbmc32r4krcftc2gm3h2q
-  factual_research_v3.py: bafybeibrqq3lgl3qycepmcueyjlty5qqmzi4oz3lvdivowqnep6i6f7aou
+  factual_research_v3.py: bafybeibk5zx7b7vhzbra2dhpghmqxajmn2hvrigdhhrlhs4ewjx5o6uaua
   tests/__init__.py: bafybeibu5izhcixkot5uv2k6uwj736qcpvdbepyk2ardyrhhc6vmhvgwnu
   tests/test_factual_research.py: bafybeifrjbeqdte3z2woenojuuzjcbji4khiktasuotjqs2uq3rll7r4lm
 fingerprint_ignore_patterns: []
@@ -26,7 +26,7 @@ dependencies:
   openai:
     version: ==1.93.0
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1
   tiktoken:
     version: ==0.12.0
   pydantic:

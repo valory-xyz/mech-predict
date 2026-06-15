@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2024 Valory AG
+#   Copyright 2024-2026 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 """This module implements a tool prediction url cot."""
 
+import copy
 import functools
 import json
 import re
@@ -101,6 +102,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
+                print(f"Unexpected error: {type(e).__name__}: {e}")
                 return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
@@ -194,43 +196,32 @@ class LLMClient:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         stop: Any = None,
-        max_tokens: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[LLMResponse]:
         """Generate a completion from the specified LLM provider using the given model and messages."""
         if self.llm_provider == "anthropic":
             # anthropic can't take system prompt in messages
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "system":
-                    system_prompt = messages[i]["content"]
-                    del messages[i]
+            # default value if not found
+            system_prompt = SYSTEM_PROMPT
+            messages_copy = copy.deepcopy(messages)
+            for i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[i]["role"] == "system":
+                    system_prompt = messages_copy[i]["content"]
+                    del messages_copy[i]
 
-            response_provider = self.client.messages.create(  # pylint: disable=no-member
-                model=model,
-                messages=messages,
-                system=system_prompt,  # pylint: disable=possibly-used-before-assignment
-                temperature=temperature,
-                max_tokens=max_tokens,
+            response_provider = (
+                self.client.messages.create(  # pylint: disable=no-member
+                    model=model,
+                    messages=messages_copy,
+                    system=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
             )
             response = LLMResponse()
             response.content = response_provider.content[0].text
             response.usage.prompt_tokens = response_provider.usage.input_tokens
             response.usage.completion_tokens = response_provider.usage.output_tokens
-            return response
-
-        if self.llm_provider == "openai":
-            response_provider = self.client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                n=1,
-                timeout=150,
-                stop=None,
-            )
-            response = LLMResponse()
-            response.content = response_provider.choices[0].message.content
-            response.usage.prompt_tokens = response_provider.usage.prompt_tokens
-            response.usage.completion_tokens = response_provider.usage.completion_tokens
             return response
 
         if self.llm_provider in ["openai", "openrouter"]:
@@ -263,16 +254,16 @@ class LLMClient:
 
 
 LLM_SETTINGS = {
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-url-cot",
+    "prediction-url-cot-v1",
     # LEGACY
-    "prediction-url-cot-claude",
+    "prediction-url-cot-claude-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 NUM_QUERIES = 5
@@ -376,7 +367,7 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
             print(
                 "Anthropic tokenizer method not available, using fallback encoding for Claude models"
             )
-        except (ConnectionError, TimeoutError) as e:
+        except (anthropic.APIConnectionError, ConnectionError, TimeoutError) as e:
             # Handle network-related issues
             print(f"Network error when counting tokens: {e}, using fallback encoding")
         except Exception as e:
@@ -404,12 +395,8 @@ def multi_queries(
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
-    temperature: Optional[float] = LLM_SETTINGS["claude-4-sonnet-20250514"][
-        "temperature"
-    ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-4-sonnet-20250514"][
-        "default_max_tokens"
-    ],
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
 ) -> Tuple[List[str], Optional[Callable]]:
     """Generate multiple queries for fetching information from the web."""
     if not client:
@@ -781,12 +768,8 @@ def fetch_additional_information(
     source_content_mode: str = "cleaned",
     num_urls: Optional[int] = NUM_URLS_PER_QUERY,
     num_queries: int = NUM_QUERIES,
-    temperature: Optional[float] = LLM_SETTINGS["claude-4-sonnet-20250514"][
-        "temperature"
-    ],
-    max_tokens: Optional[int] = LLM_SETTINGS["claude-4-sonnet-20250514"][
-        "default_max_tokens"
-    ],
+    temperature: Optional[float] = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
+    max_tokens: Optional[int] = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
     n_docs: int = N_DOCS,
 ) -> Tuple[str, Dict[str, Any], Optional[Callable]]:
     """Fetch additional information from the web."""
@@ -917,7 +900,7 @@ def run(  # pylint: disable=too-many-statements
     if model is None:
         raise ValueError("Model must be specified in kwargs")
     if "claude" in tool:  # maintain backwards compatibility
-        model = "claude-4-sonnet-20250514"
+        model = "claude-sonnet-4-6"
     print(f"MODEL for prediction url cot: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider) as (
         llm_client,

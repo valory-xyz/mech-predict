@@ -1,4 +1,4 @@
-name: prediction_request_reasoning
+name: prediction_request_reasoning_v1
 author: napthaai
 version: 0.1.0
 type: custom
@@ -7,12 +7,12 @@ description: A tool for making binary predictions on markets using an extra reas
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeib36ew6vbztldut5xayk5553rylrq7yv4cpqyhwc5ktvd4cx67vwu
-  prediction_request_reasoning.py: bafybeib3422icio62o6dbun2qfljdkdsruurtk3yt7rp4w6e24tmae2cmi
+  __init__.py: bafybeibcbvmr7v5n2vintaunxjix2jxopbvjij5hytewh3xtlca4mfwhky
+  prediction_request_reasoning_v1.py: bafybeifk7lx2iy2n54dh4zairovbfjhbz4i5bmdwnfsnjm7tuu7uanq43i
   tests/__init__.py: bafybeieu3toasuyaehkqounrtylk5bjer7qgvnt6ccjcsi6jlfig7wfrka
-  tests/test_prediction_request_reasoning.py: bafybeiclefskba2fa4rt4tohvxiepm3uevqul5zwqo6zk6v3e5mpbrysaq
+  tests/test_prediction_request_reasoning_v1.py: bafybeifqnlbc5iutq2sbvhvwoilrbzypmg2bt32raytxcnff46gaqcjcqu
 fingerprint_ignore_patterns: []
-entry_point: prediction_request_reasoning.py
+entry_point: prediction_request_reasoning_v1.py
 callable: run
 params:
   default_model: gpt-4.1-2025-04-14
@@ -46,4 +46,4 @@ dependencies:
   docstring-parser:
     version: ==0.17.0
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1

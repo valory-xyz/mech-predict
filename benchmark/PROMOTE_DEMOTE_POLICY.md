@@ -1,16 +1,16 @@
 # Promote / Demote policy for prediction tools
 
-Status: in progress on PR #341 — the first slice ships here; the remaining items continue on subsequent commits to this PR. The **Checkpoints** section is temporary and gets deleted once the policy is fully implemented; the rest of the document stays as the reference design.
-Touches: `benchmark/analyze.py`, `tool_lineage.json`, tournament config.
+Status: in progress on PR #341 — the first slice ships here; the rest continues on later commits. The **Checkpoints** section is temporary (delete when the policy is complete); the rest stays as the reference design.
+Touches: `benchmark/analyze.py`, `tool_lineage.json`, replay + tournament config.
 
 ## Goal
 
-The daily benchmark report should tell a human, **per platform**, two things:
+Per platform, the daily report tells a human two things, **advisory** (a human still opens the deploy PR):
 
-- **Promote** — a candidate tool has proven good enough to deploy.
+- **Promote** — a candidate is good enough to deploy.
 - **Demote** — a deployed tool should be retired.
 
-Both are **advisory**: the report flags them, a human still opens the deploy PR. A tool is judged only **against other versions of itself** (its _family_, tracked in `tool_lineage.json`), never against an absolute "good enough" bar — with one exception (a lone tool below no-skill; see Demote). That keeps the rule safe: the best version of a family can never be demoted, so it can't collapse into "retire everything."
+A tool is judged on **edge** (does it beat the market?), not raw direction (see Metric), and only **against other versions of itself** (its family, `tool_lineage.json`).
 
 ## Terms
 
@@ -18,128 +18,123 @@ Both are **advisory**: the report flags them, a human still opens the deploy PR.
 |---|---|
 | **Brier** | squared error of the predicted probability vs the 0/1 outcome; lower = better |
 | **Log-loss** | like Brier, but punishes a confident-**and**-wrong prediction far harder |
-| **Calibration** | do the stated probabilities match reality? (of all "70%" calls, ~70% happen). Overconfident = poorly calibrated |
-| **Edge / skill-vs-market** | how much the tool beats the **market-implied** probability — the part you can actually bet on |
-| **No-skill baseline** | the score a trivial predictor gets (e.g. always the base rate, or the market price); below it = worse than not trying |
-| **Accuracy / win-rate** | fraction of calls that are directionally right; ignores confidence |
-| **Kelly** | bet-sizing rule — stake grows with your edge to maximize long-run (log-)wealth; needs honest probabilities |
-| **Family / lineage** | a base tool and its versioned descendants (`tool_lineage.json`), e.g. `factual_research → -v1 → -v2` |
-| **Incumbent** | the best-scoring **deployed** version of a family — what a candidate must beat |
-| **Paired** | candidate and incumbent scored on the **same** markets, so a gap means skill, not luck |
-| **Drift** | a deployed tool getting worse over time vs its own past baseline |
+| **Calibration** | do the stated probabilities match reality? (of all "70%" calls, ~70% happen); overconfident = poorly calibrated |
+| **Edge / skill-vs-market** | how much the tool beats the market-implied probability — the part you can actually bet on |
+| **Sharpness** | how decisive a tool is — how far from 0.5 its probabilities dare to go. Collapsing toward 0.5 = hedging (better Brier, but no edge) |
+| **No-skill** | the score of a trivial predictor (the market price / base rate); below it = worse than not betting |
+| **Accuracy / win-rate** | fraction of directionally-right calls; ignores confidence |
+| **Family / lineage** | a base tool and its versioned descendants (`tool_lineage.json`) |
+| **Replayable** | the change only affects how a tool **reasons over given evidence** (prompt, parsing, model swap) → it can be re-scored on **recorded** requests + their saved evidence. **Not** replayable: a brand-new tool, or a change to how it **gathers** evidence (search / retrieval) |
+| **Relevant set** | the deployed tools of a family worth keeping — those not significantly worse than the best, and above no-skill |
 
 ## Metric — measure edge, not direction
 
-The real goal is **trader profit**. The trader sizes bets with **Kelly off the tool's probability**, so what pays is **calibration and edge**, not raw direction — a tool can win 70% of its calls yet lose money if it's overconfident (Kelly over-bets the ones it's confidently wrong about).
+The goal is **trader profit**. The trader Kelly-sizes bets off the tool's probability, so **calibration / edge** is what pays, not raw direction — a tool can win 70% of its calls yet lose money if it's overconfident (Kelly over-bets the ones it's confidently wrong about).
 
-| Measure | Captures | Use here |
-|---|---|---|
-| **Accuracy / win-rate** | direction only — ignores confidence, so ignores bet sizing | ❌ it's the **trader's** routing signal; read only as a demote cross-check |
-| **Realized PnL** | the true objective | ❌ too noisy / confounded to grade a tool by |
-| **Brier vs the market** (edge) | calibration **and** beating the price you'd bet against | 🟢 **primary gate** — edge is what pays |
-| **Log-loss** | calibration, harshest on confident-wrong | 🟢 **guard** — closest to the Kelly (log-wealth) objective |
+| Measure | Use here |
+|---|---|
+| **Accuracy / win-rate** | ❌ the trader's routing signal; read only as a demote cross-check |
+| **Realized PnL** | ❌ too noisy / confounded to grade a tool by |
+| **Brier vs the market** (edge) | 🟢 **primary gate** — edge is what pays |
+| **Log-loss** | 🟢 **guard** against the confident-wrong disaster |
 
-**One line:** measure calibration / edge (Brier-vs-market + log-loss guard), not direction — Kelly bets the probability, not the call.
+### Comparing two tools — the algorithm
+
+Both tools are scored on the **same dataset** — a collection of predictions (replay reuses the incumbent's recorded deliveries; the tournament runs both on the same market list). **Treat the dataset as a whole — don't group by market** (a market may appear once, many times, or not at all). Over the whole set, compute for each tool:
+
+- **edge** — its Brier skill vs the market price (the gate — what you bet on);
+- **log-loss** — the confident-wrong guard;
+- **sharpness** — how far from 0.5 its probabilities dare to go (the anti-hedging guard).
+
+**B beats A** only when **all** hold:
+
+1. **Edge margin** — B's edge beats A's by more than the noise floor.
+2. **Significant** — the gap holds (confidence interval excludes 0, or holds on two time windows) — not a one-off.
+3. **Log-loss guard** — B's log-loss is not worse.
+4. **Sharpness guard** — B didn't just **hedge toward 0.5** (sharpness not materially below A's) — this is what catches a "better Brier" that's really timidity, not skill.
+5. **Enough data** — `n` above the floor; else the verdict is "not enough data yet" (show `n` + the smallest gap the data could prove).
+
+Else → **A wins** or **tie**. Comparing against *no tool* (a new family, or the demote floor) → A's edge is 0, so B must beat the **market**.
+
+Why this shape: the **same dataset** removes the difficulty confound; **edge** (not raw Brier) is what pays; **log-loss** catches the confident-wrong disaster; **sharpness** catches the hollow "better Brier by hedging" case; **significance** stops us promoting noise.
 
 ## Lifecycle
 
-| Mode | Scores | Decides |
+| Mode | Scores | Role |
 |---|---|---|
-| **Replay** | code re-run on recorded prompts vs baseline | PR merge gate |
-| **Tournament** | candidates on live open markets, scored on resolution | **promote** |
-| **Production** | deployed tools' real on-chain answers vs outcomes | **demote** |
+| **Replay** | candidate re-run on **recorded** requests + saved evidence | PR merge gate **and** the promote test for **replayable** changes (free + paired) |
+| **Tournament** | tools run **live** on a shared set of open markets | the promote test for **non-replayable** changes / new tools |
+| **Production** | deployed tools' real answers vs outcomes | demote / roster |
 
 ```mermaid
 flowchart LR
-    code["code change"] -->|"replay<br/>(merge gate)"| tour["tournament"]
-    tour -->|"PROMOTE<br/>beats incumbent on the same markets"| prod["production"]
-    prod -->|"DEMOTE<br/>superseded · dominated · gone bad"| ret["retired"]
+    chg["new tool / change"] --> Q{replayable?}
+    Q -->|yes| rep["replay<br/>(free, paired, in the PR)"]
+    Q -->|no| tour["tournament<br/>(live)"]
+    rep --> prom["PROMOTE → production"]
+    tour --> prom
+    prom -->|"dominated · below no-skill · drift"| dem["DEMOTE → retired"]
 ```
 
-Promote reads **tournament** data (a candidate has no production history yet); demote reads **production** data.
+## Promote
 
-## The policy
+Route by **replayable?**:
 
-_Target design. Where the current PR already implements a piece, the **Checkpoints** section says so._
+- **Replayable → replay (default).** Re-run the candidate on the incumbent's **recorded requests + saved evidence**. Free, **paired by construction**, runs in the PR/CI — most version bumps land here, **no tournament needed**. Decide with the two-tool algorithm (candidate vs incumbent).
+- **Not replayable → tournament.** A brand-new tool, or a change to how it gathers evidence, can't be faithfully replayed (replay feeds the old evidence). Run it **live in the tournament** on a shared market set, then the same algorithm.
 
-### Promote (tournament → production)
-
-A candidate is promoted when, within its family and on one platform, **all** hold:
-
-1. **Paired** — candidate and the deployed tool are scored on the **same** markets, so a gap means skill, not which markets each happened to face (how we get the same markets is below).
-2. **Real margin** — Brier better by a threshold **above the noise floor**, and the win **holds on two separate time windows** (cheap guard against a one-off fluke).
-3. **Log-loss agrees** — not worse.
-4. **Enough data** — sample size shown on every verdict; a non-fire reads as "not enough data yet," not "no improvement."
+**New family (no incumbent).** A brand-new tool is non-replayable and has nothing in its family to beat → tournament. The bar becomes **edge over the market** (the algorithm vs the market baseline), significant + enough data, **plus a human sign-off** — a new approach is a bigger call than a version bump.
 
 Incumbent = the **best-scoring deployed version** of the family.
 
-**Making the comparison fair.** Production can't give us this comparison: the candidate isn't deployed, so it has **no production data** to pair against. And production wouldn't be a fair test anyway — each trader picks its markets and its tool **randomly and independently**, so which tool answered which market is just noise, not a matched comparison. So we run both tools on the same markets ourselves, two ways:
+## Demote — keep the relevant set
 
-- **In the tournament** — also run the deployed tool on the tournament's markets, so it answers the **same** ones as the candidate, live. Draw those markets from the pool the traders actually bet on, so the result carries over to production. (Costs extra live runs of the deployed tool.)
-- **By replay** — re-run the candidate on the deployed tool's **recorded past requests** (same markets, same saved evidence). Cheaper and exact, but it can't see a change to how a tool **gathers evidence** (the candidate reuses the old evidence).
+Keep the **relevant set** of a family, **not a single champion**: the traders' explore/exploit converges to the best deployed tools on its own, so a small competitive cluster is healthy and lets them adapt. Prune only what isn't relevant:
 
-Rule of thumb: a **prompt / reasoning** change → replay is enough; an **evidence / search** change → use the tournament.
-
-### Demote (production → retire)
-
-Any one of three paths fires a demote:
-
-| Path | Fires when |
+| Path | Demote when |
 |---|---|
-| **Superseded** | a candidate just got promoted over this version |
-| **Sibling-dominated** | another deployed version of the family scores meaningfully better |
-| **Lone tool gone bad** | the only version of its family **drifts** below its own past baseline, or falls **below no-skill** (worse than guessing the base rate) |
+| **Dominated** | a deployed sibling beats it by the two-tool margin (significantly worse than the best) |
+| **Below no-skill** | negative edge vs the market — worthless to bet |
+| **Drift** | a deployed tool worse than its own past baseline, sustained |
 
-A lone tool that's only _mildly_ bad stays deployed and gets an **improvement** issue instead — retiring your only tool leaves a gap. But a lone tool **below no-skill** is actively harmful, so it's surfaced for retirement, always with a **replacement-status warning**:
+Keep everything **within noise of the best** sibling — it's relevant; let the traders sort it out. The best of a family is **never** demoted (so it can't collapse to "retire everything").
+
+**Lone tool gone bad.** A family's only tool has no sibling, so judge it on **drift** or **below no-skill**. Every lone-tool demote carries a **replacement warning** (checks production **and** tournament):
 
 | Replacement | Warning |
 |---|---|
-| none deployed **and** none in tournament | ⚠️ no replacement anywhere — retiring leaves this market type unserved |
-| none deployed, **candidate in tournament** | ⚠️ no deployed replacement, but `<candidate>` is under evaluation — consider fast-tracking it |
+| none deployed, none in tournament | ⚠️ no replacement anywhere — retiring leaves this market type unserved |
+| none deployed, candidate in tournament | ⚠️ no deployed replacement, but `<candidate>` is under evaluation — consider fast-tracking it |
 
-```text
-🔴 DEMOTE  factual_research v0.17.0 — Brier 0.30 (n=150), worse than no-skill
-   (skill -0.08), up from its own 0.21 baseline.
-   ⚠️ no replacement deployed or in tournament — retiring leaves this unserved.
-```
+## Reality check
 
-### Handling thin data (cuts across both)
-
-We rarely have enough resolved markets to prove a small win:
-
-- A `0.02` Brier win needs **hundreds** of paired markets; we usually have tens.
-- So promotions are **rare by design**, and the bar errs toward "wait for more data" — a false promote is the dangerous failure.
-- Every verdict shows its `n` and the smallest win the data could prove, so "no signal yet" is distinguishable from "genuinely no better."
-- Heavier statistics (resampling confidence intervals, sequential tests) are **deferred** until per-tool volume justifies them.
-
-### Per-platform, always
-
-Omen and Polymarket are scored **separately** — different baseline difficulty, so they're never averaged together.
+- Proving a small edge needs **hundreds** of paired markets; we usually get tens → promotions are **rare by design**.
+- Bias toward "wait for more data" — a false promote is the dangerous failure.
+- Label non-fires **"not enough data yet,"** not "no improvement."
 
 ## Known dependencies
 
-- **Lineage ledger** — `factual_research-v3` is missing from `tool_lineage.json` → resolves as a singleton; add it or it can't be compared to its family.
-- **Outcome join** — production Brier needs each live answer matched to its market's resolved outcome (the subgraph has no outcome field → title / market-id match). **Drop unmatched rows, don't guess** — a bad join is a false demote.
-- **Cold start** — a brand-new tool has no baseline / no paired history → not eligible until it accrues a minimum `n`.
+- **Replayability flag** — we must know, per change, whether it's replayable (reasoning-only) or not (new tool / evidence change) to route promote → replay vs tournament.
+- **Lineage ledger** — `factual_research-v3` is missing from `tool_lineage.json` → resolves as a singleton; add it.
+- **Outcome join** — replay/production Brier needs each answer matched to its resolved outcome (the subgraph has no outcome field → title / market-id match). **Drop unmatched rows, don't guess.**
 
 ## Checkpoints — PR status (temporary; delete when the policy is complete)
 
 ### Done on this PR (#341)
 
-- [x] Lineage scoping — family resolution via `tool_lineage.json`, best deployed member = incumbent
-- [x] Per-platform, advisory `## Promotion / Demotion` section in the daily report + Slack
-- [x] Promote: tournament candidate beats deployed incumbent by Brier `≥ 0.04` (`PROMOTE_MIN_DELTA`), log-loss not worse, both `valid_n ≥ 30` (`PROMOTE_MIN_N`)
-- [x] Demote: superseded + sibling-domination paths
+- [x] Lineage scoping; per-platform advisory `## Promotion / Demotion` section in report + Slack
+- [x] Promote rule (Brier `≥ 0.04` + log-loss + `valid_n ≥ 30`); demote (superseded + sibling-domination)
 - [x] Tests + review fixes (per-incumbent dedup, deterministic ordering, degraded-load logging)
 
-### Pending (subsequent commits on this PR)
+### Pending (subsequent commits)
 
-- [ ] **Pairing** — run the deployed incumbent in the tournament so promote compares on the same markets
-- [ ] **Two-window agreement** + show `n` and smallest-provable-win on every verdict
-- [ ] **Lone-tool demote** — drift + below-no-skill triggers, with the replacement-status warning
-- [ ] **Lineage ledger** — add `factual_research-v3`
-- [ ] **Outcome join** for production-side Brier (drop unmatched rows)
+- [ ] **Edge-vs-market** as the metric (replace the raw Brier delta with skill-vs-market)
+- [ ] **Two-tool algorithm** (whole-set edge + significance + log-loss & sharpness guards + `n` labelling)
+- [ ] **Replay-as-promote** for replayable changes; **tournament** route for non-replayable ones
+- [ ] **New-family promote** (edge-vs-market + human sign-off)
+- [ ] **Relevant-set demote** (prune dominated + below-no-skill; keep the cluster) + lone-tool drift / replacement warning
+- [ ] Lineage-ledger fix; outcome join
 
-### Deferred (not this PR)
+### Deferred
 
 - [ ] Resampling confidence intervals / sequential tests — revisit when per-tool volume grows

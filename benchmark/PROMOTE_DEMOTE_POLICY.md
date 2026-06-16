@@ -43,6 +43,8 @@ The whole point is for the trading bot to make money. The bot bets bigger when a
 
 **One rule.** Form the **paired** per-prediction differences `dᵢ = BS_baselineᵢ − BS_candidateᵢ` (same market + outcome, so difficulty cancels — when the baseline is the market, this is the **edge** from the table above). **Promote** when a one-sided paired test clears the margin — **H₀** `mean(d) ≤ δ` vs **H₁** `mean(d) > δ` — i.e. the lower end of the **95% bootstrap CI** on `mean(d)` exceeds **δ = 0.04** Brier, with **`n ≥ 30`**, and the guards hold (**log-loss not worse**, **sharpness not collapsed**). One-sided + conservative by design: a false promote (Type I) loses money; a missed upgrade (Type II) just keeps the incumbent. Below `n`, or a CI that can't clear `δ` → **"not enough data yet"** (report the minimum detectable effect `≈ (z_α + z_β)·sd(d)/√n`, never "no improvement").
 
+**How much data is enough?** `n ≥ 30` is a **floor**, not a green light — at `n = 30` the bootstrap CI is far too wide to clear `δ = 0.04`. Solving the gate for `n` (`n ≈ ((z_α + z_β)·sd(d) / δ)²`, with `sd(d) ≈ 0.2`, one-sided, 80% power) gives roughly **~125 paired markets for `δ = 0.05`, ~200 for `δ = 0.04`, ~780 for `δ = 0.02`**. **Replay** reaches these immediately (the recorded set is large, so `n` rarely binds); **tournament** accrues ~30 resolved markets/day, so a `δ = 0.04` call needs **~1 week+** (markets must resolve first). When `n` falls short, report the minimum detectable effect rather than "no improvement".
+
 The **only** thing that changes between cases is the baseline:
 
 | Case | Baseline `d` compares against | Extra |
@@ -104,7 +106,7 @@ Thresholds as in *The gate* (`δ = 0.04`, `n ≥ 30`); **Rec = promote** only wh
 
 ## Demote — keep the relevant set (cap `N = 3` per family)
 
-Keep a small **relevant set** per family — the best tool **plus** any sibling still competitive — **not** a single champion (traders' explore/exploit converges on the best, so a competitive cluster helps them adapt) and **not** an unbounded pile. A deployed tool **stays** only if **all** keep-conditions hold; else demote. The family's best is **never** demoted.
+Keep a small **relevant set** per family — the best tool **plus** any sibling still competitive — **not** a single champion (traders' explore/exploit converges on the best, so a competitive cluster helps them adapt) and **not** an unbounded pile. A deployed tool **stays** only if **all** keep-conditions hold; else demote. The family's best is **never** demoted by the *relative* rules (sibling-domination / over-cap) — but it is **still demoted on absolute failure** (sustained drift, or persistently below the no-skill bar), via the lone-tool path below, with a replacement warning. So a family that is far worse than the rest on absolute terms is not shielded.
 
 | Keep when | Demote when |
 |---|---|
@@ -119,7 +121,7 @@ So a family keeps **1** tool when no sibling is competitive, up to **`N`** when 
 
 | Replacement | Warning |
 |---|---|
-| none anywhere | ⚠️ retiring leaves this market type unserved |
+| none anywhere | ⚠️ retiring leaves **no deployed tool for this family** |
 | candidate in tournament | ⚠️ no deployed replacement, but `<candidate>` is under evaluation — consider fast-tracking |
 
 ### Production roster (in the daily report)

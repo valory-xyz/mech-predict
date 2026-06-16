@@ -52,6 +52,8 @@ The **only** thing that changes between cases is the baseline:
 | **Q1 — has a sibling** (same markets, via replay or tournament) | the **best sibling**'s Brier (the incumbent) — `BS_sibling − BS_candidate` (market term cancels) | — |
 | **Q2 — no sibling** (new tool / new family) | the **market**'s Brier — `BS_market − BS_candidate` | **+ human sign-off** |
 
+**New families (Q2) get a relaxed bar.** A brand-new tool needn't *beat* the market — it's promotable if it lands **within `X` of the market** (no worse than `X` below: `BS_market − BS_candidate > −X`). That keeps production **easy to enter** on efficient platforms like Polymarket, where nothing beats the market. (Q1 is unchanged — a child must still beat its best sibling by `δ`.)
+
 Treat the dataset as a **whole** — don't group by market.
 
 ## Lifecycle
@@ -89,7 +91,7 @@ A PR's tool is judged when it opens; the route depends on whether it can be **re
 
 1. **Agent / human** — opens a PR with the new tool. No parent in `tool_lineage.json` → replay can't run → flagged **"new family → tournament"** (no `/benchmark`).
 2. **Tournament** — runs it live on shared markets vs the **market** baseline (Q2).
-3. **Human** — signs off on the tournament gate (edge over market, significant, `n`) → **adds** to the deployed set.
+3. **Human** — signs off on the relaxed Q2 gate (**within `X` of the market** — needn't beat it; significant, `n`) → **adds** to the deployed set.
 
 The benchmark's promote line is a **hint** — it sees only candidate vs the baseline it ran, not full deployment state; the **human** makes the deploy call.
 

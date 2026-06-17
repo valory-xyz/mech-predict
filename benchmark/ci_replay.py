@@ -131,6 +131,166 @@ def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return overall
 
 
+def compute_market_diagnostics(
+    baseline_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Market-anchor diagnostics: blend benchmark and surrendered-edge counts.
+
+    Headline Brier hides two things a market-anchored candidate can do. A
+    candidate that merely shrinks the baseline
+    toward a well-calibrated market price almost always improves average Brier,
+    so the question is whether it beats the mechanical 50/50 blend of baseline
+    and market — and whether the Brier gain is bought by giving up the rows
+    where the baseline *disagreed* with the market and was *right* (the edge a
+    trader actually monetises).
+
+    Rows are paired by position: ``prompt_replay.replay`` writes one baseline
+    and one candidate row per sampled delivery, in lockstep, so index *i* is the
+    same market on both sides. A row contributes only when it carries a
+    ``market_prob`` and the relevant ``p_yes`` values — runs without recorded
+    market prices (e.g. Omen) yield None and the report omits the block.
+
+    :param baseline_rows: baseline.jsonl rows (production v1 predictions).
+    :param candidate_rows: candidate.jsonl rows (PR predictions).
+    :return: diagnostics dict, or None when no row carries a market price.
+    """
+    n = min(len(baseline_rows), len(candidate_rows))
+
+    # Blend arm: baseline, candidate, and 0.5*baseline+0.5*market Briers over
+    # the rows where all three are defined (candidate must have parsed).
+    blend_base_sum = blend_cand_sum = blend_sum = 0.0
+    n_blend = 0
+
+    # Edge arm: rows where the baseline's directional call disagreed with the
+    # market's and the baseline was right.
+    n_disagree_right = 0  # size of the edge subset (baseline always valid)
+    n_edge_scored = 0  # subset rows where the candidate also parsed
+    n_edge_lost = 0  # ...of those, candidate no longer directionally correct
+    edge_base_sum = edge_cand_sum = 0.0
+
+    saw_market = False
+    for i in range(n):
+        b, c = baseline_rows[i], candidate_rows[i]
+        market = b.get("market_prob")
+        if market is None:
+            market = c.get("market_prob")
+        if market is None:
+            continue
+        saw_market = True
+
+        base_p = b.get("p_yes")
+        outcome = b.get("final_outcome")
+        if base_p is None or outcome is None:
+            continue
+        outcome_val = 1.0 if outcome else 0.0
+        cand_p = c.get("p_yes")
+
+        if cand_p is not None:
+            blend_p = 0.5 * base_p + 0.5 * market
+            blend_base_sum += (base_p - outcome_val) ** 2
+            blend_cand_sum += (cand_p - outcome_val) ** 2
+            blend_sum += (blend_p - outcome_val) ** 2
+            n_blend += 1
+
+        # Directional disagreement; ties at exactly 0.5 carry no direction.
+        if base_p == 0.5 or market == 0.5:
+            continue
+        base_yes = base_p > 0.5
+        market_yes = market > 0.5
+        if base_yes != market_yes and base_yes == bool(outcome):
+            n_disagree_right += 1
+            edge_base_sum += (base_p - outcome_val) ** 2
+            if cand_p is not None:
+                n_edge_scored += 1
+                edge_cand_sum += (cand_p - outcome_val) ** 2
+                # "Gave up the edge" = candidate is no longer on the winning
+                # side (flipped to the market's losing call, or went neutral).
+                if not (cand_p != 0.5 and (cand_p > 0.5) == bool(outcome)):
+                    n_edge_lost += 1
+
+    if not saw_market:
+        return None
+
+    return {
+        "blend": {
+            "n": n_blend,
+            "baseline_brier": (blend_base_sum / n_blend) if n_blend else None,
+            "blend_brier": (blend_sum / n_blend) if n_blend else None,
+            "candidate_brier": (blend_cand_sum / n_blend) if n_blend else None,
+        },
+        "edge": {
+            "n_disagree_right": n_disagree_right,
+            "n_scored": n_edge_scored,
+            "n_lost": n_edge_lost,
+            "lost_rate": (n_edge_lost / n_edge_scored) if n_edge_scored else None,
+            "baseline_brier": (
+                (edge_base_sum / n_disagree_right) if n_disagree_right else None
+            ),
+            "candidate_brier": (
+                (edge_cand_sum / n_edge_scored) if n_edge_scored else None
+            ),
+        },
+    }
+
+
+def _format_market_diagnostics_block(diag: dict[str, Any]) -> list[str]:
+    """Render the market-anchor diagnostics as markdown lines.
+
+    :param diag: dict from :func:`compute_market_diagnostics`.
+    :return: markdown lines (empty when there is nothing to report).
+    """
+    blend = diag["blend"]
+    edge = diag["edge"]
+    lines: list[str] = ["**Market-anchor diagnostics**", ""]
+
+    # Diagnostic 1 — beat-vs-blend.
+    if blend["n"]:
+        b = blend["baseline_brier"]
+        mix = blend["blend_brier"]
+        cand = blend["candidate_brier"]
+        # Beats the blend only if strictly lower Brier than the mechanical mix.
+        verdict = (
+            "✅ candidate beats the blend"
+            if cand < mix
+            else "⚠️ candidate does **not** beat the blend (gain is ~mechanical)"
+        )
+        lines += [
+            f"- Beat-vs-blend (n={blend['n']}): "
+            f"baseline {b:.4f} · 50/50 blend {mix:.4f} · candidate {cand:.4f} "
+            f"→ {verdict}",
+            "  - Blend = 0.5·baseline + 0.5·market. If the candidate can't beat "
+            "it, the Brier gain is just ensembling toward a calibrated market.",
+        ]
+    else:
+        lines.append("- Beat-vs-blend: no rows with market price + candidate.")
+
+    # Diagnostic 2 — edge given up.
+    if edge["n_disagree_right"]:
+        nlost = edge["n_lost"]
+        nsc = edge["n_scored"]
+        rate = edge["lost_rate"]
+        eb = edge["baseline_brier"]
+        ec = edge["candidate_brier"]
+        rate_str = f"{rate * 100:.0f}%" if rate is not None else "N/A"
+        ec_str = f"{ec:.4f}" if ec is not None else "N/A"
+        lines += [
+            f"- Edge given up (n={edge['n_disagree_right']}): on rows where "
+            f"baseline disagreed with the market and was **right**, the "
+            f"candidate surrendered {nlost}/{nsc} ({rate_str}).",
+            f"  - Brier on that subset: baseline {eb:.4f} → candidate {ec_str} "
+            "(higher = edge traded away for the headline gain).",
+        ]
+    else:
+        lines.append(
+            "- Edge given up: no rows where baseline correctly disagreed with "
+            "the market (nothing to surrender)."
+        )
+
+    lines.append("")
+    return lines
+
+
 def _fmt_delta(
     baseline_val: float | None,
     candidate_val: float | None,
@@ -321,6 +481,7 @@ def format_report(
     meta: dict[str, str],
     failure_rows: list[dict[str, Any]] | None = None,
     filter_stats: Optional[dict[str, Any]] = None,
+    market_diagnostics: Optional[dict[str, Any]] = None,
 ) -> str:
     """Format the full benchmark report as markdown.
 
@@ -333,6 +494,9 @@ def format_report(
     :param filter_stats: optional ``{accepted, rejected}`` dict from
         filter_stats.json sidecar. When present, a Production parse rate line
         is rendered showing how many in-scope production deliveries parsed.
+    :param market_diagnostics: optional dict from compute_market_diagnostics.
+        When present (runs whose rows carry a market price), the beat-vs-blend
+        and edge-given-up block is rendered.
     :return: markdown string.
     """
     tool = meta.get("tool", "unknown")
@@ -355,6 +519,9 @@ def format_report(
         "",
     ]
     parts.extend(_format_reliability_block(candidate, failure_rows or [], filter_stats))
+
+    if market_diagnostics is not None:
+        parts.extend(_format_market_diagnostics_block(market_diagnostics))
 
     if len(all_platforms) > 1:
         detail_lines = ["<details><summary>Per-platform breakdown</summary>", ""]
@@ -505,6 +672,7 @@ def main() -> None:
 
     baseline_metrics = compute_metrics(baseline_rows)
     candidate_metrics = compute_metrics(candidate_rows)
+    market_diagnostics = compute_market_diagnostics(baseline_rows, candidate_rows)
 
     # Infer tool from data
     tool = baseline_rows[0].get("tool_name", "unknown")
@@ -522,6 +690,7 @@ def main() -> None:
         meta,
         failure_rows=failure_rows,
         filter_stats=filter_stats,
+        market_diagnostics=market_diagnostics,
     )
 
     # Always print to stdout

@@ -1556,6 +1556,10 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                 "p_no": row["p_no"],
                 "prediction_parse_status": "valid",
                 "confidence": row.get("confidence"),
+                # Carry the recorded market price through so ci_replay can run
+                # the market-anchor diagnostics (blend / edge-given-up). None on
+                # rows that never had one (e.g. Omen); diagnostics skip those.
+                "market_prob": row.get("market_prob_at_prediction"),
                 "final_outcome": outcome,
                 "predicted_at": row.get("predicted_at", now),
                 "resolved_at": row.get("resolved_at"),
@@ -1664,6 +1668,9 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                 "p_no": parsed["p_no"],
                 "prediction_parse_status": parsed["prediction_parse_status"],
                 "confidence": parsed.get("confidence"),
+                # Same recorded market price as the paired baseline row; lets
+                # ci_replay pair by index and run the market-anchor diagnostics.
+                "market_prob": row.get("market_prob_at_prediction"),
                 "final_outcome": outcome,
                 "predicted_at": now,
                 "resolved_at": row.get("resolved_at"),

@@ -9,8 +9,10 @@ from pathlib import Path
 from benchmark.ci_replay import (
     PARSE_STATUS_BUCKETS,
     _compute_parse_reliability,
+    _format_market_diagnostics_block,
     _format_reliability_block,
     _load_filter_stats,
+    compute_market_diagnostics,
     compute_metrics,
     format_report,
 )
@@ -436,3 +438,164 @@ class TestFormatReportFooter:
         footer = report.splitlines()[-1]
         assert footer.index("deliveries") < footer.index("seed 1337")
         assert footer.index("seed 1337") < footer.index("LOCKhart07")
+
+
+def _pair(
+    base_p: float | None,
+    cand_p: float | None,
+    market: float | None,
+    outcome: bool,
+) -> tuple[dict, dict]:
+    """Build a paired (baseline_row, candidate_row) for diagnostics tests."""
+    base = {
+        "platform": "polymarket",
+        "tool_name": "superforcaster-polymarket-v1",
+        "p_yes": base_p,
+        "p_no": None if base_p is None else 1 - base_p,
+        "prediction_parse_status": "valid",
+        "market_prob": market,
+        "final_outcome": outcome,
+    }
+    cand = {
+        "platform": "polymarket",
+        "tool_name": "superforcaster-polymarket-v1",
+        "p_yes": cand_p,
+        "p_no": None if cand_p is None else 1 - cand_p,
+        "prediction_parse_status": "valid" if cand_p is not None else "malformed",
+        "market_prob": market,
+        "final_outcome": outcome,
+    }
+    return base, cand
+
+
+def _diag(b_rows: list[dict], c_rows: list[dict]) -> dict:
+    """compute_market_diagnostics with a non-None assertion (mypy narrowing)."""
+    result = compute_market_diagnostics(b_rows, c_rows)
+    assert result is not None
+    return result
+
+
+class TestMarketDiagnostics:
+    """`compute_market_diagnostics` — blend arm and edge-given-up arm."""
+
+    def test_none_when_no_market_price(self) -> None:
+        """Rows without any market_prob yield None (block is omitted)."""
+        b, c = _pair(0.6, 0.5, None, True)
+        assert compute_market_diagnostics([b], [c]) is None
+
+    def test_blend_briers_hand_computed(self) -> None:
+        """Baseline/blend/candidate Briers match a hand calculation."""
+        # base=0.2, market=0.6 -> blend=0.4; outcome=YES(1).
+        b, c = _pair(0.2, 0.5, 0.6, True)
+        diag = compute_market_diagnostics([b], [c])
+        assert diag is not None
+        blend = diag["blend"]
+        assert blend["n"] == 1
+        assert abs(blend["baseline_brier"] - 0.64) < 1e-9  # (0.2-1)^2
+        assert abs(blend["blend_brier"] - 0.36) < 1e-9  # (0.4-1)^2
+        assert abs(blend["candidate_brier"] - 0.25) < 1e-9  # (0.5-1)^2
+
+    def test_candidate_parse_fail_excluded_from_blend(self) -> None:
+        """A candidate with p_yes=None contributes nothing to the blend arm."""
+        b, c = _pair(0.2, None, 0.6, True)
+        diag = compute_market_diagnostics([b], [c])
+        assert diag is not None
+        assert diag["blend"]["n"] == 0
+        assert diag["blend"]["candidate_brier"] is None
+
+    def test_edge_subset_lost(self) -> None:
+        """Baseline right vs market, candidate flips to wrong -> edge lost."""
+        # base=0.7 (YES, right), market=0.3 (NO), outcome=YES; cand=0.4 (NO).
+        b, c = _pair(0.7, 0.4, 0.3, True)
+        edge = _diag([b], [c])["edge"]
+        assert edge["n_disagree_right"] == 1
+        assert edge["n_scored"] == 1
+        assert edge["n_lost"] == 1
+        assert edge["lost_rate"] == 1.0
+        assert abs(edge["baseline_brier"] - 0.09) < 1e-9  # (0.7-1)^2
+        assert abs(edge["candidate_brier"] - 0.36) < 1e-9  # (0.4-1)^2
+
+    def test_edge_subset_kept(self) -> None:
+        """Candidate that stays on the winning side does not lose the edge."""
+        # base=0.7 right vs market 0.3; cand=0.8 still YES -> kept.
+        b, c = _pair(0.7, 0.8, 0.3, True)
+        edge = _diag([b], [c])["edge"]
+        assert edge["n_disagree_right"] == 1
+        assert edge["n_lost"] == 0
+        assert edge["lost_rate"] == 0.0
+
+    def test_baseline_wrong_disagreement_not_in_edge_subset(self) -> None:
+        """Disagreement where the baseline was wrong is not edge to give up."""
+        # base=0.7 (YES) vs market 0.3 (NO), but outcome=NO -> baseline wrong.
+        b, c = _pair(0.7, 0.4, 0.3, False)
+        edge = _diag([b], [c])["edge"]
+        assert edge["n_disagree_right"] == 0
+
+    def test_agreement_not_in_edge_subset(self) -> None:
+        """When baseline agrees with the market, there is no edge to give up."""
+        # base=0.7 and market=0.6 both YES -> agreement.
+        b, c = _pair(0.7, 0.4, 0.6, True)
+        edge = _diag([b], [c])["edge"]
+        assert edge["n_disagree_right"] == 0
+
+    def test_tie_excluded_from_edge_subset(self) -> None:
+        """A baseline or market at exactly 0.5 carries no direction."""
+        b, c = _pair(0.5, 0.4, 0.3, True)
+        assert _diag([b], [c])["edge"]["n_disagree_right"] == 0
+        b2, c2 = _pair(0.7, 0.4, 0.5, True)
+        assert _diag([b2], [c2])["edge"]["n_disagree_right"] == 0
+
+    def test_rows_paired_by_index(self) -> None:
+        """Index i on both sides is the same market; mixed rows aggregate."""
+        rows = [
+            _pair(0.2, 0.5, 0.6, True),  # blend row
+            _pair(0.7, 0.4, 0.3, True),  # edge-lost row
+        ]
+        b_rows = [b for b, _ in rows]
+        c_rows = [c for _, c in rows]
+        diag = _diag(b_rows, c_rows)
+        assert diag["blend"]["n"] == 2
+        assert diag["edge"]["n_disagree_right"] == 1
+        assert diag["edge"]["n_lost"] == 1
+
+
+class TestMarketDiagnosticsRendering:
+    """`_format_market_diagnostics_block` verdict text reflects the numbers."""
+
+    def test_beats_blend_marked(self) -> None:
+        """Candidate Brier below the blend renders the ✅ beats verdict."""
+        b, c = _pair(0.2, 0.5, 0.6, True)  # candidate 0.25 < blend 0.36
+        block = "\n".join(_format_market_diagnostics_block(_diag([b], [c])))
+        assert "✅" in block and "beats the blend" in block
+
+    def test_does_not_beat_blend_marked(self) -> None:
+        """Candidate Brier above the blend renders the ⚠️ warning."""
+        # base=0.2, market=0.6 -> blend 0.36; cand=0.1 -> (0.1-1)^2=0.81 > blend.
+        b, c = _pair(0.2, 0.1, 0.6, True)
+        block = "\n".join(_format_market_diagnostics_block(_diag([b], [c])))
+        assert "⚠️" in block and "does **not** beat" in block
+
+    def test_edge_lost_count_rendered(self) -> None:
+        """The edge-given-up line shows the surrendered count."""
+        b, c = _pair(0.7, 0.4, 0.3, True)
+        block = "\n".join(_format_market_diagnostics_block(_diag([b], [c])))
+        assert "Edge given up" in block and "1/1" in block
+
+    def test_no_edge_rows_message(self) -> None:
+        """With no correct-disagreement rows, the 'nothing to surrender' note shows."""
+        b, c = _pair(0.7, 0.4, 0.6, True)  # agreement, so empty edge subset
+        block = "\n".join(_format_market_diagnostics_block(_diag([b], [c])))
+        assert "nothing to surrender" in block
+
+    def test_block_present_in_full_report(self) -> None:
+        """format_report includes the block only when diagnostics are passed."""
+        b, c = _pair(0.2, 0.5, 0.6, True)
+        diag = compute_market_diagnostics([b], [c])
+        base_m = compute_metrics([b])
+        cand_m = compute_metrics([c])
+        with_block = format_report(
+            base_m, cand_m, {"tool": "t"}, market_diagnostics=diag
+        )
+        without = format_report(base_m, cand_m, {"tool": "t"})
+        assert "Market-anchor diagnostics" in with_block
+        assert "Market-anchor diagnostics" not in without

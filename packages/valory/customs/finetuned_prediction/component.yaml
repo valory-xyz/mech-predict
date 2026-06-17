@@ -2,7 +2,8 @@ name: finetuned_prediction
 author: valory
 version: 0.1.0
 type: custom
-description: Serves the base or the fine-tuned 14B Qwen models via vLLM.
+description: A tool for making binary predictions on markets. Serves the base or fine-tuned
+  14B Qwen model via vLLM.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:

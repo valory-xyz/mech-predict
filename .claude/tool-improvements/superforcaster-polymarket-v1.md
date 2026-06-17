@@ -74,3 +74,4 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
 - **Benchmark 2026-06-17:** SHA `1930289a8956d677edd2544ecafc34f1bdae9133`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
 - **Benchmark 2026-06-17:** SHA `870750ce3a7540aac6a08c53a2f07b069c635036`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
+- **Benchmark 2026-06-17:** SHA `11bf1b065e1587f2a08bb95704e910b57b1efca1`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted

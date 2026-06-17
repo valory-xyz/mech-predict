@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
+from unittest.mock import MagicMock
 
 import pytest
 from benchmark.prompt_replay import (
@@ -18,15 +19,19 @@ from benchmark.prompt_replay import (
     _extract_factual_research_prompt_components,
     _load_and_filter_rows,
     _log_replay_summary,
+    _parse_vllm_candidate,
     _prepare_output_dir,
+    _replay_vllm_candidate,
     enrich,
     extract_prompt_components,
     main,
+    replay,
     stratified_sample,
 )
 from benchmark.tools import TOOL_REGISTRY
 
 from packages.valory.customs.factual_research.factual_research import REFRAME_USER
+from packages.valory.customs.finetuned_prediction import finetuned_prediction
 
 
 def _row(
@@ -843,9 +848,18 @@ class TestRegistryFamilyFormatRoundTrip:
     to superforcaster, whose ``format(question=, today=, sources=)`` blows up on
     SME's ``{user_prompt}``/``{additional_information}`` template. This test
     imports each module and runs the round-trip, so a mis-declared family fails.
+
+    vLLM-backend tools (``backend == "vllm"``) are excluded: the replay path
+    routes them by backend, not family — they render their own prompt via the
+    module's ``build_forecaster_prompt`` and never read a family template — so
+    they carry a required-but-inert ``family`` and deliberately export none of
+    the family prompt symbols. Asserting the family contract on them is wrong.
     """
 
-    @pytest.mark.parametrize("tool_name", sorted(TOOL_REGISTRY))
+    @pytest.mark.parametrize(
+        "tool_name",
+        sorted(n for n, s in TOOL_REGISTRY.items() if s.backend != "vllm"),
+    )
     def test_family_template_formats_with_family_kwargs(self, tool_name: str) -> None:
         """The family's template(s) exist and format with the family kwargs.
 
@@ -904,3 +918,189 @@ class TestDefaultFamilySystemPrompt:
             result = _default_family_system_prompt(module)
         assert result == DEFAULT_REPLAY_SYSTEM_PROMPT
         assert "SYSTEM_PROMPT_FORECASTER" in caplog.text
+
+
+class TestVllmCandidateRegistry:
+    """The vLLM-served tools are registered with the ``vllm`` backend tag.
+
+    The replay path keys off ``ToolSpec.backend`` to route a candidate through
+    the self-hosted vLLM helper instead of the hosted OpenAI/Anthropic SDK, so
+    the tag must be present (and default to ``openai`` for every other tool).
+    """
+
+    @pytest.mark.parametrize("tool_name", ["predict-base", "predict-fine-tuned"])
+    def test_finetuned_tools_use_vllm_backend(self, tool_name: str) -> None:
+        """Both fine-tuned modes are registered against the vLLM backend.
+
+        :param tool_name: the registered vLLM tool name under test.
+        """
+        assert TOOL_REGISTRY[tool_name].backend == "vllm"
+
+    def test_hosted_tools_default_to_openai_backend(self) -> None:
+        """A hosted-API tool keeps the default ``openai`` backend."""
+        assert TOOL_REGISTRY["superforcaster"].backend == "openai"
+
+
+class TestParseVllmCandidate:
+    """`_parse_vllm_candidate` maps a vLLM completion to the scoring dict.
+
+    Parsing is delegated to the candidate tool's own ``canonical_prediction``
+    (strip ``<think>``, validate ``p_yes``, derive ``p_no``) so it matches what
+    the deployed mech delivers. The wrapper only translates that into the
+    harness ``{p_yes, p_no, prediction_parse_status, confidence}`` contract.
+    """
+
+    def test_none_response_is_error_status(self) -> None:
+        """A failed call (None completion) yields the ``error`` status."""
+        parsed = _parse_vllm_candidate(None, finetuned_prediction)
+        assert parsed == {
+            "p_yes": None,
+            "p_no": None,
+            "prediction_parse_status": "error",
+            "confidence": None,
+        }
+
+    def test_unparseable_completion_is_malformed(self) -> None:
+        """A delivered-but-unparseable completion yields ``malformed``."""
+        parsed = _parse_vllm_candidate(
+            "<think>no number here</think> sorry", finetuned_prediction
+        )
+        assert parsed["prediction_parse_status"] == "malformed"
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+
+    def test_valid_think_json_completion(self) -> None:
+        """A ``<think>…</think>{json}`` completion parses to valid p_yes/p_no.
+
+        ``p_no`` is derived from ``p_yes`` and ``confidence`` is carried through,
+        exactly as ``canonical_prediction`` normalises them.
+        """
+        completion = '<think>weighing evidence</think>{"p_yes": 0.7, "confidence": 0.8}'
+        parsed = _parse_vllm_candidate(completion, finetuned_prediction)
+        assert parsed["prediction_parse_status"] == "valid"
+        assert parsed["p_yes"] == 0.7
+        assert parsed["p_no"] == 0.3
+        assert parsed["confidence"] == 0.8
+
+
+class TestReplayVllmCandidate:
+    """`_replay_vllm_candidate` calls the vLLM server with production framing.
+
+    It must drive the call through the candidate tool's OWN client path
+    (``VLLMClientManager`` + ``generate_prediction_with_retry``) so the request
+    is a single source of truth with the tool's ``run()`` — same prompt builder,
+    same single-user-message framing, same n=1 / stop=None / settings — target
+    the supplied base_url, and degrade to None (not raise) on a call failure.
+    """
+
+    @staticmethod
+    def _row() -> dict:
+        return {
+            "extracted_user_prompt": "Will it rain tomorrow?",
+            "extracted_today": "01/06/2026",
+            "extracted_additional_information": "<background>forecast</background>",
+        }
+
+    def test_calls_vllm_with_production_framing(self, monkeypatch: Any) -> None:
+        """The reused client path targets base_url with production parameters.
+
+        Patches the shared ``openai.OpenAI`` the tool's ``VLLMClient`` builds, so
+        the assertions cover the exact request that path emits (n=1, stop=None,
+        single user message, deterministic settings).
+
+        :param monkeypatch: pytest fixture used to stub ``openai.OpenAI``.
+        """
+        completion = '<think>r</think>{"p_yes": 0.6}'
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value.choices = [
+            MagicMock(message=MagicMock(content=completion))
+        ]
+        captured: dict = {}
+
+        def _factory(**kwargs: Any) -> Any:
+            captured["init"] = kwargs
+            return fake_client
+
+        monkeypatch.setattr("benchmark.prompt_replay.openai.OpenAI", _factory)
+
+        result = _replay_vllm_candidate(
+            row=self._row(),
+            candidate_module=finetuned_prediction,
+            base_url="https://vllm.example/v1",
+            api_key="secret-key",
+            model="qwen-14b-fine-tuned",
+        )
+
+        assert result == completion
+        assert captured["init"]["base_url"] == "https://vllm.example/v1"
+        assert captured["init"]["api_key"] == "secret-key"
+
+        create_kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert create_kwargs["model"] == "qwen-14b-fine-tuned"
+        assert create_kwargs["temperature"] == 0.0
+        assert create_kwargs["max_tokens"] == 1024
+        # Reused client path locks production single-completion semantics.
+        assert create_kwargs["n"] == 1
+        assert create_kwargs["stop"] is None
+        # Training-parity framing: exactly one user message, no system message.
+        messages = create_kwargs["messages"]
+        assert [m["role"] for m in messages] == ["user"]
+        assert "<background>forecast</background>" in messages[0]["content"]
+        # VLLMClientManager closes the underlying client on context exit.
+        fake_client.close.assert_called_once()
+
+    def test_call_failure_returns_none(self, monkeypatch: Any) -> None:
+        """A server/SDK error degrades to None so the replay run continues.
+
+        The tool's ``generate_prediction_with_retry`` raises after exhausting
+        its retries; the helper must catch that and return None. ``time.sleep``
+        is stubbed so the retry backoff doesn't slow the test.
+
+        :param monkeypatch: pytest fixture used to stub ``openai.OpenAI``.
+        """
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
+        monkeypatch.setattr(
+            "benchmark.prompt_replay.openai.OpenAI", lambda **kwargs: fake_client
+        )
+        monkeypatch.setattr(finetuned_prediction.time, "sleep", lambda *_a: None)
+
+        result = _replay_vllm_candidate(
+            row=self._row(),
+            candidate_module=finetuned_prediction,
+            base_url="https://vllm.example/v1",
+            api_key="secret-key",
+            model="qwen-14b-fine-tuned",
+        )
+
+        assert result is None
+        # The client is still closed (VLLMClientManager __exit__) on failure.
+        fake_client.close.assert_called_once()
+
+
+class TestVllmCandidateBaselineGuard:
+    """`replay` rejects a vLLM candidate against a non-superforcaster baseline.
+
+    The vLLM path renders a superforcaster-shaped ``<background>`` prompt from
+    the baseline's extracted fields, so it must fail fast (not silently feed a
+    malformed prompt) when the baseline belongs to another family.
+    """
+
+    def test_non_superforcaster_baseline_rejected(self, tmp_path: Path) -> None:
+        """A reasoning-family baseline + vLLM candidate raises ValueError.
+
+        :param tmp_path: pytest tmp_path fixture for the enriched dataset.
+        """
+        dataset = tmp_path / "dataset.jsonl"
+        # A registered reasoning-family baseline: passes the baseline-registry
+        # check so execution reaches the superforcaster-family guard under test
+        # (the bare "prediction-request-reasoning" is unregistered and would trip
+        # the earlier registry check, masking the guard).
+        _write_jsonl(dataset, [{"tool_name": "prediction-request-reasoning-v1"}])
+        with pytest.raises(ValueError, match="superforcaster-family baseline"):
+            replay(
+                dataset=dataset,
+                output_dir=tmp_path / "out",
+                model="qwen-14b-fine-tuned",
+                candidate_tool="predict-fine-tuned",
+            )

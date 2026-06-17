@@ -57,7 +57,7 @@ JSON-in-prompt + ``Pydantic.model_validate_json(...)``. v3 adds
 ``_parse_completion`` — v2's tuple only retried on the bare ``ValueError``
 from the ``p_yes + p_no`` sum check, so the Anthropic JSON-parse path
 needs explicit coverage. Trade-off accepted to match the repo convention
-and stay on ``anthropic==0.23.1`` (the repo-pinned version every other
+and use ``anthropic==0.109.1`` (the repo-pinned version every other
 claude-using tool uses).
 
 Note: ``claude-fable-5`` is an adaptive-thinking model. The Anthropic

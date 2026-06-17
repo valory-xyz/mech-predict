@@ -28,8 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import packages.valory.customs.prediction_request.prediction_request as module
-from packages.valory.customs.prediction_request.prediction_request import (
+import packages.valory.customs.prediction_request_v1.prediction_request_v1 as module
+from packages.valory.customs.prediction_request_v1.prediction_request_v1 import (
     ExtendedDocument,
     LLMClientManager,
     count_tokens,
@@ -49,7 +49,7 @@ class TestLLMClientManager:
         mock_keys: Any = {"openai": "sk-test"}
         mgr = LLMClientManager(api_keys=mock_keys, model="gpt-4o-2024-08-06")
         with patch(
-            "packages.valory.customs.prediction_request.prediction_request.LLMClient"
+            "packages.valory.customs.prediction_request_v1.prediction_request_v1.LLMClient"
         ) as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
@@ -85,7 +85,7 @@ class TestLLMClientManager:
         clients_seen: list = []
 
         with patch(
-            "packages.valory.customs.prediction_request.prediction_request.LLMClient"
+            "packages.valory.customs.prediction_request_v1.prediction_request_v1.LLMClient"
         ) as MockClient:
             MockClient.side_effect = lambda *args, **kwargs: MagicMock()
 
@@ -122,15 +122,13 @@ class TestFunctionsAcceptClient:
             input_tokens=42
         )
 
-        result = count_tokens(
-            "hello world", "claude-4-sonnet-20250514", client=mock_client
-        )
+        result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
         assert result == 42
         mock_client.client.messages.count_tokens.assert_called_once()
 
     def test_count_tokens_claude_without_client_uses_fallback(self) -> None:
         """count_tokens for Claude models without client uses cl100k_base fallback."""
-        token_count = count_tokens("hello world", "claude-4-sonnet-20250514")
+        token_count = count_tokens("hello world", "claude-sonnet-4-6")
         assert isinstance(token_count, int)
         assert token_count > 0
 
@@ -150,7 +148,7 @@ class TestFunctionsAcceptClient:
         assert params[0] == "client"
 
 
-MODULE = "packages.valory.customs.prediction_request.prediction_request"
+MODULE = "packages.valory.customs.prediction_request_v1.prediction_request_v1"
 
 
 def _make_html_future(url: str, html: str) -> tuple:
@@ -456,7 +454,7 @@ class TestRunFlagBehavior:
         mock_gen.return_value = ("prediction", None)
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("true"),
@@ -482,7 +480,7 @@ class TestRunFlagBehavior:
         mock_gen.return_value = ("prediction", None)
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=_make_mock_api_keys("false"),
@@ -513,7 +511,7 @@ class TestRunFlagBehavior:
         mock_keys.get = lambda key, default="": services.get(key, [default])[0]
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=mock_keys,
@@ -540,10 +538,158 @@ class TestRunFlagBehavior:
         mock_keys.get = lambda key, default="": services.get(key, [default])[0]
 
         result = run(
-            tool="prediction-online",
+            tool="prediction-online-v1",
             model="gpt-4.1-2025-04-14",
             prompt="test",
             api_keys=mock_keys,
         )
 
         assert "Invalid source_content_mode" in result[0]
+
+
+def _make_anthropic_text_response(
+    text: str, *, input_tokens: int = 7, output_tokens: int = 13
+) -> MagicMock:
+    """Build a mock anthropic ``messages.create`` response (content block + usage)."""
+    text_block = MagicMock()
+    text_block.text = text
+    response = MagicMock()
+    response.content = [text_block]
+    response.usage = MagicMock(input_tokens=input_tokens, output_tokens=output_tokens)
+    return response
+
+
+def _make_anthropic_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an anthropic error instance without a live ``httpx.Response``."""
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+def _anthropic_client(resp: MagicMock) -> Any:
+    """Construct an ``LLMClient`` on the anthropic branch with a mocked backing client."""
+    with patch("anthropic.Anthropic") as MockAnthropic:
+        instance = MagicMock()
+        instance.messages.create.return_value = resp
+        MockAnthropic.return_value = instance
+        api_keys: Any = {"anthropic": "sk-ant"}
+        client = module.LLMClient(api_keys=api_keys, llm_provider="anthropic")
+    return client
+
+
+class TestLLMClientAnthropicCompletions:
+    """Cover the Anthropic branch of ``LLMClient.completions``.
+
+    The wider suites mock ``LLMClientManager`` wholesale, so the
+    Anthropic-side mapping under the 0.109.1 bump is otherwise unexercised:
+    system-prompt extraction, ``content[0].text``, and the
+    ``input_tokens``/``output_tokens`` -> ``prompt_tokens``/``completion_tokens``
+    rename that feeds billing.
+    """
+
+    def test_system_message_extracted_to_system_kwarg(self) -> None:
+        """``system`` entries are passed via ``system=`` and dropped from ``messages=``."""
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[
+                {"role": "system", "content": "SYS"},
+                {"role": "user", "content": "U1"},
+            ],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == "SYS"
+        assert kwargs["messages"] == [{"role": "user", "content": "U1"}]
+
+    def test_content_and_usage_mapped_from_anthropic_names(self) -> None:
+        """``content[0].text`` and Anthropic token names map onto ``LLMResponse``."""
+        client = _anthropic_client(
+            _make_anthropic_text_response(
+                '{"p_yes": 0.5}', input_tokens=111, output_tokens=222
+            )
+        )
+        result = client.completions(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        assert result is not None
+        assert result.content == '{"p_yes": 0.5}'
+        assert result.usage.prompt_tokens == 111
+        assert result.usage.completion_tokens == 222
+
+    def test_caller_messages_list_not_mutated(self) -> None:
+        """The system-prompt strip works on a copy, leaving the caller's list intact.
+
+        Regression for the retry-path bug: stripping ``messages`` in place
+        meant a ``with_key_rotation`` re-call ran without the system prompt,
+        silently falling back to ``SYSTEM_PROMPT_FORECASTER``.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+        client.completions(model="claude-sonnet-4-6", messages=messages)
+        assert messages == [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "U1"},
+        ]
+
+    def test_missing_system_message_uses_default_prompt(self) -> None:
+        """With no ``system`` entry, the default ``SYSTEM_PROMPT_FORECASTER`` is used.
+
+        Guards the unbound-``system_prompt`` path: a user-only message list
+        must fall back to the default forecaster prompt rather than raise.
+        """
+        client = _anthropic_client(_make_anthropic_text_response('{"p_yes": 0.5}'))
+        client.completions(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "U1"}],
+        )
+        kwargs = client.client.messages.create.call_args.kwargs
+        assert kwargs["system"] == module.SYSTEM_PROMPT_FORECASTER
+
+
+class TestWithKeyRotationAnthropic:
+    """Cover the ``anthropic.RateLimitError`` branch of ``with_key_rotation``."""
+
+    @staticmethod
+    def _keys(anthropic_budget: int) -> MagicMock:
+        """Build an api_keys mock with the given anthropic retry budget."""
+        keys = MagicMock()
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": anthropic_budget,
+        }
+        keys.rotate = MagicMock()
+        return keys
+
+    def test_rate_limit_rotates_anthropic_pool_only(self) -> None:
+        """An ``anthropic.RateLimitError`` rotates ONLY the anthropic key, then retries."""
+        keys = self._keys(anthropic_budget=1)
+        calls = {"n": 0}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _make_anthropic_error(module.anthropic.RateLimitError, "burst")
+            return "ok", "", None, None, None
+
+        result = fake(api_keys=keys)
+        assert calls["n"] == 2
+        assert [c.args[0] for c in keys.rotate.call_args_list] == ["anthropic"]
+        assert result[-1] is keys
+
+    def test_anthropic_pool_exhausted_reraises(self) -> None:
+        """When the anthropic pool is exhausted, the error re-raises so the task fails."""
+        keys = self._keys(anthropic_budget=0)
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(module.anthropic.RateLimitError, "burned")
+
+        with pytest.raises(module.anthropic.RateLimitError, match="burned"):
+            fake(api_keys=keys)

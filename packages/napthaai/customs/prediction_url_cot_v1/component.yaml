@@ -1,4 +1,4 @@
-name: prediction_url_cot
+name: prediction_url_cot_v1
 author: napthaai
 version: 0.1.0
 type: custom
@@ -6,15 +6,15 @@ description: A tool for making binary predictions on markets.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeiflni5dkn5fqe7fnu4lgbqxzfrgochhqfbgzwz3vlf5grijp3nkpm
-  prediction_url_cot.py: bafybeifxblnmj6kqhduchdsbnxhqzb5qio4gava2rjpzffo22frrxdyopu
+  __init__.py: bafybeiculnaspkdsin45mnu6tvo4qgvsny4cmyh44vosdcpu57dp4szseu
+  prediction_url_cot_v1.py: bafybeiccrpkial4u4dkl5ojqi3btael24t2k35q2yylmnttlo6tln7gkcq
   tests/__init__.py: bafybeia2zevyo6fxbwf7dj4vkhd3fnsvog5sqvepqg4qjgzydlhsuwnn7q
-  tests/test_prediction_url_cot.py: bafybeiakbfpefbuhdfwkrcdlgzglatcl24fvtlmmgi3m5ooplfowtcjkcm
+  tests/test_prediction_url_cot_v1.py: bafybeibad3ikoog6ub5zwjs3md6t3antmniwb5y3pz4x75npw4tti54gsi
 fingerprint_ignore_patterns: []
-entry_point: prediction_url_cot.py
+entry_point: prediction_url_cot_v1.py
 callable: run
 params:
-  default_model: claude-4-sonnet-20250514
+  default_model: claude-sonnet-4-6
 dependencies:
   google-api-python-client:
     version: ==2.95.0
@@ -31,7 +31,7 @@ dependencies:
   lxml_html_clean:
     version: ==0.4.4
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1
   tiktoken:
     version: ==0.12.0
   pypdf:

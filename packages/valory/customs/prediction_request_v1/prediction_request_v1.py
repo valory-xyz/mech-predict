@@ -19,6 +19,7 @@
 
 """This module implements a Mech tool for binary predictions."""
 
+import copy
 import functools
 import json
 import re
@@ -209,7 +210,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error: {type(e).__name__}: {e}")
                 return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
@@ -274,16 +275,10 @@ class LLMClient:
         self.api_keys = api_keys
         self.llm_provider = llm_provider
         if self.llm_provider == "anthropic":
-            import anthropic
-
             self.client = anthropic.Anthropic(api_key=self.api_keys["anthropic"])  # type: ignore
         if self.llm_provider == "openai":
-            import openai
-
             self.client = openai.OpenAI(api_key=self.api_keys["openai"])  # type: ignore
         if self.llm_provider == "openrouter":
-            import openai
-
             self.client = openai.OpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=self.api_keys["openrouter"],  # type: ignore
@@ -298,21 +293,22 @@ class LLMClient:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         stop: Any = None,
-        max_tokens: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[LLMResponse]:
         """Generate a completion from the specified LLM provider using the given model and messages."""
         if self.llm_provider == "anthropic":
             # anthropic can't take system prompt in messages
             # default value if not found
             system_prompt = SYSTEM_PROMPT_FORECASTER
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i]["role"] == "system":
-                    system_prompt = messages[i]["content"]
-                    del messages[i]
+            messages_copy = copy.deepcopy(messages)
+            for i in range(len(messages_copy) - 1, -1, -1):
+                if messages_copy[i]["role"] == "system":
+                    system_prompt = messages_copy[i]["content"]
+                    del messages_copy[i]
 
             response_provider = self.client.messages.create(
                 model=model,
-                messages=messages,
+                messages=messages_copy,
                 system=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -401,7 +397,7 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
             print(
                 "Anthropic tokenizer method not available, using fallback encoding for Claude models"
             )
-        except (ConnectionError, TimeoutError) as e:
+        except (anthropic.APIConnectionError, ConnectionError, TimeoutError) as e:
             # Handle network-related issues
             print(f"Network error when counting tokens: {e}, using fallback encoding")
         except Exception as e:
@@ -448,27 +444,27 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-offline",
-    "prediction-online",
-    # "prediction-online-summarized-info",
+    "prediction-offline-v1",
+    "prediction-online-v1",
+    # "prediction-online-summarized-info-v1",
     # LEGACY
-    "claude-prediction-offline",
-    "claude-prediction-online",
+    "claude-prediction-offline-v1",
+    "claude-prediction-online-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 # the default number of URLs to fetch online information for
 DEFAULT_NUM_URLS = defaultdict(lambda: 3)
-DEFAULT_NUM_URLS["prediction-online-summarized-info"] = 7
+DEFAULT_NUM_URLS["prediction-online-summarized-info-v1"] = 7
 # the default number of words to fetch online information for
 DEFAULT_NUM_WORDS: Dict[str, Optional[int]] = defaultdict(lambda: 300)
-DEFAULT_NUM_WORDS["prediction-online-summarized-info"] = None
+DEFAULT_NUM_WORDS["prediction-online-summarized-info-v1"] = None
 # how much of the initial content will be kept during summarization
 DEFAULT_COMPRESSION_FACTOR = 0.05
 # the vocabulary to use for the summarization
@@ -1123,7 +1119,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return max_cost
 
     if "claude" in tool:  # maintain backwards compatibility
-        engine = "claude-4-sonnet-20250514"
+        engine = "claude-sonnet-4-6"
     print(f"ENGINE used for {tool}: {engine}")
     with LLMClientManager(kwargs["api_keys"], engine) as llm_client:
         user_prompt = kwargs["prompt"]  # question
@@ -1155,7 +1151,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         active_prompt = PREDICTION_PROMPT
         additional_information = ""
         source_content: Dict[str, Any] = {}
-        if tool in ["prediction-online", "claude-prediction-online"]:
+        if tool in ["prediction-online-v1", "claude-prediction-online-v1"]:
             additional_information, source_content, counter_callback = (
                 fetch_additional_information(
                     llm_client,
@@ -1178,7 +1174,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             # used improved prompt in all models except the Claude ones
             active_prompt = OFFLINE_PREDICTION_PROMPT
 
-        if additional_information and tool == "prediction-online-summarized-info":
+        if additional_information and tool == "prediction-online-summarized-info-v1":
             additional_information = summarize(
                 additional_information, compression_factor
             )

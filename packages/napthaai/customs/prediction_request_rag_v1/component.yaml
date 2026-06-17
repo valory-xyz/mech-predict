@@ -1,4 +1,4 @@
-name: prediction_request_rag
+name: prediction_request_rag_v1
 author: napthaai
 version: 0.1.0
 type: custom
@@ -6,12 +6,12 @@ description: A tool for making binary predictions on markets using RAG.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeibt7f7crtwvmkg7spy3jhscmlqltvyblzp32g6gj44v7tlo5lycuq
-  prediction_request_rag.py: bafybeielwbai4tejjkdarsgdavurswv4mat62e6lcdrkctwkxnbkq3bae4
+  __init__.py: bafybeifnw5qoyshsiq2g7ulz4q3vbjpy7pxgxpop3f5dsrnfgm5w3dahz4
+  prediction_request_rag_v1.py: bafybeifucm27pdzmdfxpyjszabclmpkirk5jbjq5zwdmnw5rdvtv7ehjlq
   tests/__init__.py: bafybeifcgilmgfwx7kaap67cfnuokrhfrabi6bnvqiudyzgf2idu64dvxq
-  tests/test_prediction_request_rag.py: bafybeihfaopk37fqncboshyvq24f4vwv3a3rvpdsj7ttyb5eacokxhcx34
+  tests/test_prediction_request_rag_v1.py: bafybeibe7id3s5arysqxkmongbqhep6olcfvxpabklmuuoealskyvpnnay
 fingerprint_ignore_patterns: []
-entry_point: prediction_request_rag.py
+entry_point: prediction_request_rag_v1.py
 callable: run
 params:
   default_model: gpt-4.1-2025-04-14
@@ -31,7 +31,7 @@ dependencies:
   lxml_html_clean:
     version: ==0.4.4
   anthropic:
-    version: ==0.23.1
+    version: ==0.109.1
   tiktoken:
     version: ==0.12.0
   pydantic:

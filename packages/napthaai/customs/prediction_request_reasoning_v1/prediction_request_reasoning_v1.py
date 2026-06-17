@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # ------------------------------------------------------------------------------
 #
-#   Copyright 2024-2025 Valory AG
+#   Copyright 2024-2026 Valory AG
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");
 #   you may not use this file except in compliance with the License.
@@ -131,7 +131,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate(service)
                 return execute()
             except Exception as e:
-                print(f"Unexpected error: {e}")
+                print(f"Unexpected error: {type(e).__name__}: {e}")
                 return str(e), "", None, None, None, api_keys
 
         mech_response = execute()
@@ -224,23 +224,27 @@ class LLMClient:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         stop: Any = None,
-        max_tokens: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Optional[LLMResponse]:
         """Generate a completion from the specified LLM provider using the given model and messages."""
         if self.llm_provider == "anthropic":
             # anthropic can't take system prompt in messages
+            # default value if not found
+            system_prompt = SYSTEM_PROMPT
             messages_copy = copy.deepcopy(messages)
             for i in range(len(messages_copy) - 1, -1, -1):
                 if messages_copy[i]["role"] == "system":
                     system_prompt = messages_copy[i]["content"]
                     del messages_copy[i]
 
-            response_provider = self.client.messages.create(  # pylint: disable=no-member
-                model=model,
-                messages=messages_copy,
-                system=system_prompt,  # pylint: disable=possibly-used-before-assignment
-                temperature=temperature,
-                max_tokens=max_tokens,
+            response_provider = (
+                self.client.messages.create(  # pylint: disable=no-member
+                    model=model,
+                    messages=messages_copy,
+                    system=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
             )
             response = LLMResponse()
             response.content = response_provider.content[0].text
@@ -290,16 +294,16 @@ LLM_SETTINGS = {
         "limit_max_tokens": 1_047_576,
         "temperature": 0,
     },
-    "claude-4-sonnet-20250514": {
+    "claude-sonnet-4-6": {
         "default_max_tokens": 4096,
         "limit_max_tokens": 200_000,
         "temperature": 0,
     },
 }
 ALLOWED_TOOLS = [
-    "prediction-request-reasoning",
+    "prediction-request-reasoning-v1",
     # LEGACY
-    "prediction-request-reasoning-claude",
+    "prediction-request-reasoning-claude-v1",
 ]
 ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 DEFAULT_NUM_URLS = 3
@@ -1023,11 +1027,23 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
                 model=model, messages=[{"role": "user", "content": text}]
             )
             return response.input_tokens
-        except (AttributeError, Exception):
-            # Fallback if the method doesn't exist or fails
-            print("Using fallback enconding for Claude models")
-            enc = get_encoding("cl100k_base")
-            return len(enc.encode(text))
+        except AttributeError:
+            # Fallback if the method doesn't exist
+            print(
+                "Anthropic tokenizer method not available, using fallback encoding for Claude models"
+            )
+        except (anthropic.APIConnectionError, ConnectionError, TimeoutError) as e:
+            # Handle network-related issues
+            print(f"Network error when counting tokens: {e}, using fallback encoding")
+        except Exception as e:
+            # Log unexpected errors but still provide fallback
+            print(
+                f"Unexpected error with Anthropic tokenizer: {type(e).__name__}: {e}, using fallback encoding"
+            )
+
+        # Fallback encoding for Claude
+        enc = get_encoding("cl100k_base")
+        return len(enc.encode(text))
 
     # Claude models without a client still need a fallback encoding
     if "claude" in model.lower():
@@ -1228,7 +1244,7 @@ def run(  # pylint: disable=too-many-statements
         return max_cost
 
     if "claude" in tool:  # maintain backwards compatibility
-        model = "claude-4-sonnet-20250514"
+        model = "claude-sonnet-4-6"
     print(f"MODEL for prediction request reasoning: {model}")
     with LLMClientManager(kwargs["api_keys"], model, embedding_provider="openai") as (
         llm_client,

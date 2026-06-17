@@ -36,7 +36,7 @@ dependencies = [
     "googlesearch-python==1.2.3",
     "beautifulsoup4==4.12.2",
     "google-api-python-client==2.95.0",
-    "anthropic==0.23.1",
+    "anthropic==0.109.1",
     "langchain==1.2.10",
     "langchain-core==1.2.17",
     "langchain-tavily==0.2.17",
@@ -63,7 +63,6 @@ dependencies = [
     "replicate==0.15.7",
     "langgraph==1.0.10",
     "google-generativeai==0.8.6",
-    "openfactverification-kongzii>=0.1.0,<0.2",
     # lxml exception: kept as an exact pin because `readability-lxml==0.8.1`
     # transitively requests `lxml[html_clean]` (underscore), and only
     # lxml 6.0.2 happens to register the extra under both the underscore

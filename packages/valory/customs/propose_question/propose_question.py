@@ -543,13 +543,11 @@ def with_key_rotation(func: Callable) -> Callable:  # noqa
                     return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
-                # try with a new key again
-                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                # try with a new key again; this tool only uses the openai key
+                if retries_left["openai"] <= 0:
                     raise e
                 retries_left["openai"] -= 1
-                retries_left["openrouter"] -= 1
                 api_keys.rotate("openai")
-                api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:
                 return str(e), "", None, None, None, api_keys
@@ -643,7 +641,8 @@ def gather_latest_questions(subgraph_api_key: str) -> Optional[List[str]]:
     transport = RequestsHTTPTransport(
         url=OMEN_SUBGRAPH_URL.format(subgraph_api_key=subgraph_api_key)
     )
-    gql_client = Client(transport=transport, fetch_schema_from_transport=True)
+    # Static query -- skip the per-call GraphQL introspection round-trip.
+    gql_client = Client(transport=transport, fetch_schema_from_transport=False)
     variables = {
         "creator_in": FPMM_CREATORS,
         "first": MAX_LATEST_QUESTIONS,
@@ -1060,7 +1059,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
         articles_string = ""
         for i, article in enumerate(articles, start=0):
-            articles_string += f"{i} - {article['title']} ({article['publishedAt']}): {article['content']}\n"
+            articles_string += f"{i} - {article.get('title', '')} ({article.get('publishedAt', '')}): {article.get('content', '')}\n"
 
         topics = kwargs.get("topics", DEFAULT_TOPICS)
         topics_string = ", ".join(topics)
@@ -1125,6 +1124,22 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             response_data = json.loads(response.choices[0].message.content)
             article_id = response_data["article_id"]
             topic = response_data["topic"]
+            if not isinstance(article_id, int) or not 0 <= article_id < len(articles):
+                return (
+                    json.dumps(
+                        {
+                            "error": (
+                                f"LLM returned invalid article_id {article_id!r} "
+                                f"(have {len(articles)} articles)."
+                            ),
+                            "tool": tool,
+                        }
+                    ),
+                    None,
+                    None,
+                    counter_callback,
+                    None,
+                )
             article = articles[article_id]
             reasoning = (
                 f"The article {article['title']!r} "
@@ -1133,12 +1148,14 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             )
 
         # Scrape the selected article for full body text.
-        scrape_result = scrape_url(kwargs["api_keys"]["serperapi"], article["url"])
+        scrape_result = scrape_url(
+            kwargs["api_keys"]["serperapi"], article.get("url", "")
+        )
         if scrape_result is None:
             return (
                 json.dumps(
                     {
-                        "error": f"Failed to scrape url {article['url']}",
+                        "error": f"Failed to scrape url {article.get('url', '')}",
                         "tool": tool,
                     }
                 ),
@@ -1446,6 +1463,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             counter_callback,
             used_params,
         )
+    except openai.RateLimitError:
+        # Let @with_key_rotation handle rate limits (rotate key + retry);
+        # swallowing it here would make that decorator dead code.
+        raise
     except Exception as e:
         return (
             json.dumps(

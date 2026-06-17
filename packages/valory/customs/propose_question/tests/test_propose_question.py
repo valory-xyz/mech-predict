@@ -555,7 +555,6 @@ def _make_mock_api_keys() -> MagicMock:
         "newsapi": ["newsapi-test"],
         "serperapi": ["serper-test"],
         "subgraph": ["sg-test"],
-        "openrouter": ["or-test"],
     }
     mock = MagicMock()
     mock.__getitem__ = lambda self, key: services[key][0]
@@ -600,7 +599,10 @@ SAMPLE_ARTICLE = {
     "description": "Test description",
 }
 
-SAMPLE_QUESTION = "Will something happen on June 17, 2026, according to Reuters?"
+SAMPLE_QUESTION = (
+    f"Will something happen on {format_utc_timestamp(FUTURE_TS)}, "
+    "according to Reuters?"
+)
 
 SAMPLE_STATE = {
     "state": "mortgage rate",
@@ -618,7 +620,7 @@ SELF_REVIEW_ACCEPT = json.dumps(
         "reviews": [
             {
                 "question": SAMPLE_QUESTION,
-                "deadline_date": "June 17, 2026",
+                "deadline_date": format_utc_timestamp(FUTURE_TS),
                 "earliest_plausible_date": "June 1, 2026",
                 "deadline_is_feasible": True,
                 "process_stage_named": True,
@@ -914,7 +916,7 @@ class TestRunErrors:
                 "reviews": [
                     {
                         "question": SAMPLE_QUESTION,
-                        "deadline_date": "June 17, 2026",
+                        "deadline_date": format_utc_timestamp(FUTURE_TS),
                         "earliest_plausible_date": "never",
                         "deadline_is_feasible": False,
                         "process_stage_named": True,
@@ -953,7 +955,7 @@ class TestRunErrors:
         """Unhandled exception in run() returns error JSON, does not crash."""
         bad_keys = MagicMock()
         bad_keys.__getitem__.side_effect = RuntimeError("boom")
-        bad_keys.max_retries.return_value = {"openai": 1, "openrouter": 1}
+        bad_keys.max_retries.return_value = {"openai": 1}
         result = run(
             tool="propose-question",
             prompt=json.dumps({"resolution_time": FUTURE_TS}),

@@ -47,3 +47,28 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - Non-trivial change: YES
 - ASCII-only: PASS
 - LOC: +7 (well under 150 soft / 300 hard)
+
+
+---
+
+## Issue #366 -- 2026-06-17
+
+- **Trigger:** level_floor on `polymarket` W-1 (`2026-06-10T04:26:56Z` -> `2026-06-17T04:26:56Z`); headline Brier `0.2565` vs W-2 `0.3253` (Delta `-0.0688`).
+- **PR:** branch `tool-improvement/superforcaster-polymarket-v1-forward-looking-evidence-discount`.
+- **Confirmed hypothesis:** At the prediction-LLM-call stage, the tool anchors on (a) prediction-market odds embedded in Serper search results (e.g. "Leading. 92%. Elon Musk" from polymarket.com pages) treating them as independent factual evidence, and (b) forward-looking intent language ("is set to", "expected to", "plans to", "confirmed to attend") treating announced intentions as near-certain outcomes, producing extreme YES predictions (p_yes=0.93-0.97) that resolve NO.
+- **Stage + code site:** `prediction-LLM-call` stage at `PREDICTION_PROMPT` step 4 aggregation (gate-visible per Step 3a map).
+- **Localized cells:** `by_tool_category=business (n=104, brier=0.3847)`, `by_outcome=True (n=95, brier=0.3386)`.
+- **Evidence sample (worst-miss rows):**
+  | question (truncated 80 char) | p_yes | outcome | evidence_finding |
+  |---|---|---|---|
+  | Will Elon Musk be on-stage at a bell ceremony commemorating SpaceX IPO? | 0.960 | 0 | good-evidence/bad-reasoning (market odds: "Leading. 92%. Elon Musk") |
+  | SpaceX IPO: Trading Halted for Volatility? | 0.930 | 0 | good-evidence/bad-reasoning (speculative: "SPCX is expected to experience trading halts") |
+  | Will Zohran Mamdani stream on Twitch again by June 12? | 0.970 | 0 | good-evidence/bad-reasoning (intent: "plans to launch a livestream series") |
+  | Will Elon Musk attend UFC Freedom 250? | 0.970 | 0 | good-evidence/bad-reasoning (intent: "Elon Musk is set to attend UFC Freedom 250") |
+  | Will Trump say "Memory" this week? | 0.960 | 0 | good-evidence/bad-reasoning (market odds: "Will Trump say Memory this week? 97%") |
+  | Will Trump post "China" on Truth Social this week? | 0.930 | 0 | good-evidence/bad-reasoning (past-extrapolation: prior Trump posts mentioning China) |
+  | Will Cam Skattebo attend UFC Freedom 250? | 0.960 | 0 | good-evidence/bad-reasoning (intent: "UFC Freedom 250 is scheduled") |
+  | Will Trump say "Six Seven" during G7 events? | 0.030 | 1 | bad/empty-evidence (generic snippets, not G7-specific) |
+- **Mechanism disrupted:** Added mandatory evidence-reliability screen to PREDICTION_PROMPT step 4 that (a) discards prediction-market-odds from polymarket.com/metaculus/etc. as circular self-referential evidence and (b) applies 40-60% materialization discount to forward-looking intent language; max_tokens raised 500->1500 so the full reasoning chain executes.
+- **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green, +57/-15 LOC pre-lint. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off.
+- **Status:** opened draft PR; PR-CI cached-replay pending on W-2.

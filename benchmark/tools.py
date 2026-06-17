@@ -100,6 +100,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v4 -- adds evidence-reliability screen (prediction-market-
+    # odds filter + forward-looking intent discount) to step 4 of PREDICTION_PROMPT, and raises
+    # max_tokens from 500 to 1500 so the full chain-of-thought executes before the JSON is emitted.
+    "superforcaster-polymarket-v4": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

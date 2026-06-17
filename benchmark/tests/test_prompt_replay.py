@@ -809,7 +809,15 @@ _FAMILY_TEMPLATES = {
     ],
     "rag": [("PREDICTION_PROMPT", {"USER_PROMPT": "q", "ADDITIONAL_INFORMATION": "a"})],
     "superforcaster": [
-        ("PREDICTION_PROMPT", {"question": "q", "today": "t", "sources": "s"}),
+        # ``market_prior`` is required by superforcaster-polymarket-v4 (the
+        # market-price anchor block, filled by the replay path via the module's
+        # format_market_prior) and tolerated as an unused placeholder by v1/v2/v3,
+        # so one fixture covers all four — mirroring how the replay path passes
+        # market_prior= to every superforcaster tool.
+        (
+            "PREDICTION_PROMPT",
+            {"question": "q", "today": "t", "sources": "s", "market_prior": "m"},
+        ),
     ],
     "factual_research": [
         # ``resolution_rules`` is required by factual_research-v2 (Polymarket

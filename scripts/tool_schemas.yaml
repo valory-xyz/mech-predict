@@ -104,6 +104,42 @@ defaults:
           - result
           - prompt
 
+  propose:
+    input:
+      type: object
+      description: JSON-encoded parameters for question generation
+      schema:
+        type: object
+        properties:
+          resolution_time:
+            type: integer
+            description: Unix timestamp of the market resolution date
+          num_questions:
+            type: integer
+            description: Number of questions to generate (default 1)
+        required:
+          - resolution_time
+    output:
+      type: object
+      description: A JSON object containing proposed questions and reasoning
+      schema:
+        type: object
+        properties:
+          requestId:
+            type: integer
+            description: Unique identifier for the request
+          result:
+            type: string
+            description: Result in JSON format as a string
+            example: "{\"questions\": {}, \"reasoning\": \"...\"}"
+          prompt:
+            type: string
+            description: The prompt passed to the tool.
+        required:
+          - requestId
+          - result
+          - prompt
+
 tool_kinds:
   close_market: resolve
   resolve-market-jury-v1: resolve
@@ -116,3 +152,4 @@ tool_kinds:
   corcel-completion: chat
   gemini-prediction: prediction
   gemini-completion: chat
+  propose-question: propose

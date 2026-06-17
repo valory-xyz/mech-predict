@@ -167,6 +167,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module="packages.nickcom007.customs.prediction_request_sme.prediction_request_sme",
         family="default",
     ),
+    # valory/propose_question -- generates prediction-market questions from recent
+    # news articles using a two-step LLM pipeline (story selection + measurable-
+    # state extraction + self-review). Output is {questions, reasoning}, NOT p_yes.
+    "propose-question": ToolSpec(
+        module="packages.valory.customs.propose_question.propose_question",
+        family="default",
+    ),
 }
 
 

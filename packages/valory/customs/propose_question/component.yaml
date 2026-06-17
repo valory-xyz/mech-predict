@@ -1,0 +1,29 @@
+name: propose_question
+author: valory
+version: 0.1.0
+type: custom
+description: Mech tool that proposes prediction-market questions from recent news
+  articles, using a two-step LLM pipeline with measurable-state extraction and self-review.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeic4s7syxr2m2q3wtta3pzkqmw4usib3ji5v6ziae2kxprz2swvoje
+  propose_question.py: bafybeihvlqh2x76cmbb7667o74ncgjmwet4g757nuxinorrwmn6wauh6re
+  tests/__init__.py: bafybeierlyi65bbyvrmmzse4s3j53ht54cpn3kwnt5ptgcwnqhuim25bvu
+  tests/test_propose_question.py: bafybeicacyhupszjjdxnp4re2dsi34jhiaovkyejq2mv6hmoysyj2m3tpy
+fingerprint_ignore_patterns: []
+entry_point: propose_question.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  requests:
+    version: ==2.32.5
+  gql:
+    version: '>=3.5.0,<3.6'
+  requests-toolbelt:
+    version: ==1.0.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'

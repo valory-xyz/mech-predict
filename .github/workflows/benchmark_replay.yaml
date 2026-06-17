@@ -38,12 +38,23 @@ jobs:
   replay:
     # For issue_comment: only run on PR comments starting with /benchmark, from authorized users
     # For workflow_dispatch: always run
+    #
+    # Authorized = a human MEMBER/OWNER/COLLABORATOR, OR the valory-coding-agent
+    # GitHub App bot. The bot is matched by its immutable numeric user id
+    # (272559038 = valory-coding-agent[bot]), NOT its login string: a login is
+    # only globally unique while the App lives, so if the App were ever deleted
+    # its slug — and thus the "valory-coding-agent[bot]" login — could be
+    # re-registered by someone else. The numeric id is never reused, so it
+    # can't be spoofed by a same-named app created later.
     if: >-
       github.event_name == 'workflow_dispatch'
       || (
         github.event.issue.pull_request
         && startsWith(github.event.comment.body, '/benchmark ')
-        && contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+        && (
+          contains(fromJSON('["MEMBER","OWNER","COLLABORATOR"]'), github.event.comment.author_association)
+          || github.event.comment.user.id == 272559038
+        )
       )
     runs-on: ubuntu-22.04
     # GitHub-hosted runner max (6h).

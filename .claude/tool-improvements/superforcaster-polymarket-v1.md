@@ -72,3 +72,4 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Mechanism disrupted:** Added mandatory evidence-reliability screen to PREDICTION_PROMPT step 4 that (a) discards prediction-market-odds from polymarket.com/metaculus/etc. as circular self-referential evidence and (b) applies 40-60% materialization discount to forward-looking intent language; max_tokens raised 500->1500 so the full reasoning chain executes.
 - **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green, +57/-15 LOC pre-lint. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off.
 - **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
+- **Benchmark 2026-06-17:** SHA `1930289a8956d677edd2544ecafc34f1bdae9133`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted

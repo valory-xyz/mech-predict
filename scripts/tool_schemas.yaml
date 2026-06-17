@@ -104,7 +104,7 @@ defaults:
           - result
           - prompt
 
-  propose:
+  question_generation:
     input:
       type: object
       description: JSON-encoded parameters for question generation
@@ -152,4 +152,4 @@ tool_kinds:
   corcel-completion: chat
   gemini-prediction: prediction
   gemini-completion: chat
-  propose-question: propose
+  propose-question: question_generation

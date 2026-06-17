@@ -1092,7 +1092,11 @@ class TestVllmCandidateBaselineGuard:
         :param tmp_path: pytest tmp_path fixture for the enriched dataset.
         """
         dataset = tmp_path / "dataset.jsonl"
-        _write_jsonl(dataset, [{"tool_name": "prediction-request-reasoning"}])
+        # A registered reasoning-family baseline: passes the baseline-registry
+        # check so execution reaches the superforcaster-family guard under test
+        # (the bare "prediction-request-reasoning" is unregistered and would trip
+        # the earlier registry check, masking the guard).
+        _write_jsonl(dataset, [{"tool_name": "prediction-request-reasoning-v1"}])
         with pytest.raises(ValueError, match="superforcaster-family baseline"):
             replay(
                 dataset=dataset,

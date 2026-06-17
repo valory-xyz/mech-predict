@@ -316,6 +316,23 @@ def test_run_ignores_requester_supplied_endpoint() -> None:
     assert mgr.call_args.args[1] == VLLM_ENDPOINT
 
 
+def test_run_uses_keychain_endpoint_override() -> None:
+    """A `finetuned_endpoint` KeyChain entry overrides the default base_url."""
+    override = "http://vllm.internal:8000/v1"
+    keychain = FakeKeyChain(
+        {"finetuned": "EMPTY", "finetuned_endpoint": override, "serperapi": "serp-key"}
+    )
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager") as mgr,
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        run(tool=TOOL_BASE, prompt=_bare_prompt("Will X happen?"), api_keys=keychain)
+    # VLLMClientManager(api_key, endpoint) — endpoint is the 2nd positional arg.
+    assert mgr.call_args.args[1] == override
+
+
 def test_run_raises_on_unparseable_completion() -> None:
     """An unparseable completion surfaces a 'parseable p_yes' error result."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})

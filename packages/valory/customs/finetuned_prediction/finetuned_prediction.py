@@ -109,13 +109,19 @@ MODEL_BY_TOOL = {
 }
 
 # Self-hosted vLLM OpenAI-compatible endpoint. One server hosts both models, so
-# the two modes share it.
+# the two modes share it. This is only the DEFAULT: a deployment points the tool
+# at its own server via api_keys[API_KEYS_ENDPOINT_SERVICE] (the KeyChain is the
+# only config channel that reaches run() in production — env vars do not, since
+# the component runs as published-from-IPFS bytes). The endpoint rides the same
+# channel as the key rather than an env var for that reason.
 VLLM_ENDPOINT = "http://localhost:8000/v1"
 
 # vLLM does not require a real key by default; the OpenAI client still demands a
 # non-empty string. A secured gateway can override via api_keys["finetuned"].
 DUMMY_API_KEY = "EMPTY"
 API_KEYS_SERVICE = "finetuned"
+# KeyChain service carrying the vLLM base_url. Absent/empty → VLLM_ENDPOINT.
+API_KEYS_ENDPOINT_SERVICE = "finetuned_endpoint"
 
 
 def resolve_model(tool: str) -> str:
@@ -673,11 +679,13 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     Expected kwargs (supplied by the mech task-execution layer):
       - tool:        one of ALLOWED_TOOLS — selects base vs fine-tuned MODE.
       - prompt:      the bare prediction-market request prompt.
-      - api_keys:    KeyChain; `serperapi` (required), `finetuned` (optional).
+      - api_keys:    KeyChain; `serperapi` (required), `finetuned` (optional),
+                     `finetuned_endpoint` (optional vLLM base_url override).
       - delivery_rate, counter_callback: mech cost-accounting plumbing.
 
-    The served model is fixed per mode (MODEL_BY_TOOL[tool]) and the endpoint is
-    the VLLM_ENDPOINT constant; the requester chooses neither.
+    The served model is fixed per mode (MODEL_BY_TOOL[tool]); the endpoint comes
+    from api_keys[`finetuned_endpoint`], falling back to the VLLM_ENDPOINT
+    constant. The requester chooses neither.
 
     :param kwargs: the mech task kwargs described above.
     :return: the mech response tuple, or the max-cost float for delivery_rate=0.
@@ -700,6 +708,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     api_keys = kwargs["api_keys"]
     llm_api_key = _optional_key(api_keys, API_KEYS_SERVICE) or DUMMY_API_KEY
+    base_url = _optional_key(api_keys, API_KEYS_ENDPOINT_SERVICE) or VLLM_ENDPOINT
 
     prompt = kwargs["prompt"]
     temperature = float(kwargs.get("temperature", DEFAULT_SETTINGS["temperature"]))
@@ -716,7 +725,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
     messages = build_messages(content)
 
-    with VLLMClientManager(llm_api_key, VLLM_ENDPOINT) as llm_client:
+    with VLLMClientManager(llm_api_key, base_url) as llm_client:
         completion, counter_callback = generate_prediction_with_retry(
             client=llm_client,
             model=model,

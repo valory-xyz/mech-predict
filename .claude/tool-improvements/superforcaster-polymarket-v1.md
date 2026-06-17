@@ -73,3 +73,4 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green, +57/-15 LOC pre-lint. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off.
 - **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
 - **Benchmark 2026-06-17:** SHA `1930289a8956d677edd2544ecafc34f1bdae9133`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
+- **Benchmark 2026-06-17:** SHA `870750ce3a7540aac6a08c53a2f07b069c635036`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted

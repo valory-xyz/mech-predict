@@ -207,6 +207,11 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         "google_engine_id": [os.environ.get("GOOGLE_ENGINE_ID", "")],
         "serperapi": [os.environ.get("SERPER_API_KEY", "")],
         "openrouter": [os.environ.get("OPENROUTER_API_KEY", "")],
+        # vLLM-backed finetuned_prediction tool: optional gateway key + the
+        # base_url override. Empty strings fall back to the tool's DUMMY_API_KEY
+        # / VLLM_ENDPOINT defaults via its `or` guards.
+        "finetuned": [os.environ.get("VLLM_API_KEY", "")],
+        "finetuned_endpoint": [os.environ.get("VLLM_ENDPOINT", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
         "return_source_content": ["true" if return_source_content else "false"],
     }

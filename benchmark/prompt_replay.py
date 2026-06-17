@@ -1594,10 +1594,25 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                         ADDITIONAL_INFORMATION=row["extracted_additional_information"],
                     )
                 elif is_superforcaster:
+                    # Variants that anchor on the market price (e.g.
+                    # superforcaster-polymarket-v4) expose format_market_prior
+                    # and carry a {market_prior} placeholder; render the block
+                    # from the row's recorded price. Variants without the
+                    # placeholder (v1/v2/v3) ignore the extra kwarg, so this is
+                    # a no-op for them.
+                    format_prior = getattr(
+                        candidate_module, "format_market_prior", None
+                    )
+                    market_prior = (
+                        format_prior(row.get("market_prob_at_prediction"))
+                        if callable(format_prior)
+                        else ""
+                    )
                     formatted_prompt = PREDICTION_PROMPT.format(
                         question=row["extracted_user_prompt"],
                         today=row.get("extracted_today", ""),
                         sources=row["extracted_additional_information"],
+                        market_prior=market_prior,
                     )
                 elif is_factual_research:
                     formatted_prompt = PREDICTION_PROMPT.format(

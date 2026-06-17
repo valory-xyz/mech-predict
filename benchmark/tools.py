@@ -100,6 +100,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v4 — variant of v1 that anchors the
+    # forecast on the market-implied probability as an explicit prior. Same
+    # superforcaster PREDICTION_PROMPT schema/family as its parent; the replay
+    # path fills the {market_prior} placeholder via the module's
+    # format_market_prior helper.
+    "superforcaster-polymarket-v4": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

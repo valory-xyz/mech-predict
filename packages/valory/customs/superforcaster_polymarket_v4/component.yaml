@@ -1,0 +1,28 @@
+name: superforcaster_polymarket_v4
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Variant of superforcaster-polymarket-v1
+  that anchors the forecast on the market-implied probability (passed alongside the
+  request) as an explicit base rate / prior, using the Serper API and LLMs.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v4.py: bafybeid5qxwggjl4d5egeqm3qjlmku5ws4amzogzkybwkopl67kn77zy7q
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster.py: bafybeifdeiw6f54nldkkt3hgdyda4sth3kpukpfxlsmdy4xjtyjgxz3bti
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v4.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5

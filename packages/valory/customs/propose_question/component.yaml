@@ -10,7 +10,7 @@ fingerprint:
   __init__.py: bafybeic4s7syxr2m2q3wtta3pzkqmw4usib3ji5v6ziae2kxprz2swvoje
   propose_question.py: bafybeiactuhrqoedvn4h2lbk6b2mol3sop7k4shpgipii2ktoakomlz5ei
   tests/__init__.py: bafybeierlyi65bbyvrmmzse4s3j53ht54cpn3kwnt5ptgcwnqhuim25bvu
-  tests/test_propose_question.py: bafybeicemj2dphavks3nmy7bjxc3hbxx3zrrwfhmdkjoq7dxwj6czb32nq
+  tests/test_propose_question.py: bafybeifkum73ur5rnmwbmd5gaylhp5i5sausoysbcsxfr3cifqeripj2qy
 fingerprint_ignore_patterns: []
 entry_point: propose_question.py
 callable: run

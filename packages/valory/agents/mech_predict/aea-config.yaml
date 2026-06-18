@@ -70,7 +70,7 @@ customs:
 - nickcom007/prediction_request_sme:0.1.0:bafybeifsk4og24t22agcrj7mm6fz3wxwfbdg554yjhc6odpxal5ofg22ti
 - valory/factual_research:0.1.0:bafybeidcxmqemvzm7cz2ydyjsmu53zflsqpcj2gpco5kwn3ldvf22rqx4i
 - valory/factual_research_v3:0.1.0:bafybeiboyjc2u42lcsi7er6hywwdz27ae6r57y3jnqck5nk7tj4qosoyqa
-- valory/propose_question:0.1.0:bafybeiamc5ono266servtpo3hrbzjtttdehj3o5z3bsmvhvjhcizxkklui
+- valory/propose_question:0.1.0:bafybeiccetbcycilqs4zkcxmkjehkjrpmugn3ulolb6m2zjz6ghm5s2swa
 default_ledger: ethereum
 required_ledgers:
 - ethereum

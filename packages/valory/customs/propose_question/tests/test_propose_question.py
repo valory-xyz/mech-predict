@@ -22,13 +22,13 @@
 import inspect
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import packages.valory.customs.propose_question.propose_question as module
 from packages.valory.customs.propose_question.propose_question import (
@@ -258,9 +258,7 @@ class TestFindNearDuplicate:
     def test_exact_duplicate_detected(self) -> None:
         """Near-identical question should be flagged as a duplicate."""
         existing = ["Will retail sales percentage change exceed forecast?"]
-        candidate = (
-            "Will retail sales percentage change exceed monthly forecast?"
-        )
+        candidate = "Will retail sales percentage change exceed monthly forecast?"
         hit = find_near_duplicate(candidate, existing)
         # Jaccard ~0.83 >> threshold 0.55 -- must be detected.
         assert hit is not None
@@ -1098,27 +1096,24 @@ class TestValidatequestionDatesAdditional:
         """A date more than 365 days beyond the deadline is rejected."""
         resolution_ts = int(time.time()) + 86400 * 30
         # Construct a date 366 days after the deadline.
-        far_future = datetime.fromtimestamp(
-            resolution_ts, tz=timezone.utc
-        ) + timedelta(days=366)
-        far_str = format_utc_timestamp(int(far_future.timestamp()))
-        question = (
-            f"Will something happen on {far_str}, according to Reuters?"
+        far_future = datetime.fromtimestamp(resolution_ts, tz=timezone.utc) + timedelta(
+            days=366
         )
+        far_str = format_utc_timestamp(int(far_future.timestamp()))
+        question = f"Will something happen on {far_str}, according to Reuters?"
         result = validate_question_dates(question, resolution_ts)
         assert result is not None
         assert "too far" in result
 
     def test_unparseable_date_rejected(self) -> None:
-        """A date string that passes the format regex but fails strptime is rejected.
+        r"""A date string that passes the format regex but fails strptime is rejected.
 
         'February 30, 2026' passes [A-Z][a-z]+ \\d{1,2}, \\d{4} but is
         not a real calendar date, so strptime raises ValueError.
         """
         resolution_ts = int(time.time()) + 86400 * 365
         question = (
-            "Will something happen on February 30, 2026, "
-            "according to Reuters?"
+            "Will something happen on February 30, 2026, " "according to Reuters?"
         )
         result = validate_question_dates(question, resolution_ts)
         assert result is not None
@@ -1127,9 +1122,7 @@ class TestValidatequestionDatesAdditional:
     def test_non_date_number_word_year_not_flagged(self) -> None:
         """'cut rates 2 times 2026' must NOT be mistakenly matched as a date."""
         resolution_ts = int(time.time()) + 86400 * 30
-        question = (
-            "Will the Fed cut rates 2 times 2026, according to Reuters?"
-        )
+        question = "Will the Fed cut rates 2 times 2026, according to Reuters?"
         result = validate_question_dates(question, resolution_ts)
         assert result is None
 
@@ -1150,7 +1143,7 @@ class TestWithKeyRotation:
         return keys
 
     def test_rate_limit_rotates_and_retries(self) -> None:
-        """RateLimitError causes key rotation; second call succeeds."""
+        """A rate-limit error triggers key rotation; the retried call succeeds."""
         import openai as _openai
 
         from packages.valory.customs.propose_question.propose_question import (
@@ -1231,9 +1224,7 @@ def _base_run_patches(
         "organic": [{"title": "hit", "snippet": "data"}]
     }
     openai_client = MagicMock()
-    mock_client_mgr.return_value.__enter__ = MagicMock(
-        return_value=openai_client
-    )
+    mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
     mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
     openai_client.moderations.create.return_value = _make_moderation_clean()
     openai_client.chat.completions.create.side_effect = extra_completions
@@ -1339,14 +1330,12 @@ class TestRunAdditionalBranches:
         mock_articles.return_value = [SAMPLE_ARTICLE]
         mock_filter.return_value = [SAMPLE_ARTICLE]
         openai_client = MagicMock()
-        mock_client_mgr.return_value.__enter__ = MagicMock(
-            return_value=openai_client
-        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
         # First moderation call (article pre-filter) passes; second flags prompt.
         openai_client.moderations.create.side_effect = [
-            _make_moderation_clean(),   # article pre-filter
-            _make_moderation_flagged(), # story-selection prompt
+            _make_moderation_clean(),  # article pre-filter
+            _make_moderation_flagged(),  # story-selection prompt
         ]
         result = run(
             tool="propose-question",
@@ -1383,9 +1372,7 @@ class TestRunAdditionalBranches:
             "organic": [{"title": "h", "snippet": "s"}]
         }
         openai_client = MagicMock()
-        mock_client_mgr.return_value.__enter__ = MagicMock(
-            return_value=openai_client
-        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
         judge_resp = _make_openai_completion(
             json.dumps({"answer": "YES", "reason": "ok"})
@@ -1393,9 +1380,9 @@ class TestRunAdditionalBranches:
         # Moderations: article pre-filter clean, story prompt clean,
         # propose prompt flagged.
         openai_client.moderations.create.side_effect = [
-            _make_moderation_clean(),   # article pre-filter
-            _make_moderation_clean(),   # story-selection prompt
-            _make_moderation_flagged(), # question-proposal prompt
+            _make_moderation_clean(),  # article pre-filter
+            _make_moderation_clean(),  # story-selection prompt
+            _make_moderation_flagged(),  # question-proposal prompt
         ]
         openai_client.chat.completions.create.side_effect = [
             _make_openai_completion(STORY_SELECTION_RESPONSE),
@@ -1464,13 +1451,9 @@ class TestRunAdditionalBranches:
             json.dumps({"answer": "YES", "reason": "ok"})
         )
         openai_client = MagicMock()
-        mock_client_mgr.return_value.__enter__ = MagicMock(
-            return_value=openai_client
-        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
-        openai_client.moderations.create.return_value = (
-            _make_moderation_clean()
-        )
+        openai_client.moderations.create.return_value = _make_moderation_clean()
         openai_client.chat.completions.create.side_effect = [
             _make_openai_completion(STORY_SELECTION_RESPONSE),
             _make_openai_completion(EXTRACT_STATE_RESPONSE),
@@ -1528,9 +1511,7 @@ class TestRunAdditionalBranches:
                     {
                         "question": dup_question,
                         "deadline_date": format_utc_timestamp(FUTURE_TS),
-                        "earliest_plausible_date": format_utc_timestamp(
-                            FUTURE_TS
-                        ),
+                        "earliest_plausible_date": format_utc_timestamp(FUTURE_TS),
                         "deadline_is_feasible": True,
                         "process_stage_named": True,
                         "figure_is_directly_published": True,
@@ -1548,13 +1529,9 @@ class TestRunAdditionalBranches:
             json.dumps({"answer": "YES", "reason": "ok"})
         )
         openai_client = MagicMock()
-        mock_client_mgr.return_value.__enter__ = MagicMock(
-            return_value=openai_client
-        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
-        openai_client.moderations.create.return_value = (
-            _make_moderation_clean()
-        )
+        openai_client.moderations.create.return_value = _make_moderation_clean()
         openai_client.chat.completions.create.side_effect = [
             _make_openai_completion(STORY_SELECTION_RESPONSE),
             _make_openai_completion(EXTRACT_STATE_RESPONSE),

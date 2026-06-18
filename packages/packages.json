@@ -25,8 +25,9 @@
         "custom/valory/factual_research_v2/0.1.0": "bafybeidgo3jesmvuwa64ooij7mywk7hf7ls5len2sf7cbcjwt3t6r5u6qm",
         "custom/valory/factual_research_v3/0.1.0": "bafybeiboyjc2u42lcsi7er6hywwdz27ae6r57y3jnqck5nk7tj4qosoyqa",
         "custom/valory/finetuned_prediction/0.1.0": "bafybeifetvtalxnw3y7epqspyxotrls4wl7eoffsiaglxp52nca7ozurv4",
-        "agent/valory/mech_predict/0.1.0": "bafybeib6vgyz52zcvjce6sydak6nydqjwdvlswqhdr6c4fcqopljsfrx7q",
-        "service/valory/mech_predict/0.1.0": "bafybeigjv5fjei73hfj5uf4veaajsl2mfjl3c6gmbtiafh4kyohbm5w5nm"
+        "custom/valory/propose_question/0.1.0": "bafybeiccetbcycilqs4zkcxmkjehkjrpmugn3ulolb6m2zjz6ghm5s2swa",
+        "agent/valory/mech_predict/0.1.0": "bafybeignbzm4mmodm6ggavzuphdzq3z4znq75x6a6elkpnizz2r6mscy2m",
+        "service/valory/mech_predict/0.1.0": "bafybeiczjcmbzwbgaszsju567nuyr46tcj3xxic43mj44x66t7jwsv3d7y"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
@@ -65,8 +66,8 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeihc4ruh25s7wuunfy2b3k2n4eypyhvtry3usgom44wsymagbcr3ki",
         "skill/valory/termination_abci/0.1.0": "bafybeibnnzry5kknci3z46gcjgutv4jid3ir6xn6a5adq3tx6v2e25augq",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeiaefr3eiajklnb6m4jtl7rpxr5t2lmrpizfy7gqkjem3qiewo7cz4",
-        "skill/valory/mech_abci/0.1.0": "bafybeicaxrvsspr5pablbah57yhwfcms3nengun67eozbhemzn34cqzqde",
-        "skill/valory/task_execution/0.1.0": "bafybeibgegj5oajp3sqecsyf6jovlii4u63eatm33sf4y56s5zd7vq7gf4",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeifimk7xd34j6buty4r37ny7rkbnduaavmaue6lzz5ftvris5vzfja"
+        "skill/valory/mech_abci/0.1.0": "bafybeidjjknxrn4ldakdeq7azuffe4a76oi2vladmjkb57z3fmeg3z5g6a",
+        "skill/valory/task_execution/0.1.0": "bafybeibhf7ou4cqn4v65wptogxckolzpalnrzy4g7romb63jpxe3qrrexe",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeihskhun5iy3qd2kyslg4rtppiupx6rpikklhmci5b5fjgr65ynpzq"
     }
 }

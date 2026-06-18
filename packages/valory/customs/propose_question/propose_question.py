@@ -20,6 +20,7 @@
 
 import functools
 import json
+import logging
 import random
 import re
 import uuid
@@ -32,6 +33,8 @@ from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
 from openai import OpenAI
 from pydantic import BaseModel
+
+_logger = logging.getLogger(__name__)
 
 NEWSAPI_TOP_HEADLINES_URL = "https://newsapi.org/v2/top-headlines"
 NEWSAPI_DEFAULT_NEWS_SOURCES = [
@@ -465,7 +468,15 @@ def validate_question_dates(question: str, resolution_ts: int) -> Optional[str]:
         )
 
     required_fmt_pattern = r"[A-Z][a-z]+ \d{1,2}, \d{4}"
-    any_date_pattern = r"(\w+ \d{1,2},? \d{4}|\d{1,2} \w+ \d{4})"
+    _months = (
+        r"(?:January|February|March|April|May|June|July|August"
+        r"|September|October|November|December)"
+    )
+    # Match month-first (with or without comma) and day-before-month orderings,
+    # both anchored to real month names so "cut rates 2 times 2026" is NOT matched.
+    any_date_pattern = (
+        r"(?:" + _months + r" \d{1,2},? \d{4}|\b\d{1,2} " + _months + r" \d{4}\b)"
+    )
     for match in re.findall(any_date_pattern, question):
         if not re.fullmatch(required_fmt_pattern, match):
             return (
@@ -593,10 +604,10 @@ TOOL_TO_ENGINE = {tool: "gpt-4.1-2025-04-14" for tool in ALLOWED_TOOLS}
 # measurable-state extraction). Cuts cost by ~50% with no observable
 # quality loss on classification tasks.
 LIGHT_MODEL = "gpt-4.1-mini-2025-04-14"
-# Representative number of full-model LLM calls per invocation (story
-# selection + state extraction + question proposal + self-review). The
-# verify-state calls are additional but use the same engine; 4 gives a
-# conservative upper bound for the max-cost estimate.
+# Representative number of full-model (TOOL_TO_ENGINE) LLM calls per invocation.
+# Only question-proposal and self-review use the full engine; story-selection,
+# state-extraction, and verify-state all use LIGHT_MODEL. Billing 4 full-engine
+# calls is an intentional conservative over-estimate for cost budgeting.
 N_MODEL_CALLS = 4
 DEFAULT_DELIVERY_RATE = 100
 
@@ -633,7 +644,7 @@ def gather_articles(
         )
         return None
     response_data = json.loads(response.content.decode("utf-8"))
-    return response_data["articles"]
+    return response_data.get("articles")
 
 
 def gather_latest_questions(subgraph_api_key: str) -> Optional[List[str]]:
@@ -647,9 +658,12 @@ def gather_latest_questions(subgraph_api_key: str) -> Optional[List[str]]:
         "creator_in": FPMM_CREATORS,
         "first": MAX_LATEST_QUESTIONS,
     }
-    response = gql_client.execute(gql(FPMMS_QUERY), variable_values=variables)
-    items = response.get("fixedProductMarketMakers", [])
-    return [q["question"]["title"] for q in items]
+    try:
+        response = gql_client.execute(gql(FPMMS_QUERY), variable_values=variables)
+        items = response.get("fixedProductMarketMakers", [])
+        return [q["question"]["title"] for q in items]
+    except Exception:  # noqa: BLE001
+        return None
 
 
 DEDUP_STOPWORDS = frozenset(
@@ -781,9 +795,11 @@ def scrape_url(serper_api_key: str, url: str) -> Optional[dict]:
         scraped_data = response.json()
         print(f"Successfully scraped URL: {url}")
         return scraped_data
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        _logger.warning("scrape_url request error for %s: %s", url, exc)
         return None
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _logger.warning("scrape_url JSON decode error for %s: %s", url, exc)
         return None
 
 
@@ -846,9 +862,7 @@ def verify_state_is_resolvable(
         return True, "fail_open_serper_error"
 
     if not organic:
-        result = (False, "no_hits")
-        _cache_put(cache_key, result)
-        return result
+        return False, "no_hits"
 
     snippets = "\n".join(
         f"- TITLE: {o.get('title', '')}\n  SNIPPET: {o.get('snippet', '')}"
@@ -972,6 +986,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             )
         if num_questions is None:
             num_questions = 1
+        num_questions = int(num_questions)
 
         # Gather latest opened questions from input or from TheGraph.
         latest_questions = kwargs.get("latest_questions")
@@ -1036,7 +1051,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     mod = openai_client.moderations.create(input=text)
                     if not mod.results[0].flagged:
                         clean_articles.append(article)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("Moderation pre-filter error (fail-open): %s", exc)
                     clean_articles.append(article)
             n_dropped = len(articles) - len(clean_articles)
             if n_dropped > 0:
@@ -1114,7 +1130,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     },
                 },
             )
-            if counter_callback:
+            if counter_callback and response.usage:
                 counter_callback(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
@@ -1142,7 +1158,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 )
             article = articles[article_id]
             reasoning = (
-                f"The article {article['title']!r} "
+                f"The article {article.get('title', '')!r} "
                 f"({article.get('author', '')!r}) has been selected to generate "
                 f"prediction market questions because: {response_data['reasoning']}"
             )
@@ -1168,7 +1184,16 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # Extract measurable states -- constrains the LLM to identify what CAN
         # be measured before framing a question, breaking the default
         # "Will X announce Y?" prior.
-        article_text = scrape_result["text"][:ARTICLE_TEXT_MAX_CHARS]
+        _scraped_text = scrape_result.get("text", "")
+        if not _scraped_text:
+            return (
+                json.dumps({"error": "Scraped article has no text.", "tool": tool}),
+                None,
+                None,
+                counter_callback,
+                None,
+            )
+        article_text = _scraped_text[:ARTICLE_TEXT_MAX_CHARS]
         with OpenAIClientManager(kwargs["api_keys"]["openai"]) as openai_client:
             model = LIGHT_MODEL
             extract_prompt = EXTRACT_STATE_PROMPT.format(article=article_text)
@@ -1195,7 +1220,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     },
                 },
             )
-            if counter_callback:
+            if counter_callback and extract_response.usage:
                 counter_callback(
                     input_tokens=extract_response.usage.prompt_tokens,
                     output_tokens=extract_response.usage.completion_tokens,
@@ -1308,7 +1333,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     },
                 },
             )
-            if counter_callback:
+            if counter_callback and response.usage:
                 counter_callback(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
@@ -1325,7 +1350,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             review_prompt = SELF_REVIEW_PROMPT.format(
                 questions=json.dumps(questions, indent=2),
                 latest_questions=latest_questions_string,
-                article=f"{scrape_result['text'][:ARTICLE_TEXT_MAX_CHARS]}",
+                article=f"{scrape_result.get('text', '')[:ARTICLE_TEXT_MAX_CHARS]}",
                 today=format_utc_timestamp(
                     int(datetime.now(tz=timezone.utc).timestamp())
                 ),
@@ -1354,7 +1379,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     },
                 },
             )
-            if counter_callback:
+            if counter_callback and review_response.usage:
                 counter_callback(
                     input_tokens=review_response.usage.prompt_tokens,
                     output_tokens=review_response.usage.completion_tokens,
@@ -1369,15 +1394,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         rejected_questions = []
         for rev in reviews:
             checks = [
-                rev.get("deadline_is_feasible", True),
-                rev.get("process_stage_named", True),
-                rev.get("figure_is_directly_published", True),
-                rev.get("authority_can_act_in_time", True),
+                rev.get("deadline_is_feasible", False),
+                rev.get("process_stage_named", False),
+                rev.get("figure_is_directly_published", False),
+                rev.get("authority_can_act_in_time", False),
             ]
             passes = sum(1 for c in checks if c)
-            date_ok = rev.get("date_format_valid", True)
-            not_dup = rev.get("not_a_duplicate", True)
-            window_ok = rev.get("window_bound_event", True)
+            date_ok = rev.get("date_format_valid", False)
+            not_dup = rev.get("not_a_duplicate", False)
+            window_ok = rev.get("window_bound_event", False)
             if passes == len(checks) and date_ok and not_dup and window_ok:
                 accepted_questions.append(rev["question"])
             else:

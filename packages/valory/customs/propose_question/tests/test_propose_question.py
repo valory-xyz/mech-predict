@@ -27,6 +27,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import packages.valory.customs.propose_question.propose_question as module
 from packages.valory.customs.propose_question.propose_question import (
@@ -211,18 +213,26 @@ class TestFilterDuplicateArticles:
         assert result == articles
 
     def test_highly_similar_article_dropped(self) -> None:
-        """Article with high Jaccard overlap with existing should be dropped."""
+        """Article with high Jaccard overlap with existing should be dropped.
+
+        Uses two articles so the safety valve does not force-keep the similar
+        one (min_keep_fraction * 2 = 1, so dropping one still satisfies it).
+        """
         existing = ["Will inflation rate exceed five percent in the economy?"]
         articles = [
             {
                 "title": "inflation rate economy percent",
                 "description": "economy inflation five percent threshold",
-            }
+            },
+            {
+                "title": "SpaceX launches rocket to Moon",
+                "description": "space mission launch",
+            },
         ]
         result = filter_duplicate_articles(articles, existing, threshold=0.40)
-        # May or may not drop depending on Jaccard; safety valve ensures at
-        # least min_keep_fraction are kept
-        assert isinstance(result, list)
+        titles = [a["title"] for a in result]
+        assert "SpaceX launches rocket to Moon" in titles
+        assert "inflation rate economy percent" not in titles
 
     def test_safety_valve_keeps_minimum(self) -> None:
         """Safety valve keeps at least min_keep_fraction articles."""
@@ -246,12 +256,17 @@ class TestFindNearDuplicate:
     """Tests for find_near_duplicate."""
 
     def test_exact_duplicate_detected(self) -> None:
-        """Near-identical question should be flagged."""
+        """Near-identical question should be flagged as a duplicate."""
         existing = ["Will retail sales percentage change exceed forecast?"]
-        candidate = "Will retail sales percentage change exceed monthly forecast?"
+        candidate = (
+            "Will retail sales percentage change exceed monthly forecast?"
+        )
         hit = find_near_duplicate(candidate, existing)
-        # May or may not hit depending on Jaccard threshold
-        assert hit is None or isinstance(hit, tuple)
+        # Jaccard ~0.83 >> threshold 0.55 -- must be detected.
+        assert hit is not None
+        matched, score = hit
+        assert matched == existing[0]
+        assert score >= 0.55
 
     def test_no_duplicate_for_different_question(self) -> None:
         """Clearly different question should not be flagged."""
@@ -1069,3 +1084,490 @@ class TestMaxCostBranch:
         """N_MODEL_CALLS must be a positive integer."""
         assert isinstance(N_MODEL_CALLS, int)
         assert N_MODEL_CALLS > 0
+
+
+# ---------------------------------------------------------------------------
+# validate_question_dates -- additional branches
+# ---------------------------------------------------------------------------
+
+
+class TestValidatequestionDatesAdditional:
+    """Additional branches for validate_question_dates."""
+
+    def test_too_far_future_rejected(self) -> None:
+        """A date more than 365 days beyond the deadline is rejected."""
+        resolution_ts = int(time.time()) + 86400 * 30
+        # Construct a date 366 days after the deadline.
+        far_future = datetime.fromtimestamp(
+            resolution_ts, tz=timezone.utc
+        ) + timedelta(days=366)
+        far_str = format_utc_timestamp(int(far_future.timestamp()))
+        question = (
+            f"Will something happen on {far_str}, according to Reuters?"
+        )
+        result = validate_question_dates(question, resolution_ts)
+        assert result is not None
+        assert "too far" in result
+
+    def test_unparseable_date_rejected(self) -> None:
+        """A date string that passes the format regex but fails strptime is rejected.
+
+        'February 30, 2026' passes [A-Z][a-z]+ \\d{1,2}, \\d{4} but is
+        not a real calendar date, so strptime raises ValueError.
+        """
+        resolution_ts = int(time.time()) + 86400 * 365
+        question = (
+            "Will something happen on February 30, 2026, "
+            "according to Reuters?"
+        )
+        result = validate_question_dates(question, resolution_ts)
+        assert result is not None
+        assert "could not be parsed" in result
+
+    def test_non_date_number_word_year_not_flagged(self) -> None:
+        """'cut rates 2 times 2026' must NOT be mistakenly matched as a date."""
+        resolution_ts = int(time.time()) + 86400 * 30
+        question = (
+            "Will the Fed cut rates 2 times 2026, according to Reuters?"
+        )
+        result = validate_question_dates(question, resolution_ts)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# with_key_rotation -- key rotation behavior
+# ---------------------------------------------------------------------------
+
+
+class TestWithKeyRotation:
+    """Tests for the with_key_rotation decorator."""
+
+    def _make_keys(self, n_openai: int = 2) -> MagicMock:
+        """Build a minimal KeyChain-like mock."""
+        keys = MagicMock()
+        keys.max_retries.return_value = {"openai": n_openai}
+        keys.__add__ = lambda self, other: other  # for tuple concat in decorator
+        return keys
+
+    def test_rate_limit_rotates_and_retries(self) -> None:
+        """RateLimitError causes key rotation; second call succeeds."""
+        import openai as _openai
+
+        from packages.valory.customs.propose_question.propose_question import (
+            with_key_rotation,
+        )
+
+        call_count = [0]
+
+        @with_key_rotation
+        def fake_tool(**kwargs: Any) -> tuple:
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise _openai.RateLimitError(
+                    "rate limit",
+                    response=MagicMock(
+                        status_code=429,
+                        headers={},
+                        json=lambda: {},
+                    ),
+                    body={},
+                )
+            return ("ok", None, None, None, None)
+
+        keys = self._make_keys(n_openai=2)
+        result = fake_tool(api_keys=keys)
+        assert result[0] == "ok"
+        keys.rotate.assert_called_once_with("openai")
+        assert call_count[0] == 2
+
+    def test_retries_exhausted_reraises(self) -> None:
+        """When all keys exhausted, RateLimitError propagates."""
+        import openai as _openai
+
+        from packages.valory.customs.propose_question.propose_question import (
+            with_key_rotation,
+        )
+
+        @with_key_rotation
+        def always_rate_limit(**kwargs: Any) -> tuple:
+            raise _openai.RateLimitError(
+                "rate limit",
+                response=MagicMock(
+                    status_code=429,
+                    headers={},
+                    json=lambda: {},
+                ),
+                body={},
+            )
+
+        keys = self._make_keys(n_openai=1)
+        keys.max_retries.return_value = {"openai": 1}
+        with pytest.raises(_openai.RateLimitError):
+            always_rate_limit(api_keys=keys)
+
+
+# ---------------------------------------------------------------------------
+# run() -- additional branches (invalid article_id, moderation flags,
+#           in-pipeline date rejection, in-pipeline dedup rejection)
+# ---------------------------------------------------------------------------
+
+
+def _base_run_patches(
+    mock_serper: MagicMock,
+    mock_client_mgr: MagicMock,
+    mock_scrape: MagicMock,
+    mock_filter: MagicMock,
+    mock_q: MagicMock,
+    mock_articles: MagicMock,
+    extra_completions: list,
+) -> MagicMock:
+    """Wire standard mocks for a run() invocation up to the first LLM call."""
+    mock_q.return_value = ["Will X happen?"]
+    mock_articles.return_value = [SAMPLE_ARTICLE]
+    mock_filter.return_value = [SAMPLE_ARTICLE]
+    mock_scrape.return_value = {"text": "full article body here"}
+    mock_serper.return_value.status_code = 200
+    mock_serper.return_value.json.return_value = {
+        "organic": [{"title": "hit", "snippet": "data"}]
+    }
+    openai_client = MagicMock()
+    mock_client_mgr.return_value.__enter__ = MagicMock(
+        return_value=openai_client
+    )
+    mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+    openai_client.moderations.create.return_value = _make_moderation_clean()
+    openai_client.chat.completions.create.side_effect = extra_completions
+    return openai_client
+
+
+class TestRunAdditionalBranches:
+    """Additional run() branches not covered by existing tests."""
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
+    def test_invalid_article_id_out_of_range(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """LLM returning out-of-range article_id produces an error tuple."""
+        bad_selection = json.dumps(
+            {"topic": "finance", "article_id": 999, "reasoning": "x"}
+        )
+        _base_run_patches(
+            mock_serper,
+            mock_client_mgr,
+            mock_scrape,
+            mock_filter,
+            mock_q,
+            mock_articles,
+            extra_completions=[
+                _make_openai_completion(bad_selection),
+            ],
+        )
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "article_id" in data["error"]
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
+    def test_invalid_article_id_non_int(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """LLM returning non-int article_id produces an error tuple."""
+        bad_selection = json.dumps(
+            {"topic": "finance", "article_id": "abc", "reasoning": "x"}
+        )
+        _base_run_patches(
+            mock_serper,
+            mock_client_mgr,
+            mock_scrape,
+            mock_filter,
+            mock_q,
+            mock_articles,
+            extra_completions=[
+                _make_openai_completion(bad_selection),
+            ],
+        )
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "article_id" in data["error"]
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    def test_story_selection_prompt_moderation_flagged(
+        self,
+        mock_client_mgr: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """Story-selection prompt flagged by moderation returns error."""
+        mock_q.return_value = ["Will X happen?"]
+        mock_articles.return_value = [SAMPLE_ARTICLE]
+        mock_filter.return_value = [SAMPLE_ARTICLE]
+        openai_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(
+            return_value=openai_client
+        )
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        # First moderation call (article pre-filter) passes; second flags prompt.
+        openai_client.moderations.create.side_effect = [
+            _make_moderation_clean(),   # article pre-filter
+            _make_moderation_flagged(), # story-selection prompt
+        ]
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "moderation" in data["error"].lower()
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
+    def test_propose_prompt_moderation_flagged(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """Question-proposal prompt flagged by moderation returns error."""
+        mock_q.return_value = ["Will X happen?"]
+        mock_articles.return_value = [SAMPLE_ARTICLE]
+        mock_filter.return_value = [SAMPLE_ARTICLE]
+        mock_scrape.return_value = {"text": "article body text"}
+        mock_serper.return_value.status_code = 200
+        mock_serper.return_value.json.return_value = {
+            "organic": [{"title": "h", "snippet": "s"}]
+        }
+        openai_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(
+            return_value=openai_client
+        )
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        judge_resp = _make_openai_completion(
+            json.dumps({"answer": "YES", "reason": "ok"})
+        )
+        # Moderations: article pre-filter clean, story prompt clean,
+        # propose prompt flagged.
+        openai_client.moderations.create.side_effect = [
+            _make_moderation_clean(),   # article pre-filter
+            _make_moderation_clean(),   # story-selection prompt
+            _make_moderation_flagged(), # question-proposal prompt
+        ]
+        openai_client.chat.completions.create.side_effect = [
+            _make_openai_completion(STORY_SELECTION_RESPONSE),
+            _make_openai_completion(EXTRACT_STATE_RESPONSE),
+            judge_resp,
+        ]
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "moderation" in data["error"].lower()
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
+    def test_in_pipeline_date_rejection(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """Question with a past date is rejected by the programmatic date check."""
+        mock_q.return_value = ["Will X happen?"]
+        mock_articles.return_value = [SAMPLE_ARTICLE]
+        mock_filter.return_value = [SAMPLE_ARTICLE]
+        mock_scrape.return_value = {"text": "article body"}
+        mock_serper.return_value.status_code = 200
+        mock_serper.return_value.json.return_value = {
+            "organic": [{"title": "h", "snippet": "s"}]
+        }
+        past_date_question = (
+            "Will something happen on January 1, 2020, according to Reuters?"
+        )
+        past_date_review = json.dumps(
+            {
+                "reviews": [
+                    {
+                        "question": past_date_question,
+                        "deadline_date": "January 1, 2020",
+                        "earliest_plausible_date": "January 1, 2020",
+                        "deadline_is_feasible": True,
+                        "process_stage_named": True,
+                        "figure_is_directly_published": True,
+                        "authority_can_act_in_time": True,
+                        "date_format_valid": True,
+                        "not_a_duplicate": True,
+                        "window_bound_event": True,
+                        "reasoning": "Passes all checks.",
+                        "accept": True,
+                    }
+                ]
+            }
+        )
+        past_proposal = json.dumps({"questions": [past_date_question]})
+        judge_resp = _make_openai_completion(
+            json.dumps({"answer": "YES", "reason": "ok"})
+        )
+        openai_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(
+            return_value=openai_client
+        )
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        openai_client.moderations.create.return_value = (
+            _make_moderation_clean()
+        )
+        openai_client.chat.completions.create.side_effect = [
+            _make_openai_completion(STORY_SELECTION_RESPONSE),
+            _make_openai_completion(EXTRACT_STATE_RESPONSE),
+            judge_resp,
+            _make_openai_completion(past_proposal),
+            _make_openai_completion(past_date_review),
+        ]
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "rejected" in data["error"].lower()
+
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
+    def test_in_pipeline_programmatic_dedup_rejection(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_articles: MagicMock,
+        mock_q: MagicMock,
+    ) -> None:
+        """Question identical to an existing one is caught by programmatic dedup."""
+        existing_q = (
+            "Will retail sales percentage change exceed monthly forecast "
+            f"on {format_utc_timestamp(FUTURE_TS)}, according to Reuters?"
+        )
+        mock_q.return_value = [existing_q]
+        mock_articles.return_value = [SAMPLE_ARTICLE]
+        mock_filter.return_value = [SAMPLE_ARTICLE]
+        mock_scrape.return_value = {"text": "article body"}
+        mock_serper.return_value.status_code = 200
+        mock_serper.return_value.json.return_value = {
+            "organic": [{"title": "h", "snippet": "s"}]
+        }
+        # Propose a question token-identical to the existing one.
+        dup_question = (
+            "Will retail sales percentage change exceed monthly forecast "
+            f"on {format_utc_timestamp(FUTURE_TS)}, according to Reuters?"
+        )
+        dup_proposal = json.dumps({"questions": [dup_question]})
+        dup_review = json.dumps(
+            {
+                "reviews": [
+                    {
+                        "question": dup_question,
+                        "deadline_date": format_utc_timestamp(FUTURE_TS),
+                        "earliest_plausible_date": format_utc_timestamp(
+                            FUTURE_TS
+                        ),
+                        "deadline_is_feasible": True,
+                        "process_stage_named": True,
+                        "figure_is_directly_published": True,
+                        "authority_can_act_in_time": True,
+                        "date_format_valid": True,
+                        "not_a_duplicate": True,
+                        "window_bound_event": True,
+                        "reasoning": "Passes all checks.",
+                        "accept": True,
+                    }
+                ]
+            }
+        )
+        judge_resp = _make_openai_completion(
+            json.dumps({"answer": "YES", "reason": "ok"})
+        )
+        openai_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(
+            return_value=openai_client
+        )
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        openai_client.moderations.create.return_value = (
+            _make_moderation_clean()
+        )
+        openai_client.chat.completions.create.side_effect = [
+            _make_openai_completion(STORY_SELECTION_RESPONSE),
+            _make_openai_completion(EXTRACT_STATE_RESPONSE),
+            judge_resp,
+            _make_openai_completion(dup_proposal),
+            _make_openai_completion(dup_review),
+        ]
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "rejected" in data["error"].lower()

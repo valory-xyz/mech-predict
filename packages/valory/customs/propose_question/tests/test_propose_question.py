@@ -133,7 +133,8 @@ class TestValidatequestionDates:
     def test_past_date_rejected(self) -> None:
         """A question referencing a past date is rejected."""
         resolution_ts = int(time.time()) + 86400 * 60
-        question = "Will something happen on January 1, 2020, according to Reuters?"
+        past = format_utc_timestamp(int(time.time()) - 2 * 86400)
+        question = f"Will something happen on {past}, according to Reuters?"
         result = validate_question_dates(question, resolution_ts)
         assert result is not None
         assert "past" in result
@@ -1139,7 +1140,6 @@ class TestWithKeyRotation:
         """Build a minimal KeyChain-like mock."""
         keys = MagicMock()
         keys.max_retries.return_value = {"openai": n_openai}
-        keys.__add__ = lambda self, other: other  # for tuple concat in decorator
         return keys
 
     def test_rate_limit_rotates_and_retries(self) -> None:

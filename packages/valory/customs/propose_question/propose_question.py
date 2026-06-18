@@ -20,7 +20,6 @@
 
 import functools
 import json
-import logging
 import random
 import re
 import uuid
@@ -33,8 +32,6 @@ from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
 from openai import OpenAI
 from pydantic import BaseModel
-
-_logger = logging.getLogger(__name__)
 
 NEWSAPI_TOP_HEADLINES_URL = "https://newsapi.org/v2/top-headlines"
 NEWSAPI_DEFAULT_NEWS_SOURCES = [
@@ -796,10 +793,10 @@ def scrape_url(serper_api_key: str, url: str) -> Optional[dict]:
         print(f"Successfully scraped URL: {url}")
         return scraped_data
     except requests.RequestException as exc:
-        _logger.warning("scrape_url request error for %s: %s", url, exc)
+        print(f"scrape_url request error for {url}: {exc}")
         return None
     except json.JSONDecodeError as exc:
-        _logger.warning("scrape_url JSON decode error for %s: %s", url, exc)
+        print(f"scrape_url JSON decode error for {url}: {exc}")
         return None
 
 
@@ -1052,7 +1049,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     if not mod.results[0].flagged:
                         clean_articles.append(article)
                 except Exception as exc:  # noqa: BLE001
-                    _logger.warning("Moderation pre-filter error (fail-open): %s", exc)
+                    print(f"Moderation pre-filter error (fail-open): {exc}")
                     clean_articles.append(article)
             n_dropped = len(articles) - len(clean_articles)
             if n_dropped > 0:

@@ -42,6 +42,14 @@
       "parent": "prediction-request-reasoning-claude",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
+    "predict-base": {
+      "parent": null,
+      "reason": "New from-scratch tool: un-fine-tuned DeepSeek-R1-Distill-Qwen-14B base served via vLLM (baseline mode)."
+    },
+    "predict-fine-tuned": {
+      "parent": null,
+      "reason": "New from-scratch tool: GRPO fine-tuned DeepSeek-R1-Distill-Qwen-14B served via vLLM."
+    },
     "superforcaster-polymarket-v1": {
       "parent": "superforcaster",
       "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched."

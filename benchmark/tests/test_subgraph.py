@@ -31,7 +31,9 @@ from benchmark.datasets import subgraph
 _URL = "https://subgraph.invalid/graphql"
 
 
-def _http_response(status_code: int, json_body: Optional[dict[str, Any]] = None) -> MagicMock:
+def _http_response(
+    status_code: int, json_body: Optional[dict[str, Any]] = None
+) -> MagicMock:
     """Build a fake ``requests`` response with the given status.
 
     ``raise_for_status`` raises an :class:`HTTPError` carrying the response for
@@ -52,15 +54,14 @@ def _http_response(status_code: int, json_body: Optional[dict[str, Any]] = None)
     return resp
 
 
-@pytest.fixture()
-def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+def _silence_sleep(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Replace the backoff sleep with a recorder so tests don't actually wait.
 
     :param monkeypatch: pytest patching fixture.
     :return: list that accumulates each slept duration.
     """
     slept: list[int] = []
-    monkeypatch.setattr(subgraph.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(subgraph.time, "sleep", slept.append)
     return slept
 
 
@@ -68,21 +69,21 @@ class TestPostGraphqlHttpRetries:
     """Transient upstream HTTP/network failures retry; client errors don't."""
 
     def test_retries_then_succeeds_on_transient_503(
-        self, monkeypatch: pytest.MonkeyPatch, no_sleep: list[int]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A 503 then a 200 yields the data after one backoff sleep."""
+        slept = _silence_sleep(monkeypatch)
         responses = [_http_response(503), _http_response(200, {"data": {"ok": 1}})]
         monkeypatch.setattr(subgraph.requests, "post", lambda *a, **k: responses.pop(0))
 
         data = subgraph.post_graphql(_URL, {"query": "{ x }"})
 
         assert data == {"ok": 1}
-        assert no_sleep == [subgraph.RETRY_BACKOFF_SECONDS]  # one retry, linear backoff
+        assert slept == [subgraph.RETRY_BACKOFF_SECONDS]  # one retry, linear backoff
 
-    def test_connection_error_is_retried(
-        self, monkeypatch: pytest.MonkeyPatch, no_sleep: list[int]
-    ) -> None:
+    def test_connection_error_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A ConnectionError on the first attempt is retried, then succeeds."""
+        slept = _silence_sleep(monkeypatch)
         calls: list[int] = []
 
         def _post(*_a: Any, **_k: Any) -> MagicMock:
@@ -94,7 +95,7 @@ class TestPostGraphqlHttpRetries:
         monkeypatch.setattr(subgraph.requests, "post", _post)
 
         assert subgraph.post_graphql(_URL, {"query": "{ x }"}) == {"ok": 2}
-        assert len(no_sleep) == 1
+        assert len(slept) == 1
 
     @pytest.mark.parametrize(
         ("status", "retried"),
@@ -110,11 +111,11 @@ class TestPostGraphqlHttpRetries:
     def test_status_code_retry_policy(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        no_sleep: list[int],
         status: int,
         retried: bool,
     ) -> None:
         """Only RETRYABLE_STATUS_CODES are retried; others raise at once."""
+        slept = _silence_sleep(monkeypatch)
         attempts: list[int] = []
 
         def _post(*_a: Any, **_k: Any) -> MagicMock:
@@ -128,19 +129,20 @@ class TestPostGraphqlHttpRetries:
 
         if retried:
             assert len(attempts) == subgraph.MAX_RETRIES
-            assert len(no_sleep) == subgraph.MAX_RETRIES - 1
+            assert len(slept) == subgraph.MAX_RETRIES - 1
         else:
             assert len(attempts) == 1
-            assert no_sleep == []
+            assert not slept
 
 
 class TestPostGraphqlErrors:
     """GraphQL-level ``errors`` only retry when the predicate opts in."""
 
     def test_graphql_error_raises_without_predicate(
-        self, monkeypatch: pytest.MonkeyPatch, no_sleep: list[int]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A GraphQL error with no retry predicate raises immediately."""
+        slept = _silence_sleep(monkeypatch)
         monkeypatch.setattr(
             subgraph.requests,
             "post",
@@ -149,12 +151,13 @@ class TestPostGraphqlErrors:
 
         with pytest.raises(RuntimeError, match="GraphQL errors"):
             subgraph.post_graphql(_URL, {"query": "{ x }"})
-        assert no_sleep == []
+        assert not slept
 
     def test_reorg_error_retried_then_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch, no_sleep: list[int]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A reorg GraphQL error is retried when the predicate matches."""
+        slept = _silence_sleep(monkeypatch)
         responses = [
             _http_response(200, {"errors": ["block reorganized"]}),
             _http_response(200, {"data": {"ok": 3}}),
@@ -168,12 +171,13 @@ class TestPostGraphqlErrors:
         )
 
         assert data == {"ok": 3}
-        assert len(no_sleep) == 1
+        assert len(slept) == 1
 
     def test_non_matching_graphql_error_not_retried(
-        self, monkeypatch: pytest.MonkeyPatch, no_sleep: list[int]
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A GraphQL error the predicate rejects raises without retry."""
+        slept = _silence_sleep(monkeypatch)
         monkeypatch.setattr(
             subgraph.requests,
             "post",
@@ -186,4 +190,4 @@ class TestPostGraphqlErrors:
                 {"query": "{ x }"},
                 should_retry_graphql_error=lambda errs: "reorganized" in str(errs),
             )
-        assert no_sleep == []
+        assert not slept

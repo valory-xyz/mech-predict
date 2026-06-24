@@ -96,8 +96,6 @@ def post_graphql(
     :param should_retry_graphql_error: optional predicate over the GraphQL
         ``errors`` payload; when it returns True the request is retried.
     :return: the ``data`` object from the GraphQL response.
-    :raises requests.exceptions.RequestException: on a non-retryable error or
-        once retries are exhausted.
     :raises RuntimeError: on a non-retryable GraphQL-level error.
     """
     for attempt in range(1, MAX_RETRIES + 1):

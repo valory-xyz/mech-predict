@@ -340,7 +340,9 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
     except HTTPError as exc:
         reason = exc.read().decode("utf-8", errors="replace").strip()
         log.error(
-            "Slack rejected the message (HTTP %s): %s", exc.code, reason or "<empty body>"
+            "Slack rejected the message (HTTP %s): %s",
+            exc.code,
+            reason or "<empty body>",
         )
         raise RuntimeError(
             f"Slack webhook rejected the payload (HTTP {exc.code}): "

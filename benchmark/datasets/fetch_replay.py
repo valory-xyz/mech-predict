@@ -113,6 +113,7 @@ DELIVERS_WITH_IPFS_QUERY = """
 # Subgraph helpers (reuse from fetch_production)
 # ---------------------------------------------------------------------------
 
+
 def _is_reorg_error(errors: Any) -> bool:
     """Whether a GraphQL error payload indicates a transient chain reorg.
 

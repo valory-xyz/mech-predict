@@ -19,8 +19,12 @@
 """Tests for benchmark/notify_slack.py — platform-scoped Slack summaries."""
 
 import io
+from email.message import Message
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
@@ -390,39 +394,36 @@ class TestPostToSlack:
 
     _WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXX"
 
-    def test_success_reads_response_without_raising(self, monkeypatch) -> None:
+    def test_success_reads_response_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A 200 response is consumed and no error is raised."""
-        captured: dict[str, object] = {}
+        captured: dict[str, Any] = {}
+        resp = MagicMock()
+        resp.__enter__.return_value = resp  # `with urlopen(...) as r` yields resp
+        resp.__exit__.return_value = False  # don't suppress exceptions
+        resp.read.return_value = b"ok"
 
-        class _Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_):
-                return False
-
-            def read(self) -> bytes:
-                captured["read"] = True
-                return b"ok"
-
-        def _fake_urlopen(req, timeout):  # noqa: ANN001
+        def _fake_urlopen(req: Request, timeout: float) -> MagicMock:
             captured["data"] = req.data
-            return _Resp()
+            return resp
 
         monkeypatch.setattr("benchmark.notify_slack.urlopen", _fake_urlopen)
         post_to_slack(self._WEBHOOK, "hello")
-        assert captured["read"] is True
+        resp.read.assert_called_once()
         assert b"hello" in captured["data"]
 
-    def test_http_error_surfaces_slack_reason(self, monkeypatch) -> None:
+    def test_http_error_surfaces_slack_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A 400 must raise RuntimeError carrying Slack's plaintext reason."""
 
-        def _fake_urlopen(req, timeout):  # noqa: ANN001
+        def _fake_urlopen(req: Request, timeout: float) -> None:
             raise HTTPError(
                 self._WEBHOOK,
                 400,
                 "Bad Request",
-                {},
+                Message(),
                 io.BytesIO(b"invalid_payload"),
             )
 

@@ -18,7 +18,13 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/notify_slack.py — platform-scoped Slack summaries."""
 
+import io
+from email.message import Message
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
@@ -27,6 +33,7 @@ from benchmark.notify_slack import (
     _compute_top_k,
     _count_eligible_tools,
     _infer_platform_label,
+    post_to_slack,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
 
@@ -380,3 +387,46 @@ class TestRankingBlockDispatch:
         prompt = _build_system_prompt("Omenstrat", eligible_count=1)
         assert "list ALL eligible rows" in prompt
         assert "no eligible tools" not in prompt
+
+
+class TestPostToSlack:
+    """``post_to_slack`` must surface Slack's rejection reason, not swallow it."""
+
+    _WEBHOOK = "https://hooks.slack.com/services/T000/B000/XXXX"
+
+    def test_success_reads_response_without_raising(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 response is consumed and no error is raised."""
+        captured: dict[str, Any] = {}
+        resp = MagicMock()
+        resp.__enter__.return_value = resp  # `with urlopen(...) as r` yields resp
+        resp.__exit__.return_value = False  # don't suppress exceptions
+        resp.read.return_value = b"ok"
+
+        def _fake_urlopen(req: Request, timeout: float) -> MagicMock:
+            captured["data"] = req.data
+            return resp
+
+        monkeypatch.setattr("benchmark.notify_slack.urlopen", _fake_urlopen)
+        post_to_slack(self._WEBHOOK, "hello")
+        resp.read.assert_called_once()
+        assert b"hello" in captured["data"]
+
+    def test_http_error_surfaces_slack_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 400 must raise RuntimeError carrying Slack's plaintext reason."""
+
+        def _fake_urlopen(req: Request, timeout: float) -> None:
+            raise HTTPError(
+                self._WEBHOOK,
+                400,
+                "Bad Request",
+                Message(),
+                io.BytesIO(b"invalid_payload"),
+            )
+
+        monkeypatch.setattr("benchmark.notify_slack.urlopen", _fake_urlopen)
+        with pytest.raises(RuntimeError, match="invalid_payload"):
+            post_to_slack(self._WEBHOOK, "hello")

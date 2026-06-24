@@ -17,13 +17,13 @@ import argparse
 import json
 import logging
 import os
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import requests
 from benchmark.datasets.fetch_production import classify_category
+from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl, load_existing_ids
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,6 @@ POLYMARKET_GAMMA_URL = os.environ.get(
 DEFAULT_OUTPUT = Path(__file__).parent / "open_markets.jsonl"
 DEFAULT_BATCH_SIZE = 1000
 HTTP_TIMEOUT = 60
-MAX_RETRIES = 3
 
 # Omen market creators the trader bets on
 OMEN_CREATORS = [
@@ -113,37 +112,16 @@ OMEN_OPEN_MARKETS_QUERY = """
 
 
 def _post_graphql(url: str, query: str) -> dict[str, Any]:
-    """POST a GraphQL query with retry. Returns response data dict."""
-    headers = {"Content-Type": "application/json"}
-    data: dict[str, Any] = {}
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                url,
-                json={"query": query},
-                headers=headers,
-                timeout=HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            if "errors" in body:
-                raise RuntimeError(f"GraphQL errors: {body['errors']}")
-            data = body.get("data", {})
-            return data
-        except requests.exceptions.ReadTimeout:
-            if attempt < MAX_RETRIES:
-                wait = attempt * 10
-                log.warning(
-                    "Timeout on %s (attempt %d/%d), retrying in %ds",
-                    url,
-                    attempt,
-                    MAX_RETRIES,
-                    wait,
-                )
-                time.sleep(wait)
-            else:
-                raise
-    return data
+    """POST a GraphQL query with retry. Returns response data dict.
+
+    Thin wrapper over the shared :func:`benchmark.datasets.subgraph.post_graphql`
+    retry helper (transient HTTP/network failures are retried with backoff).
+
+    :param url: subgraph endpoint URL.
+    :param query: GraphQL query string.
+    :return: the ``data`` object from the GraphQL response.
+    """
+    return post_graphql(url, {"query": query}, timeout=HTTP_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------

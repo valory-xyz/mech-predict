@@ -27,7 +27,7 @@ crashing the whole run on a single hiccup.
 
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any
 
 import requests
 
@@ -40,10 +40,10 @@ RETRY_BACKOFF_SECONDS = 10
 # under load/maintenance and 429 when rate-limited. Other 4xx (e.g. 400/404)
 # are client errors that won't recover on retry, so they propagate immediately.
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
-
-# Predicate over a GraphQL ``errors`` payload deciding whether it is transient
-# and worth retrying (e.g. a chain reorganisation).
-ShouldRetryGraphqlError = Callable[[Any], bool]
+# Substring marking a transient chain-reorganisation GraphQL error. Any on-chain
+# subgraph can hit one; it clears within a block or two, so the identical query
+# succeeds on retry. Matches e.g. "the chain was reorganized while executing...".
+CHAIN_REORG_MARKER = "reorganized"
 
 
 def _is_retryable_http_error(exc: requests.exceptions.HTTPError) -> bool:
@@ -54,6 +54,15 @@ def _is_retryable_http_error(exc: requests.exceptions.HTTPError) -> bool:
     """
     response = exc.response
     return response is not None and response.status_code in RETRYABLE_STATUS_CODES
+
+
+def _is_reorg_error(errors: Any) -> bool:
+    """Return whether a GraphQL error payload is a transient chain reorg.
+
+    :param errors: the GraphQL ``errors`` payload from the response body.
+    :return: True if it indicates a chain reorganisation worth retrying.
+    """
+    return CHAIN_REORG_MARKER in str(errors)
 
 
 def _backoff_before_retry(url: str, attempt: int, reason: str) -> None:
@@ -80,21 +89,17 @@ def post_graphql(
     payload: dict[str, Any],
     *,
     timeout: int = DEFAULT_HTTP_TIMEOUT,
-    should_retry_graphql_error: Optional[ShouldRetryGraphqlError] = None,
 ) -> dict[str, Any]:
     """POST a GraphQL query and return the response ``data``, retrying transients.
 
-    Retries on read timeouts, connection errors, and transient upstream HTTP
-    statuses (see ``RETRYABLE_STATUS_CODES``) with linear backoff. GraphQL-level
-    errors raise immediately unless ``should_retry_graphql_error`` returns True
-    for them (used by the replay fetcher to ride out chain reorganisations).
-    Non-retryable HTTP errors (e.g. 400/404) propagate at once.
+    Retries on read timeouts, connection errors, transient upstream HTTP statuses
+    (see ``RETRYABLE_STATUS_CODES``), and chain-reorganisation GraphQL errors, all
+    with linear backoff. Non-retryable HTTP errors (e.g. 400/404) and any other
+    GraphQL-level error propagate at once.
 
     :param url: subgraph endpoint URL.
     :param payload: GraphQL request body (``{"query": ...}``).
     :param timeout: per-request timeout in seconds.
-    :param should_retry_graphql_error: optional predicate over the GraphQL
-        ``errors`` payload; when it returns True the request is retried.
     :return: the ``data`` object from the GraphQL response.
     :raises RuntimeError: on a non-retryable GraphQL-level error.
     """
@@ -105,12 +110,8 @@ def post_graphql(
             body = resp.json()
             if "errors" in body:
                 errors = body["errors"]
-                if (
-                    should_retry_graphql_error is not None
-                    and attempt < MAX_RETRIES
-                    and should_retry_graphql_error(errors)
-                ):
-                    _backoff_before_retry(url, attempt, "retryable GraphQL error")
+                if attempt < MAX_RETRIES and _is_reorg_error(errors):
+                    _backoff_before_retry(url, attempt, "chain reorg")
                     continue
                 raise RuntimeError(f"GraphQL errors from {url}: {errors}")
             return body.get("data", {})

@@ -114,32 +114,18 @@ DELIVERS_WITH_IPFS_QUERY = """
 # ---------------------------------------------------------------------------
 
 
-def _is_reorg_error(errors: Any) -> bool:
-    """Whether a GraphQL error payload indicates a transient chain reorg.
-
-    :param errors: the GraphQL ``errors`` payload.
-    :return: True if it looks like a chain reorganisation worth retrying.
-    """
-    return "reorganized" in str(errors)
-
-
 def _post_graphql(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Post a GraphQL query and return the JSON response data.
 
     Thin wrapper over the shared :func:`benchmark.datasets.subgraph.post_graphql`
-    retry helper. In addition to its transient HTTP/network retries, chain
-    reorganisation GraphQL errors are retried with backoff.
+    retry helper (transient HTTP/network failures and chain reorganisations are
+    retried with backoff).
 
     :param url: subgraph endpoint URL.
     :param payload: GraphQL request body (``{"query": ...}``).
     :return: the ``data`` object from the GraphQL response.
     """
-    return post_graphql(
-        url,
-        payload,
-        timeout=HTTP_TIMEOUT,
-        should_retry_graphql_error=_is_reorg_error,
-    )
+    return post_graphql(url, payload, timeout=HTTP_TIMEOUT)
 
 
 def _paginated_fetch(

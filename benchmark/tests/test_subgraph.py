@@ -136,12 +136,12 @@ class TestPostGraphqlHttpRetries:
 
 
 class TestPostGraphqlErrors:
-    """GraphQL-level ``errors`` only retry when the predicate opts in."""
+    """Chain-reorg GraphQL errors retry by default; any other error raises."""
 
-    def test_graphql_error_raises_without_predicate(
+    def test_non_reorg_graphql_error_raises_immediately(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A GraphQL error with no retry predicate raises immediately."""
+        """A non-reorg GraphQL error raises at once, without retry."""
         slept = _silence_sleep(monkeypatch)
         monkeypatch.setattr(
             subgraph.requests,
@@ -153,41 +153,45 @@ class TestPostGraphqlErrors:
             subgraph.post_graphql(_URL, {"query": "{ x }"})
         assert not slept
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "the chain was reorganized",  # observed casing
+            "Chain Reorganized",  # upstream capitalises
+            "REORGANIZED",  # all caps — case-insensitive match must still catch it
+        ],
+        ids=["lower", "title", "upper"],
+    )
     def test_reorg_error_retried_then_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, message: str
     ) -> None:
-        """A reorg GraphQL error is retried when the predicate matches."""
+        """A chain-reorg error (any casing) is retried by default, then succeeds."""
         slept = _silence_sleep(monkeypatch)
         responses = [
-            _http_response(200, {"errors": ["block reorganized"]}),
+            _http_response(200, {"errors": [{"message": message}]}),
             _http_response(200, {"data": {"ok": 3}}),
         ]
         monkeypatch.setattr(subgraph.requests, "post", lambda *a, **k: responses.pop(0))
 
-        data = subgraph.post_graphql(
-            _URL,
-            {"query": "{ x }"},
-            should_retry_graphql_error=lambda errs: "reorganized" in str(errs),
-        )
+        data = subgraph.post_graphql(_URL, {"query": "{ x }"})
 
         assert data == {"ok": 3}
         assert len(slept) == 1
 
-    def test_non_matching_graphql_error_not_retried(
+    def test_persistent_reorg_exhausts_retries_then_raises(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A GraphQL error the predicate rejects raises without retry."""
+        """A reorg on every attempt raises after MAX_RETRIES (MAX_RETRIES-1 sleeps)."""
         slept = _silence_sleep(monkeypatch)
-        monkeypatch.setattr(
-            subgraph.requests,
-            "post",
-            lambda *a, **k: _http_response(200, {"errors": ["syntax error"]}),
-        )
+        attempts: list[int] = []
+
+        def _post(*_a: Any, **_k: Any) -> MagicMock:
+            attempts.append(1)
+            return _http_response(200, {"errors": [{"message": "chain reorganized"}]})
+
+        monkeypatch.setattr(subgraph.requests, "post", _post)
 
         with pytest.raises(RuntimeError, match="GraphQL errors"):
-            subgraph.post_graphql(
-                _URL,
-                {"query": "{ x }"},
-                should_retry_graphql_error=lambda errs: "reorganized" in str(errs),
-            )
-        assert not slept
+            subgraph.post_graphql(_URL, {"query": "{ x }"})
+        assert len(attempts) == subgraph.MAX_RETRIES
+        assert len(slept) == subgraph.MAX_RETRIES - 1

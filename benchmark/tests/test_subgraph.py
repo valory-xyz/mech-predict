@@ -153,13 +153,22 @@ class TestPostGraphqlErrors:
             subgraph.post_graphql(_URL, {"query": "{ x }"})
         assert not slept
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "the chain was reorganized",  # observed casing
+            "Chain Reorganized",  # upstream capitalises
+            "REORGANIZED",  # all caps — case-insensitive match must still catch it
+        ],
+        ids=["lower", "title", "upper"],
+    )
     def test_reorg_error_retried_then_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, message: str
     ) -> None:
-        """A chain-reorg GraphQL error is retried by default, then succeeds."""
+        """A chain-reorg error (any casing) is retried by default, then succeeds."""
         slept = _silence_sleep(monkeypatch)
         responses = [
-            _http_response(200, {"errors": [{"message": "the chain was reorganized"}]}),
+            _http_response(200, {"errors": [{"message": message}]}),
             _http_response(200, {"data": {"ok": 3}}),
         ]
         monkeypatch.setattr(subgraph.requests, "post", lambda *a, **k: responses.pop(0))

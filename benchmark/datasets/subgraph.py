@@ -40,9 +40,10 @@ RETRY_BACKOFF_SECONDS = 10
 # under load/maintenance and 429 when rate-limited. Other 4xx (e.g. 400/404)
 # are client errors that won't recover on retry, so they propagate immediately.
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
-# Substring marking a transient chain-reorganisation GraphQL error. Any on-chain
-# subgraph can hit one; it clears within a block or two, so the identical query
-# succeeds on retry. Matches e.g. "the chain was reorganized while executing...".
+# Lowercase substring marking a transient chain-reorganisation GraphQL error.
+# Any on-chain subgraph can hit one; it clears within a block or two, so the
+# identical query succeeds on retry. Matched case-insensitively against e.g.
+# "the chain was reorganized while executing...".
 CHAIN_REORG_MARKER = "reorganized"
 
 
@@ -62,7 +63,7 @@ def _is_reorg_error(errors: Any) -> bool:
     :param errors: the GraphQL ``errors`` payload from the response body.
     :return: True if it indicates a chain reorganisation worth retrying.
     """
-    return CHAIN_REORG_MARKER in str(errors)
+    return CHAIN_REORG_MARKER in str(errors).lower()
 
 
 def _backoff_before_retry(url: str, attempt: int, reason: str) -> None:

@@ -519,15 +519,5 @@ type: skill
 ---
 public_id: valory/kv_store:0.1.0
 type: connection
-0:
-  config:
-    store_path: ${KV_STORE_PATH_0:str:/data}
-1:
-  config:
-    store_path: ${KV_STORE_PATH_1:str:/data}
-2:
-  config:
-    store_path: ${KV_STORE_PATH_2:str:/data}
-3:
-  config:
-    store_path: ${KV_STORE_PATH_3:str:/data}
+config:
+  store_path: ${STORE_PATH:str:/data}

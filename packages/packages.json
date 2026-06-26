@@ -27,7 +27,7 @@
         "custom/valory/finetuned_prediction/0.1.0": "bafybeifetvtalxnw3y7epqspyxotrls4wl7eoffsiaglxp52nca7ozurv4",
         "custom/valory/propose_question/0.1.0": "bafybeifs2tczqwrbyi6nyhonvnbllz6nxbe2xoo4lslc6aeudi4waufzyi",
         "agent/valory/mech_predict/0.1.0": "bafybeierkwlngcwzwhb3tupgrp6xjzzs32y6eswdhshm5mutn6k4c6fqnm",
-        "service/valory/mech_predict/0.1.0": "bafybeifkkr6ox7ki4b7smgizls3acaog42rfv3b4pg2paoyqjsfllbkxry"
+        "service/valory/mech_predict/0.1.0": "bafybeibq5nc4payfteomyo2xwvhr5bf24dlhus4yg6htpgkivifqs3nl4u"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

@@ -41,7 +41,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
 from benchmark.datasets.fetch_production import (
     IPFS_FETCH_DELAY,
     MECH_MARKETPLACE_GNOSIS_URL,
@@ -52,6 +51,7 @@ from benchmark.datasets.fetch_production import (
     fetch_polymarket_resolved,
     parse_tool_response,
 )
+from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import load_jsonl, write_jsonl
 from benchmark.prompt_replay import (
     ADDITIONAL_INFO_RE,
@@ -113,32 +113,19 @@ DELIVERS_WITH_IPFS_QUERY = """
 # Subgraph helpers (reuse from fetch_production)
 # ---------------------------------------------------------------------------
 
-MAX_RETRIES = 3
-
 
 def _post_graphql(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Post a GraphQL query and return the JSON response data."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.post(url, json=payload, timeout=HTTP_TIMEOUT)
-            resp.raise_for_status()
-            body = resp.json()
-            if "errors" in body:
-                error_msg = str(body["errors"])
-                if "reorganized" in error_msg and attempt < MAX_RETRIES:
-                    log.warning(
-                        "Chain reorg, retrying (attempt %d/%d)", attempt, MAX_RETRIES
-                    )
-                    time.sleep(attempt * 5)
-                    continue
-                raise RuntimeError(f"GraphQL errors: {body['errors']}")
-            return body.get("data", {})
-        except requests.exceptions.ReadTimeout:
-            if attempt < MAX_RETRIES:
-                time.sleep(attempt * 10)
-            else:
-                raise
-    return {}
+    """Post a GraphQL query and return the JSON response data.
+
+    Thin wrapper over the shared :func:`benchmark.datasets.subgraph.post_graphql`
+    retry helper (transient HTTP/network failures and chain reorganisations are
+    retried with backoff).
+
+    :param url: subgraph endpoint URL.
+    :param payload: GraphQL request body (``{"query": ...}``).
+    :return: the ``data`` object from the GraphQL response.
+    """
+    return post_graphql(url, payload, timeout=HTTP_TIMEOUT)
 
 
 def _paginated_fetch(

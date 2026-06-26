@@ -47,3 +47,4 @@ PR_DESCRIPTION_METRICS.md
 .tomte-tox.ini
 .darglint
 .gitleaks-merged.toml
+/.tomte-gitleaks-merged.toml

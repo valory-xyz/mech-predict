@@ -1,0 +1,23 @@
+name: finetuned_prediction
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Serves the base or fine-tuned
+  14B Qwen model via vLLM.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeid3gdbuetsikbutcl4i32avmicucmmrqmtnwn7gw454uizs5322se
+  finetuned_prediction.py: bafybeieohwrfoc7rt5rozvmm7gpyi4hrpkry2ggpo6ekxfcucuqxton7sy
+  tests/__init__.py: bafybeieut53j2sz53firzcldhpqeh2ca6rdopnywd7dnyzis4hvsprfs3m
+  tests/test_finetuned_prediction.py: bafybeihafks6pyzbgmeerhupmcd2fqznpk2hmcykgukbp6q6ngadhujb3i
+fingerprint_ignore_patterns: []
+entry_point: finetuned_prediction.py
+callable: run
+dependencies:
+  openai:
+    version: ==1.30.2
+  httpx:
+    version: ==0.25.2
+  requests:
+    version: ==2.32.5

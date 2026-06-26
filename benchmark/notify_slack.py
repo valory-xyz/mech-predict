@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from benchmark.analyze import (
@@ -313,17 +314,40 @@ def _build_report_url() -> str | None:
 
 
 def post_to_slack(webhook_url: str, summary: str) -> None:
-    """POST a message to a Slack incoming webhook."""
+    """POST a message to a Slack incoming webhook.
+
+    On rejection Slack returns the reason as a short plaintext body
+    (e.g. ``invalid_payload``, ``no_text``, ``too_many_attachments``).
+    ``urlopen`` raises :class:`HTTPError` before that body is read, so we
+    catch it, surface the reason, and re-raise — otherwise the failure is
+    an opaque ``HTTP Error 400: Bad Request`` with no actionable detail.
+
+    :param webhook_url: Slack incoming-webhook URL (from a secret).
+    :param summary: message text to post.
+    :raises RuntimeError: if Slack rejects the payload, with its reason.
+    """
     payload = json.dumps({"text": summary}).encode()
     req = Request(
         webhook_url,
         data=payload,
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(
-        req, timeout=15
-    ) as resp:  # nosec B310 — webhook URL from secret, not user input
-        resp.read()
+    try:
+        with urlopen(
+            req, timeout=15
+        ) as resp:  # nosec B310 — webhook URL from secret, not user input
+            resp.read()
+    except HTTPError as exc:
+        reason = exc.read().decode("utf-8", errors="replace").strip()
+        log.error(
+            "Slack rejected the message (HTTP %s): %s",
+            exc.code,
+            reason or "<empty body>",
+        )
+        raise RuntimeError(
+            f"Slack webhook rejected the payload (HTTP {exc.code}): "
+            f"{reason or 'no reason given'}"
+        ) from exc
 
 
 _PLATFORM_LABEL_BY_STEM: Mapping[str, str] = MappingProxyType(

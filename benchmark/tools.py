@@ -48,6 +48,11 @@ class ToolSpec:
 
     module: str
     family: FamilyName
+    # Inference backend the replay harness must use for this tool's candidate
+    # call. "openai" (default) → OpenAI/Anthropic SDK against the hosted APIs;
+    # "vllm" → a self-hosted, OpenAI-compatible vLLM server reached via a
+    # base_url + key supplied from CI secrets (VLLM_ENDPOINT / VLLM_API_KEY).
+    backend: str = "openai"
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -155,6 +160,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module="packages.valory.customs.factual_research_v3.factual_research_v3",
         family="factual_research",
     ),
+    # valory/finetuned_prediction — DeepSeek-R1-Distill-Qwen-14B served by a
+    # self-hosted vLLM (OpenAI-compatible). Both modes share one module; the
+    # replay's --model selects which served checkpoint the vLLM call targets.
+    "predict-base": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
+        family="default",
+    ),
+    "predict-fine-tuned": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
+        family="default",
+    ),
     # nickcom007/prediction_request_sme — default schema: PREDICTION_PROMPT uses
     # {user_prompt}/{additional_information} and the module exports no
     # SYSTEM_PROMPT_FORECASTER. (It is NOT superforcaster-shaped despite
@@ -197,6 +215,11 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         "google_engine_id": [os.environ.get("GOOGLE_ENGINE_ID", "")],
         "serperapi": [os.environ.get("SERPER_API_KEY", "")],
         "openrouter": [os.environ.get("OPENROUTER_API_KEY", "")],
+        # vLLM-backed finetuned_prediction tool: optional gateway key + the
+        # base_url override. Empty strings fall back to the tool's DUMMY_API_KEY
+        # / VLLM_ENDPOINT defaults via its `or` guards.
+        "finetuned": [os.environ.get("VLLM_API_KEY", "")],
+        "finetuned_endpoint": [os.environ.get("VLLM_ENDPOINT", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
         "return_source_content": ["true" if return_source_content else "false"],
     }

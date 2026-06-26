@@ -334,3 +334,8 @@ config:
   host: ${str:0.0.0.0}
   target_skill_id: valory/mech_abci:0.1.0
 is_abstract: false
+---
+public_id: valory/kv_store:0.1.0
+type: connection
+config:
+  store_path: ${str:/data}

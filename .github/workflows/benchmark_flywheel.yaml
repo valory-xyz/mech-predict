@@ -461,6 +461,12 @@ jobs:
           SEARCH_PROVIDER: ${{ secrets.BENCHMARK_SEARCH_PROVIDER }}
           GOOGLE_API_KEY: ${{ secrets.BENCHMARK_GOOGLE_API_KEY }}
           GOOGLE_ENGINE_ID: ${{ secrets.BENCHMARK_GOOGLE_ENGINE_ID }}
+          # vLLM endpoint + optional gateway key for the finetuned_prediction
+          # tool (predict-base / predict-fine-tuned). Empty → tool's localhost
+          # default, which won't resolve on the runner, so set these to run the
+          # predict-* tools in the flywheel.
+          VLLM_ENDPOINT: ${{ secrets.BENCHMARK_VLLM_ENDPOINT }}
+          VLLM_API_KEY: ${{ secrets.BENCHMARK_VLLM_API_KEY }}
           INPUT_TOOLS: ${{ github.event.inputs.tools }}
           INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '30' }}
         run: |

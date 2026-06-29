@@ -54,7 +54,7 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Trigger:** Issue #374 chronic-bad overconfident-YES regression on polymarket.
 - **PR:** #375 `feat(superforcaster-polymarket-v4): step-4 evidence-reliability screen for overconfident-YES`
 - **Branch:** `tool-improvement/superforcaster-polymarket-v5-temporal-criterion-screen`
-- **Status:** holdout-confirmation pending (seed 1337, n=300, SHA 237173e5; E3 promotion path)
+- **Status:** holdout confirmed 2026-06-29 -- promotion recommended (comment #4835611333)
 
 ### Hypothesis (from PR body, investigation context not separately recorded)
 At the prediction-LLM-call stage (gate-visible), superforcaster-polymarket-v1 produces overconfident YES predictions (~53% of W-1 Brier mass). The step-4 evidence-reliability screen in PREDICTION_PROMPT addresses four sub-checks:
@@ -74,4 +74,5 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 - **Benchmark 2026-06-29:** SHA `237173e5c4f28442a5607640c7e3582272436900`, seed 1337, n=300, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (holdout-confirmation; E3 path; comment #4834886768)
 - **Benchmark 2026-06-29:** SHA `a57a0253a547cf17ad894bc3a49a8bb1a77c93ff`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit; tool code identical to holdout SHA 237173e5; all CI green; comment #4835068378)
 - **E2/E3 diagnosis 2026-06-29:** seed 42 n=100 result (comment #4835268684): Brier 0.2734->0.2154 (-21.2%), DA 63%->70% (+11.1%), Overconf-wrong 19->7 (-63.2%). Parse 100/100. E2: aggregate Brier and targeted fingerprint both improved -> E3 path confirmed. Holdout (seed 1337, n=300, SHA 237173e5, comment #4834886768) already triggered; awaiting result for promotion decision.
-- **Benchmark 2026-06-29:** SHA `9242f769a7a5ef0cbd7d5c1a0a3ecce51d63d80e`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit recording E2/E3 diagnosis; tool code identical to holdout SHA 237173e5; all CI green; comment #4835578188)
+- **Benchmark 2026-06-29:** SHA `9242f769a7a5ef0cbd7d5c1a0a3ecce51d63d80e`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit; tool code identical to holdout SHA 237173e5; all CI green; trigger comment #4835328995, result comment #4835516704: Brier 0.2734->0.2320 (-15.1%), DA 63%->68%, Overconf-wrong 19->9 (-52.6%))
+- **Holdout result 2026-06-29:** SHA `237173e5c4f28442a5607640c7e3582272436900`, seed 1337, n=301, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (comment #4835535374): Brier 0.2610->0.2218 (-15.0%), DA 63.8%->67.1% (+5.2%), Overconf-wrong 52->22 (-57.7%); parse 301/301 (100%). WIN: all three primary metrics improved; Overconf-wrong fingerprint strongly validated (-57.7%, consistent with 5 dev-seed runs at -18% to -63%). Promotion recommended (comment #4835611333).

@@ -279,3 +279,34 @@ jobs:
               --candidate benchmark/results/ci_replay/candidate.jsonl \
               --seed "${{ steps.parse.outputs.seed }}"
           fi
+
+      # If the run did NOT complete (cancelled, the 6h timeout, or an
+      # enrich/replay error), post a notice on the PR so the outcome is visible
+      # in the thread instead of only in the Actions logs. The "Post benchmark
+      # report" step above carries an implicit success(), so it silently skips on
+      # a bad outcome; this step is its failure/cancel counterpart (the two are
+      # mutually exclusive). It inherits the job's /benchmark authorization guard,
+      # so it only ever fires on a real benchmark run -- never on other comments.
+      - name: Notify on incomplete benchmark
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # issue_comment always carries the PR number; workflow_dispatch falls
+          # back to the optional --pr input (empty -> nothing to comment on).
+          PR_NUMBER: ${{ github.event.issue.number || github.event.inputs.pr }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$PR_NUMBER" ] || { echo "No PR to notify; skipping."; exit 0; }
+          printf '%s\n' \
+            '<!-- benchmark-incomplete -->' \
+            '## :warning: Benchmark did not complete' \
+            '' \
+            'The benchmark replay did not finish, so no verdict was posted. This' \
+            'usually means the run was cancelled, hit the 6h timeout, or errored in' \
+            'the enrich/replay steps -- it is not a tool regression.' \
+            '' \
+            "- Run log: $RUN_URL" \
+            '- Re-trigger when ready with a new comment:' \
+            '  /benchmark <tool> [--candidate-tool <tool>] [--platform omen|polymarket] [--sample N]' \
+            > "$RUNNER_TEMP/incomplete.md"
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body-file "$RUNNER_TEMP/incomplete.md"

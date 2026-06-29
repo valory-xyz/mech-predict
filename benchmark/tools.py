@@ -215,9 +215,9 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         (default) tools skip capture (replay mode).
     :return: a KeyChain populated from environment variables.
     """
-    from packages.valory.skills.task_execution.utils.apis import (
+    from packages.valory.skills.task_execution.utils.apis import (  # pylint: disable=import-outside-toplevel
         KeyChain,
-    )  # pylint: disable=import-outside-toplevel
+    )
 
     services: dict[str, list[str]] = {
         "openai": [os.environ.get("OPENAI_API_KEY", "")],

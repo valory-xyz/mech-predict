@@ -54,7 +54,7 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Trigger:** Issue #374 chronic-bad overconfident-YES regression on polymarket.
 - **PR:** #375 `feat(superforcaster-polymarket-v4): step-4 evidence-reliability screen for overconfident-YES`
 - **Branch:** `tool-improvement/superforcaster-polymarket-v5-temporal-criterion-screen`
-- **Status:** benchmarking in progress (n=50 run noisy; growing to n=300 dev)
+- **Status:** benchmarking in progress (SHA cd5fc0d3, n=100 dev posted 2026-06-29)
 
 ### Hypothesis (from PR body, investigation context not separately recorded)
 At the prediction-LLM-call stage (gate-visible), superforcaster-polymarket-v1 produces overconfident YES predictions (~53% of W-1 Brier mass). The step-4 evidence-reliability screen in PREDICTION_PROMPT addresses four sub-checks:
@@ -67,4 +67,5 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 
 ### Benchmark ledger
 - **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=50, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- n=50 too noisy (delta=-0.024, 2*SE~=0.090 > delta); Overconf-wrong -18.2% positive fingerprint signal; growing to n=300
-- **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=300, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (E1 grow-sample to reduce SE)
+- **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=300, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (E1 grow-sample to reduce SE; n=300 run likely cancelled when SHA advanced to cd5fc0d3, no result received)
+- **Benchmark 2026-06-29:** SHA `cd5fc0d3e265b3a960a3d31614b4e4b6b42c6c35`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (new SHA from revert-restore commit; all CI green)

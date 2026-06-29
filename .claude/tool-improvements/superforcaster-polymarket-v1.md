@@ -49,22 +49,57 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - LOC: +7 (well under 150 soft / 300 hard)
 
 
-## Issue #374 -> PR #375 -- 2026-06-29
+---
 
-- **Trigger:** Issue #374 chronic-bad overconfident-YES regression on polymarket.
-- **PR:** #375 `feat(superforcaster-polymarket-v4): step-4 evidence-reliability screen for overconfident-YES`
-- **Branch:** `tool-improvement/superforcaster-polymarket-v5-temporal-criterion-screen`
-- **Status:** benchmarking in progress (n=50 run noisy; growing to n=300 dev)
+## Issue #366 -- 2026-06-17
 
-### Hypothesis (from PR body, investigation context not separately recorded)
-At the prediction-LLM-call stage (gate-visible), superforcaster-polymarket-v1 produces overconfident YES predictions (~53% of W-1 Brier mass). The step-4 evidence-reliability screen in PREDICTION_PROMPT addresses four sub-checks:
-- **4a** prediction-market-odds filter (discard circular self-referential odds)
-- **4b** forward-looking-intent discount (40-60% materialization discount)
-- **4c** TYPE A/B temporal-evidence classification (base-rate fallback on all-TYPE-B) -- targets "X in headlines this week" p_yes=0.99 that resolves NO
-- **4d** criterion-specificity check (require TYPE A evidence for the exact criterion)
+- **Trigger:** level_floor on `polymarket` W-1 (`2026-06-10T04:26:56Z` -> `2026-06-17T04:26:56Z`); headline Brier `0.2565` vs W-2 `0.3253` (Delta `-0.0688`).
+- **PR:** branch `tool-improvement/superforcaster-polymarket-v1-forward-looking-evidence-discount`.
+- **Confirmed hypothesis:** At the prediction-LLM-call stage, the tool anchors on (a) prediction-market odds embedded in Serper search results (e.g. "Leading. 92%. Elon Musk" from polymarket.com pages) treating them as independent factual evidence, and (b) forward-looking intent language ("is set to", "expected to", "plans to", "confirmed to attend") treating announced intentions as near-certain outcomes, producing extreme YES predictions (p_yes=0.93-0.97) that resolve NO.
+- **Stage + code site:** `prediction-LLM-call` stage at `PREDICTION_PROMPT` step 4 aggregation (gate-visible per Step 3a map).
+- **Localized cells:** `by_tool_category=business (n=104, brier=0.3847)`, `by_outcome=True (n=95, brier=0.3386)`.
+- **Evidence sample (worst-miss rows):**
+  | question (truncated 80 char) | p_yes | outcome | evidence_finding |
+  |---|---|---|---|
+  | Will Elon Musk be on-stage at a bell ceremony commemorating SpaceX IPO? | 0.960 | 0 | good-evidence/bad-reasoning (market odds: "Leading. 92%. Elon Musk") |
+  | SpaceX IPO: Trading Halted for Volatility? | 0.930 | 0 | good-evidence/bad-reasoning (speculative: "SPCX is expected to experience trading halts") |
+  | Will Zohran Mamdani stream on Twitch again by June 12? | 0.970 | 0 | good-evidence/bad-reasoning (intent: "plans to launch a livestream series") |
+  | Will Elon Musk attend UFC Freedom 250? | 0.970 | 0 | good-evidence/bad-reasoning (intent: "Elon Musk is set to attend UFC Freedom 250") |
+  | Will Trump say "Memory" this week? | 0.960 | 0 | good-evidence/bad-reasoning (market odds: "Will Trump say Memory this week? 97%") |
+  | Will Trump post "China" on Truth Social this week? | 0.930 | 0 | good-evidence/bad-reasoning (past-extrapolation: prior Trump posts mentioning China) |
+  | Will Cam Skattebo attend UFC Freedom 250? | 0.960 | 0 | good-evidence/bad-reasoning (intent: "UFC Freedom 250 is scheduled") |
+  | Will Trump say "Six Seven" during G7 events? | 0.030 | 1 | bad/empty-evidence (generic snippets, not G7-specific) |
+- **Mechanism disrupted:** Added mandatory evidence-reliability screen to PREDICTION_PROMPT step 4 that (a) discards prediction-market-odds from polymarket.com/metaculus/etc. as circular self-referential evidence and (b) applies 40-60% materialization discount to forward-looking intent language; max_tokens raised 500->1500 so the full reasoning chain executes.
+- **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green, +57/-15 LOC pre-lint. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off.
+- **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
+- **Benchmark 2026-06-17:** SHA `1930289a8956d677edd2544ecafc34f1bdae9133`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
+- **Benchmark 2026-06-17:** SHA `870750ce3a7540aac6a08c53a2f07b069c635036`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
+- **Benchmark 2026-06-17:** SHA `11bf1b065e1587f2a08bb95704e910b57b1efca1`, seed=default (workflow-assigned), n=100, dev, baseline=superforcaster-polymarket-v1 (n=1028 W-2 rows), platform=polymarket — posted
+- **Benchmark result 2026-06-17:** SHA `870750ce3a7540aac6a08c53a2f07b069c635036`, seed=42, n=100, dev -- Brier 0.2677 (baseline) vs 0.2891 (candidate, +8.0%), DA 59%->53% (-10.2%), overconf-wrong 16->14 (-12.5%). E1: delta (+0.0214) is below 2*SE (0.06-0.08) at n=100 -- verdict is noisy. Directional signal: targeted fingerprint (overconf-wrong) improved; DA dropped (consistent with over-broad screen). Action: grow to n=300.
+- **Benchmark 2026-06-17:** SHA `a2687b381e43bf9ca5dcde02a150e0a25680441a`, seed=workflow-assigned, n=300, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (grow-sample from noisy n=100; comment #4730163087)
 
-Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: `superforcaster-polymarket-v4`.
+- **Benchmark result 2026-06-17:** SHA `36aadf8239a571fa1902af9cb1cd99b2a31bffab` (docs ledger commit, same tool code as `1930289a`), seed=42, n=100 (comment #4730316044) -- Brier 0.2677 (baseline) vs 0.2853 (candidate, +6.6%), DA 59%->58% (-1.7%), overconf-wrong 16->15 (-6.2%). **Second n=100 seed-42 run.** Both n=100 runs consistently show Brier worse + overconf-wrong better. This is the over-broad implementation signal per CLAUDE.md: hypothesis confirmed (screen catches overconf-wrong), but the 40-60% materialization discount fires too broadly on well-supported YES markets (underconfident-correct predictions add Brier mass on resolved-YES side). E1 conclusion holds: n=300 is the appropriate confirmatory signal. n=300 in flight (comment #4730163087). Sub-pipeline E analysis posted at comment #4730395448.
+- **Provisional revision plan (pending n=300 confirmation):** If n=300 confirms Brier regression + overconf-wrong fingerprint -- implement corroboration-gate revision: add explicit corroboration check to step 4(b) before applying 40-60% discount. Discount fires ONLY when intent language is primary/sole evidence and NO corroborating signals present (multiple independent sources, prerequisite completion, completed prior action). When corroborating evidence present, model uses own calibrated estimate. Single mechanism, ~15 LOC at same site (PREDICTION_PROMPT step 4b in superforcaster_polymarket_v4.py). TI_AGENT_AUTO_REVISE=off; implementation requires human approval.
+- **Benchmark 2026-06-17:** SHA `a41e7c226f60c6bdc94cbfd5d1fe1751217cf5e0` (docs-only ledger commit, same tool code as `1930289a`), seed=workflow-assigned, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (comment #4730607915)
+- **Benchmark 2026-06-17:** SHA `8961fbdf168015f4d294a5e3215ffc8f26109af1` (docs-only ledger commit, same tool code as `1930289a`), seed=workflow-assigned, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (comment #4730876222)
+- **Benchmark result 2026-06-17 (run 3, n=100):** SHA `a41e7c226f60c6bdc94cbfd5d1fe1751217cf5e0` (triggered from comment #4730607915), seed=42, n=100, dev -- Brier 0.2677->0.2650 (-1.0%), DA 59%->62% (+5.1%), overconf-wrong 16->15 (-6.2%), parse rate 100%. E1: delta (-0.0027, -1.0%) within noise at n=100 (SE ~+/-0.03-0.04). Third n=100 seed-42 run on same tool code (v4 at 1930289a); results across 3 runs: +8.0%, +6.6%, -1.0% (high variance, individually uninformative). Overconf-wrong improved in all 3 runs (consistent fingerprint). Parse rate 96.8%->100% directly confirms max_tokens truncation hypothesis. n=300 already in flight (comment #4730163087). Awaiting n=300 result; no new /benchmark posted this run. Sub-pipeline E analysis posted at comment #4730872379.
 
-### Benchmark ledger
-- **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=50, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- n=50 too noisy (delta=-0.024, 2*SE~=0.090 > delta); Overconf-wrong -18.2% positive fingerprint signal; growing to n=300
-- **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=300, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (E1 grow-sample to reduce SE)
+---
+
+## Consolidation 2026-06-29 (PR #375)
+
+The #366 evidence-reliability screen shipped as TWO overlapping tool dirs
+(`superforcaster_polymarket_v4/` + `_v5/`) on a branch cut off a stale base, so it
+never reached `main`. Consolidated into a single `superforcaster-polymarket-v4` cut
+off `main`: v4's step-4 evidence screen (4a market-odds filter, 4b forward-intent
+discount) plus the v5 additions (4c TYPE A/B temporal classification, 4d
+criterion-specificity); `max_tokens` 500 -> 1500. The `_v5/` dir was dropped; v4's
+lineage parent is `superforcaster-polymarket-v1`.
+
+- **Benchmark 2026-06-29:** baseline=superforcaster-polymarket-v1, platform=polymarket,
+  n=50, seed=42 -- Brier 0.3063 -> 0.2824 (-7.8%), DA 58% -> 58% (flat), overconf-wrong
+  11 -> 9 (-18.2%), candidate parse 50/50 (100%). Directionally consistent with the #366
+  fingerprint (overconf-wrong down; max_tokens truncation resolved). n=50 is below the
+  ~300-row confirmatory bar established in the #366 runs; n=300 run requested.
+- **Status:** PR #375 green (lint + lock + test), MERGEABLE, draft. Human runs
+  `autonomy push-all` to publish the v4 CID before merge.

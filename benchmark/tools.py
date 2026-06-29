@@ -13,7 +13,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain

@@ -54,7 +54,7 @@ Both cells are same CID in both windows; mix-shift ruled out.
 - **Trigger:** Issue #374 chronic-bad overconfident-YES regression on polymarket.
 - **PR:** #375 `feat(superforcaster-polymarket-v4): step-4 evidence-reliability screen for overconfident-YES`
 - **Branch:** `tool-improvement/superforcaster-polymarket-v5-temporal-criterion-screen`
-- **Status:** benchmarking in progress (SHA cd5fc0d3, n=100 dev posted 2026-06-29)
+- **Status:** holdout-confirmation pending (seed 1337, n=300, SHA 237173e5; E3 promotion path)
 
 ### Hypothesis (from PR body, investigation context not separately recorded)
 At the prediction-LLM-call stage (gate-visible), superforcaster-polymarket-v1 produces overconfident YES predictions (~53% of W-1 Brier mass). The step-4 evidence-reliability screen in PREDICTION_PROMPT addresses four sub-checks:
@@ -70,3 +70,5 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 - **Benchmark 2026-06-29:** SHA `19c818e5c991901987b9f0e1567d9d68abc08391`, seed 42, n=300, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (E1 grow-sample to reduce SE; n=300 run likely cancelled when SHA advanced to cd5fc0d3, no result received)
 - **Benchmark 2026-06-29:** SHA `cd5fc0d3e265b3a960a3d31614b4e4b6b42c6c35`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (new SHA from revert-restore commit; all CI green)
 - **Benchmark 2026-06-29:** SHA `6e3f11cca3871f0e620140a6a5f3f2c98c4945fc`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit; tool code identical to cd5fc0d3; all CI green; comment #4834755919)
+- **E2 diagnosis 2026-06-29:** seed 42 n=100 result (comment #4834829972): Brier 0.2734->0.2227 (-18.5%), DA 63%->72% (+14.3%), Overconf-wrong 19->11 (-42.1%). Both aggregate Brier and targeted fingerprint improved -> E3 promotion path. All prior runs used seed 42 (dev); posting holdout-confirmation at seed 1337, n=300.
+- **Benchmark 2026-06-29:** SHA `237173e5c4f28442a5607640c7e3582272436900`, seed 1337, n=300, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (holdout-confirmation; E3 path)

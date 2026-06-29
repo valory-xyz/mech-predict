@@ -317,15 +317,15 @@ jobs:
           if [ -n "$FAILED_STEPS" ]; then
             REASON="it **errored** at the **$FAILED_STEPS** step."
           elif [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then
-            REASON="it was **cancelled** -- manually, superseded by a newer run, or the 6h job timeout was reached."
+            REASON="it was **cancelled** (a manual cancel from the Actions tab, or the 6h job-timeout was hit)."
           else
-            REASON="it did not finish; see the run log below."
+            REASON="the cause could not be determined; see the run log below."
           fi
           # Link back to the request when we have it (issue_comment trigger).
           if [ -n "$TRIGGER_COMMENT_URL" ]; then
-            LEAD="The [benchmark replay requested here]($TRIGGER_COMMENT_URL) did not finish -- $REASON"
+            LEAD="The [benchmark replay requested]($TRIGGER_COMMENT_URL) did not finish: $REASON"
           else
-            LEAD="The benchmark replay did not finish -- $REASON"
+            LEAD="The benchmark replay did not finish: $REASON"
           fi
           {
             echo '<!-- benchmark-incomplete -->'

@@ -302,18 +302,24 @@ jobs:
         run: |
           [ -n "$PR_NUMBER" ] || { echo "No PR to notify; skipping."; exit 0; }
           # Explicit reason derived from this run's recorded step conclusions
-          # (the jobs API): name the step that errored, or report a cancellation.
-          # cancelled() is only valid in an if:, so we read the outcomes here
-          # instead of using a status function in env.
-          JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" 2>/dev/null)
-          FAILED_STEPS=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")')
-          CANCELLED_COUNT=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "cancelled")] | length')
+          # (the jobs API). cancelled() is only valid in an if:, so we read the
+          # step outcomes here instead. Retry briefly: a just-failed step's
+          # conclusion can lag a few seconds behind in the API.
+          FAILED_STEPS=""
+          CANCELLED_COUNT=0
+          for _ in 1 2 3 4 5 6; do
+            JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" 2>/dev/null)
+            FAILED_STEPS=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")')
+            CANCELLED_COUNT=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "cancelled")] | length')
+            if [ -n "$FAILED_STEPS" ] || [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then break; fi
+            sleep 3
+          done
           if [ -n "$FAILED_STEPS" ]; then
             REASON="it **errored** at the **$FAILED_STEPS** step."
           elif [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then
             REASON="it was **cancelled** -- manually, superseded by a newer run, or the 6h job timeout was reached."
           else
-            REASON="it did not finish (no verdict was produced)."
+            REASON="it did not finish; see the run log below."
           fi
           # Link back to the request when we have it (issue_comment trigger).
           if [ -n "$TRIGGER_COMMENT_URL" ]; then

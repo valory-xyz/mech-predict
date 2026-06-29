@@ -1,4 +1,3 @@
-## Issue #332 -- 2026-06-09
 
 - **Trigger:** regression on `polymarket` W-1 (`2026-06-02T04:17:54Z` -> `2026-06-09T04:17:54Z`); headline Brier `0.2323` (n=656) vs W-2 `0.1470` (n=222) (delta +0.0853); trigger=`regression`.
 - **PR:** branch `tool-improvement/superforcaster-polymarket-v2-criterion-specificity`.
@@ -79,3 +78,4 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 
 - **Benchmark 2026-06-29:** SHA `01c875f36d14dfb2bb345466d4dd7e226a838d13`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (memory-only chore commit; tool code identical to holdout SHA 237173e5; trigger comment #4835578188, result comment #4835759925): Brier 0.2734->0.2283 (-16.5%), DA 63%->68% (+7.9%), Overconf-wrong 19->9 (-52.6%); parse 100/100. E2: aggregate Brier and fingerprint both improved -> E3. Promotion already recommended (comment #4835611333); result is consistent.
 - **Benchmark 2026-06-29:** SHA `20185df20f4d2e69f1f85ee9e8297c8c87448f26`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit; tool code identical to holdout SHA 237173e5; all CI green; comment #4835773767)
+- **Benchmark 2026-06-29:** SHA `20185df20f4d2e69f1f85ee9e8297c8c87448f26`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (trigger comment #4835773767, result comment #4835976355): Brier 0.2734->0.2379 (-13.0%), DA 63%->66% (+4.8%), Overconf-wrong 19->11 (-42.1%); parse 100/100. E2: both aggregate Brier and fingerprint improved; consistent with all prior dev runs. Promotion already recommended (comment #4835611333, #4836061285); this run is additional corroboration.

@@ -299,19 +299,21 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number || github.event.inputs.pr }}
           # The triggering /benchmark comment (empty for workflow_dispatch).
           TRIGGER_COMMENT_URL: ${{ github.event.comment.html_url }}
-          # 'true' on a cancellation (manual / superseded / 6h timeout), 'false'
-          # when a step errored -- lets the notice name the actual reason.
-          IS_CANCELLED: ${{ cancelled() }}
         run: |
           [ -n "$PR_NUMBER" ] || { echo "No PR to notify; skipping."; exit 0; }
-          # Explicit reason: a cancellation, or the specific step that errored
-          # (named via the jobs API -- no per-step id needed).
-          if [ "$IS_CANCELLED" = "true" ]; then
+          # Explicit reason derived from this run's recorded step conclusions
+          # (the jobs API): name the step that errored, or report a cancellation.
+          # cancelled() is only valid in an if:, so we read the outcomes here
+          # instead of using a status function in env.
+          JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" 2>/dev/null)
+          FAILED_STEPS=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")')
+          CANCELLED_COUNT=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "cancelled")] | length')
+          if [ -n "$FAILED_STEPS" ]; then
+            REASON="it **errored** at the **$FAILED_STEPS** step."
+          elif [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then
             REASON="it was **cancelled** -- manually, superseded by a newer run, or the 6h job timeout was reached."
           else
-            FAILED_STEPS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-              --jq '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null)
-            REASON="it **errored** at the **${FAILED_STEPS:-unknown}** step."
+            REASON="it did not finish (no verdict was produced)."
           fi
           # Link back to the request when we have it (issue_comment trigger).
           if [ -n "$TRIGGER_COMMENT_URL" ]; then

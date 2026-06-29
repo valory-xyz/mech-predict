@@ -13,7 +13,7 @@ import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -102,6 +102,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module=(
             "packages.valory.customs.superforcaster_polymarket_v3"
             ".superforcaster_polymarket_v3"
+        ),
+        family="superforcaster",
+    ),
+    # valory/superforcaster_polymarket_v4 -- consolidates the abandoned v4/v5 work
+    # (PR #375) into one tool off v1: a step-4 evidence-reliability screen (market-
+    # odds filter, forward-intent discount, TYPE A/B temporal classification,
+    # criterion-specificity) for systematic overconfident-YES on Polymarket.
+    "superforcaster-polymarket-v4": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
         ),
         family="superforcaster",
     ),
@@ -204,9 +215,9 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         (default) tools skip capture (replay mode).
     :return: a KeyChain populated from environment variables.
     """
-    from packages.valory.skills.task_execution.utils.apis import (  # pylint: disable=import-outside-toplevel
+    from packages.valory.skills.task_execution.utils.apis import (
         KeyChain,
-    )
+    )  # pylint: disable=import-outside-toplevel
 
     services: dict[str, list[str]] = {
         "openai": [os.environ.get("OPENAI_API_KEY", "")],

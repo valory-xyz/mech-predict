@@ -100,7 +100,7 @@
     },
     "factual_research-v3": {
       "parent": "factual_research-v2",
-      "reason": "Swap the LLM backend from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5 via JSON-schema prompt injection + Pydantic model_validate_json on the response (the Anthropic SDK's forced-tool-use mechanism is NOT used). Same prompts, pipeline order, Polymarket resolution-rules handling, and guardrails as v2 — one-axis change to measure the model's contribution to the v2 baseline."
+      "reason": "Swap the LLM backend from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5 via JSON-schema prompt injection + Pydantic model_validate_json on the response (the Anthropic SDK's forced-tool-use mechanism is NOT used). Same prompts, pipeline order, Polymarket resolution-rules handling, and guardrails as v2 \u2014 one-axis change to measure the model's contribution to the v2 baseline."
     },
     "gemini-2.0-flash": {
       "parent": null,
@@ -189,6 +189,10 @@
     "superforcaster-polymarket-v3": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Swap the default LLM model from OpenAI gpt-4.1-2025-04-14 to Anthropic claude-fable-5. Same prompt, pipeline, output format and retry logic as v1 \u2014 one-axis change to measure the model's contribution to v1's baseline. Sibling of v2 (which is a prompt-only resolution-criterion specificity variant), both depart from v1."
+    },
+    "superforcaster-polymarket-v4": {
+      "parent": "superforcaster-polymarket-v1",
+      "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
     }
   }
 }

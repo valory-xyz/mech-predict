@@ -291,22 +291,44 @@ jobs:
         if: ${{ failure() || cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # issue_comment always carries the PR number; workflow_dispatch falls
           # back to the optional --pr input (empty -> nothing to comment on).
           PR_NUMBER: ${{ github.event.issue.number || github.event.inputs.pr }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The triggering /benchmark comment (empty for workflow_dispatch).
+          TRIGGER_COMMENT_URL: ${{ github.event.comment.html_url }}
+          # 'true' on a cancellation (manual / superseded / 6h timeout), 'false'
+          # when a step errored -- lets the notice name the actual reason.
+          IS_CANCELLED: ${{ cancelled() }}
         run: |
           [ -n "$PR_NUMBER" ] || { echo "No PR to notify; skipping."; exit 0; }
-          printf '%s\n' \
-            '<!-- benchmark-incomplete -->' \
-            '## :warning: Benchmark did not complete' \
-            '' \
-            'The benchmark replay did not finish, so no verdict was posted. This' \
-            'usually means the run was cancelled, hit the 6h timeout, or errored in' \
-            'the enrich/replay steps -- it is not a tool regression.' \
-            '' \
-            "- Run log: $RUN_URL" \
-            '- Re-trigger when ready with a new comment:' \
-            '  /benchmark <tool> [--candidate-tool <tool>] [--platform omen|polymarket] [--sample N]' \
-            > "$RUNNER_TEMP/incomplete.md"
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body-file "$RUNNER_TEMP/incomplete.md"
+          # Explicit reason: a cancellation, or the specific step that errored
+          # (named via the jobs API -- no per-step id needed).
+          if [ "$IS_CANCELLED" = "true" ]; then
+            REASON="it was **cancelled** -- manually, superseded by a newer run, or the 6h job timeout was reached."
+          else
+            FAILED_STEPS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" \
+              --jq '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")' 2>/dev/null)
+            REASON="it **errored** at the **${FAILED_STEPS:-unknown}** step."
+          fi
+          # Link back to the request when we have it (issue_comment trigger).
+          if [ -n "$TRIGGER_COMMENT_URL" ]; then
+            LEAD="The [benchmark replay requested here]($TRIGGER_COMMENT_URL) did not finish -- $REASON"
+          else
+            LEAD="The benchmark replay did not finish -- $REASON"
+          fi
+          {
+            echo '<!-- benchmark-incomplete -->'
+            echo '## :warning: Benchmark did not complete'
+            echo ''
+            echo "$LEAD"
+            echo ''
+            echo 'No verdict was posted. This is a pipeline/run outcome, **not** a tool regression.'
+            echo ''
+            echo "- Run log: $RUN_URL"
+            echo '- Re-trigger when ready with a new comment:'
+            echo '  /benchmark <tool> [--candidate-tool <tool>] [--platform omen|polymarket] [--sample N]'
+          } > "$RUNNER_TEMP/incomplete.md"
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$RUNNER_TEMP/incomplete.md"

@@ -284,11 +284,13 @@ jobs:
       # enrich/replay error), post a notice on the PR so the outcome is visible
       # in the thread instead of only in the Actions logs. The "Post benchmark
       # report" step above carries an implicit success(), so it silently skips on
-      # a bad outcome; this step is its failure/cancel counterpart (the two are
-      # mutually exclusive). It inherits the job's /benchmark authorization guard,
+      # a bad outcome; this step is its failure/cancel counterpart -- mutually
+      # exclusive for failures upstream of "Post benchmark report" (if that report
+      # step itself fails, both run and this notice names it). It inherits the
+      # job's /benchmark authorization guard,
       # so it only ever fires on a real benchmark run -- never on other comments.
       - name: Notify on incomplete benchmark
-        if: ${{ failure() || cancelled() }}
+        if: failure() || cancelled()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -301,27 +303,35 @@ jobs:
           TRIGGER_COMMENT_URL: ${{ github.event.comment.html_url }}
         run: |
           [ -n "$PR_NUMBER" ] || { echo "No PR to notify; skipping."; exit 0; }
-          # Explicit reason derived from this run's recorded step conclusions
-          # (the jobs API). cancelled() is only valid in an if:, so we read the
-          # step outcomes here instead. Retry briefly: a just-failed step's
-          # conclusion can lag a few seconds behind in the API.
+          # The status functions return only a boolean; to name the failed step
+          # we query the jobs API for this run's recorded step conclusions. Retry
+          # briefly: a just-concluded step's conclusion can lag a few seconds in
+          # the API.
           FAILED_STEPS=""
           CANCELLED_COUNT=0
           for _ in 1 2 3 4 5 6; do
-            JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" 2>/dev/null)
+            # gh api exits non-zero on a transient error; under the Actions
+            # bash -e default that would abort the step before gh pr comment,
+            # so no notice would post. Tolerate it, surface it, and keep JOBS
+            # valid JSON so the jq below can't error on null.
+            JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" 2>"$RUNNER_TEMP/jobs_err") || {
+              echo "::warning::could not query the jobs API: $(tr '\n' ' ' < "$RUNNER_TEMP/jobs_err" 2>/dev/null)"
+              JOBS='{"jobs":[]}'
+            }
             FAILED_STEPS=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "failure") | .name] | join(", ")')
             CANCELLED_COUNT=$(printf '%s' "$JOBS" | jq -r '[.jobs[].steps[] | select(.conclusion == "cancelled")] | length')
-            if [ -n "$FAILED_STEPS" ] || [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then break; fi
+            if [ -n "$FAILED_STEPS" ] || [ "$CANCELLED_COUNT" -gt 0 ]; then break; fi
             sleep 3
           done
+          # Failure takes priority over cancellation -- an errored step is more
+          # actionable than a downstream cancel, so check it first.
           if [ -n "$FAILED_STEPS" ]; then
             REASON="it **errored** at the **$FAILED_STEPS** step."
-          elif [ "${CANCELLED_COUNT:-0}" -gt 0 ]; then
+          elif [ "$CANCELLED_COUNT" -gt 0 ]; then
             REASON="it was **cancelled** (a manual cancel from the Actions tab, or the 6h job-timeout was hit)."
           else
             REASON="the cause could not be determined; see the run log below."
           fi
-          # Link back to the request when we have it (issue_comment trigger).
           if [ -n "$TRIGGER_COMMENT_URL" ]; then
             LEAD="The [benchmark replay requested]($TRIGGER_COMMENT_URL) did not finish: $REASON"
           else

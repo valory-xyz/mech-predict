@@ -878,6 +878,9 @@ def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
     bss = overall.get("brier_skill_score")
     dir_acc = overall.get("directional_accuracy")
     yes_rate = overall.get("outcome_yes_rate")
+    edge = overall.get("edge")
+    edge_n = overall.get("edge_n", 0)
+    edge_pos = overall.get("edge_positive_rate")
 
     if n == 0:
         return f"{heading}\n\nNo rows scored in the current window."
@@ -887,6 +890,17 @@ def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
     lift = _da_lift(dir_acc, yes_rate)
     lift_str = f"{lift:+.4f}" if lift is not None else "N/A"
     no_rate = 1.0 - yes_rate if yes_rate is not None else None
+    # Edge over market (mean per-row market_brier - tool_brier): the
+    # money-relevant "does the platform beat the price?" signal. The
+    # value already lives on the overall dict (scorer.edge_score
+    # aggregate); surface it here so it can headline the Slack digest
+    # rather than staying buried in per-tool diagnostics. Positive = the
+    # platform's tools beat the market on average.
+    if edge is None:
+        edge_str = f"N/A (n={edge_n})"
+    else:
+        pos = f", {edge_pos:.0%} of calls beat market" if edge_pos is not None else ""
+        edge_str = f"{edge:+.4f} (n={edge_n}{pos})"
 
     lines = [
         heading,
@@ -896,6 +910,7 @@ def section_platform_snapshot(rolling_scores: dict[str, Any]) -> str:
         f"- **Brier**: {_value_cell(brier, valid_n)}",
         f"- **Baseline Brier**: {_value_cell(baseline, valid_n)}",
         f"- **BSS**: {_value_cell(bss, valid_n)}",
+        f"- **Edge over market**: {edge_str}",
         f"- **Directional Accuracy**: {_pct_cell(dir_acc, valid_n)}",
         f"- **Outcome Yes Rate**: {_pct_cell(yes_rate, valid_n)}",
         f"- **Outcome No Rate**: {_pct_cell(no_rate, valid_n)}",
@@ -2457,9 +2472,13 @@ def section_tournament_callouts(
 
     Per row:
 
-    - ``BSS vs mkt`` — the candidate's Brier skill score against the
-      market-implied baseline (carried on every tournament row), so a
-      no-prod tool still has a real comparator.
+    - ``BSS`` — the candidate's Brier skill score against the **base-rate**
+      predictor (``yes_rate * (1 - yes_rate)``), the same reference used
+      everywhere else in the report. This is NOT a market comparison: no
+      market-referenced skill score is computed for tournament candidates
+      today (edge-vs-market for candidates is unbuilt — see #341), so the
+      column is deliberately labelled ``BSS`` rather than the misleading
+      ``BSS vs mkt`` it once carried.
     - ``vs Production`` — the candidate's Brier against the **latest-tagged
       production CID** for the same tool, tagged 🟢 (better by at least
       ``CALLOUT_DELTA``) or 🔴 (worse by at least ``CALLOUT_DELTA``), or
@@ -2543,8 +2562,8 @@ def section_tournament_callouts(
         f" (best first). n = resolved markets; ⚠ = n < {CALLOUT_MIN_N}"
         " (still accumulating)._",
         "",
-        "| Tool | Version | n | Brier | BSS vs mkt | vs Production |",
-        "|------|---------|--:|------:|----------:|---------------|",
+        "| Tool | Version | n | Brier | BSS | vs Production |",
+        "|------|---------|--:|------:|--:|---------------|",
     ]
     lines.extend(row for _, _, row in rows)
     return "\n".join(lines)

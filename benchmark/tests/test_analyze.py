@@ -1618,7 +1618,7 @@ class TestTournamentCallouts:
         tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
         result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
         assert "## Tournament Callouts" in result
-        assert "| Tool | Version | n | Brier | BSS vs mkt | vs Production |" in result
+        assert "| Tool | Version | n | Brier | BSS | vs Production |" in result
         assert "tool-a" in result
         assert "v2" in result
 
@@ -2645,6 +2645,44 @@ class TestSectionPlatformSnapshot:
             assert label in rendered
         # DA lift = 0.70 - max(0.55, 0.45) = +0.15
         assert "+0.1500" in rendered
+
+    def test_renders_platform_edge_over_market(self) -> None:
+        """Edge over market (already on overall) headlines beats-market.
+
+        The aggregate ``edge`` / ``edge_positive_rate`` are surfaced in
+        the snapshot so the Slack digest can lead with the money-relevant
+        "does the platform beat the price?" signal instead of leaving it
+        buried in per-tool diagnostics.
+        """
+        scores = {
+            "overall": {
+                "n": 200,
+                "valid_n": 190,
+                "brier": 0.22,
+                "outcome_yes_rate": 0.55,
+                "edge": -0.0304,
+                "edge_n": 185,
+                "edge_positive_rate": 0.64,
+            }
+        }
+        rendered = section_platform_snapshot(scores)
+        assert "Edge over market" in rendered
+        assert "-0.0304" in rendered
+        assert "64% of calls beat market" in rendered
+        assert "(n=185" in rendered
+
+    def test_edge_absent_renders_na_not_crash(self) -> None:
+        """Missing edge (older scores file) degrades to N/A, never raises."""
+        scores = {
+            "overall": {
+                "n": 200,
+                "valid_n": 190,
+                "brier": 0.22,
+                "outcome_yes_rate": 0.55,
+            }
+        }
+        rendered = section_platform_snapshot(scores)
+        assert "- **Edge over market**: N/A" in rendered
 
     def test_empty_scores_renders_placeholder(self) -> None:
         """Zero rows collapses to a placeholder, not a crash."""

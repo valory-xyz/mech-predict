@@ -31,7 +31,6 @@ from urllib.request import Request, urlopen
 from benchmark.analyze import (
     PLATFORM_LABELS,
     ROLLING_WINDOW_DAYS,
-    VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
 from benchmark.tools import TOOL_REGISTRY
@@ -39,93 +38,50 @@ from benchmark.tools import TOOL_REGISTRY
 log = logging.getLogger(__name__)
 
 _PROMPT_HEADER = f"""\
-Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `All-Time` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix numbers across windows; if you cite a value, state which window it came from. Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
+Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY the structure below. The output posts to a Slack channel as internal team telemetry — keep it technical, decision-first, and scannable on roughly one screen. The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `All-Time` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix windows in one claim; pair every cited number with its window label. Do NOT compare platforms or cite tools, deployments, or rows belonging to another platform.
 
-*Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Lead with the Current-{ROLLING_WINDOW_DAYS}d platform Brier (from the "Platform Snapshot" section). Then name the direction of change: "Δ vs All-Time" from the "Platform Historical Comparison" row for Brier, and "Δ vs Prev {ROLLING_WINDOW_DAYS}d" from the same row. If either delta shows `insufficient data`, say so plainly instead of guessing.
+*Headline:* one or two lines answering "does {{platform_label}} beat the market?".
+- BEGIN the line with the status emoji read from the "Platform Snapshot" `Edge over market` value (Current {ROLLING_WINDOW_DAYS}d): 🔴 when edge < 0 (the platform's tools lose to the market on average), 🟡 when 0 ≤ edge < 0.02 (roughly at the market), 🟢 when edge ≥ 0.02 (beats the market). Then state the verdict in words, the edge value, and the "% of calls beat market" figure from that same line. If the `Edge over market` line reads `N/A`, say platform edge is unavailable this run instead of guessing.
+- Then, kept clearly distinct from edge so the two are never conflated: `BSS` (skill vs the base-rate predictor — a dumb always-majority forecaster, NOT the market) and `Brier`, both Current {ROLLING_WINDOW_DAYS}d, each with its week-over-week direction from the "Platform Historical Comparison" `Δ vs Prev {ROLLING_WINDOW_DAYS}d` column (state `insufficient data` verbatim when the delta is suppressed).
 
-*Eligibility for the tool ranking section below:* a row is eligible only if its Current {ROLLING_WINDOW_DAYS}d n is at least {MIN_SAMPLE_SIZE} AND the row carries no ⚠ low sample / ⚠ all malformed flag."""
+*Eligibility for the per-tool edge table below:* a row is eligible only if its Current {ROLLING_WINDOW_DAYS}d n in the "Tool Historical Comparison" table is at least {MIN_SAMPLE_SIZE} AND it carries no ⚠ low sample / ⚠ all malformed flag."""
 
 
-_PROMPT_RANKING_NONE = f"""\
-*Tool performance:*
+_PROMPT_BEATS_MARKET_NONE = f"""\
+*Beats market? — edge over market (Current {ROLLING_WINDOW_DAYS}d):*
 • _no eligible tools — every row in the Tool Historical Comparison table is below n={MIN_SAMPLE_SIZE} or flagged_"""
 
 
-_PROMPT_RANKING_ALL = f"""\
-*Tool performance:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list ALL eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)"""
-
-
-def _prompt_ranking_split(top_k: int) -> str:
-    """Top-K + Worst-K ranking block for ``top_k`` ≥ 1.
-
-    :param top_k: number of rows in each of the Top tools and Worst tools
-        bullets. Caller must guarantee the eligible set has strictly more
-        than ``2 * top_k`` rows so the two slices are non-overlapping.
-    :return: ranking block as a string suitable for inserting between
-        the prompt header and footer.
-    """
-    return f"""\
-*Top tools:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list top {top_k} eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
-
-*Worst tools:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
-(list bottom {top_k} eligible rows from the same table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier descending.)"""
+_PROMPT_BEATS_MARKET = f"""\
+First output the literal bold line `*Beats market? — edge over market (Current {ROLLING_WINDOW_DAYS}d):*` on its own, then a GitHub-flavored markdown table (pipe `|` syntax with a `---` separator row). For EVERY eligible tool, read its `Edge` metric row from the "Diagnostics Historical Comparison" section and emit ONE table row, sorted by Current {ROLLING_WINDOW_DAYS}d edge descending (best first). Columns: `tool | edge | WoW | verdict`. `edge` = the Edge row's Current {ROLLING_WINDOW_DAYS}d value; `WoW` = its `Δ vs Prev {ROLLING_WINDOW_DAYS}d` cell copied verbatim (or `insufficient data` / `no prev window`); `verdict` = 🟢 beats when edge >= 0, 🔴 loses when edge < 0. Never invent an edge or a delta. Skip any eligible tool with no `Edge` row. Do NOT wrap cell values in backticks inside the table. Example:
+| tool | edge | WoW | verdict |
+|---|---|---|---|
+| tool-a | +0.0123 | +0.0045 better | 🟢 beats |
+| tool-b | -0.0210 | -0.0100 worse | 🔴 loses |"""
 
 
 _PROMPT_FOOTER = f"""\
-*Deployment status:* if the report has a "Tool Deployment Status ({{platform_label}})" section, list one line per deployment with its count of active tools only (do NOT enumerate the tool names — the full report has them and the Slack message stays readable). Skip deployments marked `⚠️ unavailable` after noting briefly that their config fetch failed.
+Output the literal bold line `*Promote watch — tournament candidates:*` then a markdown table (pipe `|` syntax + `---` separator). REQUIRED whenever the report contains a "## Tournament Callouts" heading — one table row per Callouts data row, never drop, merge, or sample-gate a row (skip the section ONLY when there is no "## Tournament Callouts" heading). Columns: `tool | ver | n | Brier | vs prod`. Count the Callouts data rows (N) and emit EXACTLY N table rows. Order: 🟢 (promote) rows first, then 🔴 (watch) rows, then the rest by Brier ascending. Fill `vs prod` from each row's "vs Production" cell: a 🟢 tag → "🟢 promote vs <prodver> <prodBrier> Δ<delta>"; a 🔴 tag → "🔴 watch vs <prodver> ..."; any other cell ("— no prod baseline" etc.) → copy that note verbatim. `ver` = the version label with any leading "untagged@" stripped (e.g. `untagged@bafybeia` -> bafybeia). When a row's n carries `⚠`, append " ⚠" inside its `n` cell. Do NOT wrap cell values in backticks. The report's `BSS` column is skill vs the base-rate predictor, NOT the market — never present a candidate as "beating the market". After the table you MUST, whenever no row carries a 🟢 tag, output this exact italic line on its own (it is the honest "nothing to promote" signal — do not omit it): _No candidate clears the promote gate vs a deployed sibling yet._ Example:
+| tool | ver | n | Brier | vs prod |
+|---|---|---|---|---|
+| tool_full_search | bafybeih | 665 | 0.1857 | — no prod baseline |
+| tool_v2 | bafybeix | 9 ⚠ | 0.3672 | — no prod baseline |
 
-*Tool × Category:* from the "Tool × Category (Current {ROLLING_WINDOW_DAYS}d)" section, list the top 3 cells by sample size (Current {ROLLING_WINDOW_DAYS}d n, descending) that clear the sample-size threshold — bullets in n-descending order. The eligible table is sorted Brier-ascending in the report; you must re-rank by n, not take the first 3 you see. Use format: • `tool` × `category` — Brier `X.XXXX` (n=X, Current {ROLLING_WINDOW_DAYS}d), DirAcc X%, Always-majority X%, DA lift `±X.XXXX`. If DA lift is ≤ 0 say " — no lift over always-majority" inline so the reader isn't misled by a low Brier on a homogeneous-outcome cell. Never cite rows from the "below n=X threshold omitted" list. FALLBACK: if fewer than 2 rows clear the threshold, write exactly "insufficient tool × category data" as the only bullet in this section.
+Output the literal bold line `*Regressions:*` then a markdown table — columns `what | Brier (Cur {ROLLING_WINDOW_DAYS}d) | note` — with up to 3 rows, most material first. Draw from: the "Platform Historical Comparison" Brier `Δ vs Prev {ROLLING_WINDOW_DAYS}d` (when worse); any tool whose "Tool Historical Comparison" Brier `Δ vs Prev {ROLLING_WINDOW_DAYS}d` is a signed worse value; and the single worst cell in "Tool × Category (Current {ROLLING_WINDOW_DAYS}d)" (highest Brier among rows above n={MIN_SAMPLE_SIZE}, `note` = "worst category"). Skip this section entirely when nothing regressed. Example:
+| what | Brier (Cur {ROLLING_WINDOW_DAYS}d) | note |
+|---|---|---|
+| tool-a | 0.2487 (n=10266) | WoW +0.0317 worse |
+| tool-a x weather | 0.3530 (n=1440) | worst category |
 
-If the "Tool × Category Historical Comparison" table has any row where `Δ vs Prev {ROLLING_WINDOW_DAYS}d` is a signed number (not `insufficient data`, not `no prev window`), add a single follow-up bullet naming the largest absolute-value movement and its direction.
-
-*Tool versions:* If the report has a "Version Deltas" section, summarize up to 5 of the most significant flagged changes, one bullet per row.
-
-REQUIRED bullet format — reproduce exactly, with both versions wrapped in backticks:
-• `tool-name` (mode): `baseline-label` → `candidate-label` — Brier Δ X.XXXX direction (n_b=X, n_c=X)
-
-Example (copy this style exactly):
-• `prediction-request-reasoning` (production_replay): `v0.16.5` → `v0.17.0` — Brier Δ -0.0725 improved (n_b=433, n_c=4485)
-
-Rules:
-- The baseline and candidate labels come verbatim from the Baseline and Candidate columns of the report's "**vs prior version:**" sub-table (they look like `v0.17.0` or `untagged@bafybei1`). Never invent labels, never truncate, never summarize them as generic "v1/v2".
-- Only include rows where min(n_b, n_c) ≥ {VERSION_DELTA_LOW_SAMPLE_STRICT} and direction is "regressed" or "improved". Never include rows marked ⚠ — the flagged samples are too small to be reliable.
-- Skip this section entirely if the Version Deltas section is absent or has no rows without ⚠.
-
-*Tournament callouts:* REQUIRED — whenever the report contains a "## Tournament Callouts" heading you MUST output this section in full; never omit, shorten, or merge it, even when every row is a plain "candidate:" with no production comparison. (The ONLY time you skip it is when the report has no "## Tournament Callouts" heading at all.) The heading introduces a standings table of every active tournament candidate (one row per tool/version) with columns Tool, Version, n (resolved markets), Brier, BSS vs mkt, and vs Production. Output exactly ONE bullet per table row — never sample-gate, never drop a candidate. Choose each bullet's prefix by reading that row's "vs Production" cell:
-- 🟢 tag (tournament beats production) → "promotion candidate:" — give the tool, both version labels in backticks (tournament and production), tournament Brier + n, and production Brier + Δ.
-- 🔴 tag (tournament worse than production) → "watch:" — same fields.
-- any other cell ("— no prod baseline", "— no prod data", or "— rolled out") → "candidate:" — give the tool, version in backticks, Brier + n, and BSS vs mkt, then append the "vs Production" note verbatim so the reader knows why there is no Δ.
-Before writing, count the table's data rows (N) and output EXACTLY N bullets — one per row, none dropped or truncated. First scan ALL rows for 🟢/🔴 tags: those promotion/watch rows are the highest-value and must never be omitted, even when they sit at the bottom of the table (the table is sorted by Brier, so a 🟢 row can be last). Order: promotion candidates (🟢) first, then watches (🔴), then the remaining "candidate:" rows sorted by BSS vs mkt descending — this is a re-ordering of the table, not the table's own row order. If a row's n carries a `⚠` marker, keep the bullet and append " (low data, still accumulating)".
-
-Examples (copy this style exactly):
-• promotion candidate: `superforcaster` (tournament `v0.20.0` vs production `v0.18.2`) — tournament Brier `0.1847` (n=47) vs production `0.2832`, Δ `-0.0985` improved
-• candidate: `factual_research` `untagged@bafybeib` — Brier `0.0896` (n=34), BSS vs mkt `+0.285` — no prod data
-
-*Diagnostics:*
-If the report has a "Diagnostics Historical Comparison" section, for each tool that carries at least one row with a signed delta (not `insufficient data`, not `no prev window`), summarize up to two metrics with the largest movement. Use format: • `tool` — `metric` Current {ROLLING_WINDOW_DAYS}d `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`. Skip the section if no tool has a signed delta.
-
-*Reliability:* from the "Reliability & Parse Quality" comparison table, list every tool whose Current {ROLLING_WINDOW_DAYS}d Reliability or Valid % has a non-`insufficient data` delta vs All-Time and the delta is negative (regression). Use format: • `tool` — Reliability X% (n=X) vs All-Time X% (Δ -X.XXXX worse). If no tool regressed, skip this section.
-
-*Recommended actions:* 2-3 concrete next steps for {{platform_label}} based on the Current {ROLLING_WINDOW_DAYS}d data. Anchor each action to a specific row in the comparison tables. If the Current {ROLLING_WINDOW_DAYS}d → Prev {ROLLING_WINDOW_DAYS}d delta shows a regression, call it out explicitly.
+*Action:* 1-2 concrete next steps for {{platform_label}} as plain `*bold*`-free bullets (not a table), each anchored to a specific row above (e.g. investigate a negative-edge tool, hold the roster when no candidate clears the gate, chase the worst category). A tournament candidate with "— no prod baseline" is NOT promotable on Brier alone — it has no deployed sibling to beat — so never recommend promoting one; at most flag it as one to keep accumulating. No filler, no restating the headline.
 
 Rules:
-- Never mix windows in a single claim. Every cited number must be paired with its window label (Current {ROLLING_WINDOW_DAYS}d, All-Time, or Prev {ROLLING_WINDOW_DAYS}d).
-- Deltas never stand alone — always cite both sides' n (or state the delta was `insufficient data` / `no prev window` verbatim from the table).
-- Do not make claims from cells flagged ⚠ low sample or all malformed.
-- Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
-- Wrap tool names, Brier scores, and Edge scores in backticks.
-- Slack mrkdwn only: *bold* (single asterisk), `code`. No **double asterisks**.
-- No greetings or preamble.
-- The *Tournament callouts:* section is mandatory whenever a "## Tournament Callouts" heading appears in the report — output one bullet per table row and never drop the section, even on short reports or when no row has a 🟢/🔴 production tag.
-- Edge over market: positive = tool beats market, negative = market beats tool. Read it as a system-level diagnostic — tools are still ranked by Brier.
-- "Accuracy" in the report means "Directional Accuracy" — it excludes predictions at exactly 0.5 (no signal).
-- Log Loss: like Brier but punishes confidently-wrong predictions harder.
-- Some tools listed below are third-party (not ours). Completely exclude them — never mention, rank, compare, or recommend actions for third-party tools anywhere in the summary."""
+- Output layout: *Headline:* and *Action:* are Slack mrkdwn prose (use `code` backticks, single-asterisk *bold*, no **double asterisks**). The *Beats market?*, *Promote watch*, and *Regressions* sections are each a bold header line followed by a GitHub-flavored markdown table (pipe syntax with a `---` separator) — the post-processor reformats those tables into aligned monospace for Slack, so just emit clean pipe tables and do not pre-align or wrap cells in backticks. Use 🟢 / 🟡 / 🔴 for status — never ✅.
+- Edge over market = paired tool-vs-market Brier on the same rows: positive = the tool beats the price you bet against. This is the money-relevant "beats market" signal. BSS = skill vs the base-rate (always-majority) predictor, NOT the market — keep the two strictly distinct and never call BSS a market comparison.
+- Never mix windows in one claim; pair every number with its window label. A delta never stands alone — cite its n, or write `insufficient data` / `no prev window` verbatim from the table.
+- Do not draw claims from cells flagged ⚠ low sample or all malformed. Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
+- No greetings, no preamble, no trailing summary. Never invent a metric, tool, or version label.
+- Some tools in the report are third-party (not ours). Exclude them entirely — never mention, rank, compare, or recommend actions for them."""
 
 
 _VALID_PLATFORM_LABELS: frozenset[str] = frozenset(PLATFORM_LABELS.values())
@@ -164,43 +120,24 @@ def _count_eligible_tools(report_text: str) -> int:
     return eligible
 
 
-def _compute_top_k(eligible_count: int) -> int:
-    """Return the per-side bullet count for the Top/Worst split.
-
-    Constraint: Top K and Worst K must be disjoint, so ``K + K < N``,
-    i.e. ``K <= floor((N - 1) / 2)``. Capped at 3 so the message stays
-    scannable on large deployments.
-
-    A return of ``0`` is the "render a single ranked list" signal —
-    used when ``N`` is too small to support a non-overlapping split
-    (``N`` is 0, 1, or 2).
-
-    :param eligible_count: number of tools that clear the eligibility
-        floor in the Tool Historical Comparison table.
-    :return: ``K`` for the Top/Worst split, or ``0`` to switch to a
-        combined "Tool performance" listing.
-    """
-    if eligible_count <= 2:
-        return 0
-    return min(3, (eligible_count - 1) // 2)
-
-
 def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
-    """Assemble the system prompt with the right tool-ranking block.
+    """Assemble the edge-led digest system prompt.
 
-    The ranking block dispatches on ``eligible_count`` so the LLM
-    only ever sees one section convention per request:
+    The per-tool "Beats market?" block dispatches on ``eligible_count``
+    so the LLM only ever sees one convention per request:
 
-    - ``0`` eligible tools → placeholder bullet under ``*Tool performance:*``
-    - ``1-2`` eligible → all eligible rows under ``*Tool performance:*``
-    - ``3+`` eligible → ``*Top tools:*`` / ``*Worst tools:*`` with K bullets
-      each, where K = ``min(3, floor((N-1)/2))``
+    - ``0`` eligible tools → a single placeholder bullet.
+    - ``1+`` eligible → list every eligible tool's edge, best first.
+
+    Each platform deploys only a handful of production tools, so the
+    eligible set is small and a single edge-sorted list reads cleanly —
+    no Top/Worst split is needed.
 
     :param platform_label: deployment name to thread into the prompt.
         Must be one of ``benchmark.analyze.PLATFORM_LABELS`` values.
     :param eligible_count: number of tools that clear the eligibility
         floor in the markdown report's Tool Historical Comparison table.
-        Drives the ranking-block dispatch.
+        Drives the beats-market-block dispatch.
     :return: fully formatted system prompt string.
     :raises ValueError: when ``platform_label`` is empty or unknown.
     """
@@ -212,15 +149,10 @@ def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
             f" got {platform_label!r}"
         )
 
-    top_k = _compute_top_k(eligible_count)
-    if eligible_count == 0:
-        ranking_block = _PROMPT_RANKING_NONE
-    elif top_k == 0:
-        ranking_block = _PROMPT_RANKING_ALL
-    else:
-        ranking_block = _prompt_ranking_split(top_k)
-
-    template = "\n\n".join([_PROMPT_HEADER, ranking_block, _PROMPT_FOOTER])
+    beats_block = (
+        _PROMPT_BEATS_MARKET_NONE if eligible_count == 0 else _PROMPT_BEATS_MARKET
+    )
+    template = "\n\n".join([_PROMPT_HEADER, beats_block, _PROMPT_FOOTER])
     return template.format(platform_label=platform_label)
 
 
@@ -245,6 +177,68 @@ def _tool_ownership_context(report_text: str) -> str:
     if not theirs:
         return ""
     return f"Third-party tools (ignore these): {', '.join(theirs)}"
+
+
+def _is_table_row(line: str) -> bool:
+    """True when ``line`` looks like a markdown table row (``| a | b |``)."""
+    s = line.strip()
+    return s.startswith("|") and s.endswith("|") and len(s) > 1
+
+
+def _is_separator_row(line: str) -> bool:
+    """True when ``line`` is a markdown header/body separator (``|---|---|``)."""
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return bool(cells) and all(c and set(c) <= set("-: ") and "-" in c for c in cells)
+
+
+def _split_row(line: str) -> list[str]:
+    """Split a ``| a | b |`` row into stripped cell strings."""
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _tables_to_monospace(text: str) -> str:
+    """Convert markdown pipe tables in ``text`` to aligned monospace blocks.
+
+    Slack does not render markdown tables — it shows the raw ``|`` pipes.
+    The LLM is reliable at emitting clean markdown tables but not at hand-
+    aligning monospace columns (long tool names skew the layout), so the
+    prompt asks for pipe tables and this pass turns each one into a fenced
+    code block with space-padded columns that line up in Slack's monospace
+    font. Non-table lines (the bold headers, the headline, the action
+    bullets) pass through untouched.
+
+    Alignment uses character counts; status emojis (🟢/🔴) sit in the last
+    column of every table, so their double-width rendering only affects
+    trailing space and never pushes a later column out of line.
+
+    :param text: the LLM summary, possibly containing markdown tables.
+    :return: the same text with every markdown table replaced by an
+        aligned, triple-backtick-fenced monospace table.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not _is_table_row(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        # Gather the contiguous run of table rows.
+        block: list[str] = []
+        while i < len(lines) and _is_table_row(lines[i]):
+            block.append(lines[i])
+            i += 1
+        rows = [_split_row(b) for b in block if not _is_separator_row(b)]
+        if not rows:
+            continue
+        ncol = max(len(r) for r in rows)
+        rows = [r + [""] * (ncol - len(r)) for r in rows]
+        widths = [max(len(r[c]) for r in rows) for c in range(ncol)]
+        out.append("```")
+        for r in rows:
+            out.append("  ".join(r[c].ljust(widths[c]) for c in range(ncol)).rstrip())
+        out.append("```")
+    return "\n".join(out)
 
 
 def summarize_report(report_text: str, api_key: str, platform_label: str) -> str:
@@ -290,7 +284,7 @@ def summarize_report(report_text: str, api_key: str, platform_label: str) -> str
     ) as resp:  # nosec B310 — fixed https URL, not user-controlled
         body = json.loads(resp.read())
 
-    return body["choices"][0]["message"]["content"].strip()
+    return _tables_to_monospace(body["choices"][0]["message"]["content"].strip())
 
 
 def _build_report_url() -> str | None:

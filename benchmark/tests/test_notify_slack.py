@@ -30,9 +30,9 @@ import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _build_system_prompt,
-    _compute_top_k,
     _count_eligible_tools,
     _infer_platform_label,
+    _tables_to_monospace,
     post_to_slack,
 )
 from benchmark.scorer import MIN_SAMPLE_SIZE
@@ -86,17 +86,51 @@ class TestBuildSystemPrompt:
             assert "*Platform performance:*" not in prompt
 
     def test_template_still_carries_core_sections(self) -> None:
-        """Core single-platform footer sections remain wired up."""
+        """The edge-led digest carries its five decision-first blocks."""
         prompt = _default_prompt()
         for heading in (
-            "*Summary:*",
-            "*Tool × Category:*",
-            "*Tournament callouts:*",
-            "*Diagnostics:*",
-            "*Reliability:*",
-            "*Recommended actions:*",
+            "*Headline:*",
+            "*Beats market? — edge over market",
+            "*Promote watch — tournament candidates:*",
+            "*Regressions:*",
+            "*Action:*",
         ):
             assert heading in prompt, f"missing: {heading}"
+
+    def test_headline_leads_with_edge_not_brier(self) -> None:
+        """Headline pivots to beats-market (edge), keeping BSS distinct.
+
+        The money-relevant verdict is edge over market; BSS (skill vs the
+        base-rate predictor) must be present but explicitly NOT framed as
+        a market comparison, so the two are never conflated.
+        """
+        prompt = _default_prompt()
+        assert "beat the market" in prompt
+        assert "Edge over market" in prompt
+        # BSS is kept, but flagged as NOT the market baseline.
+        assert "NOT the market" in prompt
+
+    def test_tournament_callouts_coverage_preserved(self) -> None:
+        """Promote-watch keeps the mandatory one-row-per-candidate rule."""
+        prompt = _default_prompt()
+        assert "## Tournament Callouts" in prompt
+        assert "one table row per Callouts data row" in prompt
+        assert "EXACTLY N table rows" in prompt
+
+    def test_tabular_sections_request_markdown_tables(self) -> None:
+        """Beats-market / Promote-watch / Regressions are emitted as tables.
+
+        The LLM emits clean markdown pipe tables (its strength); the
+        ``_tables_to_monospace`` pass aligns them for Slack. Pin that the
+        prompt asks for markdown tables (not hand-aligned ASCII, which the
+        LLM gets wrong on long tool names).
+        """
+        prompt = _default_prompt()
+        assert "markdown table" in prompt
+        assert "post-processor reformats those tables" in prompt
+        # The headline + action stay mrkdwn prose, not tables.
+        assert "*Headline:*" in prompt
+        assert "*Action:*" in prompt
 
     def test_prompt_references_rolling_window_days_constant(self) -> None:
         """Prompt cites the current ROLLING_WINDOW_DAYS value in its window labels."""
@@ -113,16 +147,22 @@ class TestBuildSystemPrompt:
         assert "deltas vs all-time" not in prompt
 
     def test_prompt_anchors_sections_to_comparison_heading_names(self) -> None:
-        """Prompt points the LLM at the new three-window comparison headings."""
+        """Prompt points the LLM at the report sections it actually reads.
+
+        The edge-led digest sources the headline from Platform Snapshot /
+        Platform Historical Comparison, the per-tool edge from Diagnostics
+        Historical Comparison, eligibility from Tool Historical Comparison,
+        and the worst category from Tool × Category. It no longer dumps
+        Tool × Category Historical Comparison or Reliability & Parse
+        Quality, so those headings are intentionally absent.
+        """
         prompt = _default_prompt()
         for heading in (
             "Platform Snapshot",
             "Platform Historical Comparison",
             "Tool Historical Comparison",
             f"Tool × Category (Current {ROLLING_WINDOW_DAYS}d)",
-            "Tool × Category Historical Comparison",
             "Diagnostics Historical Comparison",
-            "Reliability & Parse Quality",
         ):
             assert heading in prompt, f"missing: {heading}"
 
@@ -133,21 +173,12 @@ class TestBuildSystemPrompt:
         assert "insufficient data" in prompt
         assert "no prev window" in prompt
 
-    def test_deployment_status_points_at_platform_scoped_section(self) -> None:
-        """Deployment status bullet anchors to the per-platform section heading."""
+    def test_regressions_section_sources_wow_deltas(self) -> None:
+        """Regressions block draws from the Prev-window delta columns."""
         prompt = _default_prompt()
-        assert '"Tool Deployment Status (Omenstrat)"' in prompt
-        assert "count of active tools only" in prompt
-        assert "do NOT enumerate the tool names" in prompt
-        assert "`⚠️ unavailable`" in prompt
-
-    def test_tool_category_prompt_caps_at_top_3_by_sample_size(self) -> None:
-        """Tool × Category bullet caps at top 3 cells, selected by Current-window n."""
-        prompt = _default_prompt()
-        assert "list the top 3 cells by sample size" in prompt
-        assert "n-descending order" in prompt
-        assert "re-rank by n, not take the first 3 you see" in prompt
-        assert "insufficient tool × category data" in prompt
+        assert "*Regressions:*" in prompt
+        assert f"Δ vs Prev {ROLLING_WINDOW_DAYS}d" in prompt
+        assert "Skip this section entirely when nothing regressed" in prompt
 
 
 class TestInferPlatformLabel:
@@ -198,7 +229,7 @@ class TestEligibilityBlock:
     def test_min_sample_size_floor_named_in_eligibility_block(self) -> None:
         """Eligibility block cites the live ``MIN_SAMPLE_SIZE`` constant."""
         prompt = _default_prompt()
-        assert "Eligibility for the tool ranking section" in prompt
+        assert "Eligibility for the per-tool edge table" in prompt
         assert f"at least {MIN_SAMPLE_SIZE}" in prompt
 
     def test_eligibility_excludes_low_sample_and_malformed(self) -> None:
@@ -206,50 +237,6 @@ class TestEligibilityBlock:
         prompt = _default_prompt()
         assert "⚠ low sample" in prompt
         assert "⚠ all malformed" in prompt
-
-
-class TestComputeTopK:
-    """``_compute_top_k`` keeps Top and Worst slices disjoint at every N.
-
-    Constraint: Top K + Worst K rows must come from disjoint regions of
-    the sorted eligible list, so ``2 * K < N``. The dispatcher returns
-    ``0`` for ``N <= 2`` to switch to a combined "Tool performance"
-    listing instead of a useless 1-vs-1 split.
-    """
-
-    @pytest.mark.parametrize(
-        "eligible,expected_k",
-        [
-            (0, 0),
-            (1, 0),
-            (2, 0),
-            (3, 1),
-            (4, 1),
-            (5, 2),
-            (6, 2),
-            (7, 3),
-            (8, 3),
-            (10, 3),
-            (50, 3),
-        ],
-    )
-    def test_k_satisfies_disjoint_constraint(
-        self, eligible: int, expected_k: int
-    ) -> None:
-        """Returned K matches the table from the design doc."""
-        assert _compute_top_k(eligible) == expected_k
-
-    @pytest.mark.parametrize("eligible", list(range(0, 50)))
-    def test_top_and_worst_are_always_disjoint(self, eligible: int) -> None:
-        """For every N, ``2 * K < N`` (or K = 0 to disable the split)."""
-        k = _compute_top_k(eligible)
-        if k > 0:
-            assert 2 * k < eligible, f"N={eligible}, K={k}: top+worst overlap"
-
-    def test_capped_at_three_for_large_eligible_sets(self) -> None:
-        """K never exceeds 3 — keeps the Slack message scannable."""
-        assert _compute_top_k(100) == 3
-        assert _compute_top_k(1000) == 3
 
 
 class TestCountEligibleTools:
@@ -348,45 +335,85 @@ class TestCountEligibleTools:
 
 
 class TestRankingBlockDispatch:
-    """The prompt only ever exposes ONE section convention per request.
+    """The beats-market block exposes ONE convention per request.
 
-    This is what makes the dispatch deterministic: when N <= 2, the LLM
-    sees ``*Tool performance:*`` and never sees Top/Worst. When N >= 3,
-    the LLM sees Top/Worst with a specific K and never sees Tool
-    performance. There is no "skip" instruction the LLM has to obey —
-    the prohibited section is simply not in the prompt.
+    The dispatch is deterministic: with 0 eligible tools the LLM sees a
+    single placeholder bullet and no list instruction; with 1+ it sees
+    the edge-list instruction and never the placeholder. The prohibited
+    branch is simply not in the prompt — there is no "skip" rule to obey.
     """
 
-    @pytest.mark.parametrize("eligible", [0, 1, 2])
-    def test_small_n_uses_tool_performance_only(self, eligible: int) -> None:
-        """N <= 2 -> Tool performance; Top/Worst absent from the prompt."""
-        prompt = _build_system_prompt("Omenstrat", eligible_count=eligible)
-        assert "*Tool performance:*" in prompt
-        assert "*Top tools:*" not in prompt
-        assert "*Worst tools:*" not in prompt
-
-    @pytest.mark.parametrize(
-        "eligible,top_k", [(3, 1), (4, 1), (5, 2), (6, 2), (7, 3), (10, 3)]
-    )
-    def test_large_n_uses_top_worst_only(self, eligible: int, top_k: int) -> None:
-        """N >= 3 -> Top/Worst with the right K; Tool performance absent."""
-        prompt = _build_system_prompt("Omenstrat", eligible_count=eligible)
-        assert "*Tool performance:*" not in prompt
-        assert "*Top tools:*" in prompt
-        assert "*Worst tools:*" in prompt
-        assert f"top {top_k} eligible rows" in prompt
-        assert f"bottom {top_k} eligible rows" in prompt
-
     def test_zero_eligible_renders_explicit_placeholder(self) -> None:
-        """Zero-eligible case has a deterministic placeholder so the LLM doesn't guess."""
+        """Zero eligible -> placeholder bullet, no edge-list instruction."""
         prompt = _build_system_prompt("Omenstrat", eligible_count=0)
         assert "no eligible tools" in prompt
+        assert "For EVERY eligible tool" not in prompt
 
-    def test_one_eligible_lists_the_single_tool(self) -> None:
-        """One eligible tool -> Tool performance with one bullet, no placeholder."""
-        prompt = _build_system_prompt("Omenstrat", eligible_count=1)
-        assert "list ALL eligible rows" in prompt
+    @pytest.mark.parametrize("eligible", [1, 2, 3, 5, 10])
+    def test_eligible_lists_every_tool_edge(self, eligible: int) -> None:
+        """1+ eligible -> edge-list instruction, no placeholder."""
+        prompt = _build_system_prompt("Omenstrat", eligible_count=eligible)
+        assert "For EVERY eligible tool" in prompt
+        assert "edge descending (best first)" in prompt
         assert "no eligible tools" not in prompt
+
+    def test_no_legacy_top_worst_split_remains(self) -> None:
+        """The old Brier Top/Worst convention is gone at every N."""
+        for n in (0, 1, 3, 5, 10):
+            prompt = _build_system_prompt("Omenstrat", eligible_count=n)
+            assert "*Top tools:*" not in prompt
+            assert "*Worst tools:*" not in prompt
+            assert "*Tool performance:*" not in prompt
+
+
+class TestTablesToMonospace:
+    """``_tables_to_monospace`` aligns LLM markdown tables for Slack."""
+
+    def test_converts_markdown_table_to_aligned_fence(self) -> None:
+        """A pipe table becomes a backtick-fenced, space-aligned block."""
+        text = (
+            "*Beats market?*\n"
+            "| tool | edge | verdict |\n"
+            "|---|---|---|\n"
+            "| superforcaster | -0.0128 | 🔴 loses |\n"
+            "| factual_research | -0.0690 | 🔴 loses |"
+        )
+        out = _tables_to_monospace(text)
+        lines = out.split("\n")
+        # Bold header passes through untouched.
+        assert lines[0] == "*Beats market?*"
+        # Fenced.
+        assert lines[1] == "```"
+        assert lines[-1] == "```"
+        # Separator row dropped.
+        assert "---" not in out
+        # No pipes remain (Slack would show them raw).
+        assert "|" not in out
+        # Columns aligned: the header cell `tool` is padded to the width
+        # of the longest value (`factual_research`, 16 chars).
+        assert "tool              edge" in out
+
+    def test_non_table_text_passes_through(self) -> None:
+        """Prose and bullets without pipe tables are returned unchanged."""
+        text = "*Headline:* 🔴 loses to market.\n\n*Action:*\n- do a thing"
+        assert _tables_to_monospace(text) == text
+
+    def test_handles_multiple_tables(self) -> None:
+        """Each markdown table in the text is fenced independently."""
+        text = (
+            "*A:*\n| x | y |\n|---|---|\n| 1 | 2 |\n\n"
+            "*B:*\n| p | q |\n|---|---|\n| 3 | 4 |"
+        )
+        out = _tables_to_monospace(text)
+        assert out.count("```") == 4  # two fenced blocks
+        assert "|" not in out
+
+    def test_ragged_rows_do_not_crash(self) -> None:
+        """A row with fewer cells than the header is padded, not dropped."""
+        text = "| a | b | c |\n|---|---|---|\n| 1 | 2 |"
+        out = _tables_to_monospace(text)
+        assert "```" in out
+        assert "1" in out and "2" in out
 
 
 class TestPostToSlack:

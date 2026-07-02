@@ -102,3 +102,4 @@ New version: `superforcaster-polymarket-v5`. Mechanism: mandatory four-sub-step 
 
 ### Benchmark ledger
 - **Benchmark 2026-07-02:** SHA `53c350a22553365bd2554982563f4469e288b1d3`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (comment #4862477125)
+- **Benchmark 2026-07-02:** SHA `259c72e4e84ff082af96a803a56f58e11c69bac3`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (memory-only chore commit advancing from 53c350a; tool code identical; all CI green; comment #4862578016)

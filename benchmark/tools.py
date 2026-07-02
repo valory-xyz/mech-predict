@@ -172,14 +172,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         family="factual_research",
     ),
     # valory/finetuned_prediction — DeepSeek-R1-Distill-Qwen-14B served by a
-    # self-hosted vLLM (OpenAI-compatible). Both modes share one module; the
-    # replay's --model selects which served checkpoint the vLLM call targets.
+    # self-hosted vLLM (OpenAI-compatible). All three modes share one module;
+    # the replay resolves each mode's served-model name via the module's own
+    # resolve_model() (MODEL_BY_TOOL), so predict-fine-tuned-calibrated targets
+    # ft-serve's virtual calibrated served name.
     "predict-base": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
         family="default",
     ),
     "predict-fine-tuned": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
+        family="default",
+    ),
+    "predict-fine-tuned-calibrated": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
         family="default",

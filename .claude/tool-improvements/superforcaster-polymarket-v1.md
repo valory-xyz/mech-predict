@@ -112,3 +112,23 @@ New version: `superforcaster-polymarket-v5`. Mechanism: mandatory four-sub-step 
 - **Benchmark 2026-07-02 (dev result n=299):** trigger comment #4862649928 (seed 42 grow request --sample 300), result comment #4863333895, seed 42, n=299, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result: Brier 0.2764->0.2425 (-12.3%), DA 63.6%->65.2% (+2.5%), Overconf-wrong 63->27 (-57.1%); parse 299/299 (100%). E1: trustworthy (n=299, SE~0.014, delta=0.034~2.4*SE). E2: seed 42 is dev seed; both aggregate Brier AND targeted fingerprint (Overconf-wrong) improved -> E3 path. Holdout (seed 999, SHA e481582c, comment #4863085392) already posted; awaiting holdout result. Sub-pipeline E verdict: comment #4863377361.
 - **Holdout result 2026-07-02:** result comment #4863493510, seed 999, n=300, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- Brier 0.2826->0.2162 (-23.5%), DA 64.2%->69.3% (+8.0%), Overconf-wrong 62->30 (-51.6%), Overconf-wrong rate 0.2067->0.1000 (-51.6%); parse 300/300 (100%). E1: trustworthy (n=300, SE~0.017, delta=0.0664~3.9*SE, 100% parse). Holdout terminal per hard constraint 5. E3: WIN -- aggregate Brier improved (-23.5%) AND targeted fingerprint (Overconf-wrong) improved (-51.6%), consistent with all 3 dev-seed runs (seed 42: -25%, -25%, -57%). Holdout improvement exceeds dev estimates; no generalisation degradation. Promotion recommended (comment #4863529015).
 - **Status:** holdout confirmed 2026-07-02 -- promotion recommended (comment #4863529015)
+
+---
+
+## E4 -- holdout-2 confirmation (2026-07-02)
+
+**Trigger:** `<!-- benchmark-result:superforcaster-polymarket-v1 -->` on PR #383, comment ID 4863542544 (posted 2026-07-02T08:04:10Z by github-actions[bot], seed 999, n=299)
+
+| Metric | Baseline (prod) | Candidate (PR) | Delta |
+|--------|-----------------|----------------|-------|
+| Brier score | 0.2833 | 0.2284 | -19.4% |
+| Directional Accuracy | 64.1% | 66.6% | +3.8% |
+| Overconf-wrong | 62 | 30 | -51.6% |
+| Overconf-wrong rate | 0.2074 | 0.1003 | -51.6% |
+| Parse rate | -- | 299/299 (100%) | OK |
+
+**Sub-pipeline E verdict:** CONFIRMS hypothesis. Second holdout run at seed 999 (E3 was n=300, -23.5%; E4 is n=299, -19.4%). Results consistent across all four runs. Promotion recommendation (ID 4863529015, 2026-07-02T08:02:22Z) stands. Sub-pipeline E reaction posted (comment ID 4863606704, 2026-07-02T08:12:00Z).
+
+**Final state:** Awaiting human reviewer to mark PR #383 ready for review and merge.
+
+---

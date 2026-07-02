@@ -83,3 +83,70 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 - **Benchmark 2026-06-29:** SHA `504123a160dbdff624cb7614e2524af0eb11413e`, memory-only chore commit; tool code identical to holdout SHA 237173e5; CI green (Sub-pipeline D trigger); promotion recommendation re-posted (comment #4836079215) to correct phantom #4835611333 — loop closed, no further benchmarking needed.
 **CI benchmark (2026-06-29, comment #4836605495, seed 42, n=100, current-SHA):** Brier 0.2734 → 0.2471 (-9.6%), DA 63.0% → 64.0% (+1.6%), Overconf-wrong 19 → 11 (-42.1%); parse 100/100 (100%). Fingerprint consistent with holdout. Sub-pipeline E verdict: E3 Promote (comment #4836716763). Both dev and holdout seeds confirm improvement; no regression indicators.
 - **Benchmark 2026-06-30:** SHA `3266bd760caf8930717cfeaecda9afac3ab0267b`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (triggered manually by @jmoreira-valory, trigger comment #4844700993, result comment #4845048271): Brier 0.2894->0.2503 (-13.5%), DA 60.6%->62.0% (+2.3%), Overconf-wrong 20->11 (-45.0%); parse 100/100 (100%). Note: production baseline shifted from 0.2734 to 0.2894 (denominator 3459->3559) reflecting additional recent production rows. E2: both aggregate Brier and fingerprint improved -> E3 path. Promotion recommendation stands (11th consistent result; 10 dev-seed runs + 1 holdout); no new benchmark needed. Agent Sub-pipeline E verdict: comment #4845098207.
+
+## Issue #382 -> PR #383 -- 2026-07-02
+
+- **Trigger:** Issue #382 regression on polymarket. W-1 Brier 0.3679 (n=559) vs W-2 0.3018 (n=818); delta +0.0661; chronic-bad (above 0.25 threshold).
+- **PR:** #383 `tool-improvement(superforcaster-polymarket-v1): evidence-reliability screen for overconfident-YES on narrow-scope markets`
+- **Branch:** `tool-improvement/superforcaster-polymarket-v1-evidence-reliability-screen`
+- **Status:** draft PR opened; W-2 benchmark triggered 2026-07-02.
+
+### Hypothesis (from PR body)
+At the prediction-LLM-call stage (gate-visible), `superforcaster-polymarket-v1` systematically overestimates `p_yes` via three compounding failure modes confirmed in 10/10 worst-miss IPFS deliveries (good-evidence/bad-reasoning):
+- **(4a) Market-price anchoring** -- Polymarket/aggregator odds treated as independent probability estimates.
+- **(4c) Stale temporal anchoring** -- past articles treated as forward-window confirmation.
+- **(4d) Criterion-specificity failure** -- topical relevance conflated with exact criterion satisfaction.
+Plus `max_tokens=500` insufficient for 7-step CoT causing premature JSON emission.
+
+New version: `superforcaster-polymarket-v5`. Mechanism: mandatory four-sub-step evidence-reliability screen (4a-4d) + max_tokens 500->1500.
+
+### Benchmark ledger
+- **Benchmark 2026-07-02:** SHA `53c350a22553365bd2554982563f4469e288b1d3`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (comment #4862477125)
+- **Benchmark 2026-07-02:** SHA `259c72e4e84ff082af96a803a56f58e11c69bac3`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (trigger comment #4862578016, result comment #4862618410): Brier 0.2882->0.2559 (-11.2%), DA 60.6%->64.0% (+5.6%), Overconf-wrong 20->15 (-25.0%); parse 100/100 (100%). E1: delta 0.0323 < 2*SE (~0.07) at n=100 -> borderline noisy; targeted fingerprint improved; growing to n=300. E2 (preliminary): both aggregate Brier and fingerprint improved -> E3 path (promotion) when confirmed at n>=300. Agent Sub-pipeline E verdict: comment #4862649060.
+- **Benchmark 2026-07-02 (grow result):** SHA `259c72e4e84ff082af96a803a56f58e11c69bac3`, seed 42, n=101 (requested 300 via trigger comment #4862578016 [--sample 300]; n=101 is the max available W-2 deliveries for this tool/platform), dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result comment #4862734748: Brier 0.2854->0.2590 (-9.2%), DA 61.0%->63.4% (+3.9%), Overconf-wrong 20->15 (-25.0%); parse 101/101 (100%). Cannot grow further -- n=101 is max available.
+- **E2 diagnosis 2026-07-02:** seed 42 n=101 grow result (comment #4862734748). Consistent with prior n=100 run (comment #4862618410): both show Brier improvement -9% to -11%, Overconf-wrong -25%. Two dev-seed runs confirm: aggregate Brier improved AND targeted fingerprint (Overconf-wrong) improved -> E3 path. n=101 is max available; proceeding to holdout-confirm at seed 999 (unused in this PR and in PR #375 ledger), n=300 (workflow will return n<=101 max available).
+- **Benchmark 2026-07-02 (holdout pending):** SHA `b8ad7e8c3853c6329d7b9eaaa5bd86c0e704a250`, seed 999, n=300 (max available ~101), holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (holdout-confirm; E3 path; trigger comment #4862796445)
+- **Benchmark 2026-07-02 (holdout pending):** SHA `b2d3ff23155206a56718b97e21a70c3e57a9dea9`, seed 999, n=300 (max available ~101), holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (Sub-pipeline D re-trigger: new CI-green SHA; prior holdout commands for SHA `b8ad7e8c` produced no confirmed result comment; comment #4862934031)
+- **Benchmark 2026-07-02 (holdout pending):** SHA `e481582cf5c113615849d68c4cd3d37495385d93`, seed 999, n=300 (max available ~101), holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (Sub-pipeline D re-trigger: new CI-green SHA e481582; commit is memory-only chore recording previous D trigger; tool code unchanged; comment #4863085392)
+- **Benchmark 2026-07-02 (holdout result, 3rd confirmation):** SHA `31a10ed0ad0f9db19bb524b929f401628d4172f8`, seed 999, n=300, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- trigger comment #4863256617, result comment #4864145066 (2026-07-02T09:18:01Z): Brier 0.2826->0.2237 (-20.8%), DA 64.2%->67.7% (+5.4%), Overconf-wrong 62->28 (-54.8%), Overconf-wrong rate 0.2067->0.0933 (-54.9%); parse 300/300 (100%). E1: trustworthy (n=300, SE~0.017, delta=0.0589~3.5*SE). Holdout terminal per hard constraint 5. E3: WIN -- consistent with prior holdout results (#4863493510: -23.5%; #4863542544: -19.4%). Prior promotion recommendation (comment #4863529015) confirmed and stands. Sub-pipeline E5 reaction posted (comment #4864199142, 2026-07-02T09:24:06Z).
+- **Benchmark 2026-07-02 (dev result n=299):** trigger comment #4862649928 (seed 42 grow request --sample 300), result comment #4863333895, seed 42, n=299, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result: Brier 0.2764->0.2425 (-12.3%), DA 63.6%->65.2% (+2.5%), Overconf-wrong 63->27 (-57.1%); parse 299/299 (100%). E1: trustworthy (n=299, SE~0.014, delta=0.034~2.4*SE). E2: seed 42 is dev seed; both aggregate Brier AND targeted fingerprint (Overconf-wrong) improved -> E3 path. Holdout (seed 999, SHA e481582c, comment #4863085392) already posted; awaiting holdout result. Sub-pipeline E verdict: comment #4863377361.
+- **Holdout result 2026-07-02:** result comment #4863493510, seed 999, n=300, holdout, baseline=superforcaster-polymarket-v1, platform=polymarket -- Brier 0.2826->0.2162 (-23.5%), DA 64.2%->69.3% (+8.0%), Overconf-wrong 62->30 (-51.6%), Overconf-wrong rate 0.2067->0.1000 (-51.6%); parse 300/300 (100%). E1: trustworthy (n=300, SE~0.017, delta=0.0664~3.9*SE, 100% parse). Holdout terminal per hard constraint 5. E3: WIN -- aggregate Brier improved (-23.5%) AND targeted fingerprint (Overconf-wrong) improved (-51.6%), consistent with all 3 dev-seed runs (seed 42: -25%, -25%, -57%). Holdout improvement exceeds dev estimates; no generalisation degradation. Promotion recommended (comment #4863529015).
+- **Status:** holdout confirmed 2026-07-02 -- promotion recommended (comment #4863529015)
+
+---
+
+## E4 -- holdout-2 confirmation (2026-07-02)
+
+**Trigger:** `<!-- benchmark-result:superforcaster-polymarket-v1 -->` on PR #383, comment ID 4863542544 (posted 2026-07-02T08:04:10Z by github-actions[bot], seed 999, n=299)
+
+| Metric | Baseline (prod) | Candidate (PR) | Delta |
+|--------|-----------------|----------------|-------|
+| Brier score | 0.2833 | 0.2284 | -19.4% |
+| Directional Accuracy | 64.1% | 66.6% | +3.8% |
+| Overconf-wrong | 62 | 30 | -51.6% |
+| Overconf-wrong rate | 0.2074 | 0.1003 | -51.6% |
+| Parse rate | -- | 299/299 (100%) | OK |
+
+**Sub-pipeline E verdict:** CONFIRMS hypothesis. Second holdout run at seed 999 (E3 was n=300, -23.5%; E4 is n=299, -19.4%). Results consistent across all four runs. Promotion recommendation (ID 4863529015, 2026-07-02T08:02:22Z) stands. Sub-pipeline E reaction posted (comment ID 4863606704, 2026-07-02T08:12:00Z).
+
+**Final state:** Awaiting human reviewer to mark PR #383 ready for review and merge.
+
+---
+
+## E5 -- holdout-3 confirmation (2026-07-02)
+
+**Trigger:** `<!-- benchmark-result:superforcaster-polymarket-v1 -->` on PR #383, comment ID 4864145066 (posted 2026-07-02T09:18:01Z by github-actions[bot], seed 999, n=300)
+
+| Metric | Baseline (prod) | Candidate (PR) | Delta |
+|--------|-----------------|----------------|-------|
+| Brier score | 0.2826 | 0.2237 | -20.8% |
+| Directional Accuracy | 64.2% | 67.7% | +5.4% |
+| Overconf-wrong | 62 | 28 | -54.8% |
+| Overconf-wrong rate | 0.2067 | 0.0933 | -54.9% |
+| Parse rate | -- | 300/300 (100%) | OK |
+
+**Sub-pipeline E verdict:** CONFIRMS hypothesis. Third holdout run at seed 999 (E3 was n=300 -23.5%; E4 was n=299 -19.4%; E5 is n=300 -20.8%). Results consistent across all five benchmark runs (three holdout + two dev). Prior promotion recommendation (comment #4863529015, 2026-07-02T08:02:22Z) stands. Sub-pipeline E5 reaction posted (comment ID 4864199142, 2026-07-02T09:24:06Z).
+
+**Final state:** Awaiting human reviewer to mark PR #383 ready for review and merge.
+
+---

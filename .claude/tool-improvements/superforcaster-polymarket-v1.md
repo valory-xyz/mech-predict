@@ -83,3 +83,22 @@ Plus `max_tokens` 500 -> 1500 for full chain-of-thought execution. New version: 
 - **Benchmark 2026-06-29:** SHA `504123a160dbdff624cb7614e2524af0eb11413e`, memory-only chore commit; tool code identical to holdout SHA 237173e5; CI green (Sub-pipeline D trigger); promotion recommendation re-posted (comment #4836079215) to correct phantom #4835611333 — loop closed, no further benchmarking needed.
 **CI benchmark (2026-06-29, comment #4836605495, seed 42, n=100, current-SHA):** Brier 0.2734 → 0.2471 (-9.6%), DA 63.0% → 64.0% (+1.6%), Overconf-wrong 19 → 11 (-42.1%); parse 100/100 (100%). Fingerprint consistent with holdout. Sub-pipeline E verdict: E3 Promote (comment #4836716763). Both dev and holdout seeds confirm improvement; no regression indicators.
 - **Benchmark 2026-06-30:** SHA `3266bd760caf8930717cfeaecda9afac3ab0267b`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- result (triggered manually by @jmoreira-valory, trigger comment #4844700993, result comment #4845048271): Brier 0.2894->0.2503 (-13.5%), DA 60.6%->62.0% (+2.3%), Overconf-wrong 20->11 (-45.0%); parse 100/100 (100%). Note: production baseline shifted from 0.2734 to 0.2894 (denominator 3459->3559) reflecting additional recent production rows. E2: both aggregate Brier and fingerprint improved -> E3 path. Promotion recommendation stands (11th consistent result; 10 dev-seed runs + 1 holdout); no new benchmark needed. Agent Sub-pipeline E verdict: comment #4845098207.
+
+## Issue #382 -> PR #383 -- 2026-07-02
+
+- **Trigger:** Issue #382 regression on polymarket. W-1 Brier 0.3679 (n=559) vs W-2 0.3018 (n=818); delta +0.0661; chronic-bad (above 0.25 threshold).
+- **PR:** #383 `tool-improvement(superforcaster-polymarket-v1): evidence-reliability screen for overconfident-YES on narrow-scope markets`
+- **Branch:** `tool-improvement/superforcaster-polymarket-v1-evidence-reliability-screen`
+- **Status:** draft PR opened; W-2 benchmark triggered 2026-07-02.
+
+### Hypothesis (from PR body)
+At the prediction-LLM-call stage (gate-visible), `superforcaster-polymarket-v1` systematically overestimates `p_yes` via three compounding failure modes confirmed in 10/10 worst-miss IPFS deliveries (good-evidence/bad-reasoning):
+- **(4a) Market-price anchoring** -- Polymarket/aggregator odds treated as independent probability estimates.
+- **(4c) Stale temporal anchoring** -- past articles treated as forward-window confirmation.
+- **(4d) Criterion-specificity failure** -- topical relevance conflated with exact criterion satisfaction.
+Plus `max_tokens=500` insufficient for 7-step CoT causing premature JSON emission.
+
+New version: `superforcaster-polymarket-v5`. Mechanism: mandatory four-sub-step evidence-reliability screen (4a-4d) + max_tokens 500->1500.
+
+### Benchmark ledger
+- **Benchmark 2026-07-02:** SHA `53c350a22553365bd2554982563f4469e288b1d3`, seed 42, n=100, dev, baseline=superforcaster-polymarket-v1, platform=polymarket -- posted (comment #4862477125)

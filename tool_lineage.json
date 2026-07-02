@@ -193,6 +193,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster-polymarket-v5": {
+      "parent": "superforcaster-polymarket-v1",
+      "reason": "Issue #382: same step-4 evidence-reliability screen as v4 (market-odds filter, intent discount, TYPE A/B temporal classification, criterion-specificity) + max_tokens 500->1500; first version properly registered in tournament_tools.json and validated by PR-CI cached W-2 replay."
     }
   }
 }

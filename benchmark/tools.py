@@ -116,6 +116,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v5 -- issue #382: same evidence-reliability
+    # screen as v4 (market-odds filter, intent discount, TYPE A/B temporal
+    # classification, criterion-specificity), properly registered in
+    # tournament_tools.json and validated by PR-CI's cached W-2 replay.
+    "superforcaster-polymarket-v5": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v5"
+            ".superforcaster_polymarket_v5"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

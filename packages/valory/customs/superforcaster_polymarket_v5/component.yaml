@@ -1,0 +1,28 @@
+name: superforcaster_polymarket_v5
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. v5 adds a step-4 evidence-reliability
+  screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B
+  temporal-evidence classification, criterion-specificity check) for systematic overconfident-YES
+  on Polymarket; raises max_tokens 500->1500 so the full chain-of-thought executes
+  before the JSON is emitted.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v5.py: bafybeibej5wt7b2g36jolu4irfdggy6jy2ufiriqo7pcj7j76qeloh2c4e
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v5.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5

@@ -34,19 +34,26 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
+
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
+    BSS_LEVEL_FLOOR,
+    PROMOTION_LABEL,
     RECENT_CLOSE_DAYS,
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
+    _below_level,
     _closed_issue_pairs,
     _load_json,
+    _load_lineage_children,
     _open_issue,
     _open_issue_tools,
     _window_iso,
     build_issue_body,
     build_issue_title,
+    build_promotion_body,
+    build_promotion_title,
     main,
     triage,
     write_state,
@@ -60,14 +67,21 @@ def _stats(
     brier: float = 0.20,
     log_loss: float = 0.60,
     reliability: float = 0.98,
+    brier_skill_score: float | None = None,
 ) -> Dict[str, Any]:
-    return {
+    s: Dict[str, Any] = {
         "n": n,
         "valid_n": valid_n,
         "brier": brier,
         "log_loss": log_loss,
         "reliability": reliability,
     }
+    # Only set the skill score when a test explicitly exercises the
+    # market-relative floor; omitting it drives the backward-compatible
+    # absolute-Brier fallback (matches pre-BSS score files).
+    if brier_skill_score is not None:
+        s["brier_skill_score"] = brier_skill_score
+    return s
 
 
 def _scores(**by_tool: Dict[str, Any]) -> Dict[str, Any]:
@@ -1402,3 +1416,131 @@ class TestMainExitCode:
         assert rc == 1
         # Prior state preserved verbatim.
         assert json.loads(state_path.read_text()) == prior
+
+
+class TestBssLevelFloor:
+    """Level trigger is market-relative (BSS) when the skill score is present."""
+
+    def test_bss_below_floor_opens(self) -> None:
+        """BSS below the floor fires the level trigger even with a modest Brier."""
+        d = triage(
+            _scores(a=_stats(brier=0.22, brier_skill_score=BSS_LEVEL_FLOOR - 0.10)),
+            _scores(a=_stats(brier=0.22, brier_skill_score=BSS_LEVEL_FLOOR - 0.10)),
+            {},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+    def test_high_brier_but_positive_skill_is_silent(self) -> None:
+        """The market-ceiling case: high absolute Brier but the tool still beats
+        its base rate (BSS > floor) must NOT fire -- this is the whole point of
+        the market-relative floor (the legacy absolute 0.25 floor would fire)."""
+        assert 0.30 > BRIER_LEVEL_THRESHOLD  # would trip the legacy absolute floor
+        d = triage(
+            _scores(a=_stats(brier=0.30, brier_skill_score=0.05)),
+            _scores(a=_stats(brier=0.30, brier_skill_score=0.05)),
+            {},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_missing_bss_falls_back_to_absolute_floor(self) -> None:
+        """No skill score -> legacy absolute Brier floor still applies."""
+        assert _below_level(0.30, None) is True
+        assert _below_level(0.20, None) is False
+        d = triage(_scores(a=_stats(brier=0.30)), _scores(a=_stats(brier=0.30)), {})
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+
+
+class TestLineageDescendant:
+    """A tool with a merged fix variant is routed to a promotion note, not a fix."""
+
+    def _firing(self) -> Dict[str, Any]:
+        # Level-floor fire (BSS below the floor), stable across windows.
+        return _scores(a=_stats(brier=0.22, brier_skill_score=BSS_LEVEL_FLOOR - 0.10))
+
+    def test_descendant_routes_to_promotion(self) -> None:
+        d = triage(
+            self._firing(),
+            self._firing(),
+            {},
+            lineage_children={"a": ["a-v4"]},
+        )
+        assert d[0]["decision"] == "descendant_exists"
+        assert d[0]["descendants"] == ["a-v4"]
+        assert d[0]["issue_open"] is False  # not a fix issue
+
+    def test_no_descendant_opens_normally(self) -> None:
+        d = triage(self._firing(), self._firing(), {}, lineage_children={})
+        assert d[0]["decision"] == "open_issue"
+
+    def test_descendant_check_is_after_no_trigger(self) -> None:
+        """A tool that does not fire is silent even if it has descendants."""
+        d = triage(
+            _scores(a=_stats(brier=0.20, brier_skill_score=0.10)),
+            _scores(a=_stats(brier=0.20, brier_skill_score=0.10)),
+            {},
+            lineage_children={"a": ["a-v4"]},
+        )
+        assert d[0]["decision"] == "silent"
+
+    def test_regression_with_descendant_also_routed(self) -> None:
+        """A regression-triggered fire with a descendant is also promotion-routed."""
+        d = triage(
+            _scores(a=_stats(brier=0.260, log_loss=0.700, brier_skill_score=0.20)),
+            _scores(a=_stats(brier=0.210, log_loss=0.610, brier_skill_score=0.20)),
+            {},
+            lineage_children={"a": ["a-v4"]},
+        )
+        assert d[0]["decision"] == "descendant_exists"
+        assert d[0]["trigger"] == "regression"
+
+
+class TestLineageLoader:
+    """tool_lineage.json parsing into parent -> children."""
+
+    def test_children_map(self, tmp_path: Path) -> None:
+        lineage = {
+            "tools": {
+                "v1": {"parent": None},
+                "v2": {"parent": "v1"},
+                "v4": {"parent": "v1"},
+                "orphan": {"parent": "other"},
+            }
+        }
+        p = tmp_path / "tool_lineage.json"
+        p.write_text(json.dumps(lineage), encoding="utf-8")
+        children = _load_lineage_children(p)
+        assert sorted(children["v1"]) == ["v2", "v4"]
+        assert children["other"] == ["orphan"]
+        assert "v2" not in children  # leaf, no children
+
+    def test_missing_file_is_empty(self, tmp_path: Path) -> None:
+        assert _load_lineage_children(tmp_path / "nope.json") == {}
+
+
+class TestPromotionNote:
+    """The visible promotion-review note format."""
+
+    def test_title_and_body(self) -> None:
+        title = build_promotion_title("superforcaster-polymarket-v1", "polymarket")
+        assert title.startswith("[tool-promotion-review]")
+        assert "`superforcaster-polymarket-v1`" in title
+        assert "on polymarket" in title
+        body = build_promotion_body(
+            {
+                "tool": "superforcaster-polymarket-v1",
+                "trigger": "level_floor",
+                "brier_cur": 0.3679,
+                "bss_cur": -0.26,
+                "descendants": ["superforcaster-polymarket-v4"],
+            },
+            "polymarket",
+        )
+        assert "not a new fix request" in body.lower()
+        assert "`superforcaster-polymarket-v4`" in body
+        assert "BSS-vs-market" in body
+        # Must NOT invoke the coding agent.
+        assert "@valory-coding-agent" not in body
+        assert PROMOTION_LABEL == "tool-promotion-review"

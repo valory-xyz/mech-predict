@@ -36,10 +36,16 @@ cascade:
      ``sign(delta Brier) == sign(delta log_loss)``. Calibrated
      2026-05-29 against 26 days of CI data: 0.040 alone yields ~1
      issue/week per active tool.
-   - Level: ``Brier_cur > 0.25`` regardless of delta. The loop is
-     self-improvement, not just self-stabilization; a tool whose
-     Brier is persistently 0.30 is a candidate for improvement
-     even when it is not actively getting worse.
+   - Level: the tool's **Brier Skill Score** is below
+     ``BSS_LEVEL_FLOOR`` -- it is materially worse than its base-rate
+     reference (``BSS = 1 - brier / base_rate_brier``, computed per
+     group by ``scorer.py``). This is *market-relative*: unlike an
+     absolute Brier floor, it does not keep flagging a tool that is at
+     the ceiling of an efficient, hard-to-beat market (where the
+     market's own Brier is high, so an absolute floor sits below the
+     achievable frontier and fires forever, unfixable by any prompt).
+     Falls back to the legacy absolute floor (``Brier_cur > 0.25``)
+     only when the skill score is missing (pre-BSS score files).
 3. ``valid_n / 7 >= 15`` on both windows (so ``valid_n >= 105``).
 4. ``reliability >= 0.80`` (collapses route to a WARNING log instead
    of opening a tool-improvement issue; an operator watching the
@@ -59,6 +65,18 @@ log line per tool with a close in the recent past explicitly states
 whether the cooldown is ACTIVE or has ELAPSED, so an operator can see
 why a known-bad tool isn't firing today (or why it is firing again
 after a recent close).
+
+Lineage-descendant routing: a tool that fires but already has a merged
+fix variant in ``tool_lineage.json`` (i.e. it is some other tool's
+``parent``) is NOT a new fix request -- re-fixing the same ancestor is
+what produced the successive-variant churn (v1 -> v2/v3/v4 -> v5, none
+promoted). Such a fire is routed to ``descendant_exists`` and emitted as
+a *visible* promotion-review note under the ``tool-promotion-review``
+label (its own dedup, posted once per tool). That label is deliberately
+NOT ``tool-improvement``, so the label-routed coding agent is not
+invoked; the note asks a human to promote an existing variant (judged on
+BSS-vs-market, not raw Brier) or accept the lineage is at its ceiling and
+retire it.
 
 For each ``open_issue`` decision, the script calls ``gh issue create``
 with the ``tool-improvement`` label. The label routes the issue to
@@ -94,10 +112,27 @@ RECENT_CLOSE_DAYS = 1
 VALID_N_PER_WINDOW_FLOOR = 105
 RELIABILITY_FLOOR = 0.80
 ROLLING_WINDOW_DAYS = 7
+# Market-relative level floor. The tool is flagged when its Brier Skill
+# Score (BSS = 1 - brier / base_rate_brier, already computed per group by
+# the scorer) drops below this floor -- i.e. it is materially worse than
+# simply predicting the base rate. Unlike an absolute Brier floor, BSS
+# adapts to market difficulty: on an efficient market whose own Brier is
+# high, an absolute floor sits BELOW the achievable frontier and fires
+# forever, so no prompt fix can ever clear it. -0.10 keeps the same
+# sensitivity as the legacy 0.25 Brier floor on the observed ~0.22 base
+# rate, without pinning to an unbeatable absolute number.
+BSS_LEVEL_FLOOR = -0.10
 
 DEFAULT_REPO = "valory-xyz/mech-predict"
 DEFAULT_LABEL = "tool-improvement"
+# A tool that fires a Brier signal but ALREADY has a merged fix variant in
+# tool_lineage.json is not a new fix request -- re-fixing the same ancestor
+# is what produced the v1 -> v2/v3/v4 -> v5 churn. Such a fire is routed to
+# a visible promotion-review note under this separate label so the coding
+# agent (label-routed on ``tool-improvement``) is NOT invoked.
+PROMOTION_LABEL = "tool-promotion-review"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+LINEAGE_PATH = Path(__file__).resolve().parent.parent / "tool_lineage.json"
 
 log = logging.getLogger(__name__)
 
@@ -116,9 +151,46 @@ def _load_json(path: Path) -> Dict[str, Any]:
 # (tool, platform) pair. A manually-filed issue that omits either segment
 # logs a warning and is skipped (no silent suppression bypass).
 _TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+W-1\b")
+# Promotion-review notes use their own label + title so they dedup
+# independently of the fix issues and never match the coding agent's
+# ``tool-improvement`` title parser.
+_PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\b")
 
 
-def _open_issue_tools(repo: str, label: str) -> Optional[List[Tuple[str, str]]]:
+def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
+    """Map each tool to its variant descendants from ``tool_lineage.json``.
+
+    A tool present as some other tool's ``parent`` has at least one merged
+    fix variant -- the ledger is updated on merge -- so its presence as a
+    key here means "a fix for this tool already exists".
+    """
+    data = _load_json(path)
+    children: Dict[str, List[str]] = {}
+    for name, meta in (data.get("tools") or {}).items():
+        parent = (meta or {}).get("parent")
+        if parent:
+            children.setdefault(parent, []).append(name)
+    return children
+
+
+def _below_level(brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
+    """Level trigger: is the tool materially worse than its base-rate reference?
+
+    Uses the market-relative Brier Skill Score when available (adapts to
+    market difficulty). Falls back to the legacy absolute Brier floor only
+    when the skill score is missing (pre-BSS score files / unit fixtures),
+    so the change is backward-compatible.
+    """
+    if bss_cur is not None:
+        return bss_cur < BSS_LEVEL_FLOOR
+    if brier_cur is None:
+        return False
+    return brier_cur > BRIER_LEVEL_THRESHOLD
+
+
+def _open_issue_tools(
+    repo: str, label: str, title_re: "re.Pattern[str]" = _TITLE_RE
+) -> Optional[List[Tuple[str, str]]]:
     """Return (tool, platform) pairs for open issues; ``None`` on gh error, ``[]`` on zero."""
     # Distinguishing None (transient gh-CLI failure) from [] (gh
     # succeeded with zero matching open issues) lets the caller fall
@@ -167,7 +239,7 @@ def _open_issue_tools(repo: str, label: str) -> Optional[List[Tuple[str, str]]]:
     pairs: List[Tuple[str, str]] = []
     for row in rows:
         title = row.get("title") or ""
-        m = _TITLE_RE.search(title)
+        m = title_re.search(title)
         if m:
             pairs.append((m.group(1), m.group(2)))
         else:
@@ -347,8 +419,16 @@ def triage(
     open_now: Optional[List[Any]] = None,
     closed_issues: Optional[List[Tuple[str, str, datetime]]] = None,
     now: Optional[datetime] = None,
+    lineage_children: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
+
+    ``lineage_children`` maps a tool to its merged fix variants (from
+    ``tool_lineage.json``). A tool that fires but already has a variant is
+    routed to ``descendant_exists`` (a visible promotion note) instead of a
+    redundant fix issue -- see the module docstring.
+    """
+    children = lineage_children or {}
     # ``open_now`` may be a list of bare tool names (legacy single-
     # platform callers) OR a list of ``(tool, platform)`` tuples (multi-
     # platform live-gh callers). Tuple entries are filtered to the
@@ -431,24 +511,28 @@ def triage(
         # - regression: today's Brier worsened by more than the threshold
         #   AND log_loss agrees on the worsening direction. Sign
         #   agreement filters noisy borderline regressions.
-        # - level: today's Brier exceeds an absolute floor. The tool is
-        #   not getting worse but it is persistently inaccurate, which
-        #   is a self-improvement opportunity. Level is checked
-        #   independently of sign-agreement: a high-level tool may still
-        #   warrant a fix even when log_loss disagrees on the delta.
-        above_level = bc > BRIER_LEVEL_THRESHOLD
+        # - level: the tool's Brier Skill Score is below the market-relative
+        #   floor -- it is materially worse than its base-rate reference.
+        #   Using BSS (not an absolute Brier) means an efficient, hard-to-
+        #   beat market does not keep an at-ceiling tool flagged forever
+        #   (an absolute floor sits below the achievable frontier there).
+        #   Level is checked independently of sign-agreement.
+        bss_cur = c.get("brier_skill_score")
+        d["bss_cur"] = bss_cur
+        d["bss_prev"] = p.get("brier_skill_score")
+        level_hit = _below_level(bc, bss_cur)
         regressed = False
         if delta_brier > BRIER_REGRESSION_THRESHOLD:
             lc, lp = c.get("log_loss"), p.get("log_loss")
             if lc is None or lp is None:
-                if not above_level:
+                if not level_hit:
                     d.update(decision="silent", reason="missing_log_loss")
                     decisions.append(d)
                     continue
                 # else fall through with regressed=False; level fires
             elif lc - lp > 0:
                 regressed = True
-            elif not above_level:
+            elif not level_hit:
                 d.update(decision="silent", reason="sign_disagreement")
                 decisions.append(d)
                 continue
@@ -462,7 +546,7 @@ def triage(
         # prior_open being false because while the issue is still open the
         # duplicate_suppressed path below owns the suppression.
         if (
-            (regressed or above_level)
+            (regressed or level_hit)
             and not prior_open.get(tool)
             and tool in recently_closed_set
         ):
@@ -474,8 +558,27 @@ def triage(
             )
             decisions.append(d)
             continue
-        if not regressed and not above_level:
+        if not regressed and not level_hit:
             d.update(decision="silent", reason="no_regression")
+            decisions.append(d)
+            continue
+        # Lineage-descendant awareness: a tool that fires but already has a
+        # merged fix variant in tool_lineage.json is NOT a new fix request.
+        # Re-fixing the same ancestor is what produced the v1 -> v4 -> v5
+        # churn (three variants, none promoted). Route to a visible
+        # promotion-review note (emitted in main under PROMOTION_LABEL) so
+        # the label-routed coding agent is not invoked. Placed after the
+        # cooldown/no-trigger gates (a recently-closed or non-firing tool
+        # stays quiet) but before the duplicate/open paths (a stale open fix
+        # issue must not mask the promotion signal).
+        descendants = children.get(tool) or []
+        if descendants:
+            d.update(
+                decision="descendant_exists",
+                reason=trigger,
+                trigger=trigger,
+                descendants=sorted(descendants),
+            )
             decisions.append(d)
             continue
         # Duplicate-issue suppression: if an issue is already open for
@@ -520,6 +623,9 @@ def write_state(
                 "delta_brier": d.get("delta_brier"),
                 "brier_cur": d.get("brier_cur"),
                 "brier_prev": d.get("brier_prev"),
+                "bss_cur": d.get("bss_cur"),
+                "bss_prev": d.get("bss_prev"),
+                "descendants": d.get("descendants"),
                 "n_cur": d.get("n_cur"),
                 "n_prev": d.get("n_prev"),
                 "reliability_cur": d.get("reliability_cur"),
@@ -576,12 +682,18 @@ def build_issue_body(
     pm = json.dumps(polymarket_stats, indent=2, sort_keys=True)
     reason = decision.get("reason", "regression")
     if reason == "level_floor":
+        bss_cur = decision.get("bss_cur")
+        skill_clause = (
+            f"a Brier Skill Score of {bss_cur:+.4f} (below the {BSS_LEVEL_FLOOR:+.2f} "
+            "floor -- materially worse than its base-rate reference)"
+            if bss_cur is not None
+            else f"a Brier persistently above {BRIER_LEVEL_THRESHOLD:.2f}"
+        )
         headline = (
-            f"`{tool}` on {platform} has a Brier persistently above "
-            f"{BRIER_LEVEL_THRESHOLD:.2f} in the most recent 7-day window. "
-            "This is a self-improvement opportunity: the tool is not "
-            "actively getting worse, but its level is high enough that a "
-            "structural change is worth attempting."
+            f"`{tool}` on {platform} has {skill_clause} in the most recent "
+            "7-day window. This is a self-improvement opportunity: the tool "
+            "is not actively getting worse, but it is materially below its "
+            "reference, so a structural change is worth attempting."
         )
         signal = "level signal"
     else:
@@ -703,6 +815,66 @@ def _log_decision(d: Dict[str, Any]) -> None:
     )
 
 
+def build_promotion_title(tool: str, platform: str = "polymarket") -> str:
+    """Title for the visible promotion-review note (its own dedup key + label)."""
+    return f"[tool-promotion-review] `{tool}`: merged fix variant exists on {platform}"
+
+
+_PROMOTION_BODY_TEMPLATE = """## Promotion review -- not a new fix request
+
+`{tool}` on {platform} fired a Brier **{trigger}** signal again (W-1 Brier {brier_cur}, BSS {bss_cur}), but it **already has merged fix variant(s)** recorded in `tool_lineage.json`:
+
+{descendant_list}
+
+Re-fixing the same ancestor is what produced the successive-variant churn, so **no new tool variant should be generated here** -- this note is deliberately NOT labelled `tool-improvement` and does not tag the coding agent.
+
+**Decide instead:**
+
+1. **Promote** one of the existing variants above to production if it is a real improvement -- evaluate on **BSS-vs-market**, not raw Brier: a lower-Brier variant that still loses to the market gives no ROI and should not ship; or
+2. if none of them beats the market, the lineage is at its **market ceiling** -- accept it and mute / retire the tool rather than iterating further.
+
+Baseline stats for the current window are in the matching `[tool-improvement]` issue (if open) and the `benchmark-data` artifact.
+"""
+
+
+def build_promotion_body(decision: Dict[str, Any], platform: str = "polymarket") -> str:
+    """Render the visible promotion-review note for a tool that already has a fix variant."""
+    descendants = decision.get("descendants") or []
+    dlist = "\n".join(f"- `{v}`" for v in descendants) or "- (see tool_lineage.json)"
+    return _PROMOTION_BODY_TEMPLATE.format(
+        tool=decision["tool"],
+        platform=platform,
+        trigger=decision.get("trigger", "level_floor"),
+        brier_cur=_f(decision.get("brier_cur"), ".4f"),
+        bss_cur=_f(decision.get("bss_cur"), "+.4f"),
+        descendant_list=dlist,
+    )
+
+
+def _ensure_label(repo: str, label: str, dry_run: bool) -> None:
+    """Create ``label`` if missing (idempotent; a pre-existing label is a no-op)."""
+    if dry_run:
+        return
+    subprocess.run(
+        [
+            "gh",
+            "label",
+            "create",
+            label,
+            "--repo",
+            repo,
+            "--color",
+            "0e8a16",
+            "--description",
+            "Tool has a merged fix variant; promote/retire decision (no auto-fix)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def main() -> int:
     """CLI entry point invoked by benchmark_flywheel.yaml (non-zero on dispatch failure)."""
     p = argparse.ArgumentParser(description=__doc__ or "")
@@ -770,8 +942,17 @@ def main() -> int:
             sorted((t, p, c.strftime("%Y-%m-%d")) for t, p, c in closed_issues[:10]),
         )
 
+    # Lineage: tools with a merged fix variant are routed to a promotion
+    # note instead of a redundant fix issue. ``promo_open`` dedups the note
+    # under its own label so it is posted once per (tool, platform), not
+    # daily.
+    lineage_children = _load_lineage_children()
+    log.info("triage lineage: %d tools have >=1 fix variant", len(lineage_children))
+    promo_open = _open_issue_tools(args.repo, PROMOTION_LABEL, _PROMO_TITLE_RE)
+    promo_open_set = {tuple(x) for x in (promo_open or [])}
+
     all_decisions: List[Dict[str, Any]] = []
-    n_opened = n_failed = n_collapse = n_silent = 0
+    n_opened = n_failed = n_collapse = n_silent = n_promo = 0
     for platform in platforms:
         cur = _load_json(RESULTS_DIR / f"rolling_scores_{platform}.json")
         prev = _load_json(RESULTS_DIR / f"prev_rolling_scores_{platform}.json")
@@ -784,6 +965,7 @@ def main() -> int:
             open_now=open_now,
             closed_issues=closed_issues,
             now=now,
+            lineage_children=lineage_children,
         )
         all_decisions.extend(decisions)
 
@@ -822,12 +1004,50 @@ def main() -> int:
                     RELIABILITY_FLOOR,
                 )
                 n_collapse += 1
+            elif d["decision"] == "descendant_exists":
+                # Fired, but a merged fix variant already exists: post a
+                # visible promotion-review note (deduped by PROMOTION_LABEL)
+                # rather than a redundant fix issue. Does NOT invoke the
+                # coding agent.
+                key = (d["tool"], platform)
+                if key in promo_open_set:
+                    log.info(
+                        "descendant_exists on %s/%s (variants=%s): promotion "
+                        "note already open; skipping.",
+                        d["tool"],
+                        platform,
+                        d.get("descendants"),
+                    )
+                    n_silent += 1
+                else:
+                    log.info(
+                        "descendant_exists on %s/%s: fix variant(s) %s already "
+                        "merged -> opening promotion-review note (no auto-fix).",
+                        d["tool"],
+                        platform,
+                        d.get("descendants"),
+                    )
+                    _ensure_label(args.repo, PROMOTION_LABEL, args.dry_run)
+                    rc = _open_issue(
+                        args.repo,
+                        PROMOTION_LABEL,
+                        build_promotion_title(d["tool"], platform),
+                        build_promotion_body(d, platform),
+                        args.dry_run,
+                    )
+                    if rc == 0:
+                        n_promo += 1
+                        promo_open_set.add(key)
+                    else:
+                        n_failed += 1
             else:
                 n_silent += 1
 
     log.info(
-        "triage summary: %d opened, %d failed, %d reliability_collapse, %d silent",
+        "triage summary: %d opened, %d promotion-note, %d failed, "
+        "%d reliability_collapse, %d silent",
         n_opened,
+        n_promo,
         n_failed,
         n_collapse,
         n_silent,

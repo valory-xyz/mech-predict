@@ -68,15 +68,19 @@ after a recent close).
 
 Lineage-descendant routing: a tool that fires but already has a merged
 fix variant in ``tool_lineage.json`` (i.e. it is some other tool's
-``parent``) is NOT a new fix request -- re-fixing the same ancestor is
-what produced the successive-variant churn (v1 -> v2/v3/v4 -> v5, none
-promoted). Such a fire is routed to ``descendant_exists`` and emitted as
-a *visible* promotion-review note under the ``tool-promotion-review``
-label (its own dedup, posted once per tool). That label is deliberately
+``parent``) is NOT a new fix request -- repeated re-fixing of the same
+ancestor without promoting the result is the churn this stops. Such a
+fire is routed to ``descendant_exists`` and emitted as a *visible*
+promotion-review note under the ``tool-promotion-review`` label (its own
+dedup, posted once per ``(tool, platform)``). That label is deliberately
 NOT ``tool-improvement``, so the label-routed coding agent is not
 invoked; the note asks a human to promote an existing variant (judged on
 BSS-vs-market, not raw Brier) or accept the lineage is at its ceiling and
-retire it.
+retire it. By design there is no ``RECENT_CLOSE_DAYS`` cooldown for these
+notes: the signal is "the deployed ancestor is still underperforming and
+its fix is unpromoted", so a note closed without changing that condition
+re-posts on the next firing run (until the variant is promoted or the
+tool retired), rather than going quiet on a stale close.
 
 For each ``open_issue`` decision, the script calls ``gh issue create``
 with the ``tool-improvement`` label. The label routes the issue to
@@ -90,6 +94,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -118,18 +123,21 @@ ROLLING_WINDOW_DAYS = 7
 # simply predicting the base rate. Unlike an absolute Brier floor, BSS
 # adapts to market difficulty: on an efficient market whose own Brier is
 # high, an absolute floor sits BELOW the achievable frontier and fires
-# forever, so no prompt fix can ever clear it. -0.10 keeps the same
-# sensitivity as the legacy 0.25 Brier floor on the observed ~0.22 base
-# rate, without pinning to an unbeatable absolute number.
+# forever, so no prompt fix can ever clear it. -0.10 keeps roughly the same
+# sensitivity as the legacy 0.25 Brier floor on the observed base-rate
+# *Brier* of ~0.22 (yes-rate ~0.36 -> yes*(1-yes) ~= 0.22): the floor then
+# fires at Brier ~= 0.22 * 1.10 ~= 0.24. NB the referent is the base-rate
+# Brier, NOT the yes-rate itself.
 BSS_LEVEL_FLOOR = -0.10
 
 DEFAULT_REPO = "valory-xyz/mech-predict"
 DEFAULT_LABEL = "tool-improvement"
 # A tool that fires a Brier signal but ALREADY has a merged fix variant in
-# tool_lineage.json is not a new fix request -- re-fixing the same ancestor
-# is what produced the v1 -> v2/v3/v4 -> v5 churn. Such a fire is routed to
-# a visible promotion-review note under this separate label so the coding
-# agent (label-routed on ``tool-improvement``) is NOT invoked.
+# tool_lineage.json is not a new fix request -- repeated re-fixing of the
+# same ancestor without promoting the result is the churn this routing
+# stops. Such a fire is routed to a visible promotion-review note under this
+# separate label so the coding agent (label-routed on ``tool-improvement``)
+# is NOT invoked.
 PROMOTION_LABEL = "tool-promotion-review"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LINEAGE_PATH = Path(__file__).resolve().parent.parent / "tool_lineage.json"
@@ -161,8 +169,21 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
     """Map each tool to its variant descendants (children) from ``tool_lineage.json``."""
     # A tool present as some other tool's ``parent`` has at least one merged
     # fix variant (the ledger is updated on merge), so its presence as a key
-    # here means "a fix for this tool already exists".
-    data = _load_json(path)
+    # here means "a fix for this tool already exists". Warn (rather than
+    # silently returning {}) when the file EXISTS but does not parse: an empty
+    # children map disables descendant routing, so a corrupt ledger would
+    # silently resume the very re-fixing churn this stops.
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "tool_lineage.json exists but failed to parse (%s); descendant "
+            "routing DISABLED this run -- promotion notes will not fire.",
+            exc,
+        )
+        data = {}
     children: Dict[str, List[str]] = {}
     for name, meta in (data.get("tools") or {}).items():
         parent = (meta or {}).get("parent")
@@ -174,11 +195,20 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
 def _below_level(brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
     """Level trigger: is the tool materially worse than its base-rate reference?"""
     # Prefer the market-relative Brier Skill Score (adapts to market
-    # difficulty); fall back to the legacy absolute Brier floor only when the
-    # skill score is missing (pre-BSS score files / unit fixtures) so the
-    # change is backward-compatible.
-    if bss_cur is not None:
+    # difficulty); fall back to the legacy absolute Brier floor when the skill
+    # score is missing (pre-BSS score files / unit fixtures) OR not finite.
+    # A NaN BSS is plausible (scorer's base_rate_brier = yes*(1-yes) is 0 on an
+    # all-one-outcome window, and json round-trips NaN); `NaN < floor` is
+    # False, which would silently disable the level trigger -- so treat a
+    # non-finite BSS the same as missing and use the absolute Brier fallback.
+    if bss_cur is not None and math.isfinite(bss_cur):
         return bss_cur < BSS_LEVEL_FLOOR
+    if bss_cur is not None:
+        log.warning(
+            "brier_skill_score is non-finite (%r); falling back to the "
+            "absolute Brier floor for the level trigger.",
+            bss_cur,
+        )
     if brier_cur is None:
         return False
     return brier_cur > BRIER_LEVEL_THRESHOLD
@@ -240,8 +270,9 @@ def _open_issue_tools(
             pairs.append((m.group(1), m.group(2)))
         else:
             log.warning(
-                "tool-improvement issue title did not match the expected format; "
+                "%s issue title did not match the expected format; "
                 "skipping (no suppression): %r",
+                label,
                 title[:120],
             )
     return pairs
@@ -559,8 +590,8 @@ def triage(
             continue
         # Lineage-descendant awareness: a tool that fires but already has a
         # merged fix variant in tool_lineage.json is NOT a new fix request.
-        # Re-fixing the same ancestor is what produced the v1 -> v4 -> v5
-        # churn (three variants, none promoted). Route to a visible
+        # Repeated re-fixing of the same ancestor without promoting the result
+        # is the churn this stops. Route to a visible
         # promotion-review note (emitted in main under PROMOTION_LABEL) so
         # the label-routed coding agent is not invoked. Placed after the
         # cooldown/no-trigger gates (a recently-closed or non-firing tool
@@ -864,11 +895,28 @@ def _ensure_label(repo: str, label: str, dry_run: bool) -> None:
         "--description",
         "Tool has a merged fix variant; promote/retire decision (no auto-fix)",
     ]
-    subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+    # Degrade gracefully like every other gh helper in this module: a missing
+    # gh binary / timeout must not abort the whole run before write_state.
+    try:
+        r = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("gh label create failed to run (%s); continuing", exc)
+        return
+    # ``already exists`` is the expected idempotent path; surface any other
+    # non-zero (e.g. token lacks label scope) so the root cause is visible
+    # rather than showing up only as a downstream ``gh issue create`` error.
+    if r.returncode != 0 and "already exists" not in (r.stderr or "").lower():
+        log.warning(
+            "gh label create %r returned rc=%d: %s",
+            label,
+            r.returncode,
+            (r.stderr or "").strip()[:200],
+        )
 
 
 def main() -> int:
     """CLI entry point invoked by benchmark_flywheel.yaml (non-zero on dispatch failure)."""
+    # pylint: disable=too-many-locals
     p = argparse.ArgumentParser(description=__doc__ or "")
     p.add_argument(
         "--state",
@@ -1001,29 +1049,43 @@ def main() -> int:
                 # visible promotion-review note (deduped by PROMOTION_LABEL)
                 # rather than a redundant fix issue. Does NOT invoke the
                 # coding agent.
-                key = (d["tool"], platform)
-                if key in promo_open_set:
+                tool = d["tool"]
+                descendants = d.get("descendants")
+                key = (tool, platform)
+                if promo_open is None:
+                    # The open-promo-notes query itself failed (transient gh
+                    # error), so ``promo_open_set`` is unreliable. Skip rather
+                    # than risk a duplicate note -- the same fail-open stance
+                    # the fix-issue duplicate-suppression takes on a gh error.
+                    log.warning(
+                        "descendant_exists on %s/%s: promo-note list unavailable "
+                        "(gh error); skipping to avoid a duplicate note.",
+                        tool,
+                        platform,
+                    )
+                    n_silent += 1
+                elif key in promo_open_set:
                     log.info(
                         "descendant_exists on %s/%s (variants=%s): promotion "
                         "note already open; skipping.",
-                        d["tool"],
+                        tool,
                         platform,
-                        d.get("descendants"),
+                        descendants,
                     )
                     n_silent += 1
                 else:
                     log.info(
                         "descendant_exists on %s/%s: fix variant(s) %s already "
                         "merged -> opening promotion-review note (no auto-fix).",
-                        d["tool"],
+                        tool,
                         platform,
-                        d.get("descendants"),
+                        descendants,
                     )
                     _ensure_label(args.repo, PROMOTION_LABEL, args.dry_run)
                     rc = _open_issue(
                         args.repo,
                         PROMOTION_LABEL,
-                        build_promotion_title(d["tool"], platform),
+                        build_promotion_title(tool, platform),
                         build_promotion_body(d, platform),
                         args.dry_run,
                     )
@@ -1032,6 +1094,9 @@ def main() -> int:
                         promo_open_set.add(key)
                     else:
                         n_failed += 1
+                        # Mirror the fix-issue path: record the failure so
+                        # write_state does not persist a look-alike success.
+                        d["reason"] = "promotion_note_failed"
             else:
                 n_silent += 1
 

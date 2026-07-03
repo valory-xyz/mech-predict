@@ -34,7 +34,6 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
-
 from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
@@ -1432,9 +1431,9 @@ class TestBssLevelFloor:
         assert d[0]["reason"] == "level_floor"
 
     def test_high_brier_but_positive_skill_is_silent(self) -> None:
-        """The market-ceiling case: high absolute Brier but the tool still beats
-        its base rate (BSS > floor) must NOT fire -- this is the whole point of
-        the market-relative floor (the legacy absolute 0.25 floor would fire)."""
+        """Market-ceiling case: high Brier but positive skill (BSS > floor) is silent."""
+        # This is the point of the market-relative floor: the legacy absolute
+        # 0.25 floor would fire here, the BSS floor does not.
         assert 0.30 > BRIER_LEVEL_THRESHOLD  # would trip the legacy absolute floor
         d = triage(
             _scores(a=_stats(brier=0.30, brier_skill_score=0.05)),
@@ -1461,6 +1460,7 @@ class TestLineageDescendant:
         return _scores(a=_stats(brier=0.22, brier_skill_score=BSS_LEVEL_FLOOR - 0.10))
 
     def test_descendant_routes_to_promotion(self) -> None:
+        """A firing tool with a merged fix variant routes to a promotion note."""
         d = triage(
             self._firing(),
             self._firing(),
@@ -1472,6 +1472,7 @@ class TestLineageDescendant:
         assert d[0]["issue_open"] is False  # not a fix issue
 
     def test_no_descendant_opens_normally(self) -> None:
+        """A firing tool with no fix variant opens a normal fix issue."""
         d = triage(self._firing(), self._firing(), {}, lineage_children={})
         assert d[0]["decision"] == "open_issue"
 
@@ -1501,6 +1502,7 @@ class TestLineageLoader:
     """tool_lineage.json parsing into parent -> children."""
 
     def test_children_map(self, tmp_path: Path) -> None:
+        """Each parent maps to its list of child variants; leaves are absent."""
         lineage = {
             "tools": {
                 "v1": {"parent": None},
@@ -1517,13 +1519,15 @@ class TestLineageLoader:
         assert "v2" not in children  # leaf, no children
 
     def test_missing_file_is_empty(self, tmp_path: Path) -> None:
-        assert _load_lineage_children(tmp_path / "nope.json") == {}
+        """A missing lineage file yields an empty children map (no crash)."""
+        assert not _load_lineage_children(tmp_path / "nope.json")
 
 
 class TestPromotionNote:
     """The visible promotion-review note format."""
 
     def test_title_and_body(self) -> None:
+        """The note names the descendants, cites BSS-vs-market, and never tags the agent."""
         title = build_promotion_title("superforcaster-polymarket-v1", "polymarket")
         assert title.startswith("[tool-promotion-review]")
         assert "`superforcaster-polymarket-v1`" in title

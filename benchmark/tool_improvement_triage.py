@@ -158,12 +158,10 @@ _PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S
 
 
 def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
-    """Map each tool to its variant descendants from ``tool_lineage.json``.
-
-    A tool present as some other tool's ``parent`` has at least one merged
-    fix variant -- the ledger is updated on merge -- so its presence as a
-    key here means "a fix for this tool already exists".
-    """
+    """Map each tool to its variant descendants (children) from ``tool_lineage.json``."""
+    # A tool present as some other tool's ``parent`` has at least one merged
+    # fix variant (the ledger is updated on merge), so its presence as a key
+    # here means "a fix for this tool already exists".
     data = _load_json(path)
     children: Dict[str, List[str]] = {}
     for name, meta in (data.get("tools") or {}).items():
@@ -174,13 +172,11 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
 
 
 def _below_level(brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
-    """Level trigger: is the tool materially worse than its base-rate reference?
-
-    Uses the market-relative Brier Skill Score when available (adapts to
-    market difficulty). Falls back to the legacy absolute Brier floor only
-    when the skill score is missing (pre-BSS score files / unit fixtures),
-    so the change is backward-compatible.
-    """
+    """Level trigger: is the tool materially worse than its base-rate reference?"""
+    # Prefer the market-relative Brier Skill Score (adapts to market
+    # difficulty); fall back to the legacy absolute Brier floor only when the
+    # skill score is missing (pre-BSS score files / unit fixtures) so the
+    # change is backward-compatible.
     if bss_cur is not None:
         return bss_cur < BSS_LEVEL_FLOOR
     if brier_cur is None:
@@ -421,13 +417,12 @@ def triage(
     now: Optional[datetime] = None,
     lineage_children: Optional[Dict[str, List[str]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool.
-
-    ``lineage_children`` maps a tool to its merged fix variants (from
-    ``tool_lineage.json``). A tool that fires but already has a variant is
-    routed to ``descendant_exists`` (a visible promotion note) instead of a
-    redundant fix issue -- see the module docstring.
-    """
+    """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
+    # pylint: disable=too-many-locals
+    # ``lineage_children`` maps a tool to its merged fix variants (from
+    # tool_lineage.json); a tool that fires but already has a variant is
+    # routed to ``descendant_exists`` (a visible promotion note) instead of
+    # a redundant fix issue -- see the module docstring.
     children = lineage_children or {}
     # ``open_now`` may be a list of bare tool names (legacy single-
     # platform callers) OR a list of ``(tool, platform)`` tuples (multi-

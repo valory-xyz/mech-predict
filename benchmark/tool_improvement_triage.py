@@ -188,9 +188,26 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
         )
         data = {}
     children: Dict[str, List[str]] = {}
-    for name, meta in (data.get("tools") or {}).items():
-        parent = (meta or {}).get("parent")
-        if parent:
+    tools = data.get("tools")
+    if not isinstance(tools, dict):
+        if tools is not None:
+            log.warning(
+                "tool_lineage.json 'tools' is %s, not an object; ignoring.",
+                type(tools).__name__,
+            )
+        return children
+    for name, meta in tools.items():
+        # Shape-guard each entry: the ledger is hand-maintained, so a malformed
+        # value (e.g. a string) must skip-and-warn, not crash the whole run.
+        if not isinstance(meta, dict):
+            log.warning("tool_lineage.json entry %r is not an object; skipping.", name)
+            continue
+        parent = meta.get("parent")
+        # Only a real fix variant exempts the ancestor from fix issues. A
+        # maintenance bump (``kind: maintenance`` -- e.g. an SDK-only lockstep
+        # bump with no Brier-relevant change) must NOT route the ancestor to a
+        # promotion note. Absent ``kind`` defaults to ``fix`` (back-compatible).
+        if parent and meta.get("kind", "fix") != "maintenance":
             children.setdefault(parent, []).append(name)
     return children
 
@@ -749,7 +766,7 @@ def build_issue_body(
         skill_clause = (
             f"a Brier Skill Score of {bss_cur:+.4f} (below the {BSS_LEVEL_FLOOR:+.2f} "
             "floor -- materially worse than its base-rate reference)"
-            if bss_cur is not None
+            if bss_cur is not None and math.isfinite(bss_cur)
             else f"a Brier persistently above {BRIER_LEVEL_THRESHOLD:.2f}"
         )
         headline = (

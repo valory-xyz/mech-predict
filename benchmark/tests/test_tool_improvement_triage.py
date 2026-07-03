@@ -387,7 +387,32 @@ class TestIssueBodyContract:
         assert "Brier Skill Score of -0.2500" in body
         assert "below the -0.10 floor" in body
 
-    def test_body_contains_headline_and_artifact(self) -> None:
+    def test_body_and_title_agree_on_non_finite_bss(self) -> None:
+        """A NaN BSS falls back to the absolute-Brier wording in BOTH title and body."""
+        decision = {
+            "tool": "foo",
+            "platform": "polymarket",
+            "brier_cur": 0.30,
+            "brier_prev": 0.30,
+            "delta_brier": 0.0,
+            "bss_cur": float("nan"),
+            "n_cur": 187,
+            "n_prev": 212,
+            "decision": "open_issue",
+            "reason": "level_floor",
+            "issue_open": True,
+        }
+        title = build_issue_title("foo", "polymarket", "level_floor", float("nan"))
+        body = build_issue_body(
+            decision,
+            polymarket_stats={},
+            artifact_url="https://example.test/x",
+            window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
+        )
+        assert "Brier above level" in title
+        assert "Brier persistently above" in body  # body fell back too
+        assert "Skill Score" not in body  # no "+nan" contradiction
+        assert "nan" not in body.lower()
         """Issue body carries the headline numbers and the artifact URL."""
         body = build_issue_body(
             self._decision(),
@@ -1578,6 +1603,32 @@ class TestLineageLoader:
         # Multi-child + cycle guard (should not hang or duplicate).
         forked = {"a": ["b", "c"], "b": ["a"]}
         assert _descendants("a", forked) == ["b", "c"]
+
+    def test_maintenance_child_is_not_a_fix_variant(self, tmp_path: Path) -> None:
+        """kind=maintenance children don't count -> the ancestor still gets fix issues."""
+        lineage = {
+            "tools": {
+                "base": {"parent": None},
+                "base-bump": {"parent": "base", "kind": "maintenance"},
+                "real": {"parent": None},
+                "real-v1": {"parent": "real"},  # no kind -> defaults to fix
+            }
+        }
+        p = tmp_path / "tool_lineage.json"
+        p.write_text(json.dumps(lineage), encoding="utf-8")
+        children = _load_lineage_children(p)
+        assert "base" not in children  # maintenance bump excluded
+        assert children["real"] == ["real-v1"]
+
+    def test_malformed_entry_skips_not_crashes(self, tmp_path: Path) -> None:
+        """A wrong-shape ledger skips-and-warns instead of crashing the run."""
+        p = tmp_path / "tool_lineage.json"
+        # entry value is a string; 'tools' shape checked separately below.
+        p.write_text(json.dumps({"tools": {"x": "oops", "y": {"parent": "z"}}}))
+        assert _load_lineage_children(p) == {"z": ["y"]}
+        # whole 'tools' is a list -> empty, no crash.
+        p.write_text(json.dumps({"tools": ["nope"]}))
+        assert not _load_lineage_children(p)
 
 
 class TestPromotionNote:

@@ -4,42 +4,52 @@
   "tools": {
     "prediction-online-v1": {
       "parent": "prediction-online",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-offline-v1": {
       "parent": "prediction-offline",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "claude-prediction-online-v1": {
       "parent": "claude-prediction-online",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "claude-prediction-offline-v1": {
       "parent": "claude-prediction-offline",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-request-rag-v1": {
       "parent": "prediction-request-rag",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-request-rag-claude-v1": {
       "parent": "prediction-request-rag-claude",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-url-cot-v1": {
       "parent": "prediction-url-cot",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-url-cot-claude-v1": {
       "parent": "prediction-url-cot-claude",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-request-reasoning-v1": {
       "parent": "prediction-request-reasoning",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "prediction-request-reasoning-claude-v1": {
       "parent": "prediction-request-reasoning-claude",
+      "kind": "maintenance",
       "reason": "anthropic SDK 0.23.1->0.109.1 lockstep bump; dead model claude-4-sonnet-20250514 swapped to claude-sonnet-4-6."
     },
     "predict-base": {

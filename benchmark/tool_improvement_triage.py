@@ -195,8 +195,28 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
     return children
 
 
-def _below_level(brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
+def _descendants(tool: str, children: Dict[str, List[str]]) -> List[str]:
+    """All transitive variant descendants of ``tool`` (sorted, de-duped)."""
+    # Walks the parent->children map so a chained lineage
+    # (factual_research -> v1 -> v2 -> v3) surfaces the leaf tips, not just the
+    # direct children; ``seen`` (seeded with the root) guards against a cycle.
+    out: List[str] = []
+    seen: set = {tool}  # seed with the root so a back-edge can't re-add it
+    stack = list(children.get(tool, []))
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        out.append(node)
+        stack.extend(children.get(node, []))
+    return sorted(out)
+
+
+def _below_level(*, brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
     """Level trigger: is the tool materially worse than its base-rate reference?"""
+    # Keyword-only: both params are Optional[float], so a positional swap would
+    # type-check silently.
     # Prefer the market-relative Brier Skill Score (adapts to market
     # difficulty); fall back to the legacy absolute Brier floor when the skill
     # score is missing (pre-BSS score files / unit fixtures) OR not finite.
@@ -549,7 +569,7 @@ def triage(
         bss_cur = c.get("brier_skill_score")
         d["bss_cur"] = bss_cur
         d["bss_prev"] = p.get("brier_skill_score")
-        level_hit = _below_level(bc, bss_cur)
+        level_hit = _below_level(brier_cur=bc, bss_cur=bss_cur)
         regressed = False
         if delta_brier > BRIER_REGRESSION_THRESHOLD:
             lc, lp = c.get("log_loss"), p.get("log_loss")
@@ -600,7 +620,11 @@ def triage(
         # cooldown/no-trigger gates (a recently-closed or non-firing tool
         # stays quiet) but before the duplicate/open paths (a stale open fix
         # issue must not mask the promotion signal).
-        descendants = children.get(tool, [])
+        # ALL transitive descendants, not just direct children: for a chained
+        # lineage (e.g. factual_research -> v1 -> v2 -> v3) the promotable tip
+        # is a grandchild, so a direct-children-only list would point a
+        # reviewer at a stale variant.
+        descendants = _descendants(tool, children)
         if descendants:
             d.update(
                 decision="descendant_exists",
@@ -655,6 +679,7 @@ def write_state(
                 "bss_cur": d.get("bss_cur"),
                 "bss_prev": d.get("bss_prev"),
                 "descendants": d.get("descendants"),
+                "dispatch_failed": d.get("dispatch_failed", False),
                 "n_cur": d.get("n_cur"),
                 "n_prev": d.get("n_prev"),
                 "reliability_cur": d.get("reliability_cur"),
@@ -928,7 +953,7 @@ def _ensure_label(repo: str, label: str, dry_run: bool) -> None:
 
 def main() -> int:
     """CLI entry point invoked by benchmark_flywheel.yaml (non-zero on dispatch failure)."""
-    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-locals,too-many-statements
     p = argparse.ArgumentParser(description=__doc__ or "")
     p.add_argument(
         "--state",
@@ -1003,6 +1028,10 @@ def main() -> int:
     lineage_children = _load_lineage_children()
     log.info("triage lineage: %d tools have >=1 fix variant", len(lineage_children))
     promo_open = _open_issue_tools(args.repo, PROMOTION_LABEL, _PROMO_TITLE_RE)
+    # ``promo_open`` is a None/[]/[...] tristate. ``promo_open_set`` collapses
+    # None -> empty, so it is NOT sufficient on its own: the dispatch branch
+    # below MUST keep its explicit ``if promo_open is None`` guard (skip on gh
+    # error) to avoid duplicate notes. Do not "simplify" to promo_open_set only.
     promo_open_set = {tuple(x) for x in (promo_open or [])}
 
     all_decisions: List[Dict[str, Any]] = []
@@ -1051,6 +1080,10 @@ def main() -> int:
                     # suppress tomorrow's run for a nonexistent issue.
                     d["issue_open"] = False
                     d["reason"] = "open_issue_failed"
+                    # decision-independent flag so a state-file consumer can
+                    # detect "we tried to dispatch and it failed" without
+                    # knowing every per-decision reason string.
+                    d["dispatch_failed"] = True
             elif d["decision"] == "reliability_collapse":
                 log.warning(
                     "RELIABILITY COLLAPSE on %s (%s): reliability=%.3f (< %.2f). "
@@ -1071,9 +1104,11 @@ def main() -> int:
                 key = (tool, platform)
                 if promo_open is None:
                     # The open-promo-notes query itself failed (transient gh
-                    # error), so ``promo_open_set`` is unreliable. Skip rather
-                    # than risk a duplicate note -- the same fail-open stance
-                    # the fix-issue duplicate-suppression takes on a gh error.
+                    # error), so ``promo_open_set`` is unreliable. This branch is
+                    # fail-CLOSED: unlike the fix-issue path (which on a gh error
+                    # falls back to the state file and keeps operating), a promo
+                    # note has no fallback source, so we skip creation entirely
+                    # rather than risk a duplicate.
                     log.warning(
                         "descendant_exists on %s/%s: promo-note list unavailable "
                         "(gh error); skipping to avoid a duplicate note.",
@@ -1114,6 +1149,7 @@ def main() -> int:
                         # Mirror the fix-issue path: record the failure so
                         # write_state does not persist a look-alike success.
                         d["reason"] = "promotion_note_failed"
+                        d["dispatch_failed"] = True
             else:
                 n_silent += 1
 

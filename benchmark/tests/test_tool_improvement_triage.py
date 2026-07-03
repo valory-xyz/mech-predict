@@ -46,6 +46,7 @@ from benchmark.tool_improvement_triage import (
     _TITLE_RE,
     _below_level,
     _closed_issue_pairs,
+    _descendants,
     _ensure_label,
     _load_json,
     _load_lineage_children,
@@ -1490,8 +1491,8 @@ class TestBssLevelFloor:
 
     def test_missing_bss_falls_back_to_absolute_floor(self) -> None:
         """No skill score -> legacy absolute Brier floor still applies."""
-        assert _below_level(0.30, None) is True
-        assert _below_level(0.20, None) is False
+        assert _below_level(brier_cur=0.30, bss_cur=None) is True
+        assert _below_level(brier_cur=0.20, bss_cur=None) is False
         d = triage(_scores(a=_stats(brier=0.30)), _scores(a=_stats(brier=0.30)), {})
         assert d[0]["decision"] == "open_issue"
         assert d[0]["reason"] == "level_floor"
@@ -1567,6 +1568,17 @@ class TestLineageLoader:
         """A missing lineage file yields an empty children map (no crash)."""
         assert not _load_lineage_children(tmp_path / "nope.json")
 
+    def test_descendants_walks_the_full_chain(self) -> None:
+        """_descendants returns transitive tips, not just direct children."""
+        # root -> v1 -> v2 -> v3  (a chain, like factual_research)
+        children = {"root": ["v1"], "v1": ["v2"], "v2": ["v3"]}
+        assert _descendants("root", children) == ["v1", "v2", "v3"]
+        assert _descendants("v2", children) == ["v3"]
+        assert _descendants("v3", children) == []  # leaf
+        # Multi-child + cycle guard (should not hang or duplicate).
+        forked = {"a": ["b", "c"], "b": ["a"]}
+        assert _descendants("a", forked) == ["b", "c"]
+
 
 class TestPromotionNote:
     """The visible promotion-review note format."""
@@ -1600,7 +1612,7 @@ class TestBssBoundary:
 
     def test_bss_exactly_at_floor_is_silent(self) -> None:
         """A BSS equal to the floor does not fire (the gate is strict <)."""
-        assert _below_level(0.30, BSS_LEVEL_FLOOR) is False
+        assert _below_level(brier_cur=0.30, bss_cur=BSS_LEVEL_FLOOR) is False
         d = triage(
             _scores(a=_stats(brier=0.30, brier_skill_score=BSS_LEVEL_FLOOR)),
             _scores(a=_stats(brier=0.30, brier_skill_score=BSS_LEVEL_FLOOR)),
@@ -1610,16 +1622,19 @@ class TestBssBoundary:
 
     def test_bss_just_below_floor_fires(self) -> None:
         """A hair below the floor fires the level trigger."""
-        assert _below_level(0.30, BSS_LEVEL_FLOOR - 1e-9) is True
+        assert _below_level(brier_cur=0.30, bss_cur=BSS_LEVEL_FLOOR - 1e-9) is True
 
 
 class TestNanBss:
     """A non-finite BSS falls back to the absolute floor (does not silently disable)."""
 
-    def test_nan_bss_falls_back_to_absolute_floor(self) -> None:
-        """A NaN BSS uses the absolute Brier floor, not `NaN < floor` (False)."""
-        assert _below_level(0.30, float("nan")) is True  # 0.30 > 0.25 absolute
-        assert _below_level(0.20, float("nan")) is False  # 0.20 < 0.25 absolute
+    @pytest.mark.parametrize("bad", [float("nan"), float("-inf"), float("inf")])
+    def test_non_finite_bss_falls_back_to_absolute_floor(self, bad: float) -> None:
+        """A non-finite BSS (NaN or +/-inf) uses the absolute Brier floor."""
+        # -inf is reachable (base_rate_brier -> 0+ with brier > 0), so a NaN-only
+        # guard would let infinities bypass the fallback.
+        assert _below_level(brier_cur=0.30, bss_cur=bad) is True  # 0.30 > 0.25
+        assert _below_level(brier_cur=0.20, bss_cur=bad) is False  # 0.20 < 0.25
 
     def test_nan_bss_high_brier_still_fires_via_triage(self) -> None:
         """A degenerate NaN skill score does not mask a high raw Brier."""
@@ -1751,14 +1766,46 @@ class TestEnsureLabel:
         monkeypatch.setattr("benchmark.tool_improvement_triage.subprocess.run", boom)
         _ensure_label("r/r", "l", dry_run=True)  # must not raise
 
-    def test_oserror_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A missing gh binary is swallowed (fail-soft, run continues)."""
+    def test_oserror_is_swallowed_and_warned(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A missing gh binary is swallowed AND logged (fail-soft, run continues)."""
 
         def boom(*_a: Any, **_k: Any) -> Any:
             raise OSError("no gh")
 
         monkeypatch.setattr("benchmark.tool_improvement_triage.subprocess.run", boom)
-        _ensure_label("r/r", "l", dry_run=False)  # swallowed, no raise
+        with caplog.at_level(logging.WARNING):
+            _ensure_label("r/r", "l", dry_run=False)  # swallowed, no raise
+        assert any("gh label create failed" in r.message for r in caplog.records)
+
+    def test_already_exists_is_not_warned(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """rc!=0 with 'already exists' stderr is the benign idempotent path."""
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: SimpleNamespace(
+                returncode=1, stdout="", stderr="label already exists; skipping"
+            ),
+        )
+        with caplog.at_level(logging.WARNING):
+            _ensure_label("r/r", "l", dry_run=False)
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_other_failure_is_warned(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """rc!=0 with a real error (e.g. missing scope) is surfaced."""
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run",
+            lambda *a, **k: SimpleNamespace(
+                returncode=1, stdout="", stderr="HTTP 403: token lacks label scope"
+            ),
+        )
+        with caplog.at_level(logging.WARNING):
+            _ensure_label("r/r", "l", dry_run=False)
+        assert any("gh label create" in r.message for r in caplog.records)
 
 
 class TestMainPromotionDispatch:
@@ -1877,3 +1924,5 @@ class TestMainPromotionDispatch:
         assert rc == 1  # n_failed > 0 surfaces as a non-zero exit
         state = json.loads((tmp_path / "s.json").read_text())
         assert state["by_tool"]["a"]["reason"] == "promotion_note_failed"
+        # decision-independent flag for state-file consumers.
+        assert state["by_tool"]["a"]["dispatch_failed"] is True

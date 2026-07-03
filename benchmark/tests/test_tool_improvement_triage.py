@@ -43,6 +43,7 @@ from benchmark.tool_improvement_triage import (
     RELIABILITY_FLOOR,
     VALID_N_PER_WINDOW_FLOOR,
     _PROMO_TITLE_RE,
+    _TITLE_RE,
     _below_level,
     _closed_issue_pairs,
     _ensure_label,
@@ -342,6 +343,48 @@ class TestIssueBodyContract:
             "[tool-improvement] `factual_research`: "
             "Brier regression on polymarket W-1"
         )
+
+    def test_level_title_names_bss_when_present(self) -> None:
+        """A BSS-fired level trigger titles 'BSS below floor'; fallback stays legacy."""
+        assert build_issue_title("foo", "polymarket", "level_floor", -0.25) == (
+            "[tool-improvement] `foo`: BSS below floor on polymarket W-1"
+        )
+        # No BSS (or non-finite) -> the legacy absolute-Brier wording.
+        assert build_issue_title("foo", "polymarket", "level_floor", None) == (
+            "[tool-improvement] `foo`: Brier above level on polymarket W-1"
+        )
+        assert build_issue_title("foo", "polymarket", "level_floor", float("nan")) == (
+            "[tool-improvement] `foo`: Brier above level on polymarket W-1"
+        )
+        # Title still parses for (tool, platform) dedup.
+        m = _TITLE_RE.search(
+            build_issue_title("foo", "polymarket", "level_floor", -0.25)
+        )
+        assert m is not None and (m.group(1), m.group(2)) == ("foo", "polymarket")
+
+    def test_body_level_floor_cites_bss(self) -> None:
+        """The level-floor body names the Brier Skill Score when bss_cur is set."""
+        decision = {
+            "tool": "factual_research",
+            "platform": "polymarket",
+            "brier_cur": 0.30,
+            "brier_prev": 0.30,
+            "delta_brier": 0.0,
+            "bss_cur": -0.25,
+            "n_cur": 187,
+            "n_prev": 212,
+            "decision": "open_issue",
+            "reason": "level_floor",
+            "issue_open": True,
+        }
+        body = build_issue_body(
+            decision,
+            polymarket_stats={"brier": 0.30, "n": 187},
+            artifact_url="https://example.test/x",
+            window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
+        )
+        assert "Brier Skill Score of -0.2500" in body
+        assert "below the -0.10 floor" in body
 
     def test_body_contains_headline_and_artifact(self) -> None:
         """Issue body carries the headline numbers and the artifact URL."""
@@ -1817,3 +1860,20 @@ class TestMainPromotionDispatch:
         rc = self._run(monkeypatch, tmp_path, fake_run)
         assert rc == 0  # skip is not a failure
         assert not creates  # fail-open, no duplicate
+
+    def test_create_failure_is_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A failed promo-note create -> main() returns 1 and records the reason."""
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "list" in cmd:
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            if cmd[:3] == ["gh", "issue", "create"]:
+                return SimpleNamespace(returncode=1, stdout="", stderr="forbidden")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        rc = self._run(monkeypatch, tmp_path, fake_run)
+        assert rc == 1  # n_failed > 0 surfaces as a non-zero exit
+        state = json.loads((tmp_path / "s.json").read_text())
+        assert state["by_tool"]["a"]["reason"] == "promotion_note_failed"

@@ -153,16 +153,19 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
-# Parses ``[tool-improvement] `<tool>`: Brier (regression|above level) on <platform> W-1``.
+# Parses ``[tool-improvement] `<tool>`: <metric> on <platform> W-1`` where
+# <metric> is "Brier regression", "Brier above level", or "BSS below floor".
 # Backticks around the tool are required; the platform is captured from the
 # trailing ``on <platform> W-1`` segment so suppression can key on the
-# (tool, platform) pair. A manually-filed issue that omits either segment
-# logs a warning and is skipped (no silent suppression bypass).
+# (tool, platform) pair regardless of the metric wording. A manually-filed
+# issue that omits either segment logs a warning and is skipped.
 _TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+W-1\b")
 # Promotion-review notes use their own label + title so they dedup
 # independently of the fix issues and never match the coding agent's
-# ``tool-improvement`` title parser.
-_PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\b")
+# ``tool-improvement`` title parser. Anchored to end-of-title (the platform is
+# the last token); the generated-title <-> regex contract is pinned by
+# TestPromoTitleRoundTrip.
+_PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\s*$")
 
 
 def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
@@ -597,7 +600,7 @@ def triage(
         # cooldown/no-trigger gates (a recently-closed or non-firing tool
         # stays quiet) but before the duplicate/open paths (a stale open fix
         # issue must not mask the promotion signal).
-        descendants = children.get(tool) or []
+        descendants = children.get(tool, [])
         if descendants:
             d.update(
                 decision="descendant_exists",
@@ -679,9 +682,18 @@ def build_issue_title(
     tool: str,
     platform: str = "polymarket",
     reason: str = "regression",
+    bss_cur: Optional[float] = None,
 ) -> str:
     """Issue title format for ``tool`` that the agent's Step 1 parser expects."""
+    # The agent reads the trigger reason from the body's ``- Trigger:`` line and
+    # only the platform from the title's ``on <platform> W-1`` anchor, so the
+    # metric wording here is free to match the body: name BSS when the level
+    # trigger fired on the skill score, keep the legacy "Brier above level" for
+    # the absolute-Brier fallback path. ``_TITLE_RE`` still keys on
+    # ``on <platform> W-1``, so (tool, platform) dedup is unaffected.
     if reason == "level_floor":
+        if bss_cur is not None and math.isfinite(bss_cur):
+            return f"[tool-improvement] `{tool}`: BSS below floor on {platform} W-1"
         return f"[tool-improvement] `{tool}`: Brier above level on {platform} W-1"
     return f"[tool-improvement] `{tool}`: Brier regression on {platform} W-1"
 
@@ -865,7 +877,7 @@ Baseline stats for the current window are in the matching `[tool-improvement]` i
 
 def build_promotion_body(decision: Dict[str, Any], platform: str = "polymarket") -> str:
     """Render the visible promotion-review note for a tool that already has a fix variant."""
-    descendants = decision.get("descendants") or []
+    descendants = decision.get("descendants", [])
     dlist = "\n".join(f"- `{v}`" for v in descendants) or "- (see tool_lineage.json)"
     return _PROMOTION_BODY_TEMPLATE.format(
         tool=decision["tool"],
@@ -940,9 +952,11 @@ def main() -> int:
 
     platforms = [p_.strip() for p_ in args.platforms.split(",") if p_.strip()]
     log.info(
-        "triage thresholds: regression=%.3f level=%.2f valid_n=%d reliability=%.2f "
+        "triage thresholds: regression=%.3f level_bss=%.2f "
+        "level_brier_fallback=%.2f valid_n=%d reliability=%.2f "
         "window_days=%d platforms=%s dry_run=%s",
         BRIER_REGRESSION_THRESHOLD,
+        BSS_LEVEL_FLOOR,
         BRIER_LEVEL_THRESHOLD,
         VALID_N_PER_WINDOW_FLOOR,
         RELIABILITY_FLOOR,
@@ -1021,7 +1035,10 @@ def main() -> int:
                     platforms_monitored=platforms,
                 )
                 title = build_issue_title(
-                    d["tool"], platform, d.get("reason", "regression")
+                    d["tool"],
+                    platform,
+                    d.get("reason", "regression"),
+                    d.get("bss_cur"),
                 )
                 rc = _open_issue(args.repo, args.label, title, body, args.dry_run)
                 if rc == 0:

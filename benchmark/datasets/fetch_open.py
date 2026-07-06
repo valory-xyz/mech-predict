@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
 from benchmark.datasets.fetch_production import classify_category
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl, load_existing_ids
@@ -74,6 +75,13 @@ POLYMARKET_CATEGORIES = [
     "international",
 ]
 POLYMARKET_WINDOW_DAYS = 30
+# Only markets created within this window count as "new" by default; the
+# flywheel runs daily, so 24h covers the gap since the previous fetch.
+POLYMARKET_CREATED_WINDOW_HOURS = 24.0
+POLYMARKET_PAGE_LIMIT = 300
+# Safety cap: bounds Gamma API pagination per category so the scan always
+# terminates even when no market satisfies the stop conditions.
+POLYMARKET_MAX_PAGES_PER_CATEGORY = 5
 
 # ---------------------------------------------------------------------------
 # GraphQL queries
@@ -317,15 +325,96 @@ def _parse_polymarket_entry(
     }
 
 
+def _parse_created_at(m: dict[str, Any]) -> Optional[datetime]:
+    """Parse a Gamma market's ``createdAt`` timestamp, or None if absent/invalid."""
+    raw = m.get("createdAt") or ""
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _collect_polymarket_batch(  # pylint: disable=too-many-arguments
+    batch: list[dict[str, Any]],
+    category: str,
+    min_liquidity: float,
+    seen_ids: set[str],
+    existing_ids: set[str],
+    created_cutoff: Optional[datetime],
+    markets: list[dict[str, Any]],
+    max_markets: int,
+) -> bool:
+    """Collect new markets from one Gamma API page into ``markets``.
+
+    Markets already present in ``existing_ids`` are skipped WITHOUT counting
+    toward ``max_markets``, so the cap means "new markets", not "markets seen".
+
+    :param batch: one page of Gamma API market dicts (newest-first).
+    :param category: category slug the page was fetched for.
+    :param min_liquidity: minimum USD liquidity per market.
+    :param seen_ids: condition IDs already processed this run (mutated).
+    :param existing_ids: market IDs (``poly_<conditionId>``) already in the output file.
+    :param created_cutoff: ignore markets created before this instant (None = no cutoff).
+    :param markets: accumulator of parsed new markets (mutated).
+    :param max_markets: stop once this many new markets are collected.
+    :return: True when scanning should stop (cutoff reached or cap hit).
+    """
+    for m in batch:
+        created = _parse_created_at(m)
+        if created_cutoff is not None and created is not None:
+            if created < created_cutoff:
+                # Results are newest-first: everything after this is older.
+                return True
+
+        condition_id = m.get("conditionId") or m.get("id", "")
+        if not condition_id or condition_id in seen_ids:
+            continue
+        seen_ids.add(condition_id)
+
+        if f"poly_{condition_id}" in existing_ids:
+            continue
+
+        parsed = _parse_polymarket_entry(m, category, min_liquidity)
+        if parsed is not None:
+            markets.append(parsed)
+
+        if len(markets) >= max_markets:
+            return True
+    return False
+
+
 def fetch_polymarket_open(
     max_markets: int = 500,
     window_days: int = POLYMARKET_WINDOW_DAYS,
     min_liquidity: float = 0.0,
+    existing_ids: Optional[set[str]] = None,
+    created_within_hours: Optional[float] = None,
 ) -> list[dict[str, Any]]:
-    """Fetch open binary markets from Polymarket via the Gamma API."""
+    """Fetch open binary markets from Polymarket via the Gamma API.
+
+    Pages are requested newest-first (``order=createdAt``). Markets whose ID
+    is already in ``existing_ids`` don't count toward ``max_markets``, and
+    scanning a category stops at the first market older than
+    ``created_within_hours`` (or after ``POLYMARKET_MAX_PAGES_PER_CATEGORY``
+    pages, whichever comes first).
+
+    :param max_markets: stop after this many NEW markets across all categories.
+    :param window_days: only markets closing within this many days.
+    :param min_liquidity: minimum USD liquidity per market.
+    :param existing_ids: market IDs already fetched on previous runs.
+    :param created_within_hours: only markets created within the last N hours
+        (None or <= 0 disables the cutoff).
+    :return: list of parsed new market dicts.
+    """
     now = datetime.now(timezone.utc)
     end_date_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_date_max = (now + timedelta(days=window_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    created_cutoff = (
+        now - timedelta(hours=created_within_hours)
+        if created_within_hours is not None and created_within_hours > 0
+        else None
+    )
+    known_ids = existing_ids or set()
 
     seen_ids: set[str] = set()
     markets: list[dict[str, Any]] = []
@@ -340,7 +429,7 @@ def fetch_polymarket_open(
             continue
 
         offset = 0
-        while len(markets) < max_markets:
+        for _page in range(POLYMARKET_MAX_PAGES_PER_CATEGORY):
             try:
                 resp = requests.get(
                     f"{POLYMARKET_GAMMA_URL}/markets",
@@ -348,9 +437,11 @@ def fetch_polymarket_open(
                         "tag_id": str(tag_id),
                         "end_date_min": end_date_min,
                         "end_date_max": end_date_max,
-                        "limit": "300",
+                        "limit": str(POLYMARKET_PAGE_LIMIT),
                         "offset": str(offset),
                         "closed": "false",
+                        "order": "createdAt",
+                        "ascending": "false",
                     },
                     timeout=15,
                 )
@@ -363,22 +454,19 @@ def fetch_polymarket_open(
             if not batch:
                 break
 
-            for m in batch:
-                condition_id = m.get("conditionId") or m.get("id", "")
-                if not condition_id or condition_id in seen_ids:
-                    continue
-                seen_ids.add(condition_id)
-
-                parsed = _parse_polymarket_entry(m, category, min_liquidity)
-                if parsed is not None:
-                    markets.append(parsed)
-
-                if len(markets) >= max_markets:
-                    break
-
-            if len(batch) < 300:
+            stop = _collect_polymarket_batch(
+                batch,
+                category,
+                min_liquidity,
+                seen_ids,
+                known_ids,
+                created_cutoff,
+                markets,
+                max_markets,
+            )
+            if stop or len(batch) < POLYMARKET_PAGE_LIMIT:
                 break
-            offset += 300
+            offset += POLYMARKET_PAGE_LIMIT
 
     return markets
 
@@ -434,6 +522,16 @@ def main() -> None:
         help=f"Polymarket: markets closing within N days (default: {POLYMARKET_WINDOW_DAYS})",
     )
     parser.add_argument(
+        "--created-within-hours",
+        type=float,
+        default=POLYMARKET_CREATED_WINDOW_HOURS,
+        help=(
+            "Polymarket: only markets created within the last N hours; "
+            "<= 0 disables the cutoff "
+            f"(default: {POLYMARKET_CREATED_WINDOW_HOURS})"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Fetch and print stats, don't write files",
@@ -458,8 +556,10 @@ def main() -> None:
             max_markets=args.max_markets,
             window_days=args.window_days,
             min_liquidity=args.min_liquidity,
+            existing_ids=existing_ids,
+            created_within_hours=args.created_within_hours,
         )
-        log.info("  Polymarket: %d open binary markets", len(poly))
+        log.info("  Polymarket: %d new open binary markets", len(poly))
         all_markets.extend(poly)
 
     # Apply liquidity filter for Omen (Polymarket filters inline)

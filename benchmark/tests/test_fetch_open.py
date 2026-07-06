@@ -19,11 +19,14 @@
 """Tests for benchmark/datasets/fetch_open.py"""
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from benchmark.datasets.fetch_open import (
+    POLYMARKET_MAX_PAGES_PER_CATEGORY,
+    POLYMARKET_PAGE_LIMIT,
     fetch_omen_open,
     fetch_polymarket_open,
 )
@@ -66,6 +69,7 @@ def _poly_market(
     volume: float = 10000.0,
     neg_risk: bool = False,
     end_date: str = "2026-06-01T00:00:00Z",
+    created_at: str = "2026-03-01T00:00:00Z",
 ) -> dict[str, Any]:
     """Build a mock Polymarket market response."""
     return {
@@ -77,8 +81,24 @@ def _poly_market(
         "volume": volume,
         "negRisk": neg_risk,
         "endDate": end_date,
-        "createdAt": "2026-03-01T00:00:00Z",
+        "createdAt": created_at,
     }
+
+
+def _poly_response(batch: list[dict[str, Any]]) -> MagicMock:
+    """Wrap a market batch in a mock HTTP response."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = batch
+    mock_resp.raise_for_status = MagicMock()
+    return mock_resp
+
+
+def _hours_ago(hours: float) -> str:
+    """ISO timestamp ``hours`` before now (UTC, Z-suffixed)."""
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +243,104 @@ class TestFetchPolymarketOpen:
         markets = fetch_polymarket_open(max_markets=10, min_liquidity=1000)
         assert len(markets) == 1
         assert markets[0]["id"] == "poly_c2"
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_existing_ids_do_not_count_toward_cap(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Already-known markets are skipped without consuming max_markets slots."""
+        mock_tag.return_value = 42
+        mock_get.return_value = _poly_response(
+            [
+                _poly_market(condition_id="c1"),
+                _poly_market(condition_id="c2"),
+                _poly_market(condition_id="c3"),
+            ]
+        )
+
+        markets = fetch_polymarket_open(max_markets=2, existing_ids={"poly_c1"})
+        assert [m["id"] for m in markets] == ["poly_c2", "poly_c3"]
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_created_within_hours_cutoff_stops_scan(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Scanning stops at the first market older than the creation cutoff."""
+        mock_tag.return_value = 42
+        # Newest-first ordering: once one market is older than the cutoff,
+        # everything after it must be ignored even if (mis)dated newer.
+        mock_get.return_value = _poly_response(
+            [
+                _poly_market(condition_id="new", created_at=_hours_ago(1)),
+                _poly_market(condition_id="old", created_at=_hours_ago(48)),
+                _poly_market(condition_id="after_old", created_at=_hours_ago(2)),
+            ]
+        )
+
+        markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
+        assert [m["id"] for m in markets] == ["poly_new"]
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_created_cutoff_keeps_unparseable_timestamps(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Markets with missing/invalid createdAt are kept and don't stop the scan."""
+        mock_tag.return_value = 42
+        no_created = _poly_market(condition_id="undated", created_at="")
+        mock_get.return_value = _poly_response(
+            [
+                no_created,
+                _poly_market(condition_id="new", created_at=_hours_ago(1)),
+            ]
+        )
+
+        markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
+        assert [m["id"] for m in markets] == ["poly_undated", "poly_new"]
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_requests_newest_first_ordering(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """The Gamma API is asked for newest-first ordering by creation time."""
+        mock_tag.return_value = 42
+        mock_get.return_value = _poly_response([_poly_market()])
+
+        fetch_polymarket_open(max_markets=10)
+        params = mock_get.call_args.kwargs["params"]
+        assert params["order"] == "createdAt"
+        assert params["ascending"] == "false"
+
+    @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_pagination_safety_cap(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Pagination stops after the per-category page cap even if nothing new is found."""
+        mock_tag.return_value = 42
+        pages = [
+            _poly_response(
+                [
+                    _poly_market(condition_id=f"p{page}_{i}")
+                    for i in range(POLYMARKET_PAGE_LIMIT)
+                ]
+            )
+            for page in range(POLYMARKET_MAX_PAGES_PER_CATEGORY + 3)
+        ]
+        mock_get.side_effect = pages
+        all_known = {
+            f"poly_p{page}_{i}"
+            for page in range(POLYMARKET_MAX_PAGES_PER_CATEGORY + 3)
+            for i in range(POLYMARKET_PAGE_LIMIT)
+        }
+
+        markets = fetch_polymarket_open(max_markets=10, existing_ids=all_known)
+        assert markets == []
+        assert mock_get.call_count == POLYMARKET_MAX_PAGES_PER_CATEGORY
 
 
 # ---------------------------------------------------------------------------

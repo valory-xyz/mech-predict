@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.datasets.fetch_production import classify_category
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl, load_existing_ids

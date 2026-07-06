@@ -339,7 +339,7 @@ class TestFetchPolymarketOpen:
         }
 
         markets = fetch_polymarket_open(max_markets=10, existing_ids=all_known)
-        assert markets == []
+        assert not markets
         assert mock_get.call_count == POLYMARKET_MAX_PAGES_PER_CATEGORY
 
 

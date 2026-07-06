@@ -28,8 +28,10 @@ import pytest
 import packages.valory.customs.finetuned_prediction.finetuned_prediction as module
 from packages.valory.customs.finetuned_prediction.finetuned_prediction import (
     MODEL_BY_TOOL,
+    SERVED_MODEL_FINE_TUNED_CALIBRATED,
     TOOL_BASE,
     TOOL_FINE_TUNED,
+    TOOL_FINE_TUNED_CALIBRATED,
     VLLM_ENDPOINT,
     build_forecaster_prompt,
     build_messages,
@@ -188,7 +190,29 @@ def test_each_mode_resolves_to_its_served_model() -> None:
     """Each tool name resolves to its own distinct served-model name."""
     assert resolve_model(TOOL_BASE) == MODEL_BY_TOOL[TOOL_BASE]
     assert resolve_model(TOOL_FINE_TUNED) == MODEL_BY_TOOL[TOOL_FINE_TUNED]
-    assert MODEL_BY_TOOL[TOOL_BASE] != MODEL_BY_TOOL[TOOL_FINE_TUNED]
+    assert (
+        resolve_model(TOOL_FINE_TUNED_CALIBRATED)
+        == MODEL_BY_TOOL[TOOL_FINE_TUNED_CALIBRATED]
+    )
+    # The three modes are pairwise distinct served names.
+    assert (
+        len(
+            {
+                resolve_model(TOOL_BASE),
+                resolve_model(TOOL_FINE_TUNED),
+                resolve_model(TOOL_FINE_TUNED_CALIBRATED),
+            }
+        )
+        == 3
+    )
+
+
+def test_calibrated_mode_targets_the_calibrated_served_name() -> None:
+    """The calibrated tool requests ft-serve's virtual calibrated served name."""
+    assert (
+        resolve_model(TOOL_FINE_TUNED_CALIBRATED) == SERVED_MODEL_FINE_TUNED_CALIBRATED
+    )
+    assert SERVED_MODEL_FINE_TUNED_CALIBRATED == "qwen-14b-fine-tuned-calibrated"
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,10 @@
       "parent": null,
       "reason": "New from-scratch tool: GRPO fine-tuned DeepSeek-R1-Distill-Qwen-14B served via vLLM."
     },
+    "predict-fine-tuned-calibrated": {
+      "parent": "predict-fine-tuned",
+      "reason": "Same GRPO fine-tuned checkpoint, requesting ft-serve's calibrated served name (a Platt calibrator applied to p_yes) instead of the raw one."
+    },
     "superforcaster-polymarket-v1": {
       "parent": "superforcaster",
       "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched."

@@ -1,5 +1,6 @@
 {
   "factual_research-v2": "bafybeidgo3jesmvuwa64ooij7mywk7hf7ls5len2sf7cbcjwt3t6r5u6qm",
-  "predict-base": "bafybeifetvtalxnw3y7epqspyxotrls4wl7eoffsiaglxp52nca7ozurv4",
-  "predict-fine-tuned": "bafybeifetvtalxnw3y7epqspyxotrls4wl7eoffsiaglxp52nca7ozurv4"
+  "predict-base": "bafybeiclpkn4sqvri7k5aiklt5fm6hnt3tgo4qxtrkzxe4fwzfs2plgbk4",
+  "predict-fine-tuned": "bafybeiclpkn4sqvri7k5aiklt5fm6hnt3tgo4qxtrkzxe4fwzfs2plgbk4",
+  "predict-fine-tuned-calibrated": "bafybeiclpkn4sqvri7k5aiklt5fm6hnt3tgo4qxtrkzxe4fwzfs2plgbk4"
 }

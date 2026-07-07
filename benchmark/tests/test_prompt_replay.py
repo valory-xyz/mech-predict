@@ -928,9 +928,12 @@ class TestVllmCandidateRegistry:
     the tag must be present (and default to ``openai`` for every other tool).
     """
 
-    @pytest.mark.parametrize("tool_name", ["predict-base", "predict-fine-tuned"])
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["predict-base", "predict-fine-tuned", "predict-fine-tuned-calibrated"],
+    )
     def test_finetuned_tools_use_vllm_backend(self, tool_name: str) -> None:
-        """Both fine-tuned modes are registered against the vLLM backend.
+        """All fine-tuned modes are registered against the vLLM backend.
 
         :param tool_name: the registered vLLM tool name under test.
         """

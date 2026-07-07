@@ -302,6 +302,29 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_created_cutoff_handles_tz_naive_timestamps(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """A createdAt without Z/offset is treated as UTC instead of raising TypeError."""
+        mock_tag.return_value = 42
+        naive_new = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S"  # no Z suffix, no offset
+        )
+        naive_old = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        mock_get.return_value = _poly_response(
+            [
+                _poly_market(condition_id="naive_new", created_at=naive_new),
+                _poly_market(condition_id="naive_old", created_at=naive_old),
+            ]
+        )
+
+        markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
+        assert [m["id"] for m in markets] == ["poly_naive_new"]
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
     def test_requests_newest_first_ordering(
         self, mock_tag: MagicMock, mock_get: MagicMock
     ) -> None:

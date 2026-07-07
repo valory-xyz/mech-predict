@@ -325,12 +325,22 @@ def _parse_polymarket_entry(
 
 
 def _parse_created_at(m: dict[str, Any]) -> Optional[datetime]:
-    """Parse a Gamma market's ``createdAt`` timestamp, or None if absent/invalid."""
+    """Parse a Gamma market's ``createdAt`` timestamp, or None if absent/invalid.
+
+    Timestamps without a timezone are assumed UTC — a naive datetime would
+    raise TypeError when compared against the tz-aware creation cutoff.
+
+    :param m: Gamma API market dict.
+    :return: tz-aware datetime, or None when ``createdAt`` is absent/invalid.
+    """
     raw = m.get("createdAt") or ""
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _collect_polymarket_batch(  # pylint: disable=too-many-arguments

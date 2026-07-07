@@ -357,6 +357,10 @@ def _collect_polymarket_batch(  # pylint: disable=too-many-arguments
 
     Markets already present in ``existing_ids`` are skipped WITHOUT counting
     toward ``max_markets``, so the cap means "new markets", not "markets seen".
+    Markets older than ``created_cutoff`` are skipped individually — a single
+    backdated entry must not hide newer markets listed after it — and the
+    category is only abandoned when a whole page is older than the cutoff
+    (deeper pages can then only be older still).
 
     :param batch: one page of Gamma API market dicts (newest-first).
     :param category: category slug the page was fetched for.
@@ -366,14 +370,18 @@ def _collect_polymarket_batch(  # pylint: disable=too-many-arguments
     :param created_cutoff: ignore markets created before this instant (None = no cutoff).
     :param markets: accumulator of parsed new markets (mutated).
     :param max_markets: stop once this many new markets are collected.
-    :return: True when scanning should stop (cutoff reached or cap hit).
+    :return: True when scanning should stop (page fully stale or cap hit).
     """
+    page_has_recent = False
+    page_has_parseable = False
     for m in batch:
         created = _parse_created_at(m)
+        if created is not None:
+            page_has_parseable = True
         if created_cutoff is not None and created is not None:
             if created < created_cutoff:
-                # Results are newest-first: everything after this is older.
-                return True
+                continue
+            page_has_recent = True
 
         condition_id = m.get("conditionId") or m.get("id", "")
         if not condition_id or condition_id in seen_ids:
@@ -389,7 +397,11 @@ def _collect_polymarket_batch(  # pylint: disable=too-many-arguments
 
         if len(markets) >= max_markets:
             return True
-    return False
+
+    fully_stale = (
+        created_cutoff is not None and page_has_parseable and not page_has_recent
+    )
+    return fully_stale
 
 
 def fetch_polymarket_open(
@@ -402,10 +414,10 @@ def fetch_polymarket_open(
     """Fetch open binary markets from Polymarket via the Gamma API.
 
     Pages are requested newest-first (``order=createdAt``). Markets whose ID
-    is already in ``existing_ids`` don't count toward ``max_markets``, and
-    scanning a category stops at the first market older than
-    ``created_within_hours`` (or after ``POLYMARKET_MAX_PAGES_PER_CATEGORY``
-    pages, whichever comes first).
+    is already in ``existing_ids`` don't count toward ``max_markets``; markets
+    older than ``created_within_hours`` are skipped. Scanning a category ends
+    when a whole page is older than the cutoff, or after
+    ``POLYMARKET_MAX_PAGES_PER_CATEGORY`` pages, whichever comes first.
 
     :param max_markets: stop after this many NEW markets across all categories.
     :param window_days: only markets closing within this many days.

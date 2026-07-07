@@ -264,13 +264,13 @@ class TestFetchPolymarketOpen:
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
-    def test_created_within_hours_cutoff_stops_scan(
+    def test_created_cutoff_skips_old_markets(
         self, mock_tag: MagicMock, mock_get: MagicMock
     ) -> None:
-        """Scanning stops at the first market older than the creation cutoff."""
+        """Markets older than the cutoff are skipped without hiding later new ones."""
         mock_tag.return_value = 42
-        # Newest-first ordering: once one market is older than the cutoff,
-        # everything after it must be ignored even if (mis)dated newer.
+        # One backdated entry must not mask new markets listed after it —
+        # Gamma's newest-first ordering is not trusted strictly.
         mock_get.return_value = _poly_response(
             [
                 _poly_market(condition_id="new", created_at=_hours_ago(1)),
@@ -280,7 +280,51 @@ class TestFetchPolymarketOpen:
         )
 
         markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
-        assert [m["id"] for m in markets] == ["poly_new"]
+        assert [m["id"] for m in markets] == ["poly_new", "poly_after_old"]
+
+    @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_fully_stale_page_stops_category(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """A full page entirely older than the cutoff ends the category scan."""
+        mock_tag.return_value = 42
+        stale_page = _poly_response(
+            [
+                _poly_market(condition_id=f"old_{i}", created_at=_hours_ago(48))
+                for i in range(POLYMARKET_PAGE_LIMIT)
+            ]
+        )
+        mock_get.side_effect = [stale_page]  # a second request would raise
+
+        markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
+        assert markets == []
+        assert mock_get.call_count == 1
+
+    @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_partially_stale_page_continues_pagination(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """A full page with at least one recent market keeps paginating."""
+        mock_tag.return_value = 42
+        mixed_page = _poly_response(
+            [_poly_market(condition_id="recent_0", created_at=_hours_ago(1))]
+            + [
+                _poly_market(condition_id=f"old_{i}", created_at=_hours_ago(48))
+                for i in range(POLYMARKET_PAGE_LIMIT - 1)
+            ]
+        )
+        next_page = _poly_response(
+            [_poly_market(condition_id="recent_1", created_at=_hours_ago(2))]
+        )
+        mock_get.side_effect = [mixed_page, next_page]
+
+        markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
+        assert [m["id"] for m in markets] == ["poly_recent_0", "poly_recent_1"]
+        assert mock_get.call_count == 2
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")

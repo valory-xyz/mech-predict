@@ -11,12 +11,12 @@ readme = "README.md"
 license = "Apache-2.0"
 dependencies = [
     # OA / open-aea / plugins — pinned exactly (framework contract).
-    "open-autonomy[all]==0.21.23",
-    "open-aea-ledger-ethereum==2.2.7",
-    "open-aea-ledger-cosmos==2.2.7",
-    "open-aea-test-autonomy==0.21.23",
-    "open-aea-cli-ipfs==2.2.7",
-    "open-aea-helpers==0.21.23",
+    "open-autonomy[all]==0.21.26",
+    "open-aea-ledger-ethereum==2.2.9",
+    "open-aea-ledger-cosmos==2.2.9",
+    "open-aea-test-autonomy==0.21.26",
+    "open-aea-cli-ipfs==2.2.9",
+    "open-aea-helpers==0.21.26",
     # Agent-repo (app) deps — exact pins per David's #436 rule.
     # Ranges are reserved for framework/lib repos; agent repos pin
     # everything non-OA throughout.
@@ -88,11 +88,15 @@ dev = [
     "types-beautifulsoup4>=4.12.0.20250516,<5",
     "types-python-dateutil>=2.9.0.20250516,<3",
     "types-tqdm>=4.67.0.20250516,<5",
-    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
+    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@0819eea387c622cc53b398a2d3ea86e94a55cf82",
 ]
 
 [tool.uv]
 default-groups = "all"
+# cffi 2.1.0 (transitive via cryptography << open-aea-ledger-solana)
+# reports its license as MIT-0, which tomte's PARANOID liccheck rejects.
+# Constrain to the previous minor until the tomte allowlist covers MIT-0.
+override-dependencies = ["cffi<2.1"]
 
 [tool.tomte]
 # mech-predict has dev customs spanning multiple author dirs
@@ -107,8 +111,8 @@ pytest_targets_extra = ["benchmark/tests"]
 # Third-party skills/contracts on disk are synced from mech upstream;
 # tomte auto-prepends valory-xyz/open-autonomy@... and open-aea@...
 # from pyproject pins, so only the non-PyPI mech upstream needs listing.
-upstream_pins = ["valory-xyz/mech@v0.34.1"]
-tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
+upstream_pins = ["valory-xyz/mech@v0.34.2"]
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@0819eea387c622cc53b398a2d3ea86e94a55cf82"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

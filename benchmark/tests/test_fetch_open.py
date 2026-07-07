@@ -19,6 +19,7 @@
 """Tests for benchmark/datasets/fetch_open.py"""
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -380,6 +381,60 @@ class TestFetchPolymarketOpen:
         params = mock_get.call_args.kwargs["params"]
         assert params["order"] == "createdAt"
         assert params["ascending"] == "false"
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_logs_already_known_skip_count(
+        self, mock_tag: MagicMock, mock_get: MagicMock, caplog: Any
+    ) -> None:
+        """The fetch logs how many markets were skipped as already known."""
+        mock_tag.return_value = 42
+        mock_get.return_value = _poly_response(
+            [
+                _poly_market(condition_id="known_1"),
+                _poly_market(condition_id="known_2"),
+                _poly_market(condition_id="fresh"),
+            ]
+        )
+
+        with caplog.at_level(logging.INFO, logger="benchmark.datasets.fetch_open"):
+            markets = fetch_polymarket_open(
+                max_markets=10, existing_ids={"poly_known_1", "poly_known_2"}
+            )
+
+        assert [m["id"] for m in markets] == ["poly_fresh"]
+        assert "1 new" in caplog.text
+        assert "2 already-known skipped" in caplog.text
+
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_known_and_old_market_counts_as_known_skipped(
+        self, mock_tag: MagicMock, mock_get: MagicMock, caplog: Any
+    ) -> None:
+        """A market both already-known and pre-cutoff is counted as known-skipped.
+
+        On a daily run virtually every known market is also older than the
+        cutoff; if the cutoff skip shadowed the known check, the skip counter
+        would always read 0 and lose its diagnostic value.
+        """
+        mock_tag.return_value = 42
+        mock_get.return_value = _poly_response(
+            [
+                _poly_market(condition_id="fresh", created_at=_hours_ago(1)),
+                _poly_market(condition_id="known_old", created_at=_hours_ago(48)),
+            ]
+        )
+
+        with caplog.at_level(logging.INFO, logger="benchmark.datasets.fetch_open"):
+            markets = fetch_polymarket_open(
+                max_markets=10,
+                existing_ids={"poly_known_old"},
+                created_within_hours=24,
+            )
+
+        assert [m["id"] for m in markets] == ["poly_fresh"]
+        assert "1 new" in caplog.text
+        assert "1 already-known skipped" in caplog.text
 
     @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
     @patch("benchmark.datasets.fetch_open.requests.get")

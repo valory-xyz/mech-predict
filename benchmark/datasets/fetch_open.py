@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
 from benchmark.datasets.fetch_production import classify_category
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl, load_existing_ids
@@ -376,19 +377,26 @@ def _collect_polymarket_batch(  # pylint: disable=too-many-arguments
     page_has_parseable = False
     for m in batch:
         created = _parse_created_at(m)
+        is_old = False
         if created is not None:
             page_has_parseable = True
-        if created_cutoff is not None and created is not None:
-            if created < created_cutoff:
-                continue
-            page_has_recent = True
+            if created_cutoff is not None:
+                is_old = created < created_cutoff
+                if not is_old:
+                    page_has_recent = True
 
         condition_id = m.get("conditionId") or m.get("id", "")
         if not condition_id or condition_id in seen_ids:
             continue
         seen_ids.add(condition_id)
 
+        # The known-id check must precede the cutoff skip: known markets are
+        # almost always also pre-cutoff, and the caller's skipped-as-known
+        # count (seen_ids ∩ existing_ids) would otherwise always read 0.
         if f"poly_{condition_id}" in existing_ids:
+            continue
+
+        if is_old:
             continue
 
         parsed = _parse_polymarket_entry(m, category, min_liquidity)
@@ -489,6 +497,16 @@ def fetch_polymarket_open(
                 break
             offset += POLYMARKET_PAGE_LIMIT
 
+    # "skipped >> new" in this log is the visible proof that the new-markets
+    # cap semantics is active; skipped == 0 on a mature file suggests the
+    # open_markets.jsonl artifact chain was lost.
+    skipped_known = sum(1 for cid in seen_ids if f"poly_{cid}" in known_ids)
+    log.info(
+        "Polymarket scan: %d new, %d already-known skipped, %d scanned",
+        len(markets),
+        skipped_known,
+        len(seen_ids),
+    )
     return markets
 
 

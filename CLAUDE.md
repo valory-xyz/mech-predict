@@ -259,7 +259,8 @@ Lives at the repo root. The `tools` field is a **dictionary keyed by tool name**
   "tools": {
     "superforcaster-v3": {
       "parent": "superforcaster-v2",
-      "reason": "<one-line why, e.g. 'prompt rewrite to add low-p_yes evidence bar'>"
+      "reason": "<one-line why, e.g. 'prompt rewrite to add low-p_yes evidence bar'>",
+      "kind": "fix"
     }
   }
 }
@@ -268,8 +269,9 @@ Lives at the repo root. The `tools` field is a **dictionary keyed by tool name**
 Field semantics:
 
 - The dictionary key is the tool name. Must match `^[a-z][a-z0-9._-]*$` and equal `<base>-v<n+1>` per the naming convention (legacy underscored names are grandfathered).
-- `parent` — the tool named in the issue (the one that triggered this version), or `null` for a tool introduced from scratch. Lets readers walk back the lineage.
+- `parent` — the tool named in the issue (the one that triggered this version), or `null` for a tool introduced from scratch. Lets readers walk back the lineage. Must be a string (or absent/`null`); a non-string parent is skipped-and-warned by the triage loader.
 - `reason` — one human-readable line. NOT the hypothesis (that goes in the PR body); just the housekeeping reason.
+- `kind` — **`"fix"` (default) or `"maintenance"`**. Load-bearing for triage routing: a `fix` variant exempts its ancestor from a fresh `tool-improvement` issue (routes it to a promotion-review note instead); a `maintenance` variant does NOT — it's an output-preserving bump with no Brier-relevant change (e.g. an SDK-only lockstep dependency bump), so the ancestor still gets a fix issue when it regresses. Omit it (or set `"fix"`) for a normal prompt/logic fix; set `"maintenance"` ONLY for a bump that cannot shift `p_yes`. An unrecognized value is treated as `"fix"` (with a warning). Maintenance edges are still traversed, so a real fix descending through a maintenance node continues to exempt the top-of-chain ancestor.
 
 PR-of-introduction is intentionally omitted — `git log -- packages/{author}/customs/<dir>/component.yaml` is authoritative. Deployment status is intentionally omitted — it drifts; query the marketplace subgraph + IPFS manifests to get live truth.
 

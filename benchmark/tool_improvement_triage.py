@@ -67,9 +67,13 @@ why a known-bad tool isn't firing today (or why it is firing again
 after a recent close).
 
 Lineage-descendant routing: a tool that fires but already has a merged
-fix variant in ``tool_lineage.json`` (i.e. it is some other tool's
-``parent``) is NOT a new fix request -- repeated re-fixing of the same
-ancestor without promoting the result is the churn this stops. Such a
+*fix* variant reachable in ``tool_lineage.json`` is NOT a new fix
+request -- repeated re-fixing of the same ancestor without promoting the
+result is the churn this stops. "Fix variant" is specific: a
+``kind: maintenance`` entry (an SDK-only lockstep bump with no
+Brier-relevant change) does NOT exempt its ancestor, though it is still
+traversed so a real fix descending THROUGH it (``base -> v1(maint) ->
+v2(fix)``) still counts. Such a
 fire is routed to ``descendant_exists`` and emitted as a *visible*
 promotion-review note under the ``tool-promotion-review`` label (its own
 dedup, posted once per ``(tool, platform)``). That label is deliberately
@@ -101,7 +105,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TypeGuard
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
@@ -168,14 +172,20 @@ _TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+W-1\b"
 _PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\s*$")
 
 
-def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
-    """Map each tool to its variant descendants (children) from ``tool_lineage.json``."""
-    # A tool present as some other tool's ``parent`` has at least one merged
-    # fix variant (the ledger is updated on merge), so its presence as a key
-    # here means "a fix for this tool already exists". Warn (rather than
-    # silently returning {}) when the file EXISTS but does not parse: an empty
-    # children map disables descendant routing, so a corrupt ledger would
-    # silently resume the very re-fixing churn this stops.
+def _load_lineage_children(
+    path: Path = LINEAGE_PATH,
+) -> Tuple[Dict[str, List[str]], Set[str]]:
+    """Load the lineage as ``(parent->children graph, set of fix-variant names)``."""
+    # The graph carries EVERY parent->child edge (incl. ``kind: maintenance``),
+    # so transitive lookup stays intact for a chain passing THROUGH a
+    # maintenance node (``base -> v1(maint) -> v2(fix)``). ``fix_variants`` is
+    # the set of real fix variants (``kind != "maintenance"``); only those
+    # exempt an ancestor from a fresh fix issue. Splitting "traversable" from
+    # "counts as a fix" (callers route on ``_fix_descendants``, never the raw
+    # graph) is what lets a fix descending through a maintenance node exempt
+    # ``base`` while a bare ``base -> v1(maint)`` still opens a fix issue.
+    # Warn (not silently empty) on a missing/malformed file: a corrupt ledger
+    # that disabled routing would silently resume the re-fixing churn this stops.
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -188,6 +198,16 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
         )
         data = {}
     children: Dict[str, List[str]] = {}
+    fix_variants: Set[str] = set()
+    # A non-dict top-level (json.loads happily returns a list/str/number for a
+    # malformed ledger; the parse guard above does not catch that) would crash
+    # on ``data.get`` -- skip-and-warn instead.
+    if not isinstance(data, dict):
+        log.warning(
+            "tool_lineage.json top-level is %s, not an object; ignoring.",
+            type(data).__name__,
+        )
+        return children, fix_variants
     tools = data.get("tools")
     if not isinstance(tools, dict):
         if tools is not None:
@@ -195,21 +215,58 @@ def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
                 "tool_lineage.json 'tools' is %s, not an object; ignoring.",
                 type(tools).__name__,
             )
-        return children
+        return children, fix_variants
     for name, meta in tools.items():
         # Shape-guard each entry: the ledger is hand-maintained, so a malformed
         # value (e.g. a string) must skip-and-warn, not crash the whole run.
         if not isinstance(meta, dict):
             log.warning("tool_lineage.json entry %r is not an object; skipping.", name)
             continue
+        # Validate ``kind``: an unrecognized value (a typo like "maintenence")
+        # must NOT silently count as a fix variant -- warn and treat as "fix"
+        # so a regressing ancestor is not mis-routed to a promotion note.
+        kind = meta.get("kind", "fix")
+        if kind not in ("fix", "maintenance"):
+            log.warning(
+                "tool_lineage.json entry %r has unrecognized kind=%r; "
+                "treating as 'fix'.",
+                name,
+                kind,
+            )
+            kind = "fix"
         parent = meta.get("parent")
-        # Only a real fix variant exempts the ancestor from fix issues. A
-        # maintenance bump (``kind: maintenance`` -- e.g. an SDK-only lockstep
-        # bump with no Brier-relevant change) must NOT route the ancestor to a
-        # promotion note. Absent ``kind`` defaults to ``fix`` (back-compatible).
-        if parent and meta.get("kind", "fix") != "maintenance":
+        # A non-string parent (list/int/...) is not a usable graph key: it would
+        # crash ``children.setdefault`` (unhashable list) or admit a non-str key
+        # that breaks the ``Dict[str, ...]`` contract. Skip-and-warn.
+        if parent is not None and not isinstance(parent, str):
+            log.warning(
+                "tool_lineage.json entry %r has non-string parent %r; skipping.",
+                name,
+                parent,
+            )
+            continue
+        if kind != "maintenance":
+            fix_variants.add(name)
+        # Keep EVERY edge (incl. maintenance) traversable so a fix that descends
+        # THROUGH a maintenance node still exempts the ancestor.
+        if parent:
             children.setdefault(parent, []).append(name)
-    return children
+    return children, fix_variants
+
+
+def _fix_descendants(
+    tool: str,
+    children: Dict[str, List[str]],
+    fix_variants: Optional[Set[str]] = None,
+) -> List[str]:
+    """Transitive fix-variant descendants of ``tool`` (maintenance edges walked, not counted)."""
+    # Traverses the full graph (maintenance edges followed), then keeps only
+    # nodes in ``fix_variants``. ``fix_variants=None`` means "no kind info" and
+    # every descendant counts -- back-compat for callers passing a plain map.
+    desc = _descendants(tool, children)
+    if fix_variants is None:
+        return desc
+    return sorted(d for d in desc if d in fix_variants)
 
 
 def _descendants(tool: str, children: Dict[str, List[str]]) -> List[str]:
@@ -230,6 +287,16 @@ def _descendants(tool: str, children: Dict[str, List[str]]) -> List[str]:
     return sorted(out)
 
 
+def _bss_is_valid(bss_cur: Optional[float]) -> TypeGuard[float]:
+    """Is ``bss_cur`` a usable Brier Skill Score (present AND finite)?"""
+    # Single source of truth for the BSS-vs-absolute-fallback fork: the level
+    # trigger, the issue title, and the issue body all gate on this, so one
+    # predicate keeps their wording in lockstep -- a NaN/inf BSS falls back to
+    # absolute-Brier phrasing in all three by construction, not by three copies
+    # of the check staying in sync by hand.
+    return bss_cur is not None and math.isfinite(bss_cur)
+
+
 def _below_level(*, brier_cur: Optional[float], bss_cur: Optional[float]) -> bool:
     """Level trigger: is the tool materially worse than its base-rate reference?"""
     # Keyword-only: both params are Optional[float], so a positional swap would
@@ -241,7 +308,7 @@ def _below_level(*, brier_cur: Optional[float], bss_cur: Optional[float]) -> boo
     # all-one-outcome window, and json round-trips NaN); `NaN < floor` is
     # False, which would silently disable the level trigger -- so treat a
     # non-finite BSS the same as missing and use the absolute Brier fallback.
-    if bss_cur is not None and math.isfinite(bss_cur):
+    if _bss_is_valid(bss_cur):
         return bss_cur < BSS_LEVEL_FLOOR
     if bss_cur is not None:
         log.warning(
@@ -487,6 +554,7 @@ def triage(
     closed_issues: Optional[List[Tuple[str, str, datetime]]] = None,
     now: Optional[datetime] = None,
     lineage_children: Optional[Dict[str, List[str]]] = None,
+    lineage_fix_variants: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     # pylint: disable=too-many-locals
@@ -637,11 +705,13 @@ def triage(
         # cooldown/no-trigger gates (a recently-closed or non-firing tool
         # stays quiet) but before the duplicate/open paths (a stale open fix
         # issue must not mask the promotion signal).
-        # ALL transitive descendants, not just direct children: for a chained
-        # lineage (e.g. factual_research -> v1 -> v2 -> v3) the promotable tip
-        # is a grandchild, so a direct-children-only list would point a
-        # reviewer at a stale variant.
-        descendants = _descendants(tool, children)
+        # ALL transitive FIX descendants, not just direct children: for a
+        # chained lineage (e.g. factual_research -> v1 -> v2 -> v3) the
+        # promotable tip is a grandchild, so a direct-children-only list would
+        # point a reviewer at a stale variant. ``_fix_descendants`` traverses
+        # maintenance edges but only counts real fix variants, so a bare
+        # maintenance bump does not mask a genuine regression.
+        descendants = _fix_descendants(tool, children, lineage_fix_variants)
         if descendants:
             d.update(
                 decision="descendant_exists",
@@ -734,7 +804,7 @@ def build_issue_title(
     # the absolute-Brier fallback path. ``_TITLE_RE`` still keys on
     # ``on <platform> W-1``, so (tool, platform) dedup is unaffected.
     if reason == "level_floor":
-        if bss_cur is not None and math.isfinite(bss_cur):
+        if _bss_is_valid(bss_cur):
             return f"[tool-improvement] `{tool}`: BSS below floor on {platform} W-1"
         return f"[tool-improvement] `{tool}`: Brier above level on {platform} W-1"
     return f"[tool-improvement] `{tool}`: Brier regression on {platform} W-1"
@@ -766,7 +836,7 @@ def build_issue_body(
         skill_clause = (
             f"a Brier Skill Score of {bss_cur:+.4f} (below the {BSS_LEVEL_FLOOR:+.2f} "
             "floor -- materially worse than its base-rate reference)"
-            if bss_cur is not None and math.isfinite(bss_cur)
+            if _bss_is_valid(bss_cur)
             else f"a Brier persistently above {BRIER_LEVEL_THRESHOLD:.2f}"
         )
         headline = (
@@ -1042,8 +1112,12 @@ def main() -> int:
     # note instead of a redundant fix issue. ``promo_open`` dedups the note
     # under its own label so it is posted once per (tool, platform), not
     # daily.
-    lineage_children = _load_lineage_children()
-    log.info("triage lineage: %d tools have >=1 fix variant", len(lineage_children))
+    lineage_children, lineage_fix_variants = _load_lineage_children()
+    log.info(
+        "triage lineage: %d parent(s) in the ledger graph, %d fix variant(s)",
+        len(lineage_children),
+        len(lineage_fix_variants),
+    )
     promo_open = _open_issue_tools(args.repo, PROMOTION_LABEL, _PROMO_TITLE_RE)
     # ``promo_open`` is a None/[]/[...] tristate. ``promo_open_set`` collapses
     # None -> empty, so it is NOT sufficient on its own: the dispatch branch
@@ -1066,6 +1140,7 @@ def main() -> int:
             closed_issues=closed_issues,
             now=now,
             lineage_children=lineage_children,
+            lineage_fix_variants=lineage_fix_variants,
         )
         all_decisions.extend(decisions)
 

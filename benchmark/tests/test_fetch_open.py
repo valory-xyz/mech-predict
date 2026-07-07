@@ -300,7 +300,7 @@ class TestFetchPolymarketOpen:
         mock_get.side_effect = [stale_page]  # a second request would raise
 
         markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
-        assert markets == []
+        assert not markets
         assert mock_get.call_count == 1
 
     @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
@@ -411,12 +411,10 @@ class TestFetchPolymarketOpen:
     def test_known_and_old_market_counts_as_known_skipped(
         self, mock_tag: MagicMock, mock_get: MagicMock, caplog: Any
     ) -> None:
-        """A market both already-known and pre-cutoff is counted as known-skipped.
-
-        On a daily run virtually every known market is also older than the
-        cutoff; if the cutoff skip shadowed the known check, the skip counter
-        would always read 0 and lose its diagnostic value.
-        """
+        """A market both already-known and pre-cutoff is counted as known-skipped."""
+        # On a daily run virtually every known market is also older than the
+        # cutoff; if the cutoff skip shadowed the known check, the skip counter
+        # would always read 0 and lose its diagnostic value.
         mock_tag.return_value = 42
         mock_get.return_value = _poly_response(
             [

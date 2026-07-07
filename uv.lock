@@ -2582,7 +2582,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "tomte", extras = ["cli", "tests"], git = "https://github.com/valory-xyz/tomte.git?rev=0819eea387c622cc53b398a2d3ea86e94a55cf82" },
+    { name = "tomte", extras = ["cli", "tests"], git = "https://github.com/valory-xyz/tomte.git?rev=v0.7.0" },
     { name = "types-beautifulsoup4", specifier = ">=4.12.0.20250516,<5" },
     { name = "types-python-dateutil", specifier = ">=2.9.0.20250516,<3" },
     { name = "types-tqdm", specifier = ">=4.67.0.20250516,<5" },
@@ -4848,7 +4848,7 @@ wheels = [
 [[package]]
 name = "tomte"
 version = "0.7.0"
-source = { git = "https://github.com/valory-xyz/tomte.git?rev=0819eea387c622cc53b398a2d3ea86e94a55cf82#0819eea387c622cc53b398a2d3ea86e94a55cf82" }
+source = { git = "https://github.com/valory-xyz/tomte.git?rev=v0.7.0#0819eea387c622cc53b398a2d3ea86e94a55cf82" }
 
 [package.optional-dependencies]
 cli = [

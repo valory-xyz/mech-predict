@@ -88,7 +88,7 @@ dev = [
     "types-beautifulsoup4>=4.12.0.20250516,<5",
     "types-python-dateutil>=2.9.0.20250516,<3",
     "types-tqdm>=4.67.0.20250516,<5",
-    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@0819eea387c622cc53b398a2d3ea86e94a55cf82",
+    "tomte[cli, tests] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0",
 ]
 
 [tool.uv]
@@ -115,15 +115,7 @@ upstream_pins = [
     "valory-xyz/mech@v0.34.2",
     "valory-xyz/kv-store@v0.7.1",
 ]
-# When reverting this SHA to a tagged release (e.g. bumping to a future
-# `vX.Y.Z`), bump every other tomte reference in lockstep:
-# - the `[dependency-groups] dev` entry above (line 91) — the pyproject dep
-# - the seven `pip install 'tomte[tox,cli] @ git+...@v0.7.0'` lines in
-#   `.github/workflows/common_checks.yaml` (currently on the `v0.7.0` tag,
-#   which today happens to point to this same SHA — coincidence, not
-#   enforcement).
-# Otherwise CI installs a different tomte than the pyproject-locked one.
-tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@0819eea387c622cc53b398a2d3ea86e94a55cf82"
+tomte_dep_pin = " @ git+https://github.com/valory-xyz/tomte.git@v0.7.0"
 
 [tool.uv.build-backend]
 module-name = ["packages"]

@@ -1,0 +1,151 @@
+name: benchmark-roi
+
+# Queue overlapping runs (cron + workflow_dispatch) so two simulations never
+# race each other's benchmark-roi artifact. cancel-in-progress is false to
+# match the flywheel convention: queued runs are cheap and each produces a
+# report we may want to keep.
+concurrency:
+  group: benchmark-roi
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # 09:30 UTC = 7h after the flywheel's 02:30 start. The flywheel job that
+    # uploads benchmark-data has needs: [tournament-run] (timeout-minutes:
+    # 360), so on a slow tournament day the artifact can land as late as
+    # ~09:00 UTC. dawidd6/action-download-artifact (default
+    # workflow_conclusion: success) picks the most recent fully-green
+    # flywheel run, so scheduling earlier would silently consume the
+    # PREVIOUS day's artifacts. 09:30 keeps the report on today's data while
+    # still same-day; if the flywheel overruns even that, the sim falls back
+    # to yesterday's run: freshness lag <= 1 day, harmless for a
+    # trailing-90-day window.
+    - cron: '30 9 * * *'
+  workflow_dispatch:
+    inputs:
+      window_days:
+        description: 'Trailing window length in days (on prediction date)'
+        required: false
+        default: '90'
+      as_of:
+        description: 'Window end date, YYYY-MM-DD UTC (empty = today). Fixed dates make reruns byte-reproducible.'
+        required: false
+        default: ''
+
+jobs:
+  # -----------------------------------------------------------------------
+  # ROI companion simulation. Pure read-side consumer of the flywheel's
+  # persisted artifacts: no new data capture, no LLM calls, no secrets, no
+  # Slack, and nothing is written back to the repo. Phase 1 of the staged
+  # rollout in the ROI companion sim one-pager — a dedicated Slack post is
+  # phase 2 and folding ROI into the main daily reports is phase 3; neither
+  # belongs in this workflow yet.
+  # -----------------------------------------------------------------------
+  roi-sim:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    # contents: read — checkout only; the workflow never pushes or comments.
+    # actions: read — both `Download ...` steps below use
+    # dawidd6/action-download-artifact to locate the latest
+    # benchmark_flywheel.yaml run's artifacts via the Actions REST API;
+    # without it those lookups 403 and the sim has no input data.
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # No `pip install` step: benchmark/roi_sim.py deliberately imports only
+      # the standard library (same zero-dep policy as benchmark/tournament_tools.py)
+      # so this job stays install-free and fast.
+
+      # Validate dispatch inputs before anything else runs. Inputs are routed
+      # through env (not ${{ }} interpolation in the shell script) to prevent
+      # workflow_dispatch shell injection — ${{ }} is macro-expanded before
+      # the shell runs, so malicious input would become part of the script.
+      # Whitelist-validation mirrors benchmark_replay.yaml's parse step.
+      - name: Validate inputs
+        env:
+          WINDOW_DAYS: ${{ github.event.inputs.window_days || '90' }}
+          AS_OF: ${{ github.event.inputs.as_of }}
+        run: |
+          if ! echo "$WINDOW_DAYS" | grep -qP '^[0-9]+$'; then
+            echo "::error::Invalid window_days: '$WINDOW_DAYS'. Must be a positive integer."
+            exit 1
+          fi
+          # as_of is optional; when set it must be a plain YYYY-MM-DD date.
+          if [ -n "$AS_OF" ] && ! echo "$AS_OF" | grep -qP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            echo "::error::Invalid as_of: '$AS_OF'. Must be YYYY-MM-DD (UTC) or empty."
+            exit 1
+          fi
+
+      # Production shards + cumulative scoring state from the latest flywheel
+      # run. if_no_artifact_found: fail (not warn) on purpose: the ROI report
+      # is a pure function of this data — without it there is nothing to
+      # simulate and a green run would just publish an empty, misleading
+      # report.
+      - name: Download benchmark data
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
+        with:
+          name: benchmark-data
+          path: benchmark/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: fail
+
+      # Tournament rows are optional: production shards alone still produce a
+      # meaningful report (tournament coverage just shows as absent), so a
+      # missing artifact — e.g. the tournament job is skipped when no API
+      # keys are configured — only warns.
+      - name: Download tournament predictions
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      # Inputs routed through env — see the shell-injection note above.
+      # Empty AS_OF omits --as-of so the module defaults to today (UTC);
+      # ${AS_OF:+...} expands to the flag only when AS_OF is non-empty.
+      # The tournament flag is guarded on file presence, matching how the
+      # flywheel's Score steps treat tournament_scored.jsonl.
+      - name: Run ROI simulation
+        env:
+          WINDOW_DAYS: ${{ github.event.inputs.window_days || '90' }}
+          AS_OF: ${{ github.event.inputs.as_of }}
+        run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          python -m benchmark.roi_sim \
+            --window-days "$WINDOW_DAYS" \
+            --logs-dir benchmark/datasets/logs/ \
+            --results-dir benchmark/results/ \
+            ${AS_OF:+--as-of "$AS_OF"} \
+            $TOURNAMENT_FLAG
+
+      # Surface the per-platform reports in the Actions run summary so the
+      # numbers are readable in the UI without downloading the artifact.
+      - name: Publish report to job summary
+        run: |
+          for f in benchmark/results/report_roi_*.md; do
+            [ -f "$f" ] || continue
+            cat "$f" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload ROI results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-roi
+          path: |
+            benchmark/results/roi_results.json
+            benchmark/results/report_roi_*.md
+          retention-days: 90

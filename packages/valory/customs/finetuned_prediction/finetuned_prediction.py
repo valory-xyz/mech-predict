@@ -24,17 +24,19 @@ GRPO to emit a calibrated `p_yes` for a binary prediction-market question. This
 tool runs the fine-tuned checkpoints behind a vLLM OpenAI-compatible endpoint
 and returns the same JSON schema the other prediction tools deliver.
 
-Two modes (base / fine-tuned)
------------------------------
-The package is registered under two tool names — `predict-base` and
-`predict-fine-tuned` — and the tool NAME is the only selector: each maps to a
-fixed vLLM served-model name (MODEL_BY_TOOL). Both are
-DeepSeek-R1-Distill-Qwen-14B underneath; whether the fine-tuned one is a merged
-checkpoint or a runtime LoRA adapter is a serving detail invisible to this tool
-(it just sends a `model` name). The requester picks only the tool, so there is
-no untrusted model input. The production analogue of fine_tuning test.py's
-base-vs-fine-tuned comparison. (A second base model would be a follow-up design,
-adding a model axis; today there is one base, two modes.)
+Three modes (base / fine-tuned / fine-tuned-calibrated)
+-------------------------------------------------------
+The package is registered under three tool names — `predict-base`,
+`predict-fine-tuned` and `predict-fine-tuned-calibrated` — and the tool NAME is
+the only selector: each maps to a fixed vLLM served-model name (MODEL_BY_TOOL).
+All are DeepSeek-R1-Distill-Qwen-14B underneath; whether the fine-tuned one is a
+merged checkpoint or a runtime LoRA adapter is a serving detail invisible to
+this tool (it just sends a `model` name). The calibrated mode targets a third
+served name that ft-serve fronts vLLM with — the fine-tuned model with a Platt
+calibrator applied to `p_yes` — so `predict-fine-tuned` stays the honest raw
+model and `predict-fine-tuned-calibrated` is opt-in by name. The requester
+picks only the tool, so there is no untrusted model input. The production
+analogue of fine_tuning test.py's base-vs-fine-tuned(-calibrated) comparison.
 
 Why a dedicated tool (not a parametrised `superforcaster`)
 ---------------------------------------------------------
@@ -89,23 +91,36 @@ MaxCostResponse = float
 N_MODEL_CALLS = 1
 DEFAULT_DELIVERY_RATE = 100
 
-# Two modes, each a fixed vLLM served-model name. The tool NAME is the only
+# Three modes, each a fixed vLLM served-model name. The tool NAME is the only
 # selector — `predict-base` calls the base model, `predict-fine-tuned` calls the
-# fine-tuned model. Both are DeepSeek-R1-Distill-Qwen-14B underneath; how the
-# fine-tuned one is produced (LoRA weights merged into a standalone checkpoint,
-# or a runtime adapter) is a SERVING detail invisible to this tool — either way
-# vLLM exposes it under the name below. The requester does not choose the model;
-# it only picks the tool, so there is no untrusted model input.
+# raw fine-tuned model, and `predict-fine-tuned-calibrated` calls the calibrated
+# served name (the fine-tuned model with a Platt calibrator applied to p_yes,
+# which ft-serve exposes as a third vLLM served name). All are
+# DeepSeek-R1-Distill-Qwen-14B underneath; how the fine-tuned one is produced
+# (LoRA weights merged into a standalone checkpoint, or a runtime adapter) is a
+# SERVING detail invisible to this tool — either way vLLM exposes it under the
+# name below. The requester does not choose the model; it only picks the tool,
+# so there is no untrusted model input.
 TOOL_BASE = "predict-base"
 TOOL_FINE_TUNED = "predict-fine-tuned"
-ALLOWED_TOOLS = [TOOL_BASE, TOOL_FINE_TUNED]
+TOOL_FINE_TUNED_CALIBRATED = f"{TOOL_FINE_TUNED}-calibrated"
+ALLOWED_TOOLS = [TOOL_BASE, TOOL_FINE_TUNED, TOOL_FINE_TUNED_CALIBRATED]
 
-# vLLM --served-model-name for each mode. Edit to match your vLLM deployment,
+# vLLM --served-model-name for each mode. Edit to match your vLLM deployment.
+# The calibrated name is a VIRTUAL served name ft-serve's proxy adds in front of
+# vLLM (the fine-tuned model with Platt calibration applied to p_yes); it MUST
+# match the SERVED_MODEL_* constants in investigation_ml serve.py, pinned in
+# lockstep (a mismatch → the tool requests a name vLLM doesn't expose → 404).
 # Adding a different base model later means a follow-up design (model becomes a
-# second axis); today there is exactly one base, two modes.
+# second axis); today there is exactly one base.
+SERVED_MODEL_BASE = "qwen-14b-base"
+SERVED_MODEL_FINE_TUNED = "qwen-14b-fine-tuned"
+SERVED_MODEL_FINE_TUNED_CALIBRATED = f"{SERVED_MODEL_FINE_TUNED}-calibrated"
+
 MODEL_BY_TOOL = {
-    TOOL_BASE: "qwen-14b-base",
-    TOOL_FINE_TUNED: "qwen-14b-fine-tuned",
+    TOOL_BASE: SERVED_MODEL_BASE,
+    TOOL_FINE_TUNED: SERVED_MODEL_FINE_TUNED,
+    TOOL_FINE_TUNED_CALIBRATED: SERVED_MODEL_FINE_TUNED_CALIBRATED,
 }
 
 # Self-hosted vLLM OpenAI-compatible endpoint. One server hosts both models, so

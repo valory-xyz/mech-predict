@@ -32,6 +32,22 @@ shards plus the scored tournament predictions) -- no new data capture, no
 LLM calls, no network access. Stdlib only by design so light CI jobs can run
 it without the full dependency stack.
 
+Tool policy (data-driven, mirroring the accuracy benchmark's no-allowlist +
+reliability-flag approach): every (platform, tool, mode) group present in
+the data is simulated and serialized to roi_results.json -- no tool
+allowlist, nothing silently dropped. A tool is classified a prediction tool
+(``is_prediction_tool``) when at least one of its loaded rows ANYWHERE (all
+rows, not window-limited) carries a valid-parse prediction. The markdown
+tables show ALL prediction-tool groups: zero-eligible ones stay visible with
+a "no eligible rows in window" flag, and groups whose in-window parse
+reliability (``parse_reliability`` = valid-parse rows / (valid-parse rows +
+invalid_parse rejects), counted at the parse rung) falls below
+RELIABILITY_GATE (0.80, the accuracy benchmark's reliability-gate threshold)
+are flagged as a possible response-format gap. Non-prediction groups
+(question generators, service mechs -- no parseable prediction in any row)
+are omitted from the table and summarized on one compact line below it; a
+known prediction tool appearing on that line indicates a parser/format gap.
+
 Determinism: the outputs are a pure function of the input artifacts and the
 --as-of date. Fixed bootstrap seeds and no wall-clock dependence beyond the
 window cutoff mean that re-running with the same artifacts and the same
@@ -104,6 +120,15 @@ MIN_SAMPLE_SIZE = 30
 FEW_BETS_THRESHOLD = 10
 FLAG_FEW_BETS = "few bets - anecdotal"
 FLAG_LOW_SAMPLE = "low sample"
+
+# Prediction-tool rows with zero eligible in-window rows stay in the table
+# (all prediction tools visible, never dropped) under this flag.
+FLAG_NO_ELIGIBLE = "no eligible rows in window"
+
+# Parse-reliability flag threshold; mirrors the accuracy benchmark's
+# reliability gate (scorer.RELIABILITY_GATE = 0.80). Strict <: a group at
+# exactly 0.80 is not flagged.
+RELIABILITY_GATE = 0.80
 
 # Eligibility reject reasons, in ladder order (first failure wins). A null
 # final_outcome is NOT a reject: it classifies as PENDING (unresolved) and is
@@ -622,6 +647,17 @@ def _mode_label(row: dict[str, Any]) -> str:
     return str(mode)
 
 
+def _parse_reliability_flag(parse_reliability: float) -> str:
+    """Build the low-parse-reliability flag text.
+
+    :param parse_reliability: in-window parse reliability in [0, 1].
+    :return: flag string with the percentage shown.
+    """
+    return (
+        f"⚠ {parse_reliability:.0%} parse reliability — " "possible response-format gap"
+    )
+
+
 def simulate(
     rows: list[dict[str, Any]], window_start: datetime, window_end: datetime
 ) -> list[dict[str, Any]]:
@@ -634,11 +670,24 @@ def simulate(
     the parse/validity rungs; pending (unresolved) rows are counted in
     n_pending, not in rejects.
 
+    Two tool-policy fields per group (see module docstring): parse_reliability
+    = n_valid_parse / (n_valid_parse + invalid_parse rejects) over the
+    group's IN-WINDOW rows, counted at the parse rung (None when the
+    denominator is 0), and is_prediction_tool = whether the TOOL has at
+    least one valid-parse row anywhere in the loaded data (all rows, not
+    window-limited).
+
     :param rows: deduped input rows.
     :param window_start: inclusive window start (aware UTC).
     :param window_end: exclusive window end (aware UTC).
     :return: per-group stats dicts, deterministically sorted.
     """
+    # A tool that ever produced a parseable prediction is a prediction tool.
+    prediction_tools = {
+        str(row.get("tool_name") or "unknown")
+        for row in rows
+        if row.get("prediction_parse_status") == "valid"
+    }
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     n_skipped_platform = 0
     for row in rows:
@@ -676,11 +725,26 @@ def simulate(
     results: list[dict[str, Any]] = []
     for (platform, tool_name, mode), group in grouped.items():
         stats = compute_group_stats(group["eligible"], PLATFORM_GATES[platform])
+        # Parse reliability over IN-WINDOW rows, counted at the parse rung:
+        # every in-window row either rejects as invalid_parse or passes the
+        # parse rung (it may still fail later rungs), so the denominator
+        # n_valid_parse + invalid_parse equals n_rows_seen.
+        n_invalid_parse = group["rejects"]["invalid_parse"]
+        n_valid_parse = group["n_rows_seen"] - n_invalid_parse
+        parse_denominator = n_valid_parse + n_invalid_parse
+        parse_reliability = (
+            n_valid_parse / parse_denominator if parse_denominator else None
+        )
         flags: list[str] = []
-        if stats["n_bets"] < FEW_BETS_THRESHOLD:
-            flags.append(FLAG_FEW_BETS)
-        if stats["n_eligible"] < MIN_SAMPLE_SIZE:
-            flags.append(FLAG_LOW_SAMPLE)
+        if stats["n_eligible"] == 0:
+            flags.append(FLAG_NO_ELIGIBLE)
+        else:
+            if stats["n_bets"] < FEW_BETS_THRESHOLD:
+                flags.append(FLAG_FEW_BETS)
+            if stats["n_eligible"] < MIN_SAMPLE_SIZE:
+                flags.append(FLAG_LOW_SAMPLE)
+        if parse_reliability is not None and parse_reliability < RELIABILITY_GATE:
+            flags.append(_parse_reliability_flag(parse_reliability))
         entry: dict[str, Any] = {
             "platform": platform,
             "tool_name": tool_name,
@@ -688,6 +752,8 @@ def simulate(
             "n_rows_seen": group["n_rows_seen"],
             "n_pending": group["n_pending"],
             "rejects": group["rejects"],
+            "parse_reliability": parse_reliability,
+            "is_prediction_tool": tool_name in prediction_tools,
             "flags": flags,
         }
         entry.update(stats)
@@ -758,6 +824,32 @@ def _fmt_brier(brier_all: float | None, brier_bets: float | None) -> str:
     return f"{left} -> {right}"
 
 
+def _excluded_line(excluded: list[dict[str, Any]]) -> str:
+    """Summarize non-prediction groups on one compact line.
+
+    Row counts are per TOOL over ALL loaded rows for that tool's groups on
+    the platform (in-window rows plus out_of_window rejects), matching the
+    any-row classification; sorted by row count descending, then tool name.
+
+    :param excluded: groups with is_prediction_tool False (one platform).
+    :return: single-line summary string.
+    """
+    counts: dict[str, int] = {}
+    for group in excluded:
+        n_rows = group["n_rows_seen"] + group["rejects"]["out_of_window"]
+        counts[group["tool_name"]] = counts.get(group["tool_name"], 0) + n_rows
+    parts = [
+        f"{tool} ({n} row{'s' if n != 1 else ''})"
+        for tool, n in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return (
+        "Excluded (no parseable prediction in any row): "
+        + ", ".join(parts)
+        + " — a known prediction tool appearing here indicates a "
+        "parser/format gap."
+    )
+
+
 def render_report(
     platform: str,
     groups: list[dict[str, Any]],
@@ -769,7 +861,11 @@ def render_report(
     """Render one platform's markdown ROI report.
 
     Rows are sorted production-first, then by bet count descending; rows
-    below sample thresholds are flagged, never dropped.
+    below sample thresholds are flagged, never dropped. The table shows
+    prediction-tool groups only (ALL of them, including zero-eligible ones,
+    which carry the "no eligible rows in window" flag); non-prediction
+    groups are summarized on one compact line below the table, sorted by
+    row count descending.
 
     :param platform: platform key ("omen" / "polymarket").
     :param groups: all group stats (any platform; filtered here).
@@ -797,9 +893,14 @@ def render_report(
         ),
         "",
     ]
-    rows = [g for g in groups if g["platform"] == platform]
+    platform_groups = [g for g in groups if g["platform"] == platform]
+    rows = [g for g in platform_groups if g["is_prediction_tool"]]
+    excluded = [g for g in platform_groups if not g["is_prediction_tool"]]
     if not rows:
         lines.append("_No data for this platform in the window._")
+        if excluded:
+            lines.append("")
+            lines.append(_excluded_line(excluded))
         return "\n".join(lines) + "\n"
 
     rows.sort(
@@ -830,6 +931,9 @@ def render_report(
                 flags="; ".join(g["flags"]),
             )
         )
+    if excluded:
+        lines.append("")
+        lines.append(_excluded_line(excluded))
     return "\n".join(lines) + "\n"
 
 

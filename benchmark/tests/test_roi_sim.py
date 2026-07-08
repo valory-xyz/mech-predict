@@ -28,15 +28,18 @@ from typing import Any
 
 import pytest
 from benchmark.roi_sim import (
+    FLAG_NO_ELIGIBLE,
     MAX_BET,
     NO_BET_GATES,
     PLATFORM_GATES,
+    RELIABILITY_GATE,
     Bet,
     cluster_bootstrap_ci,
     compute_group_stats,
     eligibility_reason,
     load_input_rows,
     main,
+    render_report,
     simulate,
     simulate_row,
     window_bounds,
@@ -787,6 +790,8 @@ class TestEndToEnd:
             assert "roi_haircut_ci" in group
             assert "few bets - anecdotal" in group["flags"]  # all n_bets < 10
             assert "low sample" in group["flags"]  # all n_eligible < 30
+            assert group["is_prediction_tool"] is True  # all rows parse
+            assert group["parse_reliability"] == pytest.approx(1.0)
 
         report_omen = (results_1 / "report_roi_omen.md").read_text(encoding="utf-8")
         report_poly = (results_1 / "report_roi_polymarket.md").read_text(
@@ -809,3 +814,119 @@ class TestEndToEnd:
             "report_roi_polymarket.md",
         ):
             assert (results_1 / name).read_bytes() == (results_2 / name).read_bytes()
+
+
+# ---------------------------------------------------------------------------
+# Tool policy (is_prediction_tool, parse_reliability, rendering)
+# ---------------------------------------------------------------------------
+
+
+class TestToolPolicy:
+    """Data-driven tool policy: no allowlist, nothing silently dropped."""
+
+    def _render(self, groups: list[dict[str, Any]], platform: str = "omen") -> str:
+        """Render a platform report against the fixed test window.
+
+        :param groups: simulate() output.
+        :param platform: platform key.
+        :return: markdown report text.
+        """
+        return render_report(
+            platform, groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+
+    def test_non_prediction_tool_json_and_excluded_line(self) -> None:
+        """A tool with no valid-parse row anywhere is excluded from the md
+        table but kept in JSON with is_prediction_tool False, and listed on
+        the Excluded line."""
+        rows = [
+            _row(tool="pred-tool"),
+            _row(tool="propose-question", status="malformed"),
+            _row(tool="propose-question", status="malformed"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g for g in groups}
+        assert by_tool["propose-question"]["is_prediction_tool"] is False
+        assert by_tool["propose-question"]["parse_reliability"] == 0.0
+        assert by_tool["pred-tool"]["is_prediction_tool"] is True
+
+        report = self._render(groups)
+        assert "| pred-tool |" in report
+        assert "| propose-question |" not in report
+        assert (
+            "Excluded (no parseable prediction in any row): "
+            "propose-question (2 rows)" in report
+        )
+        assert "indicates a parser/format gap" in report
+
+    def test_excluded_line_sorted_by_row_count_desc(self) -> None:
+        """The Excluded line sorts non-prediction tools by row count desc."""
+        rows = (
+            [_row(tool="pred-tool")]
+            + [_row(tool="gen-small", status="malformed")]
+            + [_row(tool="gen-big", status="malformed") for _ in range(3)]
+        )
+        report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
+        assert "gen-big (3 rows), gen-small (1 row)" in report
+
+    def test_zero_eligible_prediction_tool_stays_in_table(self) -> None:
+        """Valid-parse rows OUTSIDE the window classify the tool as a
+        prediction tool; with zero eligible in-window rows the row stays in
+        the table flagged 'no eligible rows in window'."""
+        rows = [
+            _row(tool="stale-tool", predicted_at="2026-01-01T00:00:00Z"),
+            _row(tool="live-tool"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        stale = next(g for g in groups if g["tool_name"] == "stale-tool")
+        assert stale["is_prediction_tool"] is True
+        assert stale["n_eligible"] == 0
+        assert stale["parse_reliability"] is None  # denominator 0 in window
+        assert stale["flags"] == [FLAG_NO_ELIGIBLE]
+
+        report = self._render(groups)
+        assert "| stale-tool | production | 0 | 0 |" in report
+        assert FLAG_NO_ELIGIBLE in report
+        assert "Excluded" not in report  # both tools are prediction tools
+
+    def test_parse_reliability_at_gate_exactly_no_flag(self) -> None:
+        """parse_reliability exactly at the 0.80 gate is NOT flagged."""
+        rows = [_row() for _ in range(4)] + [_row(status="malformed")]
+        (group,) = simulate(rows, WINDOW_START, WINDOW_END)
+        assert group["parse_reliability"] == pytest.approx(RELIABILITY_GATE)
+        assert not any("parse reliability" in flag for flag in group["flags"])
+
+    def test_parse_reliability_below_gate_flag_text(self) -> None:
+        """A below-gate parse reliability yields the percentage flag in both
+        JSON flags and the rendered table."""
+        rows = [_row(), _row()] + [_row(status="malformed") for _ in range(3)]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        (group,) = groups
+        expected = "⚠ 40% parse reliability — possible response-format gap"
+        assert group["parse_reliability"] == pytest.approx(0.4)
+        assert expected in group["flags"]
+        assert expected in self._render(groups)
+
+    def test_parse_reliability_arithmetic_counts_at_parse_rung(self) -> None:
+        """parse_reliability counts valid-parse rows at the parse rung over
+        IN-WINDOW rows only: later-rung failures and pending rows count as
+        valid-parse; out-of-window rows are excluded entirely."""
+        rows = [
+            _row(),  # eligible
+            _row(outcome=None),  # pending -- passes parse rung
+            _row(p_yes=1.5),  # bad_p_yes -- passes parse rung
+            _row(status="malformed"),  # invalid_parse
+            _row(status="malformed", predicted_at="2026-01-01T00:00:00Z"),
+        ]
+        (group,) = simulate(rows, WINDOW_START, WINDOW_END)
+        assert group["n_rows_seen"] == 4
+        assert group["rejects"]["invalid_parse"] == 1
+        assert group["parse_reliability"] == pytest.approx(3 / 4)
+
+    def test_no_platform_data_still_lists_excluded(self) -> None:
+        """A platform with only non-prediction groups renders the no-data
+        line plus the Excluded line."""
+        rows = [_row(tool="gen-only", status="malformed")]
+        report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
+        assert "_No data for this platform in the window._" in report
+        assert "gen-only (1 row)" in report

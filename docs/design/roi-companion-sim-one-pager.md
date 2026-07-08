@@ -53,7 +53,10 @@ ROI = total PnL / total staked on bets placed *in this window* (not all-time, no
 
 Brier/accuracy = over ALL eligible predictions (same basis as the accuracy benchmark); the Brier
 worsening from all -> placed bets shows the gate selecting the tool's weaker forecasts.
-Rows below the sample threshold are **shown and flagged, never dropped**.
+Rows below the sample threshold are **shown and flagged, never dropped**; likewise every prediction
+tool is always shown (zero-eligible ones flagged "no eligible rows in window"), non-prediction tools
+(no parseable prediction in any row) are summarized on one line below the table, and a
+parse-reliability flag mirrors the accuracy benchmark's reliability gate (< 0.80).
 
 **"vs baseline" paired comparison** (same markets, same trader, only the tool changes): deferred to a
 second iteration - which tool anchors the comparison is TBD; the certified method already defines the

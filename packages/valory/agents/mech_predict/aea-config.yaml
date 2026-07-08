@@ -54,7 +54,7 @@ skills:
 customs:
 - valory/resolve_market:0.1.0:bafybeiaozazbggoglwrnfyn5v2qebyn4y4jpaxxbdodi3bd5eyieo4a55i
 - valory/resolve_market_jury:0.1.0:bafybeigdv6zbbuf2flnti7hfwbotagnqz43g76v2jfhcuk4ancucxmg5gi
-- valory/prediction_request_v1:0.1.0:bafybeifgxisrmslzwcmk4dhn5vkyygfeyhdrktxjzkmex5eyl2oiibw5ce
+- valory/prediction_request_v1:0.1.0:bafybeie23dpatwki6odlv7nnlwibuq6jbdonsmu5mszsgitlwghzpiesam
 - napthaai/resolve_market_reasoning:0.1.0:bafybeidji6or6kpmawho64tc7qetinykhrklvv2gmnqfcd6ejmg43j3i7q
 - napthaai/prediction_request_rag_v1:0.1.0:bafybeiesnbru6o3ochjn6s72iumcwmq2klgb3doa5pmleyt6psa52kxmjm
 - napthaai/prediction_request_reasoning_v1:0.1.0:bafybeigpzvqh2gbcqurqaefoopqpgmqu3dpy6p36l42pvfyx2iyy2ebvka

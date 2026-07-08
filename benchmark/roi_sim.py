@@ -515,7 +515,7 @@ def cluster_bootstrap_ci(
 
     sums = list(clusters.values())  # insertion order = first occurrence
     n_clusters = len(sums)
-    rng = random.Random(BOOT_SEED)
+    rng = random.Random(BOOT_SEED)  # nosec B311 — deterministic statistical bootstrap, not cryptographic
     samples: list[float] = []
     for _ in range(BOOT_B):
         stake_total = 0.0

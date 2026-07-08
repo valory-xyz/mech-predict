@@ -80,10 +80,15 @@ POLYMARKET_WINDOW_DAYS = 30
 # window also self-heals multi-day flywheel outages. Re-scans are idempotent:
 # already-known markets are skipped via existing_ids without consuming the cap.
 POLYMARKET_CREATED_WINDOW_HOURS = 144.0  # 6 days
-POLYMARKET_PAGE_LIMIT = 300
+# The Gamma API clamps page size at 100 server-side: requesting more still
+# returns 100 items, so ask for exactly the clamp and advance pagination by
+# the actual batch size received.
+POLYMARKET_PAGE_LIMIT = 100
 # Safety cap: bounds Gamma API pagination per category so the scan always
-# terminates even when no market satisfies the stop conditions.
-POLYMARKET_MAX_PAGES_PER_CATEGORY = 5
+# terminates. 10 pages x 100 items reaches ~1000 markets deep — past the
+# 144h creation boundary even in the busiest categories (~400-700 deep);
+# the fully-stale early exit keeps quiet categories at one page.
+POLYMARKET_MAX_PAGES_PER_CATEGORY = 10
 
 # ---------------------------------------------------------------------------
 # GraphQL queries
@@ -426,8 +431,9 @@ def fetch_polymarket_open(
     Pages are requested newest-first (``order=createdAt``). Markets whose ID
     is already in ``existing_ids`` don't count toward ``max_markets``; markets
     older than ``created_within_hours`` are skipped. Scanning a category ends
-    when a whole page is older than the cutoff, or after
-    ``POLYMARKET_MAX_PAGES_PER_CATEGORY`` pages, whichever comes first.
+    on an empty page, a page entirely older than the cutoff, or after
+    ``POLYMARKET_MAX_PAGES_PER_CATEGORY`` pages (logged as possible
+    truncation), whichever comes first.
 
     :param max_markets: stop after this many NEW markets across all categories.
     :param window_days: only markets closing within this many days.
@@ -495,9 +501,21 @@ def fetch_polymarket_open(
                 markets,
                 max_markets,
             )
-            if stop or len(batch) < POLYMARKET_PAGE_LIMIT:
+            if stop:
                 break
-            offset += POLYMARKET_PAGE_LIMIT
+            # Advance by the actual batch size — the server may clamp below
+            # the requested limit, so a short page does NOT mean the last
+            # page; only an empty page (checked above) ends the category.
+            offset += len(batch)
+        else:
+            # Loop exhausted without a stop condition: every scanned page
+            # still had in-window markets, so deeper ones may be truncated.
+            log.warning(
+                "Category '%s': page cap (%d pages) hit with in-window "
+                "markets still present — deeper results may be truncated",
+                category,
+                POLYMARKET_MAX_PAGES_PER_CATEGORY,
+            )
 
     # "skipped >> new" in this log is the visible proof that the new-markets
     # cap semantics is active; skipped == 0 on a mature file suggests the

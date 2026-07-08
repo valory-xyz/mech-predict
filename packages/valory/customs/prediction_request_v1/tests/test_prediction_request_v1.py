@@ -82,6 +82,11 @@ class TestLLMClientManager:
         ``__enter__`` gets a distinct client without relying on patch
         sequencing.
         """
+        # Retain live references, not just ``id(client)``. Once the ``with mgr``
+        # block exits, ``client`` is unreachable and CPython's allocator can
+        # reuse its memory address for the next thread's MagicMock — CI hit
+        # exactly this on 3.13 (two distinct MagicMocks, same ``id``). Holding
+        # the objects here keeps ``id`` a real identity signal.
         clients_seen: list = []
 
         with patch(
@@ -93,7 +98,7 @@ class TestLLMClientManager:
                 mock_keys: Any = {"openai": f"sk-{key_suffix}"}
                 mgr = LLMClientManager(api_keys=mock_keys, model="gpt-4o-2024-08-06")
                 with mgr as client:
-                    clients_seen.append(id(client))
+                    clients_seen.append(client)
 
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = [pool.submit(create_and_record, s) for s in ("a", "b")]
@@ -101,7 +106,7 @@ class TestLLMClientManager:
                     f.result()
 
         assert (
-            len(set(clients_seen)) == 2
+            len({id(c) for c in clients_seen}) == 2
         ), "Concurrent contexts must get independent clients"
 
 

@@ -28,12 +28,12 @@ from typing import Any
 
 import pytest
 from benchmark.roi_sim import (
+    Bet,
     FLAG_NO_ELIGIBLE,
     MAX_BET,
     NO_BET_GATES,
     PLATFORM_GATES,
     RELIABILITY_GATE,
-    Bet,
     cluster_bootstrap_ci,
     compute_group_stats,
     eligibility_reason,
@@ -179,9 +179,10 @@ class TestFavoredSideFloor:
         round() flips this row to skip_oracle_prob, so this test kills that
         mutant.
         """
-        assert 0.4999999996 < 0.5  # raw float sits below the floor
-        assert round(0.4999999996, 9) == 0.5  # 9dp rounding lands ON it
-        bet = simulate_row(_row(p_yes=0.4999999996, market_prob=0.40), OMEN)
+        raw_p_yes = 0.4999999996
+        assert raw_p_yes < 0.5  # raw float sits below the floor
+        assert round(raw_p_yes, 9) == 0.5  # 9dp rounding lands ON it
+        bet = simulate_row(_row(p_yes=raw_p_yes, market_prob=0.40), OMEN)
         assert isinstance(bet, Bet)
         assert bet.side_yes is True
 
@@ -836,9 +837,12 @@ class TestToolPolicy:
         )
 
     def test_non_prediction_tool_json_and_excluded_line(self) -> None:
-        """A tool with no valid-parse row anywhere is excluded from the md
-        table but kept in JSON with is_prediction_tool False, and listed on
-        the Excluded line."""
+        """A never-parsing tool leaves the md table but stays in JSON.
+
+        A tool with no valid-parse row anywhere is excluded from the md
+        table but kept in JSON with is_prediction_tool False, and listed
+        on the Excluded line.
+        """
         rows = [
             _row(tool="pred-tool"),
             _row(tool="propose-question", status="malformed"),
@@ -870,9 +874,12 @@ class TestToolPolicy:
         assert "gen-big (3 rows), gen-small (1 row)" in report
 
     def test_zero_eligible_prediction_tool_stays_in_table(self) -> None:
-        """Valid-parse rows OUTSIDE the window classify the tool as a
-        prediction tool; with zero eligible in-window rows the row stays in
-        the table flagged 'no eligible rows in window'."""
+        """A prediction tool with zero eligible rows stays in the table.
+
+        Valid-parse rows OUTSIDE the window classify the tool as a
+        prediction tool; with zero eligible in-window rows the row stays
+        in the table flagged 'no eligible rows in window'.
+        """
         rows = [
             _row(tool="stale-tool", predicted_at="2026-01-01T00:00:00Z"),
             _row(tool="live-tool"),
@@ -892,25 +899,33 @@ class TestToolPolicy:
     def test_parse_reliability_at_gate_exactly_no_flag(self) -> None:
         """parse_reliability exactly at the 0.80 gate is NOT flagged."""
         rows = [_row() for _ in range(4)] + [_row(status="malformed")]
-        (group,) = simulate(rows, WINDOW_START, WINDOW_END)
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert len(groups) == 1
+        group = groups[0]
         assert group["parse_reliability"] == pytest.approx(RELIABILITY_GATE)
         assert not any("parse reliability" in flag for flag in group["flags"])
 
     def test_parse_reliability_below_gate_flag_text(self) -> None:
-        """A below-gate parse reliability yields the percentage flag in both
-        JSON flags and the rendered table."""
+        """Below-gate parse reliability yields the percentage flag.
+
+        The flag text appears in both the JSON flags and the rendered
+        table.
+        """
         rows = [_row(), _row()] + [_row(status="malformed") for _ in range(3)]
         groups = simulate(rows, WINDOW_START, WINDOW_END)
-        (group,) = groups
+        assert len(groups) == 1
+        group = groups[0]
         expected = "⚠ 40% parse reliability — possible response-format gap"
         assert group["parse_reliability"] == pytest.approx(0.4)
         assert expected in group["flags"]
         assert expected in self._render(groups)
 
     def test_parse_reliability_arithmetic_counts_at_parse_rung(self) -> None:
-        """parse_reliability counts valid-parse rows at the parse rung over
-        IN-WINDOW rows only: later-rung failures and pending rows count as
-        valid-parse; out-of-window rows are excluded entirely."""
+        """parse_reliability counts at the parse rung, in-window only.
+
+        Later-rung failures and pending rows count as valid-parse;
+        out-of-window rows are excluded entirely.
+        """
         rows = [
             _row(),  # eligible
             _row(outcome=None),  # pending -- passes parse rung
@@ -918,14 +933,15 @@ class TestToolPolicy:
             _row(status="malformed"),  # invalid_parse
             _row(status="malformed", predicted_at="2026-01-01T00:00:00Z"),
         ]
-        (group,) = simulate(rows, WINDOW_START, WINDOW_END)
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert len(groups) == 1
+        group = groups[0]
         assert group["n_rows_seen"] == 4
         assert group["rejects"]["invalid_parse"] == 1
         assert group["parse_reliability"] == pytest.approx(3 / 4)
 
     def test_no_platform_data_still_lists_excluded(self) -> None:
-        """A platform with only non-prediction groups renders the no-data
-        line plus the Excluded line."""
+        """Only non-prediction groups: no-data line plus Excluded line."""
         rows = [_row(tool="gen-only", status="malformed")]
         report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
         assert "_No data for this platform in the window._" in report

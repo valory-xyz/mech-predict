@@ -31,8 +31,8 @@ from benchmark.datasets.fetch_production import (
     DELIVERS_SCHEMA_PARSED,
     PARSED_DELIVERY_GRACE_SECONDS,
     PENDING_MAX_AGE_DAYS,
-    SUBGRAPH_UNHANDLED_TYPE,
     ResolvedMarkets,
+    SUBGRAPH_UNHANDLED_TYPE,
     _compute_config_hash,
     _dedup_pending,
     _extract_question_title,
@@ -144,8 +144,11 @@ class TestParseToolResponse:
         assert resp["prediction_parse_status"] == "malformed"
 
     def test_unhandled_type_sentinel_is_malformed(self) -> None:
-        """The subgraph's ``[unhandled type]`` sentinel means the payload was
-        fetched but had no parseable ``result`` — malformed, not missing."""
+        """Test a malformed unhandled type sentinel.
+
+        The subgraph's ``[unhandled type]`` sentinel means the payload was
+        fetched but had no parseable ``result`` — malformed, not missing.
+        """
         result = parse_tool_response(SUBGRAPH_UNHANDLED_TYPE)
         assert result["prediction_parse_status"] == "malformed"
         assert result["p_yes"] is None
@@ -623,8 +626,11 @@ class TestBuildRow:
         assert row["requested_at"] is None
 
     def test_tool_hash_from_delivery_sets_version_and_config(self) -> None:
-        """A delivery-level tool_hash (ParsedDelivery.toolHash) populates
-        tool_version and config_hash without IPFS metadata."""
+        """Test that the tool hash from delivery sets version and config.
+
+        A delivery-level tool_hash (ParsedDelivery.toolHash) populates
+        tool_version and config_hash without IPFS metadata.
+        """
         delivery = {
             "deliver_id": "0xghi",
             "timestamp": 1000,
@@ -1534,8 +1540,11 @@ class TestFetchDeliveriesSchemaShapes:
 
 
 class TestDeferUnparsedDeliveries:
-    """Deliveries without an indexed ParsedDelivery defer instead of
-    becoming permanently-invalid rows."""
+    """Test that Deliveries without an indexed ParsedDelivery defer.
+
+    Deliveries without an indexed ParsedDelivery defer instead of
+    becoming permanently-invalid rows.
+    """
 
     @staticmethod
     def _delivery(ts: int, parsed_missing: bool) -> dict[str, Any]:
@@ -1584,12 +1593,12 @@ class TestDeferUnparsedDeliveries:
             [delivery], self._markets(), set(), "omen"
         )
         if expect_deferred:
-            assert rows == []
+            assert not rows
             assert still_pending == [delivery]
         else:
             assert len(rows) == 1
             assert rows[0]["prediction_parse_status"] == "missing_fields"
-            assert still_pending == []
+            assert not still_pending
 
     def test_should_defer_unparsed_explicit_now(self) -> None:
         """_should_defer_unparsed honors the injected clock."""
@@ -1696,9 +1705,7 @@ class TestRefreshUnparsedPending:
         pending = [self._pending("0xstale", None)]
         assert refresh_unparsed_pending(pending, "http://polygon") == pending
 
-    def test_noop_without_stale_entries(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_noop_without_stale_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No probe and no query when every entry already has a response."""
         # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp

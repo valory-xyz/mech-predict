@@ -1790,8 +1790,7 @@ def refresh_unparsed_pending(
     refreshed = [
         (
             {**entry, **fetched[entry["deliver_id"]]}
-            if entry.get("tool_response") is None
-            and entry.get("deliver_id") in fetched
+            if entry.get("tool_response") is None and entry.get("deliver_id") in fetched
             else entry
         )
         for entry in pending

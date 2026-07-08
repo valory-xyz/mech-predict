@@ -278,8 +278,10 @@ class TestZeroBetLine:
         assert "no bets in window" not in section
 
     def test_tool_betting_in_any_mode_not_listed(self, tmp_path: Path) -> None:
-        """A tool with bets in one mode is not idle, even if another of its
-        groups has zero bets."""
+        """Keep a tool off the idle line when any of its modes has bets.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [

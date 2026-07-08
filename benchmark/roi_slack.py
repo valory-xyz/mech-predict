@@ -156,7 +156,8 @@ def _compact_flags(flags: object) -> str:
         if reliability:
             text = f"⚠ parse {reliability.group(1)}%"
         else:
-            text = _FLAG_SHORT.get(text, text.split(" — ")[0].split(" - ")[0]).strip()
+            short = text.split(" — ", maxsplit=1)[0].split(" - ", maxsplit=1)[0]
+            text = _FLAG_SHORT.get(text, short).strip()
         if text:
             parts.append(text)
     return ", ".join(parts)

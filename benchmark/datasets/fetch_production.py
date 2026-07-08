@@ -58,6 +58,23 @@ DEFAULT_BATCH_SIZE = 1000
 HTTP_TIMEOUT = 60
 PROBABILITY_SUM_TOLERANCE = 0.05
 
+# Sentinel the marketplace subgraph writes into ParsedDelivery's non-null
+# String fields when the payload omits the key or is unparseable
+# (valory-xyz/autonolas-subgraph#113).
+SUBGRAPH_UNHANDLED_TYPE = "[unhandled type]"
+
+# ParsedDelivery is written by an async file-data-source handler, so it can
+# lag the on-chain Deliver entity. A matched delivery whose ParsedDelivery
+# has not been indexed yet is deferred to the pending store for this long
+# before being written as a permanently-invalid missing_fields row.
+PARSED_DELIVERY_GRACE_SECONDS = 2 * 86400
+
+# delivers query shapes: nested ParsedDelivery (new marketplace schema) vs
+# flat Deliver.model/toolResponse (legacy schema, e.g. the polygon
+# deployment until it is redeployed with the new indexing approach).
+DELIVERS_SCHEMA_PARSED = "parsed"
+DELIVERS_SCHEMA_LEGACY = "legacy"
+
 # Max age for pending deliveries (days). Deliveries older than this
 # are dropped from the pending store to keep the state file small.
 PENDING_MAX_AGE_DAYS = 90
@@ -650,8 +667,43 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 # GraphQL queries
 # ---------------------------------------------------------------------------
 
-# Marketplace: bulk fetch all recent deliveries with prediction data
+# Marketplace: bulk fetch all recent deliveries with prediction data.
+# New schema: the IPFS-parsed response/model/toolHash live on the nested
+# ParsedDelivery entity (the flat Deliver.model/toolResponse fields were
+# removed in valory-xyz/autonolas-subgraph#113).
 DELIVERS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    skip: %(skip)s
+    orderBy: blockTimestamp
+    orderDirection: desc
+    where: { blockTimestamp_gt: %(timestamp_gt)s }
+  ) {
+    id
+    blockTimestamp
+    parsedDelivery {
+      response
+      model
+      tool
+      toolHash
+    }
+    request {
+      id
+      blockTimestamp
+      parsedRequest {
+        questionTitle
+        tool
+        content
+      }
+    }
+  }
+}
+"""
+
+# Legacy schema variant for endpoints not yet redeployed with the nested
+# ParsedDelivery (selected at runtime via detect_delivers_schema).
+DELIVERS_QUERY_LEGACY = """
 {
   delivers(
     first: %(first)s
@@ -672,6 +724,24 @@ DELIVERS_QUERY = """
         tool
         content
       }
+    }
+  }
+}
+"""
+
+# Re-read the parsed fields for specific deliveries (pending-store refresh).
+DELIVERS_PARSED_BY_IDS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    where: { id_in: [%(ids)s] }
+  ) {
+    id
+    parsedDelivery {
+      response
+      model
+      tool
+      toolHash
     }
   }
 }
@@ -792,6 +862,120 @@ def _paginated_fetch(
 
 
 # ---------------------------------------------------------------------------
+# delivers schema detection (nested ParsedDelivery vs legacy flat fields)
+# ---------------------------------------------------------------------------
+
+# Per-endpoint schema, probed once per process. The gnosis and polygon
+# marketplace subgraphs migrate to the nested ParsedDelivery shape at
+# different times, so the shape must be detected per URL.
+_DELIVERS_SCHEMA_CACHE: dict[str, str] = {}
+
+# Lowercase markers of a GraphQL unknown-field validation error. graph-node
+# phrases these as e.g. 'Type `Deliver` has no field `parsedDelivery`' or
+# 'Cannot query field "parsedDelivery" on type "Deliver"'.
+_UNKNOWN_FIELD_MARKERS = ("has no field", "cannot query field")
+
+
+def _is_unknown_field_error(exc: RuntimeError) -> bool:
+    """Return whether a GraphQL error indicates an unknown schema field.
+
+    :param exc: the RuntimeError raised by :func:`post_graphql`.
+    :return: True when the error is a schema-validation (unknown field)
+        error, i.e. the endpoint does not support the queried shape.
+    """
+    message = str(exc).lower()
+    return any(marker in message for marker in _UNKNOWN_FIELD_MARKERS)
+
+
+def detect_delivers_schema(marketplace_url: str) -> str:
+    """Detect which delivers query shape *marketplace_url* supports.
+
+    Probes with a one-row nested-ParsedDelivery query. An unknown-field
+    validation error means the endpoint still runs the legacy schema with
+    flat ``Deliver.model``/``toolResponse`` fields. Any other error
+    propagates — a transient failure must not silently lock the process
+    into the wrong shape. The result is cached per URL for the process
+    lifetime.
+
+    :param marketplace_url: subgraph endpoint URL.
+    :return: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.
+    """
+    cached = _DELIVERS_SCHEMA_CACHE.get(marketplace_url)
+    if cached is not None:
+        return cached
+
+    probe = DELIVERS_QUERY % {"first": 1, "skip": 0, "timestamp_gt": 0}
+    try:
+        _post_graphql(marketplace_url, {"query": probe})
+        schema = DELIVERS_SCHEMA_PARSED
+    except RuntimeError as exc:
+        if not _is_unknown_field_error(exc):
+            raise
+        log.info(
+            "delivers schema: %s has no parsedDelivery — using legacy fields",
+            marketplace_url,
+        )
+        schema = DELIVERS_SCHEMA_LEGACY
+
+    _DELIVERS_SCHEMA_CACHE[marketplace_url] = schema
+    return schema
+
+
+def _normalize_subgraph_string(value: Optional[str]) -> Optional[str]:
+    """Map the subgraph's ``[unhandled type]`` sentinel (and None) to None.
+
+    :param value: raw field value from the subgraph.
+    :return: the value, or None when absent or sentinel.
+    """
+    if value is None or value == SUBGRAPH_UNHANDLED_TYPE:
+        return None
+    return value
+
+
+def extract_delivery_fields(deliver: dict[str, Any], schema: str) -> dict[str, Any]:
+    """Extract the IPFS-parsed fields from a raw deliver, either schema shape.
+
+    Maps both shapes onto the same internal delivery keys so everything
+    downstream of the fetch boundary is schema-agnostic:
+
+    - ``tool_response``: raw ``result`` string. The ``[unhandled type]``
+      sentinel is passed through — :func:`parse_tool_response` classifies
+      it as malformed (payload existed but had no parseable result).
+    - ``model`` / ``tool_hash``: sentinel-normalized to None.
+    - ``parsed_missing``: True only when the new schema's ParsedDelivery
+      entity has not been indexed yet (async file-data-source lag) — the
+      signal for deferring row construction rather than recording a
+      permanently-invalid row.
+
+    :param deliver: raw deliver dict from the subgraph.
+    :param schema: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.
+    :return: dict with model, tool_response, tool_hash, parsed_missing.
+    """
+    if schema == DELIVERS_SCHEMA_LEGACY:
+        return {
+            "model": _normalize_subgraph_string(deliver.get("model")),
+            "tool_response": deliver.get("toolResponse"),
+            "tool_hash": None,
+            "parsed_missing": False,
+        }
+
+    parsed = deliver.get("parsedDelivery")
+    if parsed is None:
+        return {
+            "model": None,
+            "tool_response": None,
+            "tool_hash": None,
+            "parsed_missing": True,
+        }
+    return {
+        "model": _normalize_subgraph_string(parsed.get("model")),
+        "tool_response": parsed.get("response"),
+        "tool_hash": _normalize_subgraph_string(parsed.get("toolHash")),
+        "parsed_missing": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Fetch deliveries (marketplace subgraphs)
 # ---------------------------------------------------------------------------
 
@@ -837,9 +1021,13 @@ def fetch_deliveries(
     :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
     :return: list of delivery dicts.
     """
+    schema = detect_delivers_schema(marketplace_url)
+    query_template = (
+        DELIVERS_QUERY if schema == DELIVERS_SCHEMA_PARSED else DELIVERS_QUERY_LEGACY
+    )
     raw = _paginated_fetch(
         marketplace_url,
-        DELIVERS_QUERY,
+        query_template,
         "delivers",
         {"timestamp_gt": timestamp_gt},
     )
@@ -867,8 +1055,7 @@ def fetch_deliveries(
                 "deliver_id": d["id"],
                 "timestamp": delivery_ts,
                 "request_timestamp": request_ts,
-                "model": d.get("model"),
-                "tool_response": d.get("toolResponse"),
+                **extract_delivery_fields(d, schema),
                 "tool": parsed.get("tool") or "unknown",
                 "question_title": question_title,
                 "market_id": ctx.get("market_id"),
@@ -1171,6 +1358,16 @@ def parse_tool_response(tool_response: Optional[str]) -> dict[str, Any]:
             "prediction_parse_status": "missing_fields",
         }
 
+    # Subgraph sentinel: the payload was fetched and indexed, but had no
+    # parseable `result` — malformed output, not a missing delivery.
+    if tool_response == SUBGRAPH_UNHANDLED_TYPE:
+        return {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": None,
+            "prediction_parse_status": "malformed",
+        }
+
     # Check for known IPFS retrieval error messages (only short non-JSON responses)
     if len(tool_response) < 300 and tool_response.lstrip()[:1] != "{":
         lower = tool_response.lower()
@@ -1365,10 +1562,14 @@ def build_row(
     if request_ts and delivery_ts and delivery_ts > request_ts:
         latency_s = delivery_ts - request_ts
 
-    # Extract tool_version and config_hash from IPFS metadata if available
+    # tool_version: prefer the exact per-delivery hash from the subgraph's
+    # ParsedDelivery.toolHash; fall back to sampled IPFS metadata.
     tool_version: Optional[str] = None
     config_hash: Optional[str] = None
-    if ipfs_metadata:
+    if delivery.get("tool_hash"):
+        tool_version = delivery["tool_hash"]
+        config_hash = _compute_config_hash(tool_version, delivery.get("model"))
+    elif ipfs_metadata:
         tool_version = ipfs_metadata.get("tool_hash")
         params = ipfs_metadata.get("params") or {}
         config_hash = _compute_config_hash(
@@ -1517,6 +1718,106 @@ def append_rows(output_path: Path, rows: list[dict[str, Any]]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _should_defer_unparsed(
+    delivery: dict[str, Any],
+    now: Optional[int] = None,
+) -> bool:
+    """Return whether a matched delivery should wait for its ParsedDelivery.
+
+    True only when the new schema reported the ParsedDelivery entity as not
+    yet indexed (``parsed_missing``) and the delivery is younger than
+    ``PARSED_DELIVERY_GRACE_SECONDS``. Once the grace period expires the
+    delivery is written as-is (missing_fields) so pipeline failures stay
+    visible in the reliability tables instead of vanishing. Legacy-schema
+    nulls never defer — they cannot heal, so deferral would only delay the
+    identical outcome.
+
+    :param delivery: delivery dict (needs ``parsed_missing``, ``timestamp``).
+    :param now: current UNIX timestamp; defaults to the wall clock.
+    :return: True when row construction should be deferred to pending.
+    """
+    if not delivery.get("parsed_missing"):
+        return False
+    now_ts = int(time.time()) if now is None else now
+    return (now_ts - (delivery.get("timestamp") or 0)) < PARSED_DELIVERY_GRACE_SECONDS
+
+
+def refresh_unparsed_pending(
+    pending: list[dict[str, Any]],
+    marketplace_url: str,
+) -> list[dict[str, Any]]:
+    """Re-read parsed fields for pending entries that lack a tool response.
+
+    Pending entries snapshot the delivery at fetch time; when a delivery was
+    fetched before the subgraph's async file handler indexed its payload,
+    the snapshot holds nulls forever. This re-queries those deliveries by id
+    (new schema only) and returns a new list with refreshed copies — stale
+    values self-heal once the ParsedDelivery lands. Entries are never
+    mutated in place; batch failures keep the affected entries unchanged.
+
+    :param pending: pending delivery snapshots from the fetch state.
+    :param marketplace_url: subgraph endpoint URL.
+    :return: new pending list with refreshed entries where available.
+    """
+    stale_ids = [
+        d["deliver_id"]
+        for d in pending
+        if d.get("tool_response") is None and d.get("deliver_id")
+    ]
+    if not stale_ids:
+        return pending
+    if detect_delivers_schema(marketplace_url) != DELIVERS_SCHEMA_PARSED:
+        return pending
+
+    fetched: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(stale_ids), DEFAULT_BATCH_SIZE):
+        batch = stale_ids[i : i + DEFAULT_BATCH_SIZE]
+        ids_str = ", ".join(f'"{did}"' for did in batch)
+        query = DELIVERS_PARSED_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
+        try:
+            data = _post_graphql(marketplace_url, {"query": query})
+        except (RuntimeError, requests.exceptions.RequestException) as e:
+            log.warning("pending refresh: batch failed (%s), keeping stale", e)
+            continue
+        for d in data.get("delivers", []):
+            fields = extract_delivery_fields(d, DELIVERS_SCHEMA_PARSED)
+            if not fields["parsed_missing"]:
+                fetched[d["id"]] = fields
+
+    if not fetched:
+        return pending
+
+    refreshed = [
+        (
+            {**entry, **fetched[entry["deliver_id"]]}
+            if entry.get("tool_response") is None
+            and entry.get("deliver_id") in fetched
+            else entry
+        )
+        for entry in pending
+    ]
+    log.info(
+        "pending refresh: %d/%d unparsed entries updated",
+        len(fetched),
+        len(set(stale_ids)),
+    )
+    return refreshed
+
+
+def _dedup_pending(pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate pending deliveries by deliver_id, keeping the last copy.
+
+    The fetch cursor only advances past matched deliveries, so unresolved
+    deliveries are refetched on every run and would otherwise accumulate as
+    duplicate snapshots. Last copy wins: a refetched delivery carries the
+    freshest parsed fields.
+
+    :param pending: pending delivery dicts, possibly with duplicates.
+    :return: deduplicated list (insertion order of first occurrence).
+    """
+    return list({d.get("deliver_id"): d for d in pending}.values())
+
+
 def _match_and_build(
     deliveries: list[dict[str, Any]],
     resolved_markets: ResolvedMarkets,
@@ -1549,6 +1850,13 @@ def _match_and_build(
 
         market, confidence = _match_delivery(delivery, resolved_markets)
         if market is None:
+            still_pending.append(delivery)
+            continue
+
+        # The market resolved but the subgraph's async file handler has not
+        # indexed the ParsedDelivery yet — wait for it instead of writing a
+        # permanently-invalid row (rows are deduped and never revisited).
+        if _should_defer_unparsed(delivery):
             still_pending.append(delivery)
             continue
 
@@ -1710,6 +2018,20 @@ def _enrich_rows_with_ipfs_metadata(
     if not rows:
         return
 
+    # Rows already versioned via ParsedDelivery.toolHash skip the sampled
+    # IPFS lookup — the subgraph value is exact and per-delivery.
+    unresolved = [r for r in rows if not r.get("tool_version")]
+    prefilled = len(rows) - len(unresolved)
+    if prefilled:
+        log.info(
+            "IPFS enrichment: %d/%d rows already versioned via subgraph",
+            prefilled,
+            len(rows),
+        )
+    rows = unresolved
+    if not rows:
+        return
+
     # Step 1: Batch fetch IPFS hashes + mech addresses from subgraph
     deliver_ids = [r["deliver_id"] for r in rows if r.get("deliver_id")]
     if not deliver_ids:
@@ -1804,6 +2126,10 @@ def process_platform(
     :return: tuple of (rows, still_pending, max_delivery_timestamp,
         max_resolved_timestamp).
     """
+    # 0. Refresh parsed fields for pending entries snapshotted before the
+    #    subgraph's async file handler indexed their payload.
+    pending_deliveries = refresh_unparsed_pending(pending_deliveries, marketplace_url)
+
     # 1. Retry pending deliveries from previous runs
     rows_from_pending: list[dict[str, Any]] = []
     remaining_pending: list[dict[str, Any]] = []
@@ -1850,7 +2176,7 @@ def process_platform(
         ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
 
     all_rows = rows_from_pending + rows_from_new
-    all_pending = remaining_pending + new_pending
+    all_pending = _dedup_pending(remaining_pending + new_pending)
 
     # 3. Enrich matched rows with IPFS metadata (tool_version, config_hash)
     _enrich_rows_with_ipfs_metadata(all_rows, marketplace_url)

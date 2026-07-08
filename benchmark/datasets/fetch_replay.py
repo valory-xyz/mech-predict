@@ -42,11 +42,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from benchmark.datasets.fetch_production import (
+    DELIVERS_SCHEMA_PARSED,
     IPFS_FETCH_DELAY,
     MECH_MARKETPLACE_GNOSIS_URL,
     MECH_MARKETPLACE_POLYGON_URL,
     QUESTION_DATA_SEPARATOR,
     classify_category,
+    detect_delivers_schema,
+    extract_delivery_fields,
     fetch_omen_resolved,
     fetch_polymarket_resolved,
     parse_tool_response,
@@ -78,8 +81,45 @@ log = logging.getLogger(__name__)
 HTTP_TIMEOUT = 60
 DEFAULT_BATCH_SIZE = 1000
 
-# Delivery query that includes ipfsHashBytes in the same call
+# Delivery query that includes ipfsHashBytes in the same call. New schema:
+# the IPFS-parsed response/model/toolHash live on the nested ParsedDelivery
+# (valory-xyz/autonolas-subgraph#113).
 DELIVERS_WITH_IPFS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    skip: %(skip)s
+    orderBy: blockTimestamp
+    orderDirection: desc
+    where: { blockTimestamp_gt: %(timestamp_gt)s }
+  ) {
+    id
+    blockTimestamp
+    parsedDelivery {
+      response
+      model
+      tool
+      toolHash
+    }
+    marketplaceDelivery {
+      ipfsHashBytes
+    }
+    request {
+      id
+      blockTimestamp
+      parsedRequest {
+        questionTitle
+        tool
+        content
+      }
+    }
+  }
+}
+"""
+
+# Legacy variant for endpoints not yet redeployed with ParsedDelivery
+# (selected at runtime via detect_delivers_schema).
+DELIVERS_WITH_IPFS_QUERY_LEGACY = """
 {
   delivers(
     first: %(first)s
@@ -169,9 +209,15 @@ def fetch_deliveries(
     tool_filter: str,
 ) -> list[dict[str, Any]]:
     """Fetch deliveries for a specific tool, including IPFS hashes."""
+    schema = detect_delivers_schema(marketplace_url)
+    query_template = (
+        DELIVERS_WITH_IPFS_QUERY
+        if schema == DELIVERS_SCHEMA_PARSED
+        else DELIVERS_WITH_IPFS_QUERY_LEGACY
+    )
     raw = _paginated_fetch(
         marketplace_url,
-        DELIVERS_WITH_IPFS_QUERY,
+        query_template,
         {"timestamp_gt": timestamp_gt},
     )
 
@@ -210,8 +256,7 @@ def fetch_deliveries(
                 "deliver_id": d["id"],
                 "timestamp": int(d["blockTimestamp"]),
                 "request_timestamp": int(request.get("blockTimestamp") or 0) or None,
-                "model": d.get("model"),
-                "tool_response": d.get("toolResponse"),
+                **extract_delivery_fields(d, schema),
                 "tool": tool,
                 "question_title": question_title,
                 "market_id": market_id,

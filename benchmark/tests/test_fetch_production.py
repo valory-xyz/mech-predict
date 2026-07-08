@@ -27,9 +27,14 @@ from typing import Any
 import pytest
 from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
+    DELIVERS_SCHEMA_LEGACY,
+    DELIVERS_SCHEMA_PARSED,
+    PARSED_DELIVERY_GRACE_SECONDS,
     PENDING_MAX_AGE_DAYS,
+    SUBGRAPH_UNHANDLED_TYPE,
     ResolvedMarkets,
     _compute_config_hash,
+    _dedup_pending,
     _extract_question_title,
     _load_ids_from_file,
     _make_row_id,
@@ -37,13 +42,17 @@ from benchmark.datasets.fetch_production import (
     _match_delivery,
     _migrate_legacy_log,
     _parse_request_context,
+    _should_defer_unparsed,
     append_rows,
     build_row,
     classify_category,
     daily_log_path,
+    detect_delivers_schema,
+    extract_delivery_fields,
     load_existing_row_ids,
     load_fetch_state,
     parse_tool_response,
+    refresh_unparsed_pending,
     save_fetch_state,
 )
 
@@ -133,6 +142,13 @@ class TestParseToolResponse:
         """Regex path should also reject incoherent probabilities."""
         resp = parse_tool_response('Result: {"p_yes": 0.8, "p_no": 0.8}')
         assert resp["prediction_parse_status"] == "malformed"
+
+    def test_unhandled_type_sentinel_is_malformed(self) -> None:
+        """The subgraph's ``[unhandled type]`` sentinel means the payload was
+        fetched but had no parseable ``result`` — malformed, not missing."""
+        result = parse_tool_response(SUBGRAPH_UNHANDLED_TYPE)
+        assert result["prediction_parse_status"] == "malformed"
+        assert result["p_yes"] is None
 
     def test_unparseable_garbage(self) -> None:
         """Test unparseable garbage input."""
@@ -605,6 +621,50 @@ class TestBuildRow:
         row = build_row(delivery, market, 1.0, "polymarket")
         assert row["latency_s"] is None
         assert row["requested_at"] is None
+
+    def test_tool_hash_from_delivery_sets_version_and_config(self) -> None:
+        """A delivery-level tool_hash (ParsedDelivery.toolHash) populates
+        tool_version and config_hash without IPFS metadata."""
+        delivery = {
+            "deliver_id": "0xghi",
+            "timestamp": 1000,
+            "request_timestamp": None,
+            "model": "gpt-4.1",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+            "tool_hash": "bafytoolhash",
+            "tool": "test-tool",
+            "question_title": "Will something happen?",
+            "market_id": None,
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+        }
+        market = {"outcome": False, "resolved_at_ts": 2000}
+        row = build_row(delivery, market, 1.0, "omen")
+        assert row["tool_version"] == "bafytoolhash"
+        assert row["config_hash"] == _compute_config_hash("bafytoolhash", "gpt-4.1")
+
+    def test_tool_hash_takes_priority_over_ipfs_metadata(self) -> None:
+        """The exact per-delivery hash wins over the sampled IPFS metadata."""
+        delivery = {
+            "deliver_id": "0xjkl",
+            "timestamp": 1000,
+            "request_timestamp": None,
+            "model": "gpt-4.1",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+            "tool_hash": "bafyexact",
+            "tool": "test-tool",
+            "question_title": "Will something happen?",
+            "market_id": None,
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+        }
+        market = {"outcome": False, "resolved_at_ts": 2000}
+        row = build_row(
+            delivery, market, 1.0, "omen", ipfs_metadata={"tool_hash": "bafysampled"}
+        )
+        assert row["tool_version"] == "bafyexact"
 
 
 # ---------------------------------------------------------------------------
@@ -1198,3 +1258,490 @@ class TestNoScoreFlag:
         assert len(calls) == 1
         rows, _scores, _history = calls[0]
         assert rows == [{"row_id": "r1", "prediction_parse_status": "valid"}]
+
+
+# ---------------------------------------------------------------------------
+# parsedDelivery schema migration (autonolas-subgraph PR #113)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(name="clear_schema_cache", autouse=False)
+def _clear_schema_cache_fixture() -> Any:
+    """Reset the per-URL delivers-schema cache around a test."""
+    # pylint: disable-next=import-outside-toplevel
+    from benchmark.datasets import fetch_production as fp
+
+    fp._DELIVERS_SCHEMA_CACHE.clear()  # pylint: disable=protected-access
+    yield
+    fp._DELIVERS_SCHEMA_CACHE.clear()  # pylint: disable=protected-access
+
+
+class TestExtractDeliveryFields:
+    """Tests for extract_delivery_fields (both schema shapes)."""
+
+    @pytest.mark.parametrize(
+        ("deliver", "schema", "expected"),
+        [
+            # New schema: fields relocate to the nested ParsedDelivery entity.
+            (
+                {
+                    "id": "0x1",
+                    "parsedDelivery": {
+                        "response": '{"p_yes": 0.8, "p_no": 0.2}',
+                        "model": "gpt-4.1",
+                        "tool": "superforcaster",
+                        "toolHash": "bafytool",
+                    },
+                },
+                DELIVERS_SCHEMA_PARSED,
+                {
+                    "model": "gpt-4.1",
+                    "tool_response": '{"p_yes": 0.8, "p_no": 0.2}',
+                    "tool_hash": "bafytool",
+                    "parsed_missing": False,
+                },
+            ),
+            # New schema: sentinel model/toolHash normalize to None; the
+            # sentinel response passes through for parse_tool_response.
+            (
+                {
+                    "id": "0x2",
+                    "parsedDelivery": {
+                        "response": SUBGRAPH_UNHANDLED_TYPE,
+                        "model": SUBGRAPH_UNHANDLED_TYPE,
+                        "tool": SUBGRAPH_UNHANDLED_TYPE,
+                        "toolHash": SUBGRAPH_UNHANDLED_TYPE,
+                    },
+                },
+                DELIVERS_SCHEMA_PARSED,
+                {
+                    "model": None,
+                    "tool_response": SUBGRAPH_UNHANDLED_TYPE,
+                    "tool_hash": None,
+                    "parsed_missing": False,
+                },
+            ),
+            # New schema: ParsedDelivery not yet indexed (async FDS lag).
+            (
+                {"id": "0x3", "parsedDelivery": None},
+                DELIVERS_SCHEMA_PARSED,
+                {
+                    "model": None,
+                    "tool_response": None,
+                    "tool_hash": None,
+                    "parsed_missing": True,
+                },
+            ),
+            # Legacy schema: flat fields, no tool_hash, never "missing".
+            (
+                {
+                    "id": "0x4",
+                    "model": "gpt-4.1",
+                    "toolResponse": '{"p_yes": 0.1, "p_no": 0.9}',
+                },
+                DELIVERS_SCHEMA_LEGACY,
+                {
+                    "model": "gpt-4.1",
+                    "tool_response": '{"p_yes": 0.1, "p_no": 0.9}',
+                    "tool_hash": None,
+                    "parsed_missing": False,
+                },
+            ),
+            # Legacy schema: sentinel model normalizes to None here too.
+            (
+                {"id": "0x5", "model": SUBGRAPH_UNHANDLED_TYPE, "toolResponse": None},
+                DELIVERS_SCHEMA_LEGACY,
+                {
+                    "model": None,
+                    "tool_response": None,
+                    "tool_hash": None,
+                    "parsed_missing": False,
+                },
+            ),
+        ],
+        ids=[
+            "parsed_full",
+            "parsed_sentinels",
+            "parsed_not_indexed",
+            "legacy_full",
+            "legacy_sentinel_model",
+        ],
+    )
+    def test_extraction(
+        self, deliver: dict[str, Any], schema: str, expected: dict[str, Any]
+    ) -> None:
+        """Both shapes map into the same internal delivery keys."""
+        assert extract_delivery_fields(deliver, schema) == expected
+
+
+@pytest.mark.usefixtures("clear_schema_cache")
+class TestDetectDeliversSchema:
+    """Tests for the per-endpoint schema probe with legacy fallback."""
+
+    def test_parsed_schema_when_probe_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful parsedDelivery probe selects the new shape."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(fp, "_post_graphql", lambda url, payload: {"delivers": []})
+        assert detect_delivers_schema("http://gnosis") == DELIVERS_SCHEMA_PARSED
+
+    def test_legacy_fallback_on_unknown_field_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unknown-field validation error falls back to the legacy shape."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        def fail(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError(
+                "GraphQL errors from http://polygon: Type `Deliver` "
+                "has no field `parsedDelivery`"
+            )
+
+        monkeypatch.setattr(fp, "_post_graphql", fail)
+        assert detect_delivers_schema("http://polygon") == DELIVERS_SCHEMA_LEGACY
+
+    def test_other_graphql_errors_propagate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-validation errors are not mistaken for a legacy schema."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        def fail(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("GraphQL errors from http://gnosis: store error")
+
+        monkeypatch.setattr(fp, "_post_graphql", fail)
+        with pytest.raises(RuntimeError, match="store error"):
+            detect_delivers_schema("http://gnosis")
+
+    def test_result_is_cached_per_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The probe runs once per endpoint per process."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls: list[str] = []
+
+        def probe(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            calls.append(url)
+            return {"delivers": []}
+
+        monkeypatch.setattr(fp, "_post_graphql", probe)
+        detect_delivers_schema("http://gnosis")
+        detect_delivers_schema("http://gnosis")
+        assert len(calls) == 1
+
+
+@pytest.mark.usefixtures("clear_schema_cache")
+class TestFetchDeliveriesSchemaShapes:
+    """fetch_deliveries selects the query by detected schema."""
+
+    @staticmethod
+    def _raw_deliver(parsed_delivery: Any) -> dict[str, Any]:
+        """Build a raw subgraph deliver dict with the given parsedDelivery."""
+        return {
+            "id": "0xdeliver",
+            "blockTimestamp": "1700000100",
+            "parsedDelivery": parsed_delivery,
+            "request": {
+                "id": "0xreq",
+                "blockTimestamp": "1700000000",
+                "parsedRequest": {
+                    "questionTitle": "Will X happen?",
+                    "tool": "superforcaster",
+                    "content": "",
+                },
+            },
+        }
+
+    def test_parsed_schema_maps_nested_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """parsedDelivery.response/model/toolHash land on the delivery dict."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        captured: dict[str, Any] = {}
+
+        def fake_paginated(
+            url: str,
+            query: str,
+            entity_key: str,
+            template_vars: dict[str, Any],
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["query"] = query
+            return [
+                self._raw_deliver(
+                    {
+                        "response": '{"p_yes": 0.7, "p_no": 0.3}',
+                        "model": "gpt-4.1",
+                        "tool": "superforcaster",
+                        "toolHash": "bafytool",
+                    }
+                )
+            ]
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+
+        deliveries = fp.fetch_deliveries("http://gnosis", 0)
+        assert "parsedDelivery" in captured["query"]
+        assert "toolResponse" not in captured["query"]
+        assert deliveries[0]["tool_response"] == '{"p_yes": 0.7, "p_no": 0.3}'
+        assert deliveries[0]["model"] == "gpt-4.1"
+        assert deliveries[0]["tool_hash"] == "bafytool"
+        assert deliveries[0]["parsed_missing"] is False
+
+    def test_legacy_schema_maps_flat_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The legacy query keeps working against the polygon subgraph."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        captured: dict[str, Any] = {}
+
+        def fake_paginated(
+            url: str,
+            query: str,
+            entity_key: str,
+            template_vars: dict[str, Any],
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["query"] = query
+            raw = self._raw_deliver(None)
+            del raw["parsedDelivery"]
+            raw["model"] = "gpt-4.1"
+            raw["toolResponse"] = '{"p_yes": 0.2, "p_no": 0.8}'
+            return [raw]
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_LEGACY
+        )
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+
+        deliveries = fp.fetch_deliveries("http://polygon", 0)
+        assert "toolResponse" in captured["query"]
+        assert "parsedDelivery" not in captured["query"]
+        assert deliveries[0]["tool_response"] == '{"p_yes": 0.2, "p_no": 0.8}'
+        assert deliveries[0]["tool_hash"] is None
+
+
+class TestDeferUnparsedDeliveries:
+    """Deliveries without an indexed ParsedDelivery defer instead of
+    becoming permanently-invalid rows."""
+
+    @staticmethod
+    def _delivery(ts: int, parsed_missing: bool) -> dict[str, Any]:
+        """Build a matched-able delivery dict."""
+        return {
+            "deliver_id": f"0x{ts}",
+            "timestamp": ts,
+            "request_timestamp": ts - 10,
+            "model": None,
+            "tool_response": None,
+            "tool": "superforcaster",
+            "question_title": "Will the parsed delivery arrive?",
+            "market_id": "0xmarket",
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+            "parsed_missing": parsed_missing,
+        }
+
+    @staticmethod
+    def _markets() -> ResolvedMarkets:
+        """One resolved market matching the delivery by id."""
+        markets = ResolvedMarkets()
+        markets.add(
+            "0xmarket",
+            "will the parsed delivery arrive?",
+            {"outcome": True, "resolved_at_ts": int(time.time())},
+        )
+        return markets
+
+    @pytest.mark.parametrize(
+        ("age_seconds", "parsed_missing", "expect_deferred"),
+        [
+            (3600, True, True),  # recent + unindexed -> wait for the FDS
+            (PARSED_DELIVERY_GRACE_SECONDS + 3600, True, False),  # grace expired
+            (3600, False, False),  # legacy null response -> build immediately
+        ],
+        ids=["recent_unindexed", "grace_expired", "legacy_null"],
+    )
+    def test_deferral(
+        self, age_seconds: int, parsed_missing: bool, expect_deferred: bool
+    ) -> None:
+        """Matched-but-unindexed deliveries defer only within the grace period."""
+        delivery = self._delivery(int(time.time()) - age_seconds, parsed_missing)
+        rows, still_pending, *_ = _match_and_build(
+            [delivery], self._markets(), set(), "omen"
+        )
+        if expect_deferred:
+            assert rows == []
+            assert still_pending == [delivery]
+        else:
+            assert len(rows) == 1
+            assert rows[0]["prediction_parse_status"] == "missing_fields"
+            assert still_pending == []
+
+    def test_should_defer_unparsed_explicit_now(self) -> None:
+        """_should_defer_unparsed honors the injected clock."""
+        delivery = self._delivery(1000, True)
+        assert _should_defer_unparsed(delivery, now=1000 + 60) is True
+        assert (
+            _should_defer_unparsed(
+                delivery, now=1000 + PARSED_DELIVERY_GRACE_SECONDS + 1
+            )
+            is False
+        )
+
+
+@pytest.mark.usefixtures("clear_schema_cache")
+class TestRefreshUnparsedPending:
+    """Pending entries missing a tool response get re-read from the subgraph."""
+
+    @staticmethod
+    def _pending(deliver_id: str, tool_response: Any) -> dict[str, Any]:
+        """Build a minimal pending-store entry."""
+        return {
+            "deliver_id": deliver_id,
+            "timestamp": 1000,
+            "tool_response": tool_response,
+            "model": None,
+            "tool": "superforcaster",
+            "question_title": "q",
+            "parsed_missing": tool_response is None,
+        }
+
+    def test_refreshes_stale_entries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Null-response entries pick up the now-indexed ParsedDelivery."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+
+        def fake_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            assert '"0xstale"' in payload["query"]
+            return {
+                "delivers": [
+                    {
+                        "id": "0xstale",
+                        "parsedDelivery": {
+                            "response": '{"p_yes": 0.6, "p_no": 0.4}',
+                            "model": "gpt-4.1",
+                            "tool": "superforcaster",
+                            "toolHash": "bafytool",
+                        },
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+
+        stale = self._pending("0xstale", None)
+        fresh = self._pending("0xfresh", '{"p_yes": 0.9, "p_no": 0.1}')
+        refreshed = refresh_unparsed_pending([stale, fresh], "http://gnosis")
+
+        by_id = {d["deliver_id"]: d for d in refreshed}
+        assert by_id["0xstale"]["tool_response"] == '{"p_yes": 0.6, "p_no": 0.4}'
+        assert by_id["0xstale"]["tool_hash"] == "bafytool"
+        assert by_id["0xstale"]["parsed_missing"] is False
+        # Untouched entries are passed through unchanged (and not mutated).
+        assert by_id["0xfresh"] is fresh
+        assert stale["tool_response"] is None  # original dict not mutated
+
+    def test_still_unindexed_entries_stay_pending(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Entries whose ParsedDelivery is still absent are kept as-is."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(
+            fp,
+            "_post_graphql",
+            lambda url, payload: {
+                "delivers": [{"id": "0xstale", "parsedDelivery": None}]
+            },
+        )
+        stale = self._pending("0xstale", None)
+        refreshed = refresh_unparsed_pending([stale], "http://gnosis")
+        assert refreshed == [stale]
+
+    def test_noop_on_legacy_schema(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Legacy endpoints have nothing to refresh from."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_LEGACY
+        )
+
+        def boom(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("must not query on legacy schema")
+
+        monkeypatch.setattr(fp, "_post_graphql", boom)
+        pending = [self._pending("0xstale", None)]
+        assert refresh_unparsed_pending(pending, "http://polygon") == pending
+
+    def test_noop_without_stale_entries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No probe and no query when every entry already has a response."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        def boom(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("must not query without stale entries")
+
+        monkeypatch.setattr(fp, "_post_graphql", boom)
+        pending = [self._pending("0xfresh", '{"p_yes": 0.9, "p_no": 0.1}')]
+        assert refresh_unparsed_pending(pending, "http://gnosis") == pending
+
+
+class TestDedupPending:
+    """Pending deliveries deduplicate by deliver_id, keeping the freshest."""
+
+    def test_last_copy_wins(self) -> None:
+        """Refetched copies of the same delivery replace stale snapshots."""
+        stale = {"deliver_id": "0xdup", "tool_response": None}
+        fresh = {"deliver_id": "0xdup", "tool_response": '{"p_yes": 0.5}'}
+        other = {"deliver_id": "0xother", "tool_response": None}
+        result = _dedup_pending([stale, other, fresh])
+        assert len(result) == 2
+        by_id = {d["deliver_id"]: d for d in result}
+        assert by_id["0xdup"] is fresh
+        assert by_id["0xother"] is other
+
+
+class TestEnrichmentSkipsPrefilled:
+    """IPFS enrichment skips rows already versioned via ParsedDelivery."""
+
+    def test_all_prefilled_rows_skip_subgraph(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No subgraph or IPFS traffic when every row has tool_version."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        def boom(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("prefilled rows must not hit the subgraph")
+
+        monkeypatch.setattr(fp, "_fetch_delivery_info", boom)
+        rows = [{"deliver_id": "0x1", "tool_version": "bafyexact", "tool_name": "t"}]
+        fp._enrich_rows_with_ipfs_metadata(  # pylint: disable=protected-access
+            rows, "http://gnosis"
+        )
+        assert rows[0]["tool_version"] == "bafyexact"

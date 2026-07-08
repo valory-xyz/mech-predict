@@ -21,9 +21,9 @@ on:
         required: false
         default: '45'
       created_within_hours:
-        description: 'Polymarket: only markets created within the last N hours; 0 disables the cutoff (use 0 once for a backfill run)'
+        description: 'Polymarket: only markets created within the last N hours; 0 disables the cutoff (use 0 once for a backfill run). 6 days by default so slow-to-liquidity markets and missed runs are still picked up.'
         required: false
-        default: '24'
+        default: '144'
       tools:
         description: 'Comma-separated subset of tools (default: every key in benchmark/tournament_tools.json)'
         required: false
@@ -373,7 +373,7 @@ jobs:
       - name: Fetch Polymarket open markets
         env:
           INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
-          INPUT_CREATED_WITHIN_HOURS: ${{ github.event.inputs.created_within_hours || '24' }}
+          INPUT_CREATED_WITHIN_HOURS: ${{ github.event.inputs.created_within_hours || '144' }}
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform polymarket \

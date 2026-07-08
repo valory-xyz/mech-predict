@@ -74,9 +74,12 @@ POLYMARKET_CATEGORIES = [
     "international",
 ]
 POLYMARKET_WINDOW_DAYS = 30
-# Only markets created within this window count as "new" by default; the
-# flywheel runs daily, so 24h covers the gap since the previous fetch.
-POLYMARKET_CREATED_WINDOW_HOURS = 24.0
+# Only markets created within this window are considered by default. Wider
+# than the daily flywheel cadence on purpose: new markets often need days to
+# clear the liquidity floor (a 24h window excluded them forever), and the
+# window also self-heals multi-day flywheel outages. Re-scans are idempotent:
+# already-known markets are skipped via existing_ids without consuming the cap.
+POLYMARKET_CREATED_WINDOW_HOURS = 144.0  # 6 days
 POLYMARKET_PAGE_LIMIT = 300
 # Safety cap: bounds Gamma API pagination per category so the scan always
 # terminates even when no market satisfies the stop conditions.

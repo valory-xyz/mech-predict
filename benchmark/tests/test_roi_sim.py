@@ -1,0 +1,811 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+"""Tests for benchmark/roi_sim.py."""
+
+import json
+import random
+import sys
+import uuid
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+from benchmark.roi_sim import (
+    MAX_BET,
+    NO_BET_GATES,
+    PLATFORM_GATES,
+    Bet,
+    cluster_bootstrap_ci,
+    compute_group_stats,
+    eligibility_reason,
+    load_input_rows,
+    main,
+    simulate,
+    simulate_row,
+    window_bounds,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+OMEN = PLATFORM_GATES["omen"]
+POLYMARKET = PLATFORM_GATES["polymarket"]
+
+WINDOW_START = datetime(2026, 4, 10, tzinfo=timezone.utc)
+WINDOW_END = datetime(2026, 7, 9, tzinfo=timezone.utc)
+
+
+def _row(
+    p_yes: Any = 0.7,
+    market_prob: Any = 0.5,
+    outcome: Any = True,
+    status: str = "valid",
+    tool: str = "test-tool",
+    platform: str = "omen",
+    mode: str = "production_replay",
+    spread: Any = None,
+    predicted_at: Any = "2026-07-01T12:00:00Z",
+    market_id: str | None = None,
+    row_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a minimal benchmark row for ROI simulation testing."""
+    return {
+        "row_id": row_id or f"test_{uuid.uuid4().hex[:12]}",
+        "mode": mode,
+        "platform": platform,
+        "tool_name": tool,
+        "prediction_parse_status": status,
+        "p_yes": p_yes,
+        "market_prob_at_prediction": market_prob,
+        "market_spread_at_prediction": spread,
+        "final_outcome": outcome,
+        "predicted_at": predicted_at,
+        "market_id": market_id or f"m_{uuid.uuid4().hex[:8]}",
+    }
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write rows to *path* as JSON lines.
+
+    :param path: destination file.
+    :param rows: rows to serialize.
+    """
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Gate boundaries
+# ---------------------------------------------------------------------------
+
+
+class TestGateBoundaries:
+    """Gate comparisons are strict and decimal-rounded."""
+
+    def test_edge_equal_min_edge_no_bet(self) -> None:
+        """An edge exactly equal to min_edge does not bet (strict >)."""
+        # 0.53 - 0.50 rounds to exactly min_edge 0.03 on Omen.
+        result = simulate_row(_row(p_yes=0.53, market_prob=0.50), OMEN)
+        assert result == "skip_edge_below_floor"
+
+    def test_edge_just_above_min_edge_bets(self) -> None:
+        """An edge strictly above min_edge bets."""
+        result = simulate_row(_row(p_yes=0.54, market_prob=0.50), OMEN)
+        assert isinstance(result, Bet)
+
+    def test_edge_equal_max_edge_no_bet(self) -> None:
+        """An edge exactly equal to max_edge does not bet (strict <)."""
+        # 0.85 - 0.55 rounds to exactly max_edge 0.30 on Polymarket.
+        row = _row(p_yes=0.85, market_prob=0.55, platform="polymarket")
+        assert simulate_row(row, POLYMARKET) == "skip_edge_above_cap"
+
+    def test_edge_just_below_max_edge_bets(self) -> None:
+        """An edge strictly below max_edge bets."""
+        row = _row(p_yes=0.84, market_prob=0.55, platform="polymarket")
+        assert isinstance(simulate_row(row, POLYMARKET), Bet)
+
+    def test_9dp_rounding_kills_ieee_boundary_leak(self) -> None:
+        """Raw-float boundary leaks are closed by 9dp rounding.
+
+        0.55 - 0.54 in IEEE floats is 0.010000000000000009 which strictly
+        exceeds min_edge 0.01; rounded to 9 decimals it is exactly 0.01 and
+        must NOT bet.
+        """
+        assert (0.55 - 0.54) > 0.01  # documents the raw-float leak
+        row = _row(p_yes=0.55, market_prob=0.54, platform="polymarket")
+        assert simulate_row(row, POLYMARKET) == "skip_edge_below_floor"
+
+    def test_no_side_complement_edge_boundary_after_rounding(self) -> None:
+        """A NO-side edge on the floor only after 9dp rounding must not bet.
+
+        NO side: p_side = 1 - 0.45 = 0.55, price = 1 - 0.48 = 0.52. The raw
+        IEEE edge 0.030000000000000027 strictly exceeds Omen's min_edge 0.03
+        (would bet without rounding); rounded to 9 decimals it is exactly
+        0.03 and must NOT bet. Kills a complement-symmetry mutant that drops
+        the round() on NO-side edges.
+        """
+        assert ((1.0 - 0.45) - (1.0 - 0.48)) > 0.03  # raw-float leak
+        assert round((1.0 - 0.45) - (1.0 - 0.48), 9) == 0.03
+        result = simulate_row(_row(p_yes=0.45, market_prob=0.48), OMEN)
+        assert result == "skip_edge_below_floor"
+
+
+# ---------------------------------------------------------------------------
+# Favored-side floor
+# ---------------------------------------------------------------------------
+
+
+class TestFavoredSideFloor:
+    """The oracle-prob floor makes both platforms favored-side-only."""
+
+    def test_p_side_below_half_never_bets(self) -> None:
+        """A favored-side probability below 0.5 never bets despite edge."""
+        # side = YES (0.45 >= 0.40), edge 0.05 clears Omen's 0.03 floor,
+        # but p_side 0.45 < 0.50 so the oracle gate rejects first.
+        result = simulate_row(_row(p_yes=0.45, market_prob=0.40), OMEN)
+        assert result == "skip_oracle_prob"
+
+    def test_p_side_exactly_half_passes_floor(self) -> None:
+        """p_side exactly 0.5 passes the floor (>= comparison)."""
+        bet = simulate_row(_row(p_yes=0.5, market_prob=0.40), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.side_yes is True
+
+    def test_oracle_floor_9dp_rounding_admits_boundary_row(self) -> None:
+        """A raw p_side just below 0.5 that rounds to 0.5 at 9dp must BET.
+
+        p_yes = 0.4999999996 < 0.5 as a raw float, but round(p_side, 9) is
+        exactly 0.5 and the floor is >= on the ROUNDED value. Removing the
+        round() flips this row to skip_oracle_prob, so this test kills that
+        mutant.
+        """
+        assert 0.4999999996 < 0.5  # raw float sits below the floor
+        assert round(0.4999999996, 9) == 0.5  # 9dp rounding lands ON it
+        bet = simulate_row(_row(p_yes=0.4999999996, market_prob=0.40), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.side_yes is True
+
+    def test_no_side_selection(self) -> None:
+        """The NO side is selected when p_yes < market price."""
+        bet = simulate_row(_row(p_yes=0.3, market_prob=0.5), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.side_yes is False
+        # NO-side price = 1 - 0.5 = 0.5.
+        assert bet.price == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Spread gate
+# ---------------------------------------------------------------------------
+
+
+class TestSpreadGate:
+    """Spread gate: enforced when usable, skipped when missing/NaN/bool."""
+
+    def _pm_row(self, spread: Any) -> dict[str, Any]:
+        """Build a Polymarket row that passes all non-spread gates.
+
+        :param spread: market_spread_at_prediction value under test.
+        :return: row dict.
+        """
+        return _row(p_yes=0.65, market_prob=0.55, platform="polymarket", spread=spread)
+
+    def test_missing_spread_skips_gate(self) -> None:
+        """A missing (None) spread skips the gate and bets."""
+        assert isinstance(simulate_row(self._pm_row(None), POLYMARKET), Bet)
+
+    def test_nan_spread_skips_gate(self) -> None:
+        """A NaN spread counts as missing and bets."""
+        result = simulate_row(self._pm_row(float("nan")), POLYMARKET)
+        assert isinstance(result, Bet)
+
+    def test_bool_spread_skips_gate(self) -> None:
+        """A bool spread is not a number and skips the gate."""
+        assert isinstance(simulate_row(self._pm_row(True), POLYMARKET), Bet)
+
+    def test_wide_spread_rejects(self) -> None:
+        """A spread above spread_max rejects the row."""
+        assert simulate_row(self._pm_row(0.15), POLYMARKET) == "skip_spread"
+
+    def test_spread_at_cap_bets(self) -> None:
+        """A spread exactly at spread_max passes (<= comparison)."""
+        assert isinstance(simulate_row(self._pm_row(0.10), POLYMARKET), Bet)
+
+
+# ---------------------------------------------------------------------------
+# Stake sizing
+# ---------------------------------------------------------------------------
+
+
+class TestStakeSizing:
+    """Kelly-proxy stake: f = clamp(edge/(1-a), 0, 1); min(2.5, f*100)."""
+
+    def test_stake_capped_at_max_bet(self) -> None:
+        """A large edge caps the stake at MAX_BET."""
+        bet = simulate_row(_row(p_yes=0.95, market_prob=0.50), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.stake == MAX_BET
+
+    def test_stake_below_cap_uses_kelly_fraction(self) -> None:
+        """A small edge stakes f * 100 below the cap."""
+        # edge = round(0.561 - 0.55, 9) = 0.011; f = 0.011 / 0.45.
+        row = _row(p_yes=0.561, market_prob=0.55, platform="polymarket")
+        bet = simulate_row(row, POLYMARKET)
+        assert isinstance(bet, Bet)
+        assert bet.stake == pytest.approx(0.011 / 0.45 * 100.0)
+        assert bet.stake < MAX_BET
+
+
+# ---------------------------------------------------------------------------
+# Haircut variant
+# ---------------------------------------------------------------------------
+
+
+class TestHaircutVariant:
+    """Haircut variant shares the mid bet set; collapse keeps the row."""
+
+    def test_haircut_collapse_keeps_row_with_zero_pnl(self) -> None:
+        """A haircut edge at/below the floor zeroes stake_h/pnl_h only."""
+        # mid edge 0.04 bets on Omen; haircut edge 0.55 - 0.53 = 0.02 <= 0.03.
+        bet = simulate_row(_row(p_yes=0.55, market_prob=0.51), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.stake > 0.0
+        assert bet.stake_haircut == 0.0
+        assert bet.pnl_haircut == 0.0
+
+    def test_haircut_prices_and_pnl(self) -> None:
+        """The haircut variant re-sizes and settles at price + haircut."""
+        bet = simulate_row(_row(p_yes=0.70, market_prob=0.50, outcome=True), OMEN)
+        assert isinstance(bet, Bet)
+        # a_h = 0.52; edge_h = 0.18; f_h = 0.18/0.48 -> stake capped at 2.5.
+        assert bet.stake_haircut == MAX_BET
+        assert bet.pnl_haircut == pytest.approx(MAX_BET * (1.0 / 0.52 - 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Settlement arithmetic
+# ---------------------------------------------------------------------------
+
+
+class TestSettlement:
+    """Winner-take-all settlement at the clamped buy price."""
+
+    def test_yes_side_win(self) -> None:
+        """A winning YES bet pays stake * (1/a - 1)."""
+        bet = simulate_row(_row(p_yes=0.7, market_prob=0.5, outcome=True), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.win is True
+        assert bet.pnl == pytest.approx(bet.stake * (1.0 / 0.5 - 1.0))
+        assert (bet.stake + bet.pnl) > 0
+
+    def test_yes_side_loss(self) -> None:
+        """A losing YES bet loses exactly its stake."""
+        bet = simulate_row(_row(p_yes=0.7, market_prob=0.5, outcome=False), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.win is False
+        assert bet.pnl == pytest.approx(-bet.stake)
+
+    def test_no_side_win_on_false_outcome(self) -> None:
+        """A NO bet wins when the outcome is False."""
+        bet = simulate_row(_row(p_yes=0.3, market_prob=0.5, outcome=False), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.win is True
+        assert bet.pnl == pytest.approx(bet.stake * (1.0 / 0.5 - 1.0))
+
+    def test_no_side_loss_on_true_outcome(self) -> None:
+        """A NO bet loses when the outcome is True."""
+        bet = simulate_row(_row(p_yes=0.3, market_prob=0.5, outcome=True), OMEN)
+        assert isinstance(bet, Bet)
+        assert bet.win is False
+        assert bet.pnl == pytest.approx(-bet.stake)
+
+
+# ---------------------------------------------------------------------------
+# Pooled ROI
+# ---------------------------------------------------------------------------
+
+
+class TestPooledRoi:
+    """ROI is pooled capital-weighted, never a mean of per-bet ROIs."""
+
+    def test_pooled_roi_not_mean_of_per_bet_rois(self) -> None:
+        """Group ROI equals 100*sum(pnl)/sum(stake), not the per-bet mean."""
+        rows = [
+            _row(
+                p_yes=0.561,
+                market_prob=0.55,
+                outcome=True,
+                platform="polymarket",
+                market_id="m1",
+            ),
+            _row(
+                p_yes=0.85,
+                market_prob=0.56,
+                outcome=False,
+                platform="polymarket",
+                market_id="m2",
+            ),
+        ]
+        sims = [simulate_row(row, POLYMARKET) for row in rows]
+        bets = [bet for bet in sims if isinstance(bet, Bet)]
+        assert len(bets) == len(rows)
+        stakes = [bet.stake for bet in bets]
+        pnls = [bet.pnl for bet in bets]
+        pooled = 100.0 * sum(pnls) / sum(stakes)
+        per_bet_mean = sum(
+            100.0 * pnl / stake for pnl, stake in zip(pnls, stakes)
+        ) / len(bets)
+
+        stats = compute_group_stats(rows, POLYMARKET)
+        assert stats["n_bets"] == 2
+        assert stats["staked"] == pytest.approx(sum(stakes))
+        assert stats["roi_mid"] == pytest.approx(pooled)
+        # The two definitions genuinely differ on this bet set.
+        assert abs(pooled - per_bet_mean) > 1.0
+        assert stats["roi_mid"] != pytest.approx(per_bet_mean)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap CI
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapCi:
+    """Market-clustered bootstrap with a fresh fixed-seed RNG per call."""
+
+    _BETS = [
+        ("m1", 2.5, 2.5),
+        ("m2", 2.5, -2.5),
+        ("m3", 2.0, 1.0),
+        ("m1", 1.0, -1.0),
+    ]
+
+    def test_same_rows_identical_ci_twice(self) -> None:
+        """Two calls on the same bets return bit-identical bounds."""
+        assert cluster_bootstrap_ci(self._BETS) == cluster_bootstrap_ci(self._BETS)
+
+    def test_ci_isolated_from_global_random_state(self) -> None:
+        """Global random state never leaks into the CI computation."""
+        random.seed(0)
+        first = cluster_bootstrap_ci(self._BETS)
+        random.seed(999)
+        random.random()
+        assert cluster_bootstrap_ci(self._BETS) == first
+
+    def test_ci_none_below_two_clusters(self) -> None:
+        """Fewer than 2 market clusters yields no CI."""
+        assert cluster_bootstrap_ci([("m1", 2.0, 1.0), ("m1", 1.0, -1.0)]) is None
+
+    def test_zero_stake_rows_do_not_form_clusters(self) -> None:
+        """Zero-stake rows are excluded before clustering."""
+        assert cluster_bootstrap_ci([("m1", 0.0, 0.0), ("m2", 2.0, 1.0)]) is None
+
+    def test_ci_bounds_ordered(self) -> None:
+        """CI low bound never exceeds the high bound."""
+        ci = cluster_bootstrap_ci(self._BETS)
+        assert ci is not None
+        assert ci[0] <= ci[1]
+
+    def test_haircut_ci_deterministic_and_mid_ci_unperturbed(self) -> None:
+        """Haircut CI is reproducible and never perturbs the mid CI.
+
+        Each CI call uses a FRESH Random(seed): computing the haircut CI in
+        between two mid-CI computations must leave the mid CI bit-identical,
+        and two group-stat computations must agree on both CIs. Kills a
+        mutant that shares one RNG across the two CI calls.
+        """
+        rows = [
+            _row(p_yes=0.70, market_prob=0.50, outcome=True, market_id="m1"),
+            _row(p_yes=0.72, market_prob=0.52, outcome=False, market_id="m2"),
+            _row(p_yes=0.68, market_prob=0.50, outcome=True, market_id="m3"),
+            _row(p_yes=0.80, market_prob=0.55, outcome=False, market_id="m4"),
+        ]
+        bets = [b for b in (simulate_row(r, OMEN) for r in rows) if isinstance(b, Bet)]
+        assert len(bets) == 4
+        mid_rows = [(b.market_id, b.stake, b.pnl) for b in bets]
+        haircut_rows = [(b.market_id, b.stake_haircut, b.pnl_haircut) for b in bets]
+
+        mid_before = cluster_bootstrap_ci(mid_rows)
+        haircut_first = cluster_bootstrap_ci(haircut_rows)
+        mid_after = cluster_bootstrap_ci(mid_rows)
+        haircut_second = cluster_bootstrap_ci(haircut_rows)
+        assert mid_before is not None
+        assert haircut_first is not None
+        assert haircut_first == haircut_second
+        assert mid_before == mid_after
+
+        stats_1 = compute_group_stats(rows, OMEN)
+        stats_2 = compute_group_stats(rows, OMEN)
+        assert stats_1["roi_haircut_ci"] == list(haircut_first)
+        assert stats_1["roi_haircut_ci"] == stats_2["roi_haircut_ci"]
+        assert stats_1["roi_ci"] == list(mid_before)
+        assert stats_1["roi_ci"] == stats_2["roi_ci"]
+
+
+# ---------------------------------------------------------------------------
+# Dedup
+# ---------------------------------------------------------------------------
+
+
+class TestDedup:
+    """row_id dedup: first-seen wins, files scanned in sorted name order.
+
+    :param tmp_path: pytest tmp_path fixture (per test).
+    """
+
+    def test_first_seen_wins_across_shards(self, tmp_path: Path) -> None:
+        """A duplicated row_id keeps the copy from the earlier shard.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        dup = _row(p_yes=0.6, row_id="prod_dup_1")
+        later = dict(dup, p_yes=0.9)
+        _write_jsonl(logs / "production_log_2026_07_02.jsonl", [later])
+        _write_jsonl(logs / "production_log_2026_07_01.jsonl", [dup])
+        rows = load_input_rows(logs, tmp_path / "missing_tournament.jsonl")
+        assert len(rows) == 1
+        assert rows[0]["p_yes"] == 0.6  # sorted filename order: 07_01 first
+
+    def test_tournament_rows_appended_after_shards(self, tmp_path: Path) -> None:
+        """Tournament rows load after all shards, with their own row_ids.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        _write_jsonl(logs / "production_log_2026_07_01.jsonl", [_row(row_id="prod_a")])
+        tournament = tmp_path / "tournament_scored.jsonl"
+        _write_jsonl(tournament, [_row(row_id="tourn_a", mode="tournament")])
+        rows = load_input_rows(logs, tournament)
+        assert [row["row_id"] for row in rows] == ["prod_a", "tourn_a"]
+
+
+# ---------------------------------------------------------------------------
+# Eligibility ladder
+# ---------------------------------------------------------------------------
+
+
+class TestEligibility:
+    """Eligibility ladder rejects with the first failing reason."""
+
+    def _reason(self, row: dict[str, Any]) -> str | None:
+        """Run the ladder against the fixed test window.
+
+        :param row: row under test.
+        :return: reject reason or None.
+        """
+        return eligibility_reason(row, WINDOW_START, WINDOW_END)
+
+    def test_valid_row_is_eligible(self) -> None:
+        """A well-formed in-window row passes the ladder."""
+        assert self._reason(_row()) is None
+
+    def test_invalid_parse_status(self) -> None:
+        """A non-valid parse status rejects."""
+        assert self._reason(_row(status="malformed")) == "invalid_parse"
+
+    def test_bool_p_yes_rejects(self) -> None:
+        """A bool p_yes is not a probability."""
+        assert self._reason(_row(p_yes=True)) == "bad_p_yes"
+
+    def test_nan_p_yes_rejects(self) -> None:
+        """A NaN p_yes rejects."""
+        assert self._reason(_row(p_yes=float("nan"))) == "bad_p_yes"
+
+    def test_out_of_range_p_yes_rejects(self) -> None:
+        """A p_yes outside [0, 1] rejects."""
+        assert self._reason(_row(p_yes=1.5)) == "bad_p_yes"
+
+    def test_p_yes_bounds_are_closed(self) -> None:
+        """p_yes of exactly 0.0 and 1.0 are eligible (closed interval)."""
+        assert self._reason(_row(p_yes=0.0)) is None
+        assert self._reason(_row(p_yes=1.0)) is None
+
+    def test_market_prob_bounds_are_open(self) -> None:
+        """market_prob of exactly 0.0 / 1.0 rejects (open interval)."""
+        assert self._reason(_row(market_prob=0.0)) == "bad_market_prob"
+        assert self._reason(_row(market_prob=1.0)) == "bad_market_prob"
+
+    def test_string_outcome_rejects(self) -> None:
+        """A string final_outcome is not a strict JSON bool."""
+        assert self._reason(_row(outcome="true")) == "bad_final_outcome"
+
+    def test_null_outcome_is_pending(self) -> None:
+        """A null final_outcome (unresolved) classifies as pending."""
+        assert self._reason(_row(outcome=None)) == "pending"
+
+    def test_pending_vs_bad_final_outcome_ladder(self) -> None:
+        """Null is PENDING; any other non-bool is bad_final_outcome.
+
+        The certified ladder distinguishes an unresolved row (null) from a
+        malformed one ("true" strings, 0/1 ints); collapsing the two loses
+        the pending count and inflates the reject counters.
+        """
+        assert self._reason(_row(outcome=None)) == "pending"
+        assert self._reason(_row(outcome="true")) == "bad_final_outcome"
+        assert self._reason(_row(outcome=0)) == "bad_final_outcome"
+        assert self._reason(_row(outcome=1)) == "bad_final_outcome"
+        assert self._reason(_row(outcome=True)) is None
+        assert self._reason(_row(outcome=False)) is None
+
+    def test_unparseable_predicted_at_is_out_of_window(self) -> None:
+        """An unparseable predicted_at counts as out_of_window."""
+        assert self._reason(_row(predicted_at="garbage")) == "out_of_window"
+
+    def test_out_of_window_rejects(self) -> None:
+        """A predicted_at before the window start rejects."""
+        row = _row(predicted_at="2026-01-01T00:00:00Z")
+        assert self._reason(row) == "out_of_window"
+
+    def test_window_checked_before_parse_status(self) -> None:
+        """The ladder order pins out_of_window ahead of invalid_parse."""
+        row = _row(predicted_at="2026-01-01T00:00:00Z", status="malformed")
+        assert self._reason(row) == "out_of_window"
+
+    def test_naive_timestamp_treated_as_utc(self) -> None:
+        """A naive predicted_at is interpreted as UTC."""
+        assert self._reason(_row(predicted_at="2026-07-01T12:00:00")) is None
+
+
+# ---------------------------------------------------------------------------
+# Windowing
+# ---------------------------------------------------------------------------
+
+
+class TestWindowing:
+    """Trailing window semantics around --as-of."""
+
+    def test_window_bounds_include_whole_as_of_day(self) -> None:
+        """The window ends at midnight UTC of as-of + 1, exclusive."""
+        start, end = window_bounds(date(2026, 7, 8), 1)
+        assert start == datetime(2026, 7, 8, tzinfo=timezone.utc)
+        assert end == datetime(2026, 7, 9, tzinfo=timezone.utc)
+
+    def test_window_length_in_days(self) -> None:
+        """The window spans exactly window_days days."""
+        start, end = window_bounds(date(2026, 7, 8), 90)
+        assert (end - start).days == 90
+        assert start == datetime(2026, 4, 10, tzinfo=timezone.utc)
+
+    def test_as_of_day_inclusive_next_day_exclusive(self) -> None:
+        """Rows late on the as-of day are in; as-of + 1 midnight is out."""
+        start, end = window_bounds(date(2026, 7, 8), 1)
+        late = _row(predicted_at="2026-07-08T23:59:59Z")
+        assert eligibility_reason(late, start, end) is None
+        next_day = _row(predicted_at="2026-07-09T00:00:00Z")
+        assert eligibility_reason(next_day, start, end) == "out_of_window"
+
+    def test_window_start_inclusive(self) -> None:
+        """A row exactly at window_start is in the window."""
+        start, end = window_bounds(date(2026, 7, 8), 1)
+        boundary = _row(predicted_at="2026-07-08T00:00:00Z")
+        assert eligibility_reason(boundary, start, end) is None
+
+
+# ---------------------------------------------------------------------------
+# Group counters (window-scoped n_rows_seen, n_pending, no-bet attribution)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupCounters:
+    """simulate() group counters follow the certified contract."""
+
+    def test_n_rows_seen_window_scoped_and_pending_counted(self) -> None:
+        """n_rows_seen counts only in-window rows; null outcome is pending.
+
+        Out-of-window and unparseable-timestamp rows stay OUT of
+        n_rows_seen (they are still counted as out_of_window rejects);
+        pending rows count in n_rows_seen and n_pending, never in rejects.
+        """
+        rows = [
+            _row(),  # eligible
+            _row(outcome=None),  # in-window, pending
+            _row(predicted_at="2026-01-01T00:00:00Z"),  # out of window
+            _row(predicted_at="garbage"),  # unparseable -> out_of_window
+            _row(status="malformed"),  # in-window, invalid_parse
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert len(groups) == 1
+        group = groups[0]
+        assert group["n_rows_seen"] == 3  # eligible + pending + invalid_parse
+        assert group["n_pending"] == 1
+        assert group["n_eligible"] == 1
+        assert group["rejects"]["out_of_window"] == 2
+        assert group["rejects"]["invalid_parse"] == 1
+        assert group["rejects"]["bad_final_outcome"] == 0
+
+    def test_no_bet_gate_attribution_and_coverage(self) -> None:
+        """No-bets are attributed to their first-failing gate per group."""
+        rows = [
+            _row(p_yes=0.70, market_prob=0.50),  # bet
+            _row(p_yes=0.45, market_prob=0.40),  # skip_oracle_prob
+            _row(p_yes=0.53, market_prob=0.50),  # skip_edge_below_floor
+            _row(p_yes=0.45, market_prob=0.40),  # skip_oracle_prob
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert len(groups) == 1
+        group = groups[0]
+        assert set(group["no_bet"]) == set(NO_BET_GATES)
+        assert group["no_bet"]["skip_oracle_prob"] == 2
+        assert group["no_bet"]["skip_edge_below_floor"] == 1
+        assert group["no_bet"]["skip_edge_above_cap"] == 0
+        assert group["no_bet"]["skip_spread"] == 0
+        assert group["no_bet"]["skip_zero_stake"] == 0
+        assert group["n_bets"] == 1
+        assert group["coverage_pct"] == pytest.approx(25.0)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end smoke
+# ---------------------------------------------------------------------------
+
+
+class TestEndToEnd:
+    """main() over synthetic shards: outputs parse and are deterministic."""
+
+    def _build_inputs(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Write 2 platforms x 2 tools of synthetic rows.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :return: (logs_dir, tournament_input) paths.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        production = [
+            _row(tool="tool-a", p_yes=0.7, market_prob=0.5, outcome=True),
+            _row(tool="tool-a", p_yes=0.8, market_prob=0.5, outcome=False),
+            _row(tool="tool-b", p_yes=0.65, market_prob=0.5, outcome=True),
+            _row(tool="tool-b", p_yes=0.75, market_prob=0.5, outcome=True),
+            _row(
+                tool="tool-a",
+                platform="polymarket",
+                p_yes=0.65,
+                market_prob=0.55,
+                spread=0.05,
+                outcome=True,
+            ),
+            _row(
+                tool="tool-a",
+                platform="polymarket",
+                p_yes=0.70,
+                market_prob=0.55,
+                spread=0.05,
+                outcome=False,
+            ),
+        ]
+        _write_jsonl(logs / "production_log_2026_07_01.jsonl", production)
+        tournament = [
+            _row(tool="tool-a", mode="tournament", p_yes=0.7, market_prob=0.5),
+            _row(tool="tool-a", mode="tournament", p_yes=0.6, market_prob=0.5),
+            _row(
+                tool="tool-b",
+                mode="tournament",
+                platform="polymarket",
+                p_yes=0.65,
+                market_prob=0.55,
+            ),
+            _row(
+                tool="tool-b",
+                mode="tournament",
+                platform="polymarket",
+                p_yes=0.75,
+                market_prob=0.55,
+                outcome=False,
+            ),
+        ]
+        tournament_path = tmp_path / "tournament_scored.jsonl"
+        _write_jsonl(tournament_path, tournament)
+        return logs, tournament_path
+
+    def _run_main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        logs: Path,
+        tournament: Path,
+        results: Path,
+    ) -> None:
+        """Invoke main() with a synthetic argv.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param logs: logs directory.
+        :param tournament: tournament_scored.jsonl path.
+        :param results: results output directory.
+        """
+        argv = [
+            "roi_sim",
+            "--logs-dir",
+            str(logs),
+            "--tournament-input",
+            str(tournament),
+            "--results-dir",
+            str(results),
+            "--as-of",
+            "2026-07-08",
+            "--window-days",
+            "90",
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        main()
+
+    def test_smoke_outputs_parse_and_are_byte_identical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both md reports + json are produced, sane, and reproducible.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        logs, tournament = self._build_inputs(tmp_path)
+        results_1 = tmp_path / "results_1"
+        self._run_main(monkeypatch, logs, tournament, results_1)
+
+        payload = json.loads(
+            (results_1 / "roi_results.json").read_text(encoding="utf-8")
+        )
+        assert payload["as_of"] == "2026-07-08"
+        assert payload["window_days"] == 90
+        groups = payload["groups"]
+        keys = {(g["platform"], g["tool_name"], g["mode"]) for g in groups}
+        assert ("omen", "tool-a", "production") in keys
+        assert ("omen", "tool-a", "tournament") in keys
+        assert ("polymarket", "tool-a", "production") in keys
+        assert ("polymarket", "tool-b", "tournament") in keys
+        for group in groups:
+            assert group["n_eligible"] <= group["n_rows_seen"]
+            assert group["n_pending"] == 0  # all synthetic rows are resolved
+            assert set(group["rejects"]) == {
+                "out_of_window",
+                "invalid_parse",
+                "bad_p_yes",
+                "bad_market_prob",
+                "bad_final_outcome",
+            }
+            assert set(group["no_bet"]) == set(NO_BET_GATES)
+            assert (
+                group["n_bets"] + sum(group["no_bet"].values()) == group["n_eligible"]
+            )
+            assert group["coverage_pct"] is not None
+            assert "roi_haircut_ci" in group
+            assert "few bets - anecdotal" in group["flags"]  # all n_bets < 10
+            assert "low sample" in group["flags"]  # all n_eligible < 30
+
+        report_omen = (results_1 / "report_roi_omen.md").read_text(encoding="utf-8")
+        report_poly = (results_1 / "report_roi_polymarket.md").read_text(
+            encoding="utf-8"
+        )
+        for report in (report_omen, report_poly):
+            assert "| tool | mode | n preds | n bets |" in report
+            assert "tool-a" in report
+        # Production rows sort before tournament rows in the table.
+        assert report_omen.index("| tool-a | production |") < report_omen.index(
+            "| tool-a | tournament |"
+        )
+
+        # Byte-identical on a second run with the same artifacts + as-of.
+        results_2 = tmp_path / "results_2"
+        self._run_main(monkeypatch, logs, tournament, results_2)
+        for name in (
+            "roi_results.json",
+            "report_roi_omen.md",
+            "report_roi_polymarket.md",
+        ):
+            assert (results_1 / name).read_bytes() == (results_2 / name).read_bytes()

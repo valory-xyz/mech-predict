@@ -1594,11 +1594,85 @@ class TestDeferUnparsedDeliveries:
         )
         if expect_deferred:
             assert not rows
-            assert still_pending == [delivery]
+            # The deferred entry snapshots the matched market so it can
+            # still build once the market leaves the resolution cursor.
+            assert len(still_pending) == 1
+            snapshot = still_pending[0]["deferred_market"]
+            assert snapshot["outcome"] is True
+            assert snapshot["match_confidence"] == 1.0
         else:
             assert len(rows) == 1
             assert rows[0]["prediction_parse_status"] == "missing_fields"
             assert not still_pending
+
+    def test_deferred_entry_builds_after_market_leaves_cursor(self) -> None:
+        """Two-run strand scenario: deferred in run 1, market no longer
+        fetchable in run 2 — the snapshot still produces a row."""
+        now = int(time.time())
+        delivery = self._delivery(now - 3600, True)
+
+        # Run 1: matched but unindexed -> deferred with market snapshot.
+        rows, still_pending, *_ = _match_and_build(
+            [delivery], self._markets(), set(), "omen"
+        )
+        assert not rows
+        deferred = still_pending[0]
+
+        # Run 2: the refresh healed the parsed fields; the resolved-markets
+        # cursor has advanced, so the market is gone from the fetch.
+        healed = {
+            **deferred,
+            "tool_response": '{"p_yes": 0.7, "p_no": 0.3}',
+            "parsed_missing": False,
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [healed], ResolvedMarkets(), set(), "omen"
+        )
+        assert not still_pending
+        assert len(rows) == 1
+        assert rows[0]["p_yes"] == 0.7
+        assert rows[0]["final_outcome"] is True
+        assert rows[0]["prediction_parse_status"] == "valid"
+
+    def test_deferred_entry_expires_after_market_leaves_cursor(self) -> None:
+        """A never-healed deferred entry still surfaces as missing_fields
+        once grace expires, even without a fetchable market."""
+        now = int(time.time())
+        expired = {
+            **self._delivery(now - PARSED_DELIVERY_GRACE_SECONDS - 3600, True),
+            "deferred_market": {
+                "outcome": False,
+                "resolved_at_ts": now - PARSED_DELIVERY_GRACE_SECONDS,
+                "match_confidence": 0.8,
+            },
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [expired], ResolvedMarkets(), set(), "omen"
+        )
+        assert not still_pending
+        assert len(rows) == 1
+        assert rows[0]["prediction_parse_status"] == "missing_fields"
+        assert rows[0]["final_outcome"] is False
+        assert rows[0]["match_confidence"] == 0.8
+
+    def test_deferred_entry_redefers_within_grace(self) -> None:
+        """Still-unindexed, still-recent entries keep waiting (with their
+        snapshot) when the market is no longer fetchable."""
+        now = int(time.time())
+        deferred = {
+            **self._delivery(now - 3600, True),
+            "deferred_market": {
+                "outcome": True,
+                "resolved_at_ts": now,
+                "match_confidence": 1.0,
+            },
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [deferred], ResolvedMarkets(), set(), "omen"
+        )
+        assert not rows
+        assert len(still_pending) == 1
+        assert still_pending[0]["deferred_market"]["outcome"] is True
 
     def test_should_defer_unparsed_explicit_now(self) -> None:
         """_should_defer_unparsed honors the injected clock."""
@@ -1731,6 +1805,27 @@ class TestDedupPending:
         by_id = {d["deliver_id"]: d for d in result}
         assert by_id["0xdup"] is fresh
         assert by_id["0xother"] is other
+
+    def test_deferred_market_snapshot_survives_refetch(self) -> None:
+        """A refetched copy (no snapshot) must not clobber the deferred
+        market snapshot — the market is no longer re-matchable."""
+        snapshot = {"outcome": True, "resolved_at_ts": 123, "match_confidence": 1.0}
+        deferred = {
+            "deliver_id": "0xdup",
+            "tool_response": None,
+            "deferred_market": snapshot,
+        }
+        refetched = {
+            "deliver_id": "0xdup",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+        }
+        result = _dedup_pending([deferred, refetched])
+        assert len(result) == 1
+        merged = result[0]
+        # Fresh parsed fields win; the snapshot is carried over.
+        assert merged["tool_response"] == '{"p_yes": 0.5, "p_no": 0.5}'
+        assert merged["deferred_market"] == snapshot
+        assert refetched.get("deferred_market") is None  # input not mutated
 
 
 class TestEnrichmentSkipsPrefilled:

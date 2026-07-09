@@ -1809,12 +1809,29 @@ def _dedup_pending(pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
     The fetch cursor only advances past matched deliveries, so unresolved
     deliveries are refetched on every run and would otherwise accumulate as
     duplicate snapshots. Last copy wins: a refetched delivery carries the
-    freshest parsed fields.
+    freshest parsed fields. A ``deferred_market`` snapshot is carried over
+    from earlier copies — the refetched copy cannot re-match the market
+    (its resolution left the cursor window), so dropping the snapshot
+    would strand the delivery in pending permanently.
 
     :param pending: pending delivery dicts, possibly with duplicates.
     :return: deduplicated list (insertion order of first occurrence).
     """
-    return list({d.get("deliver_id"): d for d in pending}.values())
+    merged: dict[str, dict[str, Any]] = {}
+    for delivery in pending:
+        key = delivery.get("deliver_id")
+        previous = merged.get(key)
+        if (
+            previous is not None
+            and previous.get("deferred_market")
+            and not delivery.get("deferred_market")
+        ):
+            delivery = {
+                **delivery,
+                "deferred_market": previous["deferred_market"],
+            }
+        merged[key] = delivery
+    return list(merged.values())
 
 
 def _match_and_build(
@@ -1849,14 +1866,37 @@ def _match_and_build(
 
         market, confidence = _match_delivery(delivery, resolved_markets)
         if market is None:
-            still_pending.append(delivery)
-            continue
+            # A market matched in an earlier run leaves the resolved-markets
+            # window once the resolution cursor advances past it. Deferred
+            # entries carry a snapshot of that match so they can still build
+            # a row (healed or grace-expired) instead of stranding in
+            # pending until the max-age prune drops them.
+            snapshot = delivery.get("deferred_market")
+            if snapshot is None:
+                still_pending.append(delivery)
+                continue
+            market = {
+                "outcome": snapshot["outcome"],
+                "resolved_at_ts": snapshot["resolved_at_ts"],
+            }
+            confidence = snapshot.get("match_confidence", 1.0)
 
         # The market resolved but the subgraph's async file handler has not
         # indexed the ParsedDelivery yet — wait for it instead of writing a
         # permanently-invalid row (rows are deduped and never revisited).
+        # The matched market is snapshotted onto the deferred entry because
+        # it may no longer be fetchable when the entry is retried.
         if _should_defer_unparsed(delivery):
-            still_pending.append(delivery)
+            still_pending.append(
+                {
+                    **delivery,
+                    "deferred_market": {
+                        "outcome": market["outcome"],
+                        "resolved_at_ts": market["resolved_at_ts"],
+                        "match_confidence": confidence,
+                    },
+                }
+            )
             continue
 
         if delivery.get("market_id") and confidence == 1.0:

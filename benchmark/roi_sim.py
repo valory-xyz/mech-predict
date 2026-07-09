@@ -1087,16 +1087,13 @@ def _fmt_roi_ci(roi: float | None, ci: list[float] | None) -> str:
     return f"{_fmt_pct(roi)} ({ci[0]:+.1f}, {ci[1]:+.1f})"
 
 
-def _fmt_brier(brier_all: float | None, brier_bets: float | None) -> str:
-    """Format the "Brier all->bets" report cell.
+def _fmt_brier_cell(value: float | None) -> str:
+    """Format one Brier report cell ("Brier all" or "Brier bets").
 
-    :param brier_all: Brier over all eligible predictions, or None.
-    :param brier_bets: Brier over the gated bet subset, or None.
-    :return: display string.
+    :param value: Brier score, or None when missing/non-numeric.
+    :return: 3-decimal display string, or "n/a".
     """
-    left = "n/a" if brier_all is None else f"{brier_all:.3f}"
-    right = "n/a" if brier_bets is None else f"{brier_bets:.3f}"
-    return f"{left} -> {right}"
+    return "n/a" if value is None else f"{value:.3f}"
 
 
 def _excluded_line(excluded: list[dict[str, Any]]) -> str:
@@ -1203,8 +1200,8 @@ def render_report(
             "(capital-weighted, pooled; not annualized)."
         ),
         (
-            "Brier all->bets: ALL eligible predictions vs the gated bet "
-            "subset. Low-sample rows are flagged, never dropped."
+            "Brier all / Brier bets: ALL eligible predictions vs the gated "
+            "bet subset. Low-sample rows are flagged, never dropped."
         ),
         "",
     ]
@@ -1244,20 +1241,21 @@ def render_report(
         )
     )
     lines.append(
-        "| tool | mode | model | n preds | n bets | Brier all->bets | staked "
-        "| ROI (95% CI) | ROI w/ costs | flags |"
+        "| tool | mode | model | n preds | n bets | Brier all | Brier bets "
+        "| staked | ROI (95% CI) | ROI w/ costs | flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for g in rows:
         lines.append(
-            "| {tool} | {mode} | {model} | {n_preds} | {n_bets} | {brier} "
-            "| {staked} | {roi} | {roi_h} | {flags} |".format(
+            "| {tool} | {mode} | {model} | {n_preds} | {n_bets} | {brier_all} "
+            "| {brier_bets} | {staked} | {roi} | {roi_h} | {flags} |".format(
                 tool=g["tool_name"],
                 mode=g["mode"],
                 model=MODEL_DISPLAY.get(g["model"], g["model"]),
                 n_preds=g["n_eligible"],
                 n_bets=g["n_bets"],
-                brier=_fmt_brier(g["brier_all"], g["brier_bets"]),
+                brier_all=_fmt_brier_cell(g["brier_all"]),
+                brier_bets=_fmt_brier_cell(g["brier_bets"]),
                 staked=f"{g['staked']:.2f} USDC",
                 roi=_fmt_roi_ci(g["roi_mid"], g["roi_ci"]),
                 roi_h=_fmt_roi_ci(g["roi_haircut"], g["roi_haircut_ci"]),

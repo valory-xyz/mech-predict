@@ -1199,6 +1199,66 @@ class TestGoldenValues:
 
 
 # ---------------------------------------------------------------------------
+# Brier columns (two explicit columns: "Brier all" and "Brier bets")
+# ---------------------------------------------------------------------------
+
+
+class TestBrierColumns:
+    """The report renders Brier as two columns, never a single arrow cell."""
+
+    def _render(self, groups: list[dict[str, Any]]) -> str:
+        """Render an Omen report against the fixed test window.
+
+        :param groups: simulate() output.
+        :return: markdown report text.
+        """
+        return render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+
+    def test_header_names_two_brier_columns(self) -> None:
+        """The header carries "Brier all" and "Brier bets", not the arrow."""
+        report = self._render(simulate([_row()], WINDOW_START, WINDOW_END))
+        assert "| Brier all | Brier bets |" in report
+        assert "Brier all->bets" not in report
+
+    def test_data_row_carries_two_brier_cells(self) -> None:
+        """The two scores land in two adjacent cells, not one arrow cell.
+
+        p_yes 0.8 / True bets (Brier 0.04); p_yes 0.6 / False (Brier 0.36)
+        does not bet, so brier_all = 0.20 while brier_bets = 0.04.
+        """
+        rows = [
+            _row(p_yes=0.8, market_prob=0.5, outcome=True, market_id="m1"),
+            _row(p_yes=0.6, market_prob=0.58, outcome=False, market_id="m2"),
+        ]
+        report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
+        assert "| 0.200 | 0.040 |" in report
+        assert "0.200 -> 0.040" not in report
+
+    def test_zero_bet_group_renders_brier_bets_na(self) -> None:
+        """A group with eligible rows but no bets shows a per-column n/a.
+
+        The lone row's edge (0.02) fails Omen's floor, so brier_bets has no
+        bet subset (n/a) while brier_all is the eligible-row Brier (0.360).
+        """
+        rows = [_row(p_yes=0.6, market_prob=0.58, outcome=False)]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert groups[0]["n_bets"] == 0
+        report = self._render(groups)
+        assert "| 0.360 | n/a |" in report
+
+    def test_zero_eligible_group_renders_both_brier_na(self) -> None:
+        """A zero-eligible active prediction tool shows n/a in both cells."""
+        rows = [
+            _row(tool="stale-tool", predicted_at="2026-01-01T00:00:00Z"),
+            _row(tool="live-tool"),
+        ]
+        report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
+        assert "| stale-tool | production | unknown | 0 | 0 | n/a | n/a |" in report
+
+
+# ---------------------------------------------------------------------------
 # Sentinel types stay in sync with the runtime tuples
 # ---------------------------------------------------------------------------
 

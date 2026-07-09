@@ -37,19 +37,52 @@ from typing import Any, TypeGuard
 
 from benchmark.roi_sim import MODEL_DISPLAY
 
-# Slack renders ~monospace code blocks without wrapping up to roughly this
-# width on a desktop client; every table line is kept at or under it.
-MAX_LINE_WIDTH = 100
+# Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
+# wide table renders fine; MAX_LINE_WIDTH is only a truncation backstop for
+# pathological tool/flag text. Numeric columns are never capped (see _CAPS),
+# so a full mirror of the report table fits comfortably under this bound.
+MAX_LINE_WIDTH = 160
 
 # Truncation guard for very wide deployments: keep the top rows by staked
 # capital and point at the full report for the rest.
 MAX_TABLE_ROWS = 14
 
-_HEADERS = ("tool", "mode", "model", "preds", "bets", "ROI (95% CI)", "w/costs", "flags")
-# Per-column width caps; actual widths are content-driven up to these.
-# Worst case: tool shrinks 28 -> _TOOL_MIN (12) and flags 22 -> _FLAGS_MIN (6),
-# leaving 12+5+17+6+5+20+8+6 + 7*len(_SEP) = 100 = MAX_LINE_WIDTH exactly.
-_CAPS = (28, 5, 17, 6, 5, 20, 8, 22)
+# Column order mirrors the full report (render_report in benchmark.roi_sim):
+# tool | mode | model | preds | bets | Brier all | Brier bets | staked | ROI |
+# w/costs | flags.
+_HEADERS = (
+    "tool",
+    "mode",
+    "model",
+    "preds",
+    "bets",
+    "Brier all",
+    "Brier bets",
+    "staked",
+    "ROI (95% CI)",
+    "w/costs",
+    "flags",
+)
+# Per-column width caps. Only the TOOL name and the FLAGS text may ever
+# ellipsize; every other column -- mode, model, and all numeric cells
+# (preds, bets, Brier all, Brier bets, staked, ROI, w/costs) -- is
+# content-driven with NO cap (None), so a 6-digit bet count like 109722
+# always renders in full.
+_TOOL_CAP = 30
+_FLAGS_CAP = 24
+_CAPS: tuple[int | None, ...] = (
+    _TOOL_CAP,  # tool
+    None,  # mode
+    None,  # model
+    None,  # preds
+    None,  # bets
+    None,  # Brier all
+    None,  # Brier bets
+    None,  # staked
+    None,  # ROI (95% CI)
+    None,  # w/costs
+    _FLAGS_CAP,  # flags
+)
 
 # Abbreviated mode labels keep the width budget for the tool column.
 _MODE_SHORT = {"production": "prod", "tournament": "tourn"}
@@ -62,8 +95,9 @@ _FLAG_SHORT = {
 }
 _PARSE_RELIABILITY_RE = re.compile(r"(\d+)% parse reliability")
 _SEP = " | "
-# When the capped widths still exceed MAX_LINE_WIDTH, shrink the tool
-# column first (down to this floor), then the flags column.
+# Backstop only: if even the capped tool/flags widths push a line past
+# MAX_LINE_WIDTH (pathological text), shrink the tool column first (down to
+# this floor), then flags. Numeric columns are never touched.
 _TOOL_MIN = 12
 _FLAGS_MIN = 6
 
@@ -141,6 +175,36 @@ def _fmt_roi_point(roi: object) -> str:
     return f"{_fmt_signed(float(roi))}%"
 
 
+def _fmt_brier(group: dict[str, Any]) -> tuple[str, str]:
+    """Format the two Brier cells ("Brier all", "Brier bets").
+
+    Mirrors ``render_report``'s two columns: each cell is the 3-decimal
+    score, or ``n/a`` when its field is missing/non-numeric.
+
+    :param group: group dict from roi_results.json.
+    :return: ``(Brier all, Brier bets)`` display cells, e.g.
+        ``("0.218", "0.221")`` or ``("n/a", "n/a")``.
+    """
+    brier_all = group.get("brier_all")
+    brier_bets = group.get("brier_bets")
+    left = f"{float(brier_all):.3f}" if _is_num(brier_all) else "n/a"
+    right = f"{float(brier_bets):.3f}" if _is_num(brier_bets) else "n/a"
+    return left, right
+
+
+def _fmt_staked(group: dict[str, Any]) -> str:
+    """Format the "staked" cell as a plain 2-decimal figure.
+
+    Matches the report's 2-decimal USDC number but drops the " USDC" suffix
+    to save table width (the intro already frames the numbers as simulated
+    USDC stake). Never truncated -- the column is content-driven.
+
+    :param group: group dict from roi_results.json.
+    :return: 2-decimal staked amount, e.g. ``274305.00``.
+    """
+    return f"{_as_float(group.get('staked')):.2f}"
+
+
 def _compact_flags(flags: object) -> str:
     """Compress a group's flags list into a short cell.
 
@@ -194,22 +258,22 @@ def _format_line(cells: tuple[str, ...], widths: list[int]) -> str:
 
 
 def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
-    """Render header + divider + data lines, all within MAX_LINE_WIDTH.
+    """Render header + divider + data lines.
 
-    Widths are content-driven up to the per-column caps; if the capped
-    total still exceeds the width budget the tool column shrinks first,
-    then flags -- both truncations are marked with an ellipsis.
+    Each column width is content-driven: max(header, widest cell). Numeric
+    columns (and mode/model) carry no cap, so their cells never ellipsize.
+    The tool and flags columns are capped; only they may be truncated. As a
+    backstop, if the resulting line still exceeds MAX_LINE_WIDTH (pathological
+    tool/flag text), the tool column shrinks first, then flags -- numeric
+    columns are never touched.
 
     :param rows: pre-formatted cell tuples, one per table row.
     :return: table lines (no code-block fences).
     """
-    widths = [
-        min(
-            cap,
-            max(len(header), *(len(row[i]) for row in rows)),
-        )
-        for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS))
-    ]
+    widths = []
+    for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
+        content = max(len(header), *(len(row[i]) for row in rows))
+        widths.append(content if cap is None else min(cap, content))
     overflow = sum(widths) + len(_SEP) * (len(_HEADERS) - 1) - MAX_LINE_WIDTH
     if overflow > 0:
         take = min(overflow, widths[0] - _TOOL_MIN)
@@ -248,12 +312,16 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
     :return: one string per table column.
     """
     mode = str(group.get("mode") or "")
+    brier_all_cell, brier_bets_cell = _fmt_brier(group)
     return (
         str(group.get("tool_name") or "unknown"),
         _MODE_SHORT.get(mode, mode),
         _model_cell(group),
         str(_as_int(group.get("n_eligible"))),
         str(_as_int(group.get("n_bets"))),
+        brier_all_cell,
+        brier_bets_cell,
+        _fmt_staked(group),
         _fmt_roi_ci(group.get("roi_mid"), group.get("roi_ci")),
         _fmt_roi_point(group.get("roi_haircut")),
         _compact_flags(group.get("flags")),
@@ -378,9 +446,7 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
 
     # A tool counts as not-deployed only when ALL of its groups carry the
     # explicit "active": false marker.
-    active_tool_names = {
-        str(g.get("tool_name") or "unknown") for g in platform_groups
-    }
+    active_tool_names = {str(g.get("tool_name") or "unknown") for g in platform_groups}
     inactive_tools = {
         str(g.get("tool_name") or "unknown") for g in inactive_groups
     } - active_tool_names

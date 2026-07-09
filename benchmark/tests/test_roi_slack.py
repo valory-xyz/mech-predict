@@ -45,6 +45,8 @@ def _group(
     n_eligible: int = 40,
     n_bets: int = 20,
     staked: float = 25.0,
+    brier_all: Any = 0.218,
+    brier_bets: Any = 0.221,
     roi_mid: Any = 12.3,
     roi_ci: Any = None,
     roi_haircut: Any = 8.4,
@@ -58,6 +60,25 @@ def _group(
 
     ``active`` is only written when not None (the key is absent in older
     results files and only emitted by the deployment filter).
+
+    :param tool: tool name for the group.
+    :param platform: platform key (omen / polymarket).
+    :param mode: deployment mode (production / tournament).
+    :param model: underlying LLM identifier.
+    :param n_eligible: count of eligible predictions.
+    :param n_bets: count of simulated bets.
+    :param staked: total simulated stake.
+    :param brier_all: mean Brier over all eligible predictions.
+    :param brier_bets: mean Brier over the gated bet subset.
+    :param roi_mid: mid-point ROI percentage.
+    :param roi_ci: ROI 95% CI pair, or None for the default.
+    :param roi_haircut: cost-adjusted ROI percentage.
+    :param roi_haircut_ci: cost-adjusted ROI 95% CI pair, or None for the default.
+    :param flags: list of warning flags, or None for none.
+    :param is_prediction_tool: whether the tool is a prediction tool.
+    :param parse_reliability: parse-reliability ratio.
+    :param active: deployment-filter flag; omitted from the entry when None.
+    :return: the group entry dict.
     """
     entry: dict[str, Any] = {
         "platform": platform,
@@ -67,6 +88,8 @@ def _group(
         "n_eligible": n_eligible,
         "n_bets": n_bets,
         "staked": staked,
+        "brier_all": brier_all,
+        "brier_bets": brier_bets,
         "roi_mid": roi_mid,
         "roi_ci": roi_ci if roi_ci is not None else [4.1, 20.9],
         "roi_haircut": roi_haircut,
@@ -87,7 +110,13 @@ def _write_results(
     groups: list[dict[str, Any]],
     window_days: int = 90,
 ) -> Path:
-    """Write a roi_results.json fixture and return its path."""
+    """Write a roi_results.json fixture and return its path.
+
+    :param tmp_path: pytest tmp_path fixture.
+    :param groups: group entries to embed in the payload.
+    :param window_days: trailing window length in days.
+    :return: path of the written roi_results.json.
+    """
     path = tmp_path / "roi_results.json"
     payload = {
         "as_of": "2026-07-06",
@@ -101,7 +130,11 @@ def _write_results(
 
 
 def _code_block_lines(section: str) -> list[str]:
-    """Extract the lines inside the fenced code block of a section."""
+    """Extract the lines inside the fenced code block of a section.
+
+    :param section: rendered Slack section text.
+    :return: the lines between the two code fences.
+    """
     lines = section.splitlines()
     fences = [i for i, line in enumerate(lines) if line == "```"]
     assert len(fences) == 2, f"expected one fenced code block, got {section!r}"
@@ -117,7 +150,10 @@ class TestBuildRoiSectionHappyPath:
     """The section renders intro + code-block table for bet-carrying groups."""
 
     def test_intro_line_and_window_days(self, tmp_path: Path) -> None:
-        """First line is the bold intro citing the window from the json."""
+        """First line is the bold intro citing the window from the json.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group()], window_days=21)
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -126,7 +162,10 @@ class TestBuildRoiSectionHappyPath:
         assert "trailing 21d" in first
 
     def test_code_block_carries_all_columns(self, tmp_path: Path) -> None:
-        """Header row inside the code block names every column."""
+        """Header row inside the code block names every column.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group()])
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -137,14 +176,21 @@ class TestBuildRoiSectionHappyPath:
             "model",
             "preds",
             "bets",
+            "Brier all",
+            "Brier bets",
+            "staked",
             "ROI (95% CI)",
             "w/costs",
             "flags",
         ):
             assert column in header, f"missing column: {column}"
+        assert "Brier all->bets" not in header
 
     def test_row_renders_counts_roi_and_ci(self, tmp_path: Path) -> None:
-        """A data row shows n_eligible, n_bets, and the ROI with its CI."""
+        """A data row shows n_eligible, n_bets, and the ROI with its CI.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -166,8 +212,62 @@ class TestBuildRoiSectionHappyPath:
         assert "20" in rows[0]
         assert "+12.3% (+4.1,+20.9)" in rows[0]
 
+    def test_row_renders_brier_and_staked(self, tmp_path: Path) -> None:
+        """A data row carries the two Brier cells separately, plus staked.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(
+            tmp_path,
+            [_group(tool="alpha", brier_all=0.218, brier_bets=0.221, staked=274305.0)],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        # The two scores land in two distinct cells, not one arrow cell.
+        assert "0.218" in rows[0]
+        assert "0.221" in rows[0]
+        assert "0.218 -> 0.221" not in rows[0]
+        assert "274305.00" in rows[0]
+
+    def test_absent_brier_fields_render_na(self, tmp_path: Path) -> None:
+        """Missing Brier fields render two 'n/a' cells (one per column).
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        group = _group(tool="alpha")
+        del group["brier_all"]
+        del group["brier_bets"]
+        path = _write_results(tmp_path, [group])
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        # ROI / w-costs are populated, so the only n/a cells are the two
+        # Brier columns.
+        assert rows[0].count("n/a") == 2
+        assert "n/a -> n/a" not in rows[0]
+
+    def test_one_brier_field_missing_renders_per_column_na(
+        self, tmp_path: Path
+    ) -> None:
+        """A single missing Brier field only blanks its own column.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        group = _group(tool="alpha", brier_all=0.207)
+        del group["brier_bets"]
+        path = _write_results(tmp_path, [group])
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert "0.207" in rows[0]
+        assert rows[0].count("n/a") == 1
+
     def test_production_sorts_before_tournament(self, tmp_path: Path) -> None:
-        """Production rows precede tournament rows regardless of bet count."""
+        """Production rows precede tournament rows regardless of bet count.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -182,7 +282,10 @@ class TestBuildRoiSectionHappyPath:
         assert "t-big" in rows[1]
 
     def test_within_mode_sorted_by_bets_desc(self, tmp_path: Path) -> None:
-        """Within one mode, more bets rank higher."""
+        """Within one mode, more bets rank higher.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -197,7 +300,10 @@ class TestBuildRoiSectionHappyPath:
         assert "few" in rows[1]
 
     def test_zero_bet_groups_stay_out_of_table(self, tmp_path: Path) -> None:
-        """Groups with n_bets == 0 never occupy a table row."""
+        """Groups with n_bets == 0 never occupy a table row.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [_group(tool="bettor", n_bets=10), _group(tool="idle", n_bets=0)],
@@ -208,7 +314,10 @@ class TestBuildRoiSectionHappyPath:
         assert not any("idle" in row for row in rows)
 
     def test_other_platform_groups_ignored(self, tmp_path: Path) -> None:
-        """Only the requested platform's groups render."""
+        """Only the requested platform's groups render.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -222,7 +331,10 @@ class TestBuildRoiSectionHappyPath:
         assert "poly-tool" not in section
 
     def test_flags_compacted(self, tmp_path: Path) -> None:
-        """Verbose flags render as their short spellings in the flags cell."""
+        """Verbose flags render as their short spellings in the flags cell.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [_group(flags=["few bets - anecdotal", "low sample"])],
@@ -234,7 +346,10 @@ class TestBuildRoiSectionHappyPath:
         assert "anecdotal" not in rows[0]
 
     def test_parse_reliability_flag_compacted(self, tmp_path: Path) -> None:
-        """The parse-reliability warning compacts to '⚠ parse NN%'."""
+        """The parse-reliability warning compacts to '⚠ parse NN%'.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         long_flag = "⚠ 45% parse reliability — possible response-format gap"
         path = _write_results(tmp_path, [_group(flags=[long_flag])])
         section = build_roi_section(path, "omen")
@@ -244,7 +359,10 @@ class TestBuildRoiSectionHappyPath:
         assert "response-format" not in rows[0]
 
     def test_mode_labels_abbreviated(self, tmp_path: Path) -> None:
-        """Modes render as 'prod' / 'tourn' to keep the table narrow."""
+        """Modes render as 'prod' / 'tourn' to keep the table narrow.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -263,10 +381,11 @@ class TestModelColumn:
     """Groups are split per underlying LLM; the table shows a model column."""
 
     def test_model_rendered_short(self, tmp_path: Path) -> None:
-        """Known full model names render as their short display form."""
-        path = _write_results(
-            tmp_path, [_group(model="gpt-4.1-2025-04-14")]
-        )
+        """Known full model names render as their short display form.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(tmp_path, [_group(model="gpt-4.1-2025-04-14")])
         section = build_roi_section(path, "omen")
         assert section is not None
         rows = _code_block_lines(section)[2:]
@@ -274,7 +393,10 @@ class TestModelColumn:
         assert "gpt-4.1-2025-04-14" not in section
 
     def test_unmapped_model_kept_verbatim(self, tmp_path: Path) -> None:
-        """Models without a display mapping render their full name."""
+        """Models without a display mapping render their full name.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group(model="claude-sonnet-4-6")])
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -282,7 +404,10 @@ class TestModelColumn:
         assert "claude-sonnet-4-6" in rows[0]
 
     def test_split_groups_render_separate_rows(self, tmp_path: Path) -> None:
-        """Same tool+mode under two models -> two table rows."""
+        """Same tool+mode under two models -> two table rows.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -299,7 +424,10 @@ class TestModelColumn:
         assert "gpt-4o" in rows[1]
 
     def test_absent_model_field_renders_empty_cell(self, tmp_path: Path) -> None:
-        """Older results files without a model field still render rows."""
+        """Older results files without a model field still render rows.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         group = _group()
         del group["model"]
         path = _write_results(tmp_path, [group])
@@ -319,7 +447,10 @@ class TestZeroBetLine:
     """Prediction tools with zero bets are listed on one compact line."""
 
     def test_zero_bet_tools_listed(self, tmp_path: Path) -> None:
-        """Zero-bet prediction tools appear comma-joined after the block."""
+        """Zero-bet prediction tools appear comma-joined after the block.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -333,7 +464,10 @@ class TestZeroBetLine:
         assert "no bets in window: idle-a, idle-b" in section
 
     def test_line_omitted_when_all_tools_bet(self, tmp_path: Path) -> None:
-        """No zero-bet line when every prediction tool placed bets."""
+        """No zero-bet line when every prediction tool placed bets.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group()])
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -375,10 +509,11 @@ class TestZeroBetLine:
 class TestActiveFilter:
     """Groups marked "active": false are excluded and counted, not rendered."""
 
-    def test_inactive_excluded_from_table_and_counted(
-        self, tmp_path: Path
-    ) -> None:
-        """active:false tools leave the table; a trailing count appears."""
+    def test_inactive_excluded_from_table_and_counted(self, tmp_path: Path) -> None:
+        """active:false tools leave the table; a trailing count appears.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -394,7 +529,10 @@ class TestActiveFilter:
         assert "not deployed/active: 2 tools" in section
 
     def test_inactive_excluded_from_zero_bet_line(self, tmp_path: Path) -> None:
-        """A zero-bet inactive tool is counted, never listed as idle."""
+        """A zero-bet inactive tool is counted, never listed as idle.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -408,7 +546,10 @@ class TestActiveFilter:
         assert "not deployed/active: 1 tools" in section
 
     def test_active_true_renders_normally(self, tmp_path: Path) -> None:
-        """An explicit active:true group renders like any other."""
+        """An explicit active:true group renders like any other.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group(tool="live-tool", active=True)])
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -416,7 +557,10 @@ class TestActiveFilter:
         assert "not deployed/active" not in section
 
     def test_absent_active_key_back_compat(self, tmp_path: Path) -> None:
-        """Older results files without the key behave exactly as before."""
+        """Older results files without the key behave exactly as before.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [_group(tool="bettor", n_bets=10), _group(tool="idle", n_bets=0)],
@@ -432,7 +576,10 @@ class TestExcludedLine:
     """Non-prediction tools are summarized as a count only."""
 
     def test_excluded_count_rendered(self, tmp_path: Path) -> None:
-        """Count of distinct non-prediction tools, names omitted."""
+        """Count of distinct non-prediction tools, names omitted.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(
             tmp_path,
             [
@@ -447,7 +594,10 @@ class TestExcludedLine:
         assert "question-gen" not in section
 
     def test_line_omitted_when_none_excluded(self, tmp_path: Path) -> None:
-        """No excluded line when every group is a prediction tool."""
+        """No excluded line when every group is a prediction tool.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group()])
         section = build_roi_section(path, "omen")
         assert section is not None
@@ -463,28 +613,43 @@ class TestReturnsNone:
     """Callers append nothing when there is nothing to render."""
 
     def test_missing_file(self, tmp_path: Path) -> None:
-        """Missing results file -> None."""
+        """Missing results file -> None.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         assert build_roi_section(tmp_path / "absent.json", "omen") is None
 
     def test_unparseable_file(self, tmp_path: Path) -> None:
-        """Corrupt JSON -> None."""
+        """Corrupt JSON -> None.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = tmp_path / "roi_results.json"
         path.write_text("{not json", encoding="utf-8")
         assert build_roi_section(path, "omen") is None
 
     def test_non_dict_payload(self, tmp_path: Path) -> None:
-        """A JSON list payload -> None."""
+        """A JSON list payload -> None.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = tmp_path / "roi_results.json"
         path.write_text("[1, 2]", encoding="utf-8")
         assert build_roi_section(path, "omen") is None
 
     def test_no_groups_for_platform(self, tmp_path: Path) -> None:
-        """Groups exist but none on the requested platform -> None."""
+        """Groups exist but none on the requested platform -> None.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [_group(platform="polymarket")])
         assert build_roi_section(path, "omen") is None
 
     def test_empty_groups(self, tmp_path: Path) -> None:
-        """Empty groups list -> None."""
+        """Empty groups list -> None.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         path = _write_results(tmp_path, [])
         assert build_roi_section(path, "omen") is None
 
@@ -498,7 +663,10 @@ class TestTruncation:
     """Wide deployments keep the top rows by staked and point at the report."""
 
     def test_more_than_max_rows_truncates(self, tmp_path: Path) -> None:
-        """17 bet groups -> MAX_TABLE_ROWS rows + '+N more' line."""
+        """17 bet groups -> MAX_TABLE_ROWS rows + '+N more' line.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         groups = [
             _group(tool=f"tool-{i:02d}", n_bets=10 + i, staked=float(i))
             for i in range(MAX_TABLE_ROWS + 3)
@@ -512,7 +680,10 @@ class TestTruncation:
         assert "+3 more rows in the full report" in rows[-1]
 
     def test_kept_rows_are_top_by_staked(self, tmp_path: Path) -> None:
-        """The lowest-staked groups are the ones dropped."""
+        """The lowest-staked groups are the ones dropped.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         groups = [
             _group(tool=f"tool-{i:02d}", staked=float(i))
             for i in range(MAX_TABLE_ROWS + 2)
@@ -525,7 +696,10 @@ class TestTruncation:
         assert f"tool-{MAX_TABLE_ROWS + 1:02d}" in section
 
     def test_at_max_rows_no_truncation(self, tmp_path: Path) -> None:
-        """Exactly MAX_TABLE_ROWS groups render fully with no more-line."""
+        """Exactly MAX_TABLE_ROWS groups render fully with no more-line.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         groups = [_group(tool=f"tool-{i:02d}") for i in range(MAX_TABLE_ROWS)]
         path = _write_results(tmp_path, groups)
         section = build_roi_section(path, "omen")
@@ -534,17 +708,26 @@ class TestTruncation:
 
 
 class TestLineWidth:
-    """Every code-block line stays within the Slack-friendly width cap."""
+    """Lines stay within the backstop; numeric cells are never ellipsized."""
 
     def test_long_names_and_flags_fit(self, tmp_path: Path) -> None:
-        """Very long tool names / flags are truncated, not overflowed."""
+        """Very long tool names / flags are truncated, not overflowed.
+
+        Numeric columns (preds, bets, Brier, staked, ROI, w/costs) must
+        never carry the ellipsis marker, however extreme their values.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         long_flag = "⚠ 45% parse reliability — possible response-format gap"
         groups = [
             _group(
                 tool="a-very-long-tool-name-that-exceeds-the-column-cap-x" * 2,
-                model="qwen-14b-fine-tuned-calibrated-with-a-long-suffix",
-                n_eligible=99999,
-                n_bets=88888,
+                model="claude-3-5-sonnet-20241022",
+                n_eligible=999999,
+                n_bets=888888,
+                brier_all=0.123456,
+                brier_bets=0.654321,
+                staked=1234567.89,
                 roi_mid=-100.0,
                 roi_ci=[-1234.5, 6789.0],
                 roi_haircut=-100.0,
@@ -554,11 +737,33 @@ class TestLineWidth:
         path = _write_results(tmp_path, groups)
         section = build_roi_section(path, "omen")
         assert section is not None
-        for line in _code_block_lines(section):
+        block = _code_block_lines(section)
+        for line in block:
             assert len(line) <= MAX_LINE_WIDTH, f"too wide: {line!r}"
+        # Only tool + flags may ellipsize; every numeric value renders in full.
+        data_row = block[2]
+        for value in ("999999", "888888", "0.123", "0.654", "1234567.89"):
+            assert value in data_row, f"numeric cell truncated: {value}"
+
+    def test_six_digit_bets_not_ellipsized(self, tmp_path: Path) -> None:
+        """A 6-digit bet count renders in full, never '1097…'.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(
+            tmp_path, [_group(tool="alpha", n_eligible=200000, n_bets=109722)]
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        data_row = _code_block_lines(section)[2]
+        assert "109722" in data_row
+        assert "…" not in data_row
 
     def test_typical_rows_fit(self, tmp_path: Path) -> None:
-        """A realistic multi-row table also honors the width cap."""
+        """A realistic multi-row table also honors the width cap.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         groups = [
             _group(tool="prediction-request-reasoning", n_bets=120),
             _group(tool="prediction-online", mode="tournament", n_bets=40),
@@ -585,7 +790,14 @@ class TestNotifySlackHook:
         extra_argv: list[str] | None = None,
         roi_env: str | None = None,
     ) -> list[str]:
-        """Drive notify_slack.main with network + LLM stubbed; return posts."""
+        """Drive notify_slack.main with network + LLM stubbed; return posts.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        :param extra_argv: extra CLI arguments appended after --report.
+        :param roi_env: value for the ROI_SECTION env var, or None to leave it unset.
+        :return: texts posted to the Slack webhook stub.
+        """
         report = tmp_path / "report_omen.md"
         report.write_text(
             "# Benchmark Report (Omenstrat) — 2026-07-06\n\nbody\n",
@@ -618,7 +830,11 @@ class TestNotifySlackHook:
     def test_section_appended_after_summary(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The builder's text lands at the end of the posted message."""
+        """The builder's text lands at the end of the posted message.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
         calls: list[tuple[Path, str]] = []
 
         def _fake_builder(results_path: Path, platform: str) -> str:
@@ -636,7 +852,11 @@ class TestNotifySlackHook:
     def test_roi_results_flag_passed_through(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """--roi-results overrides the default results path."""
+        """--roi-results overrides the default results path.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
         calls: list[Path] = []
         monkeypatch.setattr(
             notify_slack,
@@ -650,7 +870,11 @@ class TestNotifySlackHook:
     def test_builder_none_appends_nothing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A None from the builder leaves the summary untouched."""
+        """A None from the builder leaves the summary untouched.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
         monkeypatch.setattr(notify_slack, "build_roi_section", lambda *a, **k: None)
         posted = self._run_main(monkeypatch, tmp_path)
         assert len(posted) == 1
@@ -662,7 +886,12 @@ class TestNotifySlackHook:
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """An exploding builder logs a warning; the post still goes out."""
+        """An exploding builder logs a warning; the post still goes out.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
 
         def _boom(results_path: Path, platform: str) -> str:
             raise RuntimeError("boom")
@@ -677,7 +906,11 @@ class TestNotifySlackHook:
     def test_env_var_off_disables_section(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """ROI_SECTION=off skips the builder entirely."""
+        """ROI_SECTION=off skips the builder entirely.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
 
         def _must_not_run(results_path: Path, platform: str) -> str:
             raise AssertionError("builder must not be called when ROI_SECTION=off")

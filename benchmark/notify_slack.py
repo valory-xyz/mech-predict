@@ -232,7 +232,11 @@ OUR_TOOLS: set[str] = set(TOOL_REGISTRY)
 
 
 def _tool_ownership_context(report_text: str) -> str:
-    """List third-party tools found in the report so the LLM can ignore them."""
+    """List third-party tools found in the report so the LLM can ignore them.
+
+    :param report_text: full markdown report for a single platform.
+    :return: a context line naming third-party tools, or an empty string.
+    """
     report_tools: list[str] = []
     for line in report_text.splitlines():
         # "1. **tool-name** — ..."

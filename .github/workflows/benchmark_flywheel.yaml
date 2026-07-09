@@ -115,8 +115,13 @@ jobs:
       # repairable yet the step is a no-op (repaired=0). It writes
       # repaired=<n> AND backfill_error=<true|false> to the step output,
       # both consumed by the force-rebuild path below (backfill_error=true
-      # means a batch/probe/shard-rewrite failed partway, so some rows may
-      # have been repaired but we cannot tell which -> force a rebuild).
+      # means a batch/probe/shard-rewrite failed partway, or a shard was
+      # unreadable/undecodable, so some rows may have been repaired but we
+      # cannot tell which -> force a rebuild). skipped_lines=<n> is also
+      # emitted (total malformed lines quarantined) for the flywheel
+      # summary. A hard kill of this step (timeout/OOM/cancel) writes no
+      # outputs at all; the force-rebuild path additionally gates on
+      # steps.backfill.outcome == 'failure' to cover that case.
       # --max-shard-age-days bounds the scan so legacy/unhealable shards are
       # not re-globbed and re-queried forever as logs/ grows.
       # continue-on-error: a subgraph failure must not kill the flywheel.
@@ -149,11 +154,20 @@ jobs:
       # the scores.json accumulators, so only a full rebuild rescores them
       # -- an incremental update would dedup them away as already-scored.
       # backfill_error=='true' also forces the rebuild: the backfill may
-      # have persisted some repairs before failing partway, and we cannot
-      # tell which rows changed, so a full rebuild is the only safe way to
-      # rescore them.
+      # have persisted some repairs before failing partway (a subgraph
+      # batch/probe failure, an unreadable/undecodable shard, or a shard
+      # rewrite), and we cannot tell which rows changed, so a full rebuild
+      # is the only safe way to rescore them.
+      # steps.backfill.outcome == 'failure' is a THIRD trigger for the
+      # harness-boundary kills that custom outputs cannot report: a timeout,
+      # OOM, cancel, or a pre-try argparse exit terminates the process
+      # before backfill_error/repaired are ever written, and an unset output
+      # reads as '' (failing both '> 0' and "== 'true'"). GitHub Actions
+      # always sets .outcome even under continue-on-error, so gating on it
+      # too means a crash after partial repairs still forces the rebuild
+      # rather than leaving the scores permanently desynced.
       - name: Clear cached scores (force rebuild)
-        if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true'
+        if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure'
         run: |
           rm -f benchmark/results/scores.json \
                 benchmark/results/scores_history.jsonl \
@@ -166,16 +180,17 @@ jobs:
       # Inputs routed through env (not ${{ }} interpolation in the shell script)
       # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
       # before the shell runs, so malicious input would become part of the script.
-      # FORCE_REBUILD also flips to true when the backfill repaired rows or
-      # errored partway, so this step and the Score step stay in lockstep
-      # with the wipe above (otherwise the inline fast-path would recreate
-      # scores.json from today's rows only and the Score step would skip the
-      # rebuild). The condition must stay identical to the wipe step's and
-      # the Score step's FORCE_REBUILD.
+      # FORCE_REBUILD also flips to true when the backfill repaired rows,
+      # errored partway, or was hard-killed at the harness boundary
+      # (outcome == 'failure'), so this step and the Score step stay in
+      # lockstep with the wipe above (otherwise the inline fast-path would
+      # recreate scores.json from today's rows only and the Score step would
+      # skip the rebuild). The condition must stay identical to the wipe
+      # step's and the Score step's FORCE_REBUILD.
       - name: Fetch production data
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
-          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true') && 'true' || 'false' }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
         run: |
           NO_SCORE_FLAG=""
           if [ "$FORCE_REBUILD" = "true" ]; then
@@ -193,7 +208,7 @@ jobs:
       # the backfill step repaired rows (see the wipe step above for why).
       - name: Score
         env:
-          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true') && 'true' || 'false' }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then

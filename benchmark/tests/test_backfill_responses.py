@@ -212,6 +212,16 @@ class TestRepairRow:
         assert "tool_version" not in row
         assert "config_hash" not in row
 
+    def test_empty_string_metadata_treated_as_absent(self) -> None:
+        """An empty-string model/tool_hash never fills the row (presence)."""
+        row = _row("0x01")
+        assert br.repair_row(row, VALID_RESPONSE, model="", tool_hash="") is True
+        # Empty strings are absent: no useless "" written that would then
+        # defeat a future fill-if-null.
+        assert "model" not in row
+        assert "tool_version" not in row
+        assert "config_hash" not in row
+
 
 # ---------------------------------------------------------------------------
 # backfill: repair behaviour
@@ -786,6 +796,69 @@ class TestFailureIsolation:
         assert _read_shard(first)[0]["prediction_parse_status"] == "valid"
         assert _read_shard(second)[0]["prediction_parse_status"] == "missing_fields"
 
+    def test_dropped_line_quarantined_when_shard_rewritten(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A dropped line is quarantined (not lost) on rewrite; skipped_lines emitted."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        shard = logs_dir / "production_log_2026_07_01.jsonl"
+        corrupt = "{ this is not valid json\n"
+        with open(shard, "w", encoding="utf-8") as f:
+            f.write(corrupt)
+            f.write(json.dumps(_row("0xaa"), ensure_ascii=False) + "\n")
+        gh_output = tmp_path / "gh_output.txt"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+        monkeypatch.setattr(
+            br, "_post_graphql", _make_fake_post_graphql({"0xaa": VALID_RESPONSE})
+        )
+        monkeypatch.setattr(
+            "sys.argv", ["backfill_responses", "--logs-dir", str(logs_dir)]
+        )
+
+        br.main()
+
+        # The repaired candidate remains; the corrupt line is gone from it.
+        after = _read_shard(shard)
+        assert [r["deliver_id"] for r in after] == ["0xaa"]
+        # ...but its raw text is preserved verbatim in the reject file.
+        rejected = logs_dir / "production_log_2026_07_01.jsonl.rejected.jsonl"
+        assert rejected.exists()
+        assert rejected.read_text(encoding="utf-8") == corrupt
+        # skipped_lines surfaced for the flywheel summary.
+        assert "skipped_lines=1" in gh_output.read_text()
+        # A second run does not re-scan or re-quarantine the reject file.
+        summary2 = br.backfill(logs_dir)
+        assert summary2["skipped_lines"] == 0
+        assert rejected.read_text(encoding="utf-8") == corrupt
+
+    def test_undecodable_shard_isolated_other_shards_repaired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bad UTF-8 byte skips that shard; others still repair, no raise."""
+        # Shard A holds a raw invalid UTF-8 byte: iteration decodes it and
+        # raises UnicodeDecodeError before the per-line json guard.
+        bad = tmp_path / "production_log_2026_07_01.jsonl"
+        bad.write_bytes(b"\xff\xfe not valid utf-8\n")
+        # Shard B is a clean, repairable candidate.
+        good = tmp_path / "production_log_2026_07_02.jsonl"
+        _write_shard(good, [_row("0xbb")])
+        monkeypatch.setattr(
+            br, "_post_graphql", _make_fake_post_graphql({"0xbb": VALID_RESPONSE})
+        )
+
+        summary = br.backfill(tmp_path)  # must not raise
+
+        # Undecodable shard isolated + flagged; healthy shard still repaired.
+        assert summary["backfill_error"] is True
+        assert summary["repaired"] == 1
+        assert _read_shard(good)[0]["prediction_parse_status"] == "valid"
+        # The undecodable shard was left untouched (bytes unchanged).
+        assert bad.read_bytes() == b"\xff\xfe not valid utf-8\n"
+
 
 # ---------------------------------------------------------------------------
 # Shard-age bound
@@ -817,6 +890,23 @@ class TestShardAgeBound:
         monkeypatch.setattr(br, "_post_graphql", _make_fake_post_graphql({}))
 
         summary = br.backfill(tmp_path, max_shard_age_days=1)
+
+        assert summary["shards_scanned"] == 1
+        assert summary["candidates"] == 1
+
+    @pytest.mark.parametrize("disabled", [0, -1])
+    def test_zero_or_negative_age_scans_all_shards(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        disabled: int,
+    ) -> None:
+        """max_shard_age_days <= 0 disables the bound directly in backfill()."""
+        # A very old shard that any positive bound would skip.
+        _write_shard(tmp_path / "production_log_2000_01_01.jsonl", [_row("0xold")])
+        monkeypatch.setattr(br, "_post_graphql", _make_fake_post_graphql({}))
+
+        summary = br.backfill(tmp_path, max_shard_age_days=disabled)
 
         assert summary["shards_scanned"] == 1
         assert summary["candidates"] == 1

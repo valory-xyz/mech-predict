@@ -40,15 +40,15 @@ Design:
      (any platform -- the repair is platform-generic). Malformed JSONL
      lines are skipped with a warning (a bad line -- exactly the failure
      class this module heals -- must never abort the scan) and an
-     unreadable shard is isolated so it cannot sink the run.
+     unreadable or undecodable shard is isolated so it cannot sink the run.
   2. Batch-requery each platform's marketplace subgraph for those deliver
      ids, using the query shape the endpoint supports (nested
      ParsedDelivery vs legacy flat fields, probed once per endpoint via
      ``fetch_production.detect_delivers_schema``).
   3. Rows whose response is now available are re-parsed with the same
      parser the fetcher uses; rows that parse to a valid prediction are
-     updated in place (p_yes, p_no, parse status, bucketing metadata when
-     plus model/tool_version/config_hash when the row lacked them, so a
+     updated in place (p_yes, p_no, parse status, and the bucketing
+     metadata model/tool_version/config_hash when the row lacked them, so a
      repaired row buckets correctly rather than under "unknown"). Rows
      still missing or still unparseable stay untouched.
   4. Each modified shard is rewritten atomically (tmp file + os.replace),
@@ -57,12 +57,13 @@ Design:
      ``repaired`` count is accumulated as each shard succeeds.
 
 Failure isolation: ``backfill`` never raises -- a failed schema probe,
-subgraph batch, malformed line, unreadable shard, or shard rewrite is
-logged and skipped, and the partial summary (with the count of repairs
-already persisted) is RETURNED, not unwound. When any subgraph batch/probe
-or shard rewrite failed, the summary carries ``backfill_error=True`` so the
-caller (and CI) can distinguish "nothing to repair" from "crashed partway"
-and force a rebuild of the already-repaired rows.
+subgraph batch, malformed line, unreadable/undecodable shard, or shard
+rewrite is logged and skipped, and the partial summary (with the count of
+repairs already persisted) is RETURNED, not unwound. When any subgraph
+batch/probe, unreadable/undecodable shard, or shard rewrite failed, the
+summary carries ``backfill_error=True`` so the caller (and CI) can
+distinguish "nothing to repair" from "crashed partway" and force a rebuild
+of the already-repaired rows.
 
 Idempotent: repaired rows no longer carry ``missing_fields``, so a second
 run finds nothing to repair; running while the upstream data is still
@@ -264,37 +265,63 @@ def fetch_tool_responses(
 # ---------------------------------------------------------------------------
 
 
-def _load_shard(path: Path) -> tuple[list[dict[str, Any]], int]:
+def _load_shard(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     """Load all rows from one JSONL shard, tolerating malformed lines.
 
     A single corrupt/truncated JSONL line -- exactly the failure class this
     module exists to heal -- must never abort the scan, so a bad line is
     skipped with a warning (mirroring
-    ``fetch_production._load_ids_from_file``'s scoped except) and counted
-    rather than raised.
+    ``fetch_production._load_ids_from_file``'s scoped except) and its raw
+    text is captured rather than raised, so the caller can quarantine it
+    before a rewrite would otherwise delete it for good.
+
+    A truncated multi-byte line raises ``UnicodeDecodeError`` (a
+    ``ValueError`` subclass) during file iteration, BEFORE the per-line
+    json guard, so it escapes this function and is isolated by the caller's
+    ``(OSError, ValueError)`` catch.
 
     :param path: path to the shard file.
-    :return: ``(rows, skipped)`` -- row dicts in file order and the count
-        of malformed lines skipped.
+    :return: ``(rows, dropped)`` -- row dicts in file order and the raw
+        verbatim text of each malformed line skipped.
     """
     rows: list[dict[str, Any]] = []
-    skipped = 0
+    dropped: list[str] = []
     with open(path, encoding="utf-8") as f:
-        for lineno, line in enumerate(f, start=1):
-            line = line.strip()
+        for lineno, raw in enumerate(f, start=1):
+            line = raw.strip()
             if not line:
                 continue
             try:
                 rows.append(json.loads(line))
             except (json.JSONDecodeError, ValueError) as e:
-                skipped += 1
+                dropped.append(raw)
                 log.warning(
                     "Skipping malformed line %d in shard %s: %s",
                     lineno,
                     path.name,
                     e,
                 )
-    return rows, skipped
+    return rows, dropped
+
+
+def _quarantine_dropped_lines(shard_path: Path, lines: list[str]) -> None:
+    """Append verbatim dropped malformed lines to a sibling reject file.
+
+    Called just before a shard is rewritten (which drops its malformed
+    lines): without this the raw text would vanish with no forensic trail.
+    The reject file is ``<shard>.rejected.jsonl`` alongside the shard; the
+    Pass-1 scan explicitly skips ``*.rejected.jsonl`` so quarantined text is
+    never re-scanned or re-quarantined.
+
+    :param shard_path: shard being rewritten.
+    :param lines: raw verbatim malformed lines to preserve (may be empty).
+    """
+    if not lines:
+        return
+    rejected = shard_path.with_name(shard_path.name + ".rejected.jsonl")
+    with open(rejected, "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line if line.endswith("\n") else line + "\n")
 
 
 def _shard_date(path: Path) -> Optional[date]:
@@ -310,6 +337,10 @@ def _shard_date(path: Path) -> Optional[date]:
     try:
         return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     except ValueError:
+        log.warning(
+            "Shard %s has an impossible date in its name -- not age-gating it",
+            path.name,
+        )
         return None
 
 
@@ -328,6 +359,7 @@ def _is_candidate(row: dict[str, Any]) -> bool:
 def repair_row(
     row: dict[str, Any],
     tool_response: Optional[str],
+    *,
     model: Optional[str] = None,
     tool_hash: Optional[str] = None,
 ) -> bool:
@@ -363,11 +395,14 @@ def repair_row(
     # row must match that shape exactly rather than grow an extra column.
     # Backfill bucketing metadata (fill-if-null; never overwrite). Mirror
     # build_row: config_hash = _compute_config_hash(tool_version, model).
-    if model is not None and row.get("model") is None:
+    # Truthiness is the presence predicate: a subgraph "" (or None) is
+    # treated as absent so an empty-string model can't fill the column with
+    # a useless value that then defeats a future fill.
+    if model and row.get("model") is None:
         row["model"] = model
-    if tool_hash is not None and row.get("tool_version") is None:
+    if tool_hash and row.get("tool_version") is None:
         row["tool_version"] = tool_hash
-    if tool_hash is not None and row.get("config_hash") is None:
+    if tool_hash and row.get("config_hash") is None:
         row["config_hash"] = _compute_config_hash(tool_hash, row.get("model"))
     return True
 
@@ -401,18 +436,21 @@ def backfill(
 ) -> dict[str, Any]:
     """Scan all shards, requery lost responses, and repair rows in place.
 
-    Never raises: a failed probe/batch, malformed line, unreadable shard,
-    or shard-rewrite failure is logged and skipped, and the partial summary
-    (with the repairs already persisted) is returned. ``backfill_error`` in
-    the summary is True when any subgraph probe/batch or shard rewrite
-    failed, so the caller can force a rebuild of the already-repaired rows.
+    Never raises: a failed probe/batch, malformed line, unreadable/
+    undecodable shard, or shard-rewrite failure is logged and skipped, and
+    the partial summary (with the repairs already persisted) is returned.
+    ``backfill_error`` in the summary is True when any subgraph probe/batch,
+    unreadable/undecodable shard, or shard rewrite failed, so the caller can
+    force a rebuild of the already-repaired rows.
 
     :param logs_dir: directory containing the daily JSONL shards.
     :param batch_size: max deliver ids per GraphQL request.
     :param max_shard_age_days: skip shards whose filename date is older
-        than this many days (None disables the bound); give-up behavior for
-        legacy/unhealable rows once they age out of the window. Shards with
-        an unparseable filename date are never age-gated.
+        than this many days; give-up behavior for legacy/unhealable rows
+        once they age out of the window. ``None`` or a value <= 0 disables
+        the bound (scan all shards) -- this "<=0 disables" translation lives
+        here so a direct caller and the CLI share one source of truth.
+        Shards with an unparseable filename date are never age-gated.
     :return: summary dict with ``shards_scanned``, ``candidates``,
         ``repaired``, ``skipped_lines``, ``backfill_error``, and a
         per-platform breakdown.
@@ -429,14 +467,23 @@ def backfill(
         log.info("Logs dir %s does not exist -- nothing to backfill", logs_dir)
         return summary
 
+    # Single source of truth for the "<=0 disables the bound" rule: a
+    # direct caller passing 0/negative gets the same scan-all behavior as
+    # the CLI, not a silent near-empty scan.
+    if max_shard_age_days is not None and max_shard_age_days <= 0:
+        max_shard_age_days = None
+
     cutoff: Optional[date] = None
     if max_shard_age_days is not None:
         cutoff = date.today() - timedelta(days=max_shard_age_days)
 
     # Pass 1: scan shards, collect candidate deliver ids per platform.
-    shards: list[tuple[Path, list[dict[str, Any]]]] = []
+    shards: list[tuple[Path, list[dict[str, Any]], list[str]]] = []
     ids_by_platform: dict[str, list[str]] = {}
     for path in sorted(logs_dir.glob("*.jsonl")):
+        # Never re-scan (or re-quarantine) our own quarantine files.
+        if path.name.endswith(".rejected.jsonl"):
+            continue
         if cutoff is not None:
             shard_dt = _shard_date(path)
             if shard_dt is not None and shard_dt < cutoff:
@@ -447,14 +494,17 @@ def backfill(
                 )
                 continue
         try:
-            rows, skipped = _load_shard(path)
-        except OSError as e:
-            # Per-file isolation: an unreadable shard cannot sink the run.
+            rows, dropped = _load_shard(path)
+        except (OSError, ValueError) as e:
+            # Per-file isolation: an unreadable shard (OSError) or an
+            # undecodable one -- a truncated multi-byte line raises
+            # UnicodeDecodeError, a ValueError subclass, during iteration
+            # before the per-line json guard -- cannot sink the run.
             log.warning("Failed to read shard %s: %s -- skipping", path.name, e)
             summary["backfill_error"] = True
             continue
-        summary["skipped_lines"] += skipped
-        shards.append((path, rows))
+        summary["skipped_lines"] += len(dropped)
+        shards.append((path, rows, dropped))
         summary["shards_scanned"] += 1
         for row in rows:
             if not _is_candidate(row):
@@ -494,7 +544,7 @@ def backfill(
     # the repairs already persisted to earlier shards. Per-shard/per-platform
     # counts are committed to the summary only AFTER the atomic rewrite
     # succeeds, so the returned counts reflect exactly what is on disk.
-    for path, rows in shards:
+    for path, rows, dropped in shards:
         try:
             shard_repaired = 0
             shard_by_platform: dict[str, int] = {}
@@ -508,12 +558,16 @@ def backfill(
                 if repair_row(
                     row,
                     fields.get("tool_response"),
-                    fields.get("model"),
-                    fields.get("tool_hash"),
+                    model=fields.get("model"),
+                    tool_hash=fields.get("tool_hash"),
                 ):
                     shard_repaired += 1
                     shard_by_platform[platform] = shard_by_platform.get(platform, 0) + 1
             if shard_repaired:
+                # The rewrite drops this shard's malformed lines; preserve
+                # their raw text first so a corrupt row is quarantined, not
+                # silently deleted.
+                _quarantine_dropped_lines(path, dropped)
                 _rewrite_shard_atomic(path, rows)
                 summary["repaired"] += shard_repaired
                 for platform, count in shard_by_platform.items():
@@ -562,21 +616,29 @@ def _log_summary(summary: dict[str, Any]) -> None:
         )
 
 
-def _emit_repaired_output(repaired: int, backfill_error: bool = False) -> None:
+def _emit_repaired_output(
+    repaired: int, backfill_error: bool = False, skipped_lines: int = 0
+) -> None:
     """Emit the repaired count and error flag for workflow consumption.
 
-    Prints ``repaired=<n>`` and ``backfill_error=<true|false>`` to stdout
-    and appends the same lines to ``$GITHUB_OUTPUT`` when that env var is
-    set, so the flywheel force-rebuild path can gate on either: repaired>0
-    (rows changed) OR backfill_error (a partial rewrite/batch failure means
-    some rows may have been repaired but we cannot tell which, so rebuild).
+    Prints ``repaired=<n>``, ``backfill_error=<true|false>`` and
+    ``skipped_lines=<n>`` to stdout and appends the same lines to
+    ``$GITHUB_OUTPUT`` when that env var is set, so the flywheel
+    force-rebuild path can gate on either: repaired>0 (rows changed) OR
+    backfill_error (a partial rewrite/batch failure, or an unreadable/
+    undecodable shard, means some rows may have been repaired but we cannot
+    tell which, so rebuild). ``skipped_lines`` is surfaced (total malformed
+    lines dropped across shards) so the flywheel summary can flag it.
 
     :param repaired: number of rows repaired this run.
-    :param backfill_error: True if any probe/batch/shard rewrite failed.
+    :param backfill_error: True if any probe/batch/shard rewrite or
+        unreadable/undecodable shard failed.
+    :param skipped_lines: total malformed lines skipped across all shards.
     """
     lines = [
         f"repaired={repaired}",
         f"backfill_error={'true' if backfill_error else 'false'}",
+        f"skipped_lines={skipped_lines}",
     ]
     for line in lines:
         print(line)
@@ -634,22 +696,24 @@ def main() -> None:
     ``$GITHUB_OUTPUT`` write are the only non-zero exits.
     """
     args = _build_arg_parser().parse_args()
-    max_age: Optional[int] = (
-        args.max_shard_age_days if args.max_shard_age_days > 0 else None
-    )
+    # Pass the raw --max-shard-age-days through: backfill() owns the
+    # "<=0 disables the bound" translation so a direct caller and the CLI
+    # share one source of truth.
     repaired = 0
     backfill_error = False
+    skipped_lines = 0
     try:
-        summary = backfill(args.logs_dir, args.batch_size, max_age)
+        summary = backfill(args.logs_dir, args.batch_size, args.max_shard_age_days)
         repaired = summary["repaired"]
         backfill_error = summary.get("backfill_error", False)
+        skipped_lines = summary.get("skipped_lines", 0)
         _log_summary(summary)
     except Exception:  # pylint: disable=broad-except
         # Defense in depth: backfill is designed not to raise, but if it
         # ever does, force a rebuild rather than silently drop the signal.
         log.exception("Backfill failed (non-fatal: the flywheel must not block)")
         backfill_error = True
-    _emit_repaired_output(repaired, backfill_error)
+    _emit_repaired_output(repaired, backfill_error, skipped_lines)
 
 
 if __name__ == "__main__":

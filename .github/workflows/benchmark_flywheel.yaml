@@ -105,6 +105,22 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # Self-healing backfill: delivery rows are occasionally written to
+      # the daily shards before their response is available upstream
+      # (indexer lag or transient subgraph failures), landing with
+      # p_yes=null and prediction_parse_status="missing_fields". The fetch
+      # is append-only (row_id dedup), so those rows are never re-fetched.
+      # This step requeries the marketplace subgraphs for such rows and
+      # repairs the shards in place once the data exists; when nothing is
+      # repairable yet the step is a no-op (repaired=0). It writes
+      # repaired=<n> to the step output, which the force-rebuild path
+      # below consumes.
+      # continue-on-error: a subgraph failure must not kill the flywheel.
+      - name: Backfill null tool responses (self-healing)
+        id: backfill
+        continue-on-error: true
+        run: python -m benchmark.datasets.backfill_responses
+
       # Tournament-scored data from the tournament-run job. Used as input
       # to scorer (--tournament-input) so the per-(tool, version, mode)
       # breakdown shows up in the unified report.
@@ -124,8 +140,12 @@ jobs:
       # persisted so deleting it here was a no-op; now that it rides in
       # the artifact, force_rebuild must explicitly clear it or the
       # rebuild runs against an empty log dir.
+      # Also fires when the backfill step above repaired rows: those rows
+      # were previously counted as invalid inside scored_row_ids.json and
+      # the scores.json accumulators, so only a full rebuild rescores them
+      # -- an incremental update would dedup them away as already-scored.
       - name: Clear cached scores (force rebuild)
-        if: github.event.inputs.force_rebuild == 'true'
+        if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0
         run: |
           rm -f benchmark/results/scores.json \
                 benchmark/results/scores_history.jsonl \
@@ -138,10 +158,14 @@ jobs:
       # Inputs routed through env (not ${{ }} interpolation in the shell script)
       # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
       # before the shell runs, so malicious input would become part of the script.
+      # FORCE_REBUILD also flips to true when the backfill repaired rows,
+      # so this step and the Score step stay in lockstep with the wipe
+      # above (otherwise the inline fast-path would recreate scores.json
+      # from today's rows only and the Score step would skip the rebuild).
       - name: Fetch production data
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
-          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0) && 'true' || 'false' }}
         run: |
           NO_SCORE_FLAG=""
           if [ "$FORCE_REBUILD" = "true" ]; then
@@ -155,10 +179,11 @@ jobs:
       # missing (first run, or prior run crashed before fetch's inline
       # update), or (b) force_rebuild=true (explicit full rebuild). On
       # normal runs the fast path in fetch_production already produced
-      # scores.json, and this step is a no-op.
+      # scores.json, and this step is a no-op. The rebuild also fires when
+      # the backfill step repaired rows (see the wipe step above for why).
       - name: Score
         env:
-          FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0) && 'true' || 'false' }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then

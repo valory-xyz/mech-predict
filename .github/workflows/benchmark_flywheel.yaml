@@ -113,13 +113,17 @@ jobs:
       # This step requeries the marketplace subgraphs for such rows and
       # repairs the shards in place once the data exists; when nothing is
       # repairable yet the step is a no-op (repaired=0). It writes
-      # repaired=<n> to the step output, which the force-rebuild path
-      # below consumes.
+      # repaired=<n> AND backfill_error=<true|false> to the step output,
+      # both consumed by the force-rebuild path below (backfill_error=true
+      # means a batch/probe/shard-rewrite failed partway, so some rows may
+      # have been repaired but we cannot tell which -> force a rebuild).
+      # --max-shard-age-days bounds the scan so legacy/unhealable shards are
+      # not re-globbed and re-queried forever as logs/ grows.
       # continue-on-error: a subgraph failure must not kill the flywheel.
       - name: Backfill null tool responses (self-healing)
         id: backfill
         continue-on-error: true
-        run: python -m benchmark.datasets.backfill_responses
+        run: python -m benchmark.datasets.backfill_responses --max-shard-age-days 120
 
       # Tournament-scored data from the tournament-run job. Used as input
       # to scorer (--tournament-input) so the per-(tool, version, mode)
@@ -144,8 +148,12 @@ jobs:
       # were previously counted as invalid inside scored_row_ids.json and
       # the scores.json accumulators, so only a full rebuild rescores them
       # -- an incremental update would dedup them away as already-scored.
+      # backfill_error=='true' also forces the rebuild: the backfill may
+      # have persisted some repairs before failing partway, and we cannot
+      # tell which rows changed, so a full rebuild is the only safe way to
+      # rescore them.
       - name: Clear cached scores (force rebuild)
-        if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0
+        if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true'
         run: |
           rm -f benchmark/results/scores.json \
                 benchmark/results/scores_history.jsonl \
@@ -158,14 +166,16 @@ jobs:
       # Inputs routed through env (not ${{ }} interpolation in the shell script)
       # to prevent workflow_dispatch shell injection — ${{ }} is macro-expanded
       # before the shell runs, so malicious input would become part of the script.
-      # FORCE_REBUILD also flips to true when the backfill repaired rows,
-      # so this step and the Score step stay in lockstep with the wipe
-      # above (otherwise the inline fast-path would recreate scores.json
-      # from today's rows only and the Score step would skip the rebuild).
+      # FORCE_REBUILD also flips to true when the backfill repaired rows or
+      # errored partway, so this step and the Score step stay in lockstep
+      # with the wipe above (otherwise the inline fast-path would recreate
+      # scores.json from today's rows only and the Score step would skip the
+      # rebuild). The condition must stay identical to the wipe step's and
+      # the Score step's FORCE_REBUILD.
       - name: Fetch production data
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
-          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0) && 'true' || 'false' }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true') && 'true' || 'false' }}
         run: |
           NO_SCORE_FLAG=""
           if [ "$FORCE_REBUILD" = "true" ]; then
@@ -183,7 +193,7 @@ jobs:
       # the backfill step repaired rows (see the wipe step above for why).
       - name: Score
         env:
-          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0) && 'true' || 'false' }}
+          FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true') && 'true' || 'false' }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then

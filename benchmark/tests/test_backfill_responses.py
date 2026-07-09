@@ -28,6 +28,7 @@ from benchmark.datasets import backfill_responses as br
 from benchmark.datasets.fetch_production import (
     DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
+    parse_tool_response,
 )
 
 # ---------------------------------------------------------------------------
@@ -177,6 +178,36 @@ class TestRepairRow:
         before = dict(row)
         assert br.repair_row(row, '{"p_yes": 0.9, "p_no": 0.9}') is False
         assert row == before
+
+    def test_backfills_bucketing_metadata_when_null(self) -> None:
+        """A repair fills model/tool_version/config_hash when they are null."""
+        row = _row("0x01")  # no model/tool_version/config_hash keys
+        assert (
+            br.repair_row(row, VALID_RESPONSE, model="gpt-4o", tool_hash="bafyabc")
+            is True
+        )
+        assert row["model"] == "gpt-4o"
+        assert row["tool_version"] == "bafyabc"
+        assert row["config_hash"] is not None
+
+    def test_does_not_overwrite_existing_metadata(self) -> None:
+        """Existing (non-null) model/tool_version/config_hash are preserved."""
+        row = _row("0x01", model="existing", tool_version="v1", config_hash="c1")
+        assert (
+            br.repair_row(row, VALID_RESPONSE, model="gpt-4o", tool_hash="bafyabc")
+            is True
+        )
+        assert row["model"] == "existing"
+        assert row["tool_version"] == "v1"
+        assert row["config_hash"] == "c1"
+
+    def test_no_metadata_added_when_not_supplied(self) -> None:
+        """Without model/tool_hash the repair adds no bucketing metadata."""
+        row = _row("0x01")
+        assert br.repair_row(row, VALID_RESPONSE) is True
+        assert "model" not in row
+        assert "tool_version" not in row
+        assert "config_hash" not in row
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +655,11 @@ class TestMainOutput:
     ) -> None:
         """An unexpected failure is swallowed and reported as repaired=0."""
 
-        def boom(logs_dir: Path, batch_size: int = 0) -> dict[str, Any]:
+        def boom(
+            logs_dir: Path,
+            batch_size: int = 0,
+            max_shard_age_days: Optional[int] = None,
+        ) -> dict[str, Any]:
             """Simulate an unexpected crash inside the backfill."""
             raise RuntimeError("unexpected")
 
@@ -637,3 +672,148 @@ class TestMainOutput:
         br.main()  # must not raise
 
         assert "repaired=0" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Status-literal contract (regression guard)
+# ---------------------------------------------------------------------------
+
+
+class TestStatusLiteralContract:
+    """Pin the parse-status literal this module keys candidates on.
+
+    ``CANDIDATE_PARSE_STATUS`` is a bare string that must equal what
+    ``fetch_production.parse_tool_response`` emits for empty/null input; a
+    silent rename there would zero candidates forever. This test breaks
+    instead so the contract is enforced from within #396 without editing
+    fetch_production. (A shared Literal/StrEnum is the cleaner long-term
+    fix but belongs to a base-branch/main change.)
+    """
+
+    def test_candidate_parse_status_matches_fetch_production(self) -> None:
+        """Empty/null input yields exactly CANDIDATE_PARSE_STATUS."""
+        for empty in (None, ""):
+            result = parse_tool_response(empty)
+            assert result["prediction_parse_status"] == br.CANDIDATE_PARSE_STATUS
+
+
+# ---------------------------------------------------------------------------
+# Failure isolation (critical-path tests)
+# ---------------------------------------------------------------------------
+
+
+class TestFailureIsolation:
+    """Highest-risk paths: a corrupt line and a partial rewrite failure."""
+
+    def test_corrupt_line_skipped_other_shards_still_repaired(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A malformed JSONL line is skipped; other shards still repair."""
+        # Shard A carries a corrupt line before a valid candidate.
+        bad = tmp_path / "production_log_2026_07_01.jsonl"
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("{ this is not valid json\n")
+            f.write(json.dumps(_row("0xaa"), ensure_ascii=False) + "\n")
+        # Shard B is clean with its own candidate.
+        good = tmp_path / "production_log_2026_07_02.jsonl"
+        _write_shard(good, [_row("0xbb")])
+        monkeypatch.setattr(
+            br,
+            "_post_graphql",
+            _make_fake_post_graphql({"0xaa": VALID_RESPONSE, "0xbb": VALID_RESPONSE}),
+        )
+
+        summary = br.backfill(tmp_path)
+
+        # Corrupt line counted, not fatal; both candidates repaired.
+        assert summary["skipped_lines"] == 1
+        assert summary["repaired"] == 2
+        assert summary["backfill_error"] is False
+        assert _read_shard(good)[0]["prediction_parse_status"] == "valid"
+        repaired_bad = _read_shard(bad)
+        assert [r["deliver_id"] for r in repaired_bad] == ["0xaa"]
+        assert repaired_bad[0]["prediction_parse_status"] == "valid"
+
+    def test_partial_rewrite_failure_reflected_in_output(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """2nd-shard rewrite raising: 1st shard's repair + error still ship."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        # Two dirty shards; sorted order rewrites 07_01 before 07_02.
+        first = logs_dir / "production_log_2026_07_01.jsonl"
+        second = logs_dir / "production_log_2026_07_02.jsonl"
+        _write_shard(first, [_row("0xaa")])
+        _write_shard(second, [_row("0xbb")])
+        gh_output = tmp_path / "gh_output.txt"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(gh_output))
+        monkeypatch.setattr(
+            br,
+            "_post_graphql",
+            _make_fake_post_graphql({"0xaa": VALID_RESPONSE, "0xbb": VALID_RESPONSE}),
+        )
+
+        real_rewrite = br._rewrite_shard_atomic  # pylint: disable=protected-access
+        state = {"n": 0}
+
+        def flaky_rewrite(path: Path, rows: list[dict[str, Any]]) -> None:
+            """Succeed on the first shard, raise on the second."""
+            state["n"] += 1
+            if state["n"] == 2:
+                raise RuntimeError("disk full")
+            real_rewrite(path, rows)
+
+        monkeypatch.setattr(br, "_rewrite_shard_atomic", flaky_rewrite)
+        monkeypatch.setattr(
+            "sys.argv", ["backfill_responses", "--logs-dir", str(logs_dir)]
+        )
+
+        br.main()  # must not raise
+
+        out = capsys.readouterr().out
+        assert "repaired=1" in out
+        assert "backfill_error=true" in out
+        text = gh_output.read_text()
+        assert "repaired=1" in text
+        assert "backfill_error=true" in text
+        # First shard was rewritten; second stayed a candidate.
+        assert _read_shard(first)[0]["prediction_parse_status"] == "valid"
+        assert _read_shard(second)[0]["prediction_parse_status"] == "missing_fields"
+
+
+# ---------------------------------------------------------------------------
+# Shard-age bound
+# ---------------------------------------------------------------------------
+
+
+class TestShardAgeBound:
+    """Tests for the --max-shard-age-days give-up bound."""
+
+    def test_old_shard_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard older than the bound is skipped entirely (given up on)."""
+        _write_shard(tmp_path / "production_log_2000_01_01.jsonl", [_row("0xold")])
+        calls: list[tuple[str, list[str]]] = []
+        monkeypatch.setattr(br, "_post_graphql", _make_fake_post_graphql({}, calls))
+
+        summary = br.backfill(tmp_path, max_shard_age_days=120)
+
+        assert summary["shards_scanned"] == 0
+        assert summary["candidates"] == 0
+        assert not calls
+
+    def test_unparseable_shard_name_never_age_gated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shard whose name has no date is scanned regardless of the bound."""
+        _write_shard(tmp_path / "production_log_legacy.jsonl", [_row("0x01")])
+        monkeypatch.setattr(br, "_post_graphql", _make_fake_post_graphql({}))
+
+        summary = br.backfill(tmp_path, max_shard_age_days=1)
+
+        assert summary["shards_scanned"] == 1
+        assert summary["candidates"] == 1

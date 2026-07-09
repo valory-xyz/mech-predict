@@ -1364,9 +1364,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 model=review_model,
                 messages=review_messages,
                 temperature=0.0,
-                # Review output scales with candidate count (each needs verbose
-                # step-by-step reasoning); a fixed 2048 truncated the JSON at
-                # num_questions>=3 (n_candidates = num_questions * 3).
+                # 768 tokens per candidate covers verbose per-verdict reasoning;
+                # 1024 covers the JSON schema envelope. 16384 caps the worst case.
                 max_tokens=min(16384, 1024 + 768 * n_candidates),
                 n=1,
                 timeout=120,

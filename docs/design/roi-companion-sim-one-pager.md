@@ -45,12 +45,14 @@ Each daily run re-reads the accumulated artifacts and recomputes a **trailing wi
 **Simulated trader ROI - trailing 90 days - Polymarket**
 ROI = total PnL / total staked on bets placed *in this window* (not all-time, not annualized).
 
-| Tool | mode | n preds | n bets | Brier (all -> bets) | staked | ROI (95% CI) | ROI w/ costs | flags |
-|---|---|---|---|---|---|---|---|---|
-| fine-tuned tool | tourn | 1,240 | 96 | 0.21 -> 0.26 | 212 USDC | **-2.9%** (-10.1, +4.6) | -5.1% | |
-| live production tool | prod | 3,410 | 187 | 0.24 -> 0.33 | 421 USDC | -6.3% (-11.2, -1.5) | -8.8% | |
-| tournament-only tool | tourn | 310 | 22 | 0.25 -> 0.31 | 48 USDC | -1.0% (-19.4, +18.2) | -3.2% | few bets - anecdotal |
+| Tool | mode | model | n preds | n bets | Brier (all -> bets) | staked | ROI (95% CI) | ROI w/ costs | flags |
+|---|---|---|---|---|---|---|---|---|---|
+| fine-tuned tool | tourn | qwen-14b-fine-tuned | 1,240 | 96 | 0.21 -> 0.26 | 212 USDC | **-2.9%** (-10.1, +4.6) | -5.1% | |
+| live production tool | prod | gpt-4.1 | 3,410 | 187 | 0.24 -> 0.33 | 421 USDC | -6.3% (-11.2, -1.5) | -8.8% | |
+| tournament-only tool | tourn | gpt-4.1 | 310 | 22 | 0.25 -> 0.31 | 48 USDC | -1.0% (-19.4, +18.2) | -3.2% | few bets - anecdotal |
 
+model = the LLM the tool ran on, payload-derived for production; tournament stamps corrected for
+tools that hardcode their model - a tool that ran on several models splits into one row per model.
 Brier/accuracy = over ALL eligible predictions (same basis as the accuracy benchmark); the Brier
 worsening from all -> placed bets shows the gate selecting the tool's weaker forecasts.
 Rows below the sample threshold are **shown and flagged, never dropped**; likewise every prediction

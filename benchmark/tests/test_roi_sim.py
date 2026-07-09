@@ -30,8 +30,11 @@ from typing import Any, get_args
 import pytest
 from benchmark.roi_sim import (
     Bet,
+    CLAUDE_HARDCODED_MODEL,
     FLAG_NO_ELIGIBLE,
     MAX_BET,
+    MODEL_DISPLAY,
+    MODEL_UNKNOWN,
     NO_BET_GATES,
     NoBetReason,
     PENDING,
@@ -39,7 +42,9 @@ from benchmark.roi_sim import (
     REJECT_REASONS,
     RELIABILITY_GATE,
     RejectReason,
+    TOURNAMENT_MODEL_OVERRIDES,
     _mode_label,
+    _resolve_model,
     cluster_bootstrap_ci,
     compute_group_stats,
     eligibility_reason,
@@ -74,6 +79,7 @@ def _row(
     predicted_at: Any = "2026-07-01T12:00:00Z",
     market_id: str | None = None,
     row_id: str | None = None,
+    model: Any = None,
 ) -> dict[str, Any]:
     """Build a minimal benchmark row for ROI simulation testing."""
     return {
@@ -81,6 +87,7 @@ def _row(
         "mode": mode,
         "platform": platform,
         "tool_name": tool,
+        "model": model,
         "prediction_parse_status": status,
         "p_yes": p_yes,
         "market_prob_at_prediction": market_prob,
@@ -784,11 +791,11 @@ class TestEndToEnd:
         assert payload["as_of"] == "2026-07-08"
         assert payload["window_days"] == 90
         groups = payload["groups"]
-        keys = {(g["platform"], g["tool_name"], g["mode"]) for g in groups}
-        assert ("omen", "tool-a", "production") in keys
-        assert ("omen", "tool-a", "tournament") in keys
-        assert ("polymarket", "tool-a", "production") in keys
-        assert ("polymarket", "tool-b", "tournament") in keys
+        keys = {(g["platform"], g["tool_name"], g["mode"], g["model"]) for g in groups}
+        assert ("omen", "tool-a", "production", MODEL_UNKNOWN) in keys
+        assert ("omen", "tool-a", "tournament", MODEL_UNKNOWN) in keys
+        assert ("polymarket", "tool-a", "production", MODEL_UNKNOWN) in keys
+        assert ("polymarket", "tool-b", "tournament", MODEL_UNKNOWN) in keys
         for group in groups:
             assert group["n_eligible"] <= group["n_rows_seen"]
             assert group["n_pending"] == 0  # all synthetic rows are resolved
@@ -815,7 +822,7 @@ class TestEndToEnd:
             encoding="utf-8"
         )
         for report in (report_omen, report_poly):
-            assert "| tool | mode | n preds | n bets |" in report
+            assert "| tool | mode | model | n preds | n bets |" in report
             assert "tool-a" in report
         # Production rows sort before tournament rows in the table.
         assert report_omen.index("| tool-a | production |") < report_omen.index(
@@ -908,7 +915,7 @@ class TestToolPolicy:
         assert stale["flags"] == [FLAG_NO_ELIGIBLE]
 
         report = self._render(groups)
-        assert "| stale-tool | production | 0 | 0 |" in report
+        assert "| stale-tool | production | unknown | 0 | 0 |" in report
         assert FLAG_NO_ELIGIBLE in report
         assert "Excluded" not in report  # both tools are prediction tools
 
@@ -1215,3 +1222,146 @@ class TestDeterministicOrdering:
     def test_mode_label_unknown_mode_passthrough(self) -> None:
         """An unknown mode string passes through verbatim (stays visible)."""
         assert _mode_label({"mode": "shadow"}) == "shadow"
+
+
+# ---------------------------------------------------------------------------
+# Model column (provenance, per-model split, display, ordering)
+# ---------------------------------------------------------------------------
+
+
+class TestModelColumn:
+    """Underlying-LLM column: provenance rules + per-model group split."""
+
+    def test_same_tool_two_models_split_and_sums_match_single_group(self) -> None:
+        """Two models within one (platform, tool, mode) yield two rows.
+
+        The model dimension only PARTITIONS a group -- gates and stakes
+        never read it -- so summing n_eligible / n_bets / staked / PnL over
+        the model-split rows must reproduce the old single-group row
+        computed on the same data under one common model.
+        """
+        base: list[dict[str, Any]] = [
+            {"p_yes": 0.70, "market_prob": 0.50, "outcome": True, "market_id": "m1"},
+            {"p_yes": 0.80, "market_prob": 0.50, "outcome": False, "market_id": "m2"},
+            {"p_yes": 0.53, "market_prob": 0.50, "outcome": True, "market_id": "m3"},
+            {"p_yes": 0.65, "market_prob": 0.50, "outcome": True, "market_id": "m4"},
+        ]
+        models = ["gpt-4.1-2025-04-14", "gpt-4o-2024-08-06"]
+        split_rows = [
+            _row(model=models[i % 2], **kwargs) for i, kwargs in enumerate(base)
+        ]
+        merged_rows = [_row(model="gpt-4.1-2025-04-14", **kwargs) for kwargs in base]
+
+        split = simulate(split_rows, WINDOW_START, WINDOW_END)
+        merged = simulate(merged_rows, WINDOW_START, WINDOW_END)
+        assert len(merged) == 1
+        assert len(split) == 2
+        assert {g["model"] for g in split} == set(models)
+        assert {(g["platform"], g["tool_name"], g["mode"]) for g in split} == {
+            ("omen", "test-tool", "production")
+        }
+        for field in ("n_rows_seen", "n_eligible", "n_bets"):
+            assert sum(g[field] for g in split) == merged[0][field]
+        assert sum(g["staked"] for g in split) == pytest.approx(merged[0]["staked"])
+
+        def pnl(group: dict[str, Any]) -> float:
+            """Recover a group's total PnL from its pooled ROI.
+
+            :param group: simulate() group entry with staked > 0.
+            :return: total PnL in USDC.
+            """
+            return group["staked"] * group["roi_mid"] / 100.0
+
+        split_pnl = sum(pnl(g) for g in split if g["staked"] > 0)
+        assert split_pnl == pytest.approx(pnl(merged[0]))
+
+    def test_tournament_override_beats_runner_stamp(self) -> None:
+        """Hardcoding tools get their model corrected on tournament rows.
+
+        predict-fine-tuned serves a fixed vLLM checkpoint (MODEL_BY_TOOL)
+        and claude-* tools hardcode claude-sonnet-4-6; both ignore the CI
+        runner's --model stamp, so the stamp must never reach the report.
+        A kwarg-honoring tournament tool keeps its stamp.
+        """
+        rows = [
+            _row(
+                tool="predict-fine-tuned",
+                mode="tournament",
+                model="gpt-4.1-2025-04-14",
+            ),
+            _row(
+                tool="claude-prediction-online-v1",
+                mode="tournament",
+                model="gpt-4.1-2025-04-14",
+            ),
+            _row(
+                tool="superforcaster",
+                mode="tournament",
+                model="gpt-4o-2024-08-06",
+            ),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g["model"] for g in groups}
+        assert by_tool["predict-fine-tuned"] == "qwen-14b-fine-tuned"
+        assert by_tool["claude-prediction-online-v1"] == CLAUDE_HARDCODED_MODEL
+        assert by_tool["superforcaster"] == "gpt-4o-2024-08-06"
+        # Every override entry resolves regardless of the stamp.
+        for tool, served in TOURNAMENT_MODEL_OVERRIDES.items():
+            row = _row(tool=tool, mode="tournament", model="stamped-anything")
+            assert _resolve_model(row, "tournament") == served
+
+    def test_production_model_passthrough_and_unknown_fallback(self) -> None:
+        """Production rows trust the payload-derived model; else unknown.
+
+        The tournament overrides never apply to production rows (their
+        model is payload-derived, not a runner stamp); missing / None /
+        empty / non-string model values all resolve to MODEL_UNKNOWN.
+        """
+        passthrough = _row(model="gpt-4.1-2025-04-14")
+        assert _resolve_model(passthrough, "production") == "gpt-4.1-2025-04-14"
+        # A claude-named tool's PRODUCTION row is trusted, not overridden.
+        claude_prod = _row(tool="claude-prediction-online-v1", model="other-model")
+        assert _resolve_model(claude_prod, "production") == "other-model"
+        for bad_model in (None, "", 42):
+            assert _resolve_model(_row(model=bad_model), "production") == MODEL_UNKNOWN
+        missing = _row()
+        del missing["model"]
+        assert _resolve_model(missing, "production") == MODEL_UNKNOWN
+        groups = simulate([missing], WINDOW_START, WINDOW_END)
+        assert groups[0]["model"] == MODEL_UNKNOWN
+
+    def test_report_shortens_display_names_json_keeps_full(self) -> None:
+        """The md table shows short display names; JSON keeps full names."""
+        assert MODEL_DISPLAY["gpt-4.1-2025-04-14"] == "gpt-4.1"
+        assert MODEL_DISPLAY["gpt-4o-2024-08-06"] == "gpt-4o"
+        rows = [
+            _row(tool="tool-a", model="gpt-4.1-2025-04-14"),
+            _row(tool="tool-b", model="qwen-14b-fine-tuned"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g["model"] for g in groups}
+        assert by_tool["tool-a"] == "gpt-4.1-2025-04-14"  # JSON: full name
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert "| tool-a | production | gpt-4.1 |" in report
+        assert "gpt-4.1-2025-04-14" not in report
+        # Names outside the display map render verbatim.
+        assert "| tool-b | production | qwen-14b-fine-tuned |" in report
+
+    def test_ordering_model_tie_break_deterministic(self) -> None:
+        """Groups tied on every other key sort by model, in JSON and md."""
+        rows = [  # inserted in REVERSE of the expected order
+            _row(tool="tool-a", model="b-model", p_yes=0.7, market_prob=0.5),
+            _row(tool="tool-a", model="a-model", p_yes=0.7, market_prob=0.5),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert [g["model"] for g in groups] == ["a-model", "b-model"]
+        # Precondition: the report's -n_bets sort key genuinely ties.
+        assert groups[0]["n_bets"] == groups[1]["n_bets"] == 1
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert report.index("| tool-a | production | a-model |") < report.index(
+            "| tool-a | production | b-model |"
+        )

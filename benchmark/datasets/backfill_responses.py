@@ -47,7 +47,7 @@ Design:
      ``fetch_production.detect_delivers_schema``).
   3. Rows whose response is now available are re-parsed with the same
      parser the fetcher uses; rows that parse to a valid prediction are
-     updated in place (p_yes, p_no, parse status, confidence when parsed,
+     updated in place (p_yes, p_no, parse status, bucketing metadata when
      plus model/tool_version/config_hash when the row lacked them, so a
      repaired row buckets correctly rather than under "unknown"). Rows
      still missing or still unparseable stay untouched.
@@ -358,8 +358,9 @@ def repair_row(
     row["p_yes"] = parsed["p_yes"]
     row["p_no"] = parsed["p_no"]
     row["prediction_parse_status"] = parsed["prediction_parse_status"]
-    if parsed["confidence"] is not None:
-        row["confidence"] = parsed["confidence"]
+    # Deliberately NOT written: build_row discards parse_tool_response's
+    # confidence, so normal shard rows carry no confidence key -- a repaired
+    # row must match that shape exactly rather than grow an extra column.
     # Backfill bucketing metadata (fill-if-null; never overwrite). Mirror
     # build_row: config_hash = _compute_config_hash(tool_version, model).
     if model is not None and row.get("model") is None:

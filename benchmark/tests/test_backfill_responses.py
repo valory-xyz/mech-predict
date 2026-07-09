@@ -151,18 +151,21 @@ class TestRepairRow:
     """Tests for single-row repair."""
 
     def test_valid_response_repairs_in_place(self) -> None:
-        """A now-present valid response updates p_yes/p_no/status/confidence."""
+        """A now-present valid response updates p_yes/p_no/status."""
         row = _row("0x01")
         assert br.repair_row(row, VALID_RESPONSE) is True
         assert row["p_yes"] == 0.72
         assert row["p_no"] == 0.28
         assert row["prediction_parse_status"] == "valid"
-        assert row["confidence"] == 0.85
 
-    def test_no_confidence_key_when_not_parsed(self) -> None:
-        """A response without confidence does not add the field."""
+    def test_confidence_never_added(self) -> None:
+        """No confidence key is ever written.
+
+        build_row discards it, so a repaired row must match the normal shard
+        row shape even when the response carries a confidence value.
+        """
         row = _row("0x01")
-        assert br.repair_row(row, '{"p_yes": 0.6, "p_no": 0.4}') is True
+        assert br.repair_row(row, VALID_RESPONSE) is True
         assert "confidence" not in row
 
     def test_still_null_untouched(self) -> None:
@@ -243,7 +246,7 @@ class TestBackfillRepairs:
         assert repaired["p_yes"] == 0.72
         assert repaired["p_no"] == 0.28
         assert repaired["prediction_parse_status"] == "valid"
-        assert repaired["confidence"] == 0.85
+        assert "confidence" not in repaired
         # Untouched fields survive
         assert repaired["row_id"] == rows[1]["row_id"]
         assert repaired["question_text"] == rows[1]["question_text"]

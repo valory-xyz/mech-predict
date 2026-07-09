@@ -321,11 +321,60 @@ class TestFetchPolymarketOpen:
         next_page = _poly_response(
             [_poly_market(condition_id="recent_1", created_at=_hours_ago(2))]
         )
-        mock_get.side_effect = [mixed_page, next_page]
+        # A short page no longer ends the scan (the server clamp makes real
+        # pages shorter than the requested limit) — only an empty page does.
+        mock_get.side_effect = [mixed_page, next_page, _poly_response([])]
 
         markets = fetch_polymarket_open(max_markets=10, created_within_hours=24)
         assert [m["id"] for m in markets] == ["poly_recent_0", "poly_recent_1"]
+        assert mock_get.call_count == 3
+
+    @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_clamped_short_page_advances_offset_by_batch_size(
+        self, mock_tag: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Pagination advances by the actual batch size, not the requested limit."""
+        mock_tag.return_value = 42
+        # Simulate a server clamp below our requested limit: 60 items back.
+        clamped_page = _poly_response(
+            [
+                _poly_market(condition_id=f"m{i}", created_at=_hours_ago(1))
+                for i in range(60)
+            ]
+        )
+        mock_get.side_effect = [clamped_page, _poly_response([])]
+
+        markets = fetch_polymarket_open(max_markets=500, created_within_hours=24)
+        assert len(markets) == 60
         assert mock_get.call_count == 2
+        second_call_params = mock_get.call_args_list[1].kwargs["params"]
+        assert second_call_params["offset"] == "60"
+
+    @patch("benchmark.datasets.fetch_open.POLYMARKET_CATEGORIES", ["business"])
+    @patch("benchmark.datasets.fetch_open.requests.get")
+    @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
+    def test_page_cap_exit_logs_truncation_warning(
+        self, mock_tag: MagicMock, mock_get: MagicMock, caplog: Any
+    ) -> None:
+        """Exiting via the page cap with in-window markets left logs a warning."""
+        mock_tag.return_value = 42
+        mock_get.side_effect = [
+            _poly_response(
+                [
+                    _poly_market(condition_id=f"p{page}_{i}", created_at=_hours_ago(1))
+                    for i in range(POLYMARKET_PAGE_LIMIT)
+                ]
+            )
+            for page in range(POLYMARKET_MAX_PAGES_PER_CATEGORY)
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="benchmark.datasets.fetch_open"):
+            fetch_polymarket_open(max_markets=10_000, created_within_hours=24)
+
+        assert mock_get.call_count == POLYMARKET_MAX_PAGES_PER_CATEGORY
+        assert "page cap" in caplog.text
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")
@@ -381,6 +430,9 @@ class TestFetchPolymarketOpen:
         params = mock_get.call_args.kwargs["params"]
         assert params["order"] == "createdAt"
         assert params["ascending"] == "false"
+        # The Gamma API clamps page size at 100 server-side; requesting more
+        # silently returns 100 and would desync offset-based pagination.
+        assert params["limit"] == "100"
 
     @patch("benchmark.datasets.fetch_open.requests.get")
     @patch("benchmark.datasets.fetch_open._fetch_polymarket_tag_id")

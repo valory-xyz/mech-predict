@@ -105,6 +105,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v4 -- consolidates the abandoned v4/v5 work
+    # (PR #375) into one tool off v1: a step-4 evidence-reliability screen (market-
+    # odds filter, forward-intent discount, TYPE A/B temporal classification,
+    # criterion-specificity) for systematic overconfident-YES on Polymarket.
+    "superforcaster-polymarket-v4": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",
@@ -161,14 +172,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         family="factual_research",
     ),
     # valory/finetuned_prediction — DeepSeek-R1-Distill-Qwen-14B served by a
-    # self-hosted vLLM (OpenAI-compatible). Both modes share one module; the
-    # replay's --model selects which served checkpoint the vLLM call targets.
+    # self-hosted vLLM (OpenAI-compatible). All three modes share one module;
+    # the replay resolves each mode's served-model name via the module's own
+    # resolve_model() (MODEL_BY_TOOL), so predict-fine-tuned-calibrated targets
+    # ft-serve's virtual calibrated served name.
     "predict-base": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
         family="default",
     ),
     "predict-fine-tuned": ToolSpec(
+        module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
+        backend="vllm",
+        family="default",
+    ),
+    "predict-fine-tuned-calibrated": ToolSpec(
         module="packages.valory.customs.finetuned_prediction.finetuned_prediction",
         backend="vllm",
         family="default",

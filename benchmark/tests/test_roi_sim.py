@@ -19,12 +19,13 @@
 """Tests for benchmark/roi_sim.py."""
 
 import json
+import logging
 import random
 import sys
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from benchmark.roi_sim import (
@@ -32,8 +33,13 @@ from benchmark.roi_sim import (
     FLAG_NO_ELIGIBLE,
     MAX_BET,
     NO_BET_GATES,
+    NoBetReason,
+    PENDING,
     PLATFORM_GATES,
+    REJECT_REASONS,
     RELIABILITY_GATE,
+    RejectReason,
+    _mode_label,
     cluster_bootstrap_ci,
     compute_group_stats,
     eligibility_reason,
@@ -364,6 +370,10 @@ class TestPooledRoi:
         # The two definitions genuinely differ on this bet set.
         assert abs(pooled - per_bet_mean) > 1.0
         assert stats["roi_mid"] != pytest.approx(per_bet_mean)
+        # Exact companion stats: one win out of two bets, and with only two
+        # markets the top-3 concentration share is exactly 1.0.
+        assert stats["win_rate"] == 0.5
+        assert stats["top3_pnl_share"] == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +451,12 @@ class TestBootstrapCi:
         assert stats_1["roi_haircut_ci"] == stats_2["roi_haircut_ci"]
         assert stats_1["roi_ci"] == list(mid_before)
         assert stats_1["roi_ci"] == stats_2["roi_ci"]
+        # Exact non-degenerate companion stats on this 4-market bet set:
+        # 2 wins / 4 bets, and all four |per-market PnL| are 2.5 (every
+        # stake caps at MAX_BET on a 0.5-ish price), so the top-3 share is
+        # exactly 7.5 / 10.0.
+        assert stats_1["win_rate"] == 0.5
+        assert stats_1["top3_pnl_share"] == 0.75
 
 
 # ---------------------------------------------------------------------------
@@ -946,3 +962,256 @@ class TestToolPolicy:
         report = self._render(simulate(rows, WINDOW_START, WINDOW_END))
         assert "_No data for this platform in the window._" in report
         assert "gen-only (1 row)" in report
+
+
+# ---------------------------------------------------------------------------
+# Input integrity (malformed lines, corrupt shards, empty input)
+# ---------------------------------------------------------------------------
+
+
+class TestInputIntegrity:
+    """Broken input aborts loudly instead of publishing an empty report."""
+
+    def test_malformed_lines_skipped_and_counted(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Garbage / JSON-array / empty lines are skipped; valid row loads.
+
+        The shard holds 4 lines (garbage, JSON array, blank, valid row):
+        2 bad out of 4 total is exactly the 50% threshold, NOT above it,
+        so the run proceeds with the valid row and a WARNING carrying the
+        per-file bad-line count.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest log-capture fixture.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        shard = logs / "production_log_2026_07_01.jsonl"
+        valid = _row(row_id="good_row")
+        shard.write_text(
+            "{not json at all\n"
+            + json.dumps([1, 2, 3])
+            + "\n"
+            + "\n"
+            + json.dumps(valid)
+            + "\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING, logger="benchmark.roi_sim"):
+            rows = load_input_rows(logs, tmp_path / "missing_tournament.jsonl")
+        assert len(rows) == 1
+        assert rows[0]["row_id"] == "good_row"
+        assert "skipped 2 unparseable line(s) out of 4" in caplog.text
+        assert shard.name in caplog.text
+
+    def test_mostly_garbage_shard_aborts(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A shard with >50% unparseable lines exits 1 with an annotation.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param capsys: pytest capture fixture.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        shard = logs / "production_log_2026_07_01.jsonl"
+        shard.write_text(
+            "garbage-1\ngarbage-2\ngarbage-3\n" + json.dumps(_row()) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            load_input_rows(logs, tmp_path / "missing_tournament.jsonl")
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert "::error::roi_sim:" in out
+        assert "failed to parse" in out
+
+    def test_zero_rows_loaded_aborts_main(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """main() with no input rows exits 1 instead of a green empty run.
+
+        Defense-in-depth companion to the workflow's
+        ``if_no_artifact_found: fail`` download step: an artifact-layout
+        drift that leaves the logs dir empty must fail the run.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capture fixture.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir()  # exists but holds no shards
+        argv = [
+            "roi_sim",
+            "--logs-dir",
+            str(logs),
+            "--tournament-input",
+            str(tmp_path / "missing_tournament.jsonl"),
+            "--results-dir",
+            str(tmp_path / "results"),
+            "--as-of",
+            "2026-07-08",
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert "::error::roi_sim: no input rows loaded — check artifact layout" in out
+        assert not (tmp_path / "results").exists()  # nothing was published
+
+
+# ---------------------------------------------------------------------------
+# Golden values (bootstrap CI quantiles, Brier formula)
+# ---------------------------------------------------------------------------
+
+
+class TestGoldenValues:
+    """Exact expected numbers pin the statistical formulas against mutation."""
+
+    def test_bootstrap_ci_golden_value(self) -> None:
+        """cluster_bootstrap_ci reproduces the pinned reference draw exactly.
+
+        Derivation (self-contained reference re-implementation below): the
+        six bet rows aggregate into five market clusters in first-occurrence
+        order -- m1 (3.5, 1.5), m2 (2.5, -2.5), m3 (2.0, 1.0),
+        m4 (1.5, -1.5), m5 (3.0 pnl on 1.0 stake). A fresh
+        ``random.Random(12345)`` draws B = 2000 replicates of n = 5 clusters
+        via ``randrange(n)``; each replicate's statistic is
+        100 * sum(pnl) / sum(stake); bounds are the pinned index convention
+        ``sorted_samples[int(0.025 * N)]`` / ``[int(0.975 * N)]``. The
+        reference is INDEPENDENT of the module's constants, so silently
+        widening/narrowing the quantiles (e.g. 0.025/0.975 -> 0.05/0.95,
+        which yields (-60.0, 100.0) here), changing the seed, B, or the
+        index convention all fail this test. The hard-coded literals pin
+        the same values a second time, independent of the reference code.
+        """
+        bet_rows = [
+            ("m1", 2.5, 2.5),
+            ("m2", 2.5, -2.5),
+            ("m3", 2.0, 1.0),
+            ("m4", 1.5, -1.5),
+            ("m5", 1.0, 3.0),
+            ("m1", 1.0, -1.0),
+        ]
+        # Reference algorithm, re-implemented independently of the module.
+        sums = [(3.5, 1.5), (2.5, -2.5), (2.0, 1.0), (1.5, -1.5), (1.0, 3.0)]
+        n_clusters = len(sums)
+        rng = random.Random(12345)
+        samples: list[float] = []
+        for _ in range(2000):
+            stake_total = 0.0
+            pnl_total = 0.0
+            for _ in range(n_clusters):
+                stake_part, pnl_part = sums[rng.randrange(n_clusters)]
+                stake_total += stake_part
+                pnl_total += pnl_part
+            if stake_total <= 0.0:
+                continue
+            samples.append(100.0 * pnl_total / stake_total)
+        samples.sort()
+        n_kept = len(samples)
+        expected = (samples[int(0.025 * n_kept)], samples[int(0.975 * n_kept)])
+
+        ci = cluster_bootstrap_ci(bet_rows)
+        assert ci is not None
+        assert ci == expected  # bit-identical to the reference draw
+        assert (round(ci[0], 6), round(ci[1], 6)) == (-66.666667, 120.0)
+
+    def test_brier_golden_values(self) -> None:
+        """Brier columns match hand-computed exact values.
+
+        Two eligible Omen rows: p_yes 0.8 / outcome True (Brier 0.04, bets:
+        edge 0.30 > 0.03) and p_yes 0.6 / outcome False (Brier 0.36, no bet:
+        edge 0.02 <= 0.03). brier_all = (0.04 + 0.36) / 2 = 0.20 while
+        brier_bets = 0.04 alone -- dropping the square yields -0.2 there
+        and fails. A one-row group pins 0.36 = (0.6 - 0)^2 on brier_all
+        too (the un-squared value would be 0.6).
+        """
+        rows = [
+            _row(p_yes=0.8, market_prob=0.5, outcome=True, market_id="m1"),
+            _row(p_yes=0.6, market_prob=0.58, outcome=False, market_id="m2"),
+        ]
+        stats = compute_group_stats(rows, OMEN)
+        assert stats["n_bets"] == 1  # only the 0.8 row clears the edge floor
+        assert stats["brier_all"] == pytest.approx(0.20)
+        assert stats["brier_bets"] == pytest.approx(0.04)
+
+        lone = [_row(p_yes=0.6, market_prob=0.5, outcome=False)]
+        assert compute_group_stats(lone, OMEN)["brier_all"] == pytest.approx(0.36)
+
+
+# ---------------------------------------------------------------------------
+# Sentinel types stay in sync with the runtime tuples
+# ---------------------------------------------------------------------------
+
+
+class TestSentinelTypes:
+    """Literal aliases mirror the runtime reason tuples exactly."""
+
+    def test_literal_aliases_match_runtime_tuples(self) -> None:
+        """NoBetReason/RejectReason and the tuples must never drift apart."""
+        assert set(get_args(NoBetReason)) == set(NO_BET_GATES)
+        assert set(get_args(RejectReason)) == set(REJECT_REASONS) | {PENDING}
+
+
+# ---------------------------------------------------------------------------
+# Deterministic ordering (tie-breaks) + row-classification edges
+# ---------------------------------------------------------------------------
+
+
+class TestDeterministicOrdering:
+    """Ordering under ties is part of the byte-reproducibility contract."""
+
+    def test_report_sort_tool_name_tie_break_on_equal_n_bets(self) -> None:
+        """Two tools with equal n_bets sort by tool_name in the report."""
+        rows = [  # inserted in REVERSE of the expected report order
+            _row(tool="b-tool", p_yes=0.7, market_prob=0.5),
+            _row(tool="a-tool", p_yes=0.7, market_prob=0.5),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g for g in groups}
+        # Precondition: the -n_bets sort key genuinely ties.
+        assert by_tool["a-tool"]["n_bets"] == by_tool["b-tool"]["n_bets"] == 1
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert report.index("| a-tool |") < report.index("| b-tool |")
+
+    def test_simulate_group_ordering_tie_breaks(self) -> None:
+        """simulate() orders groups by platform, prod-first, mode, tool."""
+        rows = [  # inserted in REVERSE of the expected sorted order
+            _row(tool="tool-a", platform="polymarket"),
+            _row(tool="tool-a", mode="tournament"),
+            _row(tool="tool-a", mode="shadow"),
+            _row(tool="tool-b"),
+            _row(tool="tool-a"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        assert [(g["platform"], g["mode"], g["tool_name"]) for g in groups] == [
+            ("omen", "production", "tool-a"),
+            ("omen", "production", "tool-b"),
+            ("omen", "shadow", "tool-a"),
+            ("omen", "tournament", "tool-a"),
+            ("polymarket", "production", "tool-a"),
+        ]
+
+    def test_unrecognized_platform_rows_warned_and_skipped(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Rows on a platform without a gate config are skipped with a warn.
+
+        :param caplog: pytest log-capture fixture.
+        """
+        with caplog.at_level(logging.WARNING, logger="benchmark.roi_sim"):
+            groups = simulate([_row(platform="kalshi")], WINDOW_START, WINDOW_END)
+        assert not groups
+        assert "platforms without a gate config" in caplog.text
+
+    def test_mode_label_unknown_mode_passthrough(self) -> None:
+        """An unknown mode string passes through verbatim (stays visible)."""
+        assert _mode_label({"mode": "shadow"}) == "shadow"

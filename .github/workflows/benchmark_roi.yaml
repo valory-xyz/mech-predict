@@ -100,7 +100,11 @@ jobs:
       # Tournament rows are optional: production shards alone still produce a
       # meaningful report (tournament coverage just shows as absent), so a
       # missing artifact — e.g. the tournament job is skipped when no API
-      # keys are configured — only warns.
+      # keys are configured — only warns. if_no_artifact_found: warn is the
+      # ONLY tolerated failure mode: real download errors (auth, rate limit,
+      # an actions: read permission regression, a corrupted archive) must
+      # fail the run, so "we failed to fetch tournament data that exists"
+      # stays distinguishable from "no tournament data existed".
       - name: Download tournament predictions
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
         with:
@@ -108,7 +112,6 @@ jobs:
           path: benchmark/results/
           workflow: benchmark_flywheel.yaml
           if_no_artifact_found: warn
-        continue-on-error: true
 
       # Inputs routed through env — see the shell-injection note above.
       # Empty AS_OF omits --as-of so the module defaults to today (UTC);

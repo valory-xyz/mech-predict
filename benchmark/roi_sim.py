@@ -68,10 +68,11 @@ import json
 import logging
 import math
 import random
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, Final, Literal, NoReturn, TypeGuard
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ REJECT_REASONS = (
     "bad_final_outcome",
 )
 
-PENDING = "pending"
+PENDING: Final = "pending"
 
 # First-failing-gate no-bet reasons, in gate order (certified naming).
 NO_BET_GATES = (
@@ -151,6 +152,33 @@ NO_BET_GATES = (
     "skip_spread",
     "skip_zero_stake",
 )
+
+# Closed sentinel types for the reject / no-bet reasons. The REJECT_REASONS /
+# NO_BET_GATES tuples above stay the single RUNTIME source (counter seeding,
+# iteration order); these Literal aliases mirror them so mypy rejects a new
+# reason string added at a return site but missing from the closed set (the
+# counters are pre-seeded only with these keys, so such a drift would be a
+# runtime KeyError). The aliases and the tuples MUST stay in sync — a unit
+# test asserts equality via typing.get_args.
+RejectReason = Literal[
+    "out_of_window",
+    "invalid_parse",
+    "bad_p_yes",
+    "bad_market_prob",
+    "bad_final_outcome",
+    "pending",
+]
+NoBetReason = Literal[
+    "skip_oracle_prob",
+    "skip_edge_below_floor",
+    "skip_edge_above_cap",
+    "skip_spread",
+    "skip_zero_stake",
+]
+
+# A shard where more than this fraction of lines fails to parse is treated as
+# corrupt input and aborts the run (strict >; blank lines count as lines).
+BAD_LINE_FRACTION_MAX = 0.5
 
 PLATFORM_LABELS = {"omen": "Omen", "polymarket": "Polymarket"}
 
@@ -287,6 +315,20 @@ def window_bounds(as_of: date, window_days: int) -> tuple[datetime, datetime]:
 # ---------------------------------------------------------------------------
 
 
+def _input_error(message: str) -> NoReturn:
+    """Abort on an input-integrity failure, visibly in CI.
+
+    Logs at ERROR, prints a GitHub Actions ``::error::`` annotation (picked
+    up from stdout when the module runs inside a workflow) and exits 1 so
+    the run can never publish a plausible-but-empty report on broken input.
+
+    :param message: human-readable description of the input failure.
+    """
+    log.error(message)
+    print(f"::error::roi_sim: {message}")
+    sys.exit(1)
+
+
 def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, Any]]:
     """Load and dedup all input rows from the benchmark artifacts.
 
@@ -297,6 +339,12 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
     (collector re-emission), so first-seen-wins in sorted filename order is
     the deterministic rule. Rows without a string row_id are kept as-is
     (never deduped).
+
+    Bad-line policy: unparseable lines (bad JSON or a non-dict top level)
+    are skipped and counted, with a WARNING per affected file; but when more
+    than BAD_LINE_FRACTION_MAX of any single file's lines fail to parse the
+    file is treated as corrupt and the run aborts via :func:`_input_error`
+    rather than silently thinning the data.
 
     :param logs_dir: directory holding production_log_*.jsonl shards.
     :param tournament_input: path to tournament_scored.jsonl (resolved rows
@@ -321,18 +369,21 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
     n_duplicates = 0
     n_bad_lines = 0
     for path in paths:
+        n_file_lines = 0
+        n_file_bad = 0
         with path.open(encoding="utf-8") as handle:
             for line in handle:
+                n_file_lines += 1
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
-                    n_bad_lines += 1
+                    n_file_bad += 1
                     continue
                 if not isinstance(row, dict):
-                    n_bad_lines += 1
+                    n_file_bad += 1
                     continue
                 row_id = row.get("row_id")
                 if isinstance(row_id, str):
@@ -341,6 +392,19 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
                         continue
                     seen_ids.add(row_id)
                 rows.append(row)
+        if n_file_bad:
+            log.warning(
+                "%s: skipped %d unparseable line(s) out of %d",
+                path.name,
+                n_file_bad,
+                n_file_lines,
+            )
+            if n_file_bad > BAD_LINE_FRACTION_MAX * n_file_lines:
+                _input_error(
+                    f"{n_file_bad}/{n_file_lines} lines in {path.name} "
+                    "failed to parse — corrupt or mislaid shard"
+                )
+        n_bad_lines += n_file_bad
     log.info(
         "Loaded %d rows from %d files (%d duplicate row_ids dropped, "
         "%d unparseable lines skipped)",
@@ -359,7 +423,7 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
 
 def eligibility_reason(
     row: dict[str, Any], window_start: datetime, window_end: datetime
-) -> str | None:
+) -> RejectReason | None:
     """Apply the eligibility ladder to one row; first failure wins.
 
     Ladder (in order): predicted_at parses and lies in the window;
@@ -400,7 +464,7 @@ def eligibility_reason(
 # ---------------------------------------------------------------------------
 
 
-def simulate_row(row: dict[str, Any], gates: GateConfig) -> Bet | str:
+def simulate_row(row: dict[str, Any], gates: GateConfig) -> Bet | NoBetReason:
     """Run one ELIGIBLE row through the trader's gates and settle it.
 
     Side selection: bet the side the tool favors relative to the captured
@@ -1052,6 +1116,13 @@ def main() -> None:
         window_end.isoformat(),
     )
     rows = load_input_rows(args.logs_dir, args.tournament_input)
+    if not rows:
+        # Defense-in-depth: the CI workflow's benchmark-data download already
+        # uses if_no_artifact_found: fail, but an artifact-layout drift (e.g.
+        # shards extracted under a different path) would still reach here
+        # with zero rows and would otherwise exit 0 after publishing a
+        # well-formed "no data" report that nobody is alerted to.
+        _input_error("no input rows loaded — check artifact layout")
     groups = simulate(rows, window_start, window_end)
     log.info(
         "Simulated %d groups (%d bets total)",

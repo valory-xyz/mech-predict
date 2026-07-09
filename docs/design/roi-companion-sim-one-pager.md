@@ -79,7 +79,7 @@ low-bet rows. A longer trailing window (90d) is the default remedy for thin segm
 
 | Phase | What | Existing pipeline touched? |
 |---|---|---|
-| 1 (ships first) | artifacts + committed-to-artifact reports only; `notify_slack` input **defaults to off** | no |
+| 1 (ships first) | artifacts + job-summary visibility only: the `benchmark-roi` artifact plus the per-platform reports surfaced in the Actions run summary - **no Slack code path at all** (the Slack toggle arrives with the phase-2 PR) | no |
 | 2 | the ROI workflow posts its **own** daily Slack message via the existing webhook + summarizer machinery | no |
 | 3 (optional, later) | fold an ROI section into the main daily benchmark reports | yes - own PR, only after the numbers are trusted |
 

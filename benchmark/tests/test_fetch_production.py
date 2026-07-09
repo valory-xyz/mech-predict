@@ -1828,6 +1828,54 @@ class TestDedupPending:
         assert refetched.get("deferred_market") is None  # input not mutated
 
 
+class TestPendingSurvivesQuietRun:
+    """The pending store must not be wiped by a run with no resolutions."""
+
+    def test_pending_survives_run_without_resolved_markets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run with zero newly-resolved markets must carry the pending
+        store forward, not overwrite it with just the new deliveries."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        old_pending = {
+            "deliver_id": "0xold",
+            # Recent enough to survive the PENDING_MAX_AGE_DAYS prune.
+            "timestamp": int(time.time()) - 3600,
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',  # no refresh needed
+            "question_title": "old pending question",
+            "market_id": None,
+        }
+        new_delivery = {
+            "deliver_id": "0xnew",
+            "timestamp": int(time.time()),
+            "request_timestamp": None,
+            "model": None,
+            "tool_response": None,
+            "tool": "superforcaster",
+            "question_title": "new unmatched question",
+            "market_id": None,
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+            "parsed_missing": False,
+        }
+        monkeypatch.setattr(fp, "fetch_deliveries", lambda url, ts: [new_delivery])
+
+        rows, all_pending, _, _ = fp.process_platform(
+            "omen",
+            "http://gnosis",
+            ResolvedMarkets(),  # nothing resolved this run
+            0,
+            set(),
+            [old_pending],
+        )
+        assert not rows
+        pending_ids = {d["deliver_id"] for d in all_pending}
+        assert pending_ids == {"0xold", "0xnew"}
+
+
 class TestEnrichmentSkipsPrefilled:
     """IPFS enrichment skips rows already versioned via ParsedDelivery."""
 

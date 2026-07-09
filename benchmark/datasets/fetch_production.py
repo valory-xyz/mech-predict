@@ -2171,7 +2171,7 @@ def process_platform(
 
     # 1. Retry pending deliveries from previous runs
     rows_from_pending: list[dict[str, Any]] = []
-    remaining_pending: list[dict[str, Any]] = []
+    remaining_pending: list[dict[str, Any]]
     if pending_deliveries and resolved_markets:
         rows_from_pending, remaining_pending, _, _, _, _ = _match_and_build(
             pending_deliveries,
@@ -2185,6 +2185,12 @@ def process_platform(
                 platform,
                 len(rows_from_pending),
             )
+    else:
+        # No resolved markets this run: skip the matching work but carry
+        # the pending store forward — the platform state is overwritten
+        # with remaining_pending + new_pending below, so leaving this
+        # empty would silently wipe every previously-pending delivery.
+        remaining_pending = pending_deliveries
 
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)

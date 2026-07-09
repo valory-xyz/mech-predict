@@ -19,7 +19,8 @@
 """Render the ROI companion section appended to the daily benchmark Slack post.
 
 Pure builder over ``roi_results.json`` (written by ``benchmark.roi_sim``):
-no network, no LLM, stdlib only. :func:`build_roi_section` returns a Slack
+no network, no LLM, stdlib only (the model display-name map is imported from
+``benchmark.roi_sim``, itself stdlib-only). :func:`build_roi_section` returns a Slack
 mrkdwn snippet -- one intro line plus a compact fixed-width table inside a
 fenced code block -- or None when there is nothing to append (missing or
 unparseable results file, or no groups for the platform). Callers treat
@@ -34,6 +35,8 @@ import re
 from pathlib import Path
 from typing import Any, TypeGuard
 
+from benchmark.roi_sim import MODEL_DISPLAY
+
 # Slack renders ~monospace code blocks without wrapping up to roughly this
 # width on a desktop client; every table line is kept at or under it.
 MAX_LINE_WIDTH = 100
@@ -42,9 +45,11 @@ MAX_LINE_WIDTH = 100
 # capital and point at the full report for the rest.
 MAX_TABLE_ROWS = 14
 
-_HEADERS = ("tool", "mode", "preds", "bets", "ROI (95% CI)", "w/costs", "flags")
+_HEADERS = ("tool", "mode", "model", "preds", "bets", "ROI (95% CI)", "w/costs", "flags")
 # Per-column width caps; actual widths are content-driven up to these.
-_CAPS = (28, 5, 6, 5, 20, 8, 22)
+# Worst case: tool shrinks 28 -> _TOOL_MIN (12) and flags 22 -> _FLAGS_MIN (6),
+# leaving 12+5+17+6+5+20+8+6 + 7*len(_SEP) = 100 = MAX_LINE_WIDTH exactly.
+_CAPS = (28, 5, 17, 6, 5, 20, 8, 22)
 
 # Abbreviated mode labels keep the width budget for the tool column.
 _MODE_SHORT = {"production": "prod", "tournament": "tourn"}
@@ -220,6 +225,22 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     return lines
 
 
+def _model_cell(group: dict[str, Any]) -> str:
+    """Short display name for the group's underlying LLM.
+
+    Full model names stay in the json/report; the table shows the
+    ``MODEL_DISPLAY`` short form when one exists. Older results files
+    without a "model" field render an empty cell.
+
+    :param group: group dict from roi_results.json.
+    :return: display text for the model column.
+    """
+    model = group.get("model")
+    if not isinstance(model, str):
+        return ""
+    return MODEL_DISPLAY.get(model, model)
+
+
 def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
     """Build the table cells for one bet-carrying group.
 
@@ -230,6 +251,7 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
     return (
         str(group.get("tool_name") or "unknown"),
         _MODE_SHORT.get(mode, mode),
+        _model_cell(group),
         str(_as_int(group.get("n_eligible"))),
         str(_as_int(group.get("n_bets"))),
         _fmt_roi_ci(group.get("roi_mid"), group.get("roi_ci")),
@@ -238,8 +260,11 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _display_sort_key(group: dict[str, Any]) -> tuple[int, int, str]:
+def _display_sort_key(group: dict[str, Any]) -> tuple[int, int, str, str, str]:
     """Table display order: production first, then bet count descending.
+
+    Tool name / mode / model break ties so split groups (one row per
+    underlying LLM) render in a stable order.
 
     :param group: group dict from roi_results.json.
     :return: sort key tuple.
@@ -248,6 +273,8 @@ def _display_sort_key(group: dict[str, Any]) -> tuple[int, int, str]:
         0 if group.get("mode") == "production" else 1,
         -_as_int(group.get("n_bets")),
         str(group.get("tool_name") or ""),
+        str(group.get("mode") or ""),
+        str(group.get("model") or ""),
     )
 
 
@@ -288,6 +315,13 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
     ]
     if not platform_groups:
         return None
+
+    # Forward-compatible deployment filter: groups explicitly marked
+    # "active": false (tools not currently deployed) stay out of the table
+    # and the zero-bet listing, surfacing only as a compact trailing count.
+    # Older results files without the key render every group as before.
+    inactive_groups = [g for g in platform_groups if g.get("active") is False]
+    platform_groups = [g for g in platform_groups if g.get("active") is not False]
 
     window_days = payload.get("window_days")
     window_text = (
@@ -341,4 +375,15 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
         lines.append(
             f"excluded non-prediction tools: {len(excluded_tools)} " "— see report"
         )
+
+    # A tool counts as not-deployed only when ALL of its groups carry the
+    # explicit "active": false marker.
+    active_tool_names = {
+        str(g.get("tool_name") or "unknown") for g in platform_groups
+    }
+    inactive_tools = {
+        str(g.get("tool_name") or "unknown") for g in inactive_groups
+    } - active_tool_names
+    if inactive_tools:
+        lines.append(f"not deployed/active: {len(inactive_tools)} tools")
     return "\n".join(lines)

@@ -41,6 +41,7 @@ def _group(
     tool: str = "test-tool",
     platform: str = "omen",
     mode: str = "production",
+    model: Any = "gpt-4.1-2025-04-14",
     n_eligible: int = 40,
     n_bets: int = 20,
     staked: float = 25.0,
@@ -51,12 +52,18 @@ def _group(
     flags: Any = None,
     is_prediction_tool: bool = True,
     parse_reliability: Any = 1.0,
+    active: Any = None,
 ) -> dict[str, Any]:
-    """Build a minimal roi_results.json group entry."""
-    return {
+    """Build a minimal roi_results.json group entry.
+
+    ``active`` is only written when not None (the key is absent in older
+    results files and only emitted by the deployment filter).
+    """
+    entry: dict[str, Any] = {
         "platform": platform,
         "tool_name": tool,
         "mode": mode,
+        "model": model,
         "n_eligible": n_eligible,
         "n_bets": n_bets,
         "staked": staked,
@@ -70,6 +77,9 @@ def _group(
         "is_prediction_tool": is_prediction_tool,
         "parse_reliability": parse_reliability,
     }
+    if active is not None:
+        entry["active"] = active
+    return entry
 
 
 def _write_results(
@@ -124,6 +134,7 @@ class TestBuildRoiSectionHappyPath:
         for column in (
             "tool",
             "mode",
+            "model",
             "preds",
             "bets",
             "ROI (95% CI)",
@@ -248,6 +259,57 @@ class TestBuildRoiSectionHappyPath:
         assert "tourn" in rows[1] and "tournament" not in rows[1]
 
 
+class TestModelColumn:
+    """Groups are split per underlying LLM; the table shows a model column."""
+
+    def test_model_rendered_short(self, tmp_path: Path) -> None:
+        """Known full model names render as their short display form."""
+        path = _write_results(
+            tmp_path, [_group(model="gpt-4.1-2025-04-14")]
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert "gpt-4.1" in rows[0]
+        assert "gpt-4.1-2025-04-14" not in section
+
+    def test_unmapped_model_kept_verbatim(self, tmp_path: Path) -> None:
+        """Models without a display mapping render their full name."""
+        path = _write_results(tmp_path, [_group(model="claude-sonnet-4-6")])
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert "claude-sonnet-4-6" in rows[0]
+
+    def test_split_groups_render_separate_rows(self, tmp_path: Path) -> None:
+        """Same tool+mode under two models -> two table rows."""
+        path = _write_results(
+            tmp_path,
+            [
+                _group(tool="split-tool", model="gpt-4.1-2025-04-14", n_bets=9),
+                _group(tool="split-tool", model="gpt-4o-2024-08-06", n_bets=9),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert len(rows) == 2
+        assert all("split-tool" in row for row in rows)
+        assert "gpt-4.1" in rows[0]
+        assert "gpt-4o" in rows[1]
+
+    def test_absent_model_field_renders_empty_cell(self, tmp_path: Path) -> None:
+        """Older results files without a model field still render rows."""
+        group = _group()
+        del group["model"]
+        path = _write_results(tmp_path, [group])
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert len(rows) == 1
+        assert "test-tool" in rows[0]
+
+
 # ---------------------------------------------------------------------------
 # Zero-bet and excluded lines
 # ---------------------------------------------------------------------------
@@ -292,6 +354,78 @@ class TestZeroBetLine:
         section = build_roi_section(path, "omen")
         assert section is not None
         assert "no bets in window" not in section
+
+    def test_tool_betting_under_any_model_not_listed(self, tmp_path: Path) -> None:
+        """Keep a tool off the idle line when any of its models has bets.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(
+            tmp_path,
+            [
+                _group(tool="multi", model="gpt-4.1-2025-04-14", n_bets=0),
+                _group(tool="multi", model="gpt-4o-2024-08-06", n_bets=8),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "no bets in window" not in section
+
+
+class TestActiveFilter:
+    """Groups marked "active": false are excluded and counted, not rendered."""
+
+    def test_inactive_excluded_from_table_and_counted(
+        self, tmp_path: Path
+    ) -> None:
+        """active:false tools leave the table; a trailing count appears."""
+        path = _write_results(
+            tmp_path,
+            [
+                _group(tool="live-tool", n_bets=10),
+                _group(tool="retired-a", n_bets=5, active=False),
+                _group(tool="retired-b", n_bets=0, active=False),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "retired-a" not in section
+        assert "retired-b" not in section
+        assert "not deployed/active: 2 tools" in section
+
+    def test_inactive_excluded_from_zero_bet_line(self, tmp_path: Path) -> None:
+        """A zero-bet inactive tool is counted, never listed as idle."""
+        path = _write_results(
+            tmp_path,
+            [
+                _group(tool="live-tool", n_bets=10),
+                _group(tool="retired", n_bets=0, active=False),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "no bets in window" not in section
+        assert "not deployed/active: 1 tools" in section
+
+    def test_active_true_renders_normally(self, tmp_path: Path) -> None:
+        """An explicit active:true group renders like any other."""
+        path = _write_results(tmp_path, [_group(tool="live-tool", active=True)])
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "live-tool" in section
+        assert "not deployed/active" not in section
+
+    def test_absent_active_key_back_compat(self, tmp_path: Path) -> None:
+        """Older results files without the key behave exactly as before."""
+        path = _write_results(
+            tmp_path,
+            [_group(tool="bettor", n_bets=10), _group(tool="idle", n_bets=0)],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "bettor" in section
+        assert "no bets in window: idle" in section
+        assert "not deployed/active" not in section
 
 
 class TestExcludedLine:
@@ -408,6 +542,7 @@ class TestLineWidth:
         groups = [
             _group(
                 tool="a-very-long-tool-name-that-exceeds-the-column-cap-x" * 2,
+                model="qwen-14b-fine-tuned-calibrated-with-a-long-suffix",
                 n_eligible=99999,
                 n_bets=88888,
                 roi_mid=-100.0,

@@ -19,7 +19,11 @@ on:
       max_markets:
         description: 'Max markets per platform for tournament'
         required: false
-        default: '30'
+        default: '45'
+      created_within_hours:
+        description: 'Polymarket: only markets created within the last N hours; 0 disables the cutoff (use 0 once for a backfill run). 6 days by default so slow-to-liquidity markets and missed runs are still picked up.'
+        required: false
+        default: '144'
       tools:
         description: 'Comma-separated subset of tools (default: every key in benchmark/tournament_tools.json)'
         required: false
@@ -360,7 +364,7 @@ jobs:
       # Inputs routed via env to avoid shell injection — see note in benchmark job.
       - name: Fetch Omen open markets
         env:
-          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '30' }}
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform omen \
@@ -368,12 +372,14 @@ jobs:
 
       - name: Fetch Polymarket open markets
         env:
-          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '30' }}
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
+          INPUT_CREATED_WITHIN_HOURS: ${{ github.event.inputs.created_within_hours || '144' }}
         run: |
           python -m benchmark.datasets.fetch_open \
             --platform polymarket \
             --max-markets "$INPUT_MAX_MARKETS" \
-            --min-liquidity 1000
+            --min-liquidity 1000 \
+            --created-within-hours "$INPUT_CREATED_WITHIN_HOURS"
 
       - name: Upload tournament markets
         uses: actions/upload-artifact@v4
@@ -468,7 +474,12 @@ jobs:
           VLLM_ENDPOINT: ${{ secrets.BENCHMARK_VLLM_ENDPOINT }}
           VLLM_API_KEY: ${{ secrets.BENCHMARK_VLLM_API_KEY }}
           INPUT_TOOLS: ${{ github.event.inputs.tools }}
-          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '30' }}
+          INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
+          # Wall-clock budget for the prediction loop (5h). Keeps the step
+          # comfortably inside the job's 6h runner ceiling so the scoring and
+          # artifact-upload steps always run — combos left over are recorded
+          # as skipped_global_timeout and retried by the next daily run.
+          GLOBAL_TIMEOUT_SECONDS: '18000'
         run: |
           # When INPUT_TOOLS is empty (cron run, or dispatch with the
           # default), omit --tools so tournament.py runs every tool listed
@@ -479,11 +490,13 @@ jobs:
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
               --tools "$INPUT_TOOLS" \
-              --max-markets "$INPUT_MAX_MARKETS"
+              --max-markets "$INPUT_MAX_MARKETS" \
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
           else
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
-              --max-markets "$INPUT_MAX_MARKETS"
+              --max-markets "$INPUT_MAX_MARKETS" \
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
           fi
 
       - name: Score resolved predictions

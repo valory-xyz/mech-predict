@@ -1608,8 +1608,10 @@ class TestDeferUnparsedDeliveries:
             assert not still_pending
 
     def test_deferred_entry_builds_after_market_leaves_cursor(self) -> None:
-        """Two-run strand scenario: deferred in run 1, market no longer
-        fetchable in run 2 — the snapshot still produces a row."""
+        """Two-run strand scenario: the snapshot still produces a row.
+
+        Deferred in run 1; the market is no longer fetchable in run 2.
+        """
         now = int(time.time())
         delivery = self._delivery(now - 3600, True)
 
@@ -1637,8 +1639,11 @@ class TestDeferUnparsedDeliveries:
         assert rows[0]["prediction_parse_status"] == "valid"
 
     def test_deferred_entry_expires_after_market_leaves_cursor(self) -> None:
-        """A never-healed deferred entry still surfaces as missing_fields
-        once grace expires, even without a fetchable market."""
+        """A never-healed deferred entry still surfaces as missing_fields.
+
+        Grace expired and the market is no longer fetchable — the snapshot
+        alone must be enough to build the row.
+        """
         now = int(time.time())
         expired = {
             **self._delivery(now - PARSED_DELIVERY_GRACE_SECONDS - 3600, True),
@@ -1658,8 +1663,11 @@ class TestDeferUnparsedDeliveries:
         assert rows[0]["match_confidence"] == 0.8
 
     def test_deferred_entry_redefers_within_grace(self) -> None:
-        """Still-unindexed, still-recent entries keep waiting (with their
-        snapshot) when the market is no longer fetchable."""
+        """Still-unindexed, still-recent entries keep waiting.
+
+        The re-deferred entry retains its market snapshot even when the
+        market is no longer fetchable.
+        """
         now = int(time.time())
         deferred = {
             **self._delivery(now - 3600, True),
@@ -1776,8 +1784,13 @@ class TestRefreshUnparsedPending:
     def test_batch_failure_keeps_stale_entries(
         self, monkeypatch: pytest.MonkeyPatch, exc: Exception
     ) -> None:
-        """A failed refresh batch keeps the stale entries unchanged instead
-        of crashing the run or dropping them."""
+        """A failed refresh batch keeps the stale entries unchanged.
+
+        Neither exception type may crash the run or drop pending entries.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param exc: the exception the refresh query raises.
+        """
         # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp
 
@@ -1841,8 +1854,11 @@ class TestDedupPending:
         assert by_id["0xother"] is other
 
     def test_deferred_market_snapshot_survives_refetch(self) -> None:
-        """A refetched copy (no snapshot) must not clobber the deferred
-        market snapshot — the market is no longer re-matchable."""
+        """A refetched copy must not clobber the deferred market snapshot.
+
+        The refetched copy has no snapshot of its own, and the market is
+        no longer re-matchable.
+        """
         snapshot = {"outcome": True, "resolved_at_ts": 123, "match_confidence": 1.0}
         deferred = {
             "deliver_id": "0xdup",
@@ -1905,7 +1921,7 @@ class TestUnparsedRequestCursorCap:
             lambda *a, **k: [self._raw_deliver(ts, None)],
         )
         deliveries, cap = fp.fetch_deliveries("http://gnosis", 0)
-        assert deliveries == []
+        assert not deliveries
         assert cap == (ts - 1 if expect_cap else None)
 
     def test_cap_holds_platform_delivery_cursor(
@@ -1955,8 +1971,13 @@ class TestPendingSurvivesQuietRun:
     def test_pending_survives_run_without_resolved_markets(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A run with zero newly-resolved markets must carry the pending
-        store forward, not overwrite it with just the new deliveries."""
+        """A quiet run must carry the pending store forward.
+
+        Zero newly-resolved markets must not overwrite the state with
+        just the new deliveries.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
         # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp
 

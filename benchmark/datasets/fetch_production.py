@@ -1837,9 +1837,9 @@ def _dedup_pending(pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
     :param pending: pending delivery dicts, possibly with duplicates.
     :return: deduplicated list (insertion order of first occurrence).
     """
-    merged: dict[str, dict[str, Any]] = {}
+    merged: dict[Optional[str], dict[str, Any]] = {}
     for delivery in pending:
-        key = delivery.get("deliver_id")
+        key: Optional[str] = delivery.get("deliver_id")
         previous = merged.get(key)
         if (
             previous is not None

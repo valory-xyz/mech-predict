@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
     DELIVERS_SCHEMA_LEGACY,
@@ -1763,6 +1764,38 @@ class TestRefreshUnparsedPending:
         stale = self._pending("0xstale", None)
         refreshed = refresh_unparsed_pending([stale], "http://gnosis")
         assert refreshed == [stale]
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("GraphQL errors from http://gnosis: store error"),
+            requests.exceptions.ConnectionError("connection refused"),
+        ],
+        ids=["graphql_error", "network_error"],
+    )
+    def test_batch_failure_keeps_stale_entries(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        """A failed refresh batch keeps the stale entries unchanged instead
+        of crashing the run or dropping them."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+
+        def fail(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise exc
+
+        monkeypatch.setattr(fp, "_post_graphql", fail)
+
+        stale = self._pending("0xstale", None)
+        pending = [stale]
+        result = refresh_unparsed_pending(pending, "http://gnosis")
+        assert result == pending
+        assert result[0] is stale  # same object — kept, not rebuilt
+        assert stale["tool_response"] is None  # and not mutated
 
     def test_noop_on_legacy_schema(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Legacy endpoints have nothing to refresh from."""

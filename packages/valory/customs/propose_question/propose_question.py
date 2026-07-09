@@ -606,6 +606,11 @@ LIGHT_MODEL = "gpt-4.1-mini-2025-04-14"
 # state-extraction, and verify-state all use LIGHT_MODEL. Billing 4 full-engine
 # calls is an intentional conservative over-estimate for cost budgeting.
 N_MODEL_CALLS = 4
+# Self-review max_tokens budget (see review-step call site). The output scales
+# with n_candidates because every candidate gets a verbose per-verdict entry.
+REVIEW_MAX_TOKENS_ENVELOPE = 1024  # JSON schema wrapper overhead
+REVIEW_MAX_TOKENS_PER_CANDIDATE = 768  # verbose per-verdict reasoning budget
+REVIEW_MAX_TOKENS_CAP = 16384  # bounded worst case
 DEFAULT_DELIVERY_RATE = 100
 
 _VERIFY_CACHE: Dict[Tuple[str, str], Tuple[bool, str]] = {}
@@ -1364,9 +1369,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 model=review_model,
                 messages=review_messages,
                 temperature=0.0,
-                # 768 tokens per candidate covers verbose per-verdict reasoning;
-                # 1024 covers the JSON schema envelope. 16384 caps the worst case.
-                max_tokens=min(16384, 1024 + 768 * n_candidates),
+                max_tokens=min(
+                    REVIEW_MAX_TOKENS_CAP,
+                    REVIEW_MAX_TOKENS_ENVELOPE
+                    + REVIEW_MAX_TOKENS_PER_CANDIDATE * n_candidates,
+                ),
                 n=1,
                 timeout=120,
                 stop=None,

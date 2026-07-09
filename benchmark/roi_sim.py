@@ -33,9 +33,13 @@ LLM calls, no network access. Stdlib only by design so light CI jobs can run
 it without the full dependency stack.
 
 Tool policy (data-driven, mirroring the accuracy benchmark's no-allowlist +
-reliability-flag approach): every (platform, tool, mode) group present in
-the data is simulated and serialized to roi_results.json -- no tool
-allowlist, nothing silently dropped. A tool is classified a prediction tool
+reliability-flag approach): every (platform, tool, mode, model) group
+present in the data is simulated and serialized to roi_results.json -- no
+tool allowlist, nothing silently dropped. The model dimension is the
+underlying LLM the tool ran on (payload-derived for production rows;
+tournament runner stamps corrected for tools that hardcode their model --
+see TOURNAMENT_MODEL_OVERRIDES), so a tool that ran on several models
+splits into one row per model. A tool is classified a prediction tool
 (``is_prediction_tool``) when at least one of its loaded rows ANYWHERE (all
 rows, not window-limited) carries a valid-parse prediction. The markdown
 tables show ALL prediction-tool groups: zero-eligible ones stay visible with
@@ -68,10 +72,11 @@ import json
 import logging
 import math
 import random
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, Final, Literal, NoReturn, TypeGuard
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +146,7 @@ REJECT_REASONS = (
     "bad_final_outcome",
 )
 
-PENDING = "pending"
+PENDING: Final = "pending"
 
 # First-failing-gate no-bet reasons, in gate order (certified naming).
 NO_BET_GATES = (
@@ -152,7 +157,67 @@ NO_BET_GATES = (
     "skip_zero_stake",
 )
 
+# Closed sentinel types for the reject / no-bet reasons. The REJECT_REASONS /
+# NO_BET_GATES tuples above stay the single RUNTIME source (counter seeding,
+# iteration order); these Literal aliases mirror them so mypy rejects a new
+# reason string added at a return site but missing from the closed set (the
+# counters are pre-seeded only with these keys, so such a drift would be a
+# runtime KeyError). The aliases and the tuples MUST stay in sync — a unit
+# test asserts equality via typing.get_args.
+RejectReason = Literal[
+    "out_of_window",
+    "invalid_parse",
+    "bad_p_yes",
+    "bad_market_prob",
+    "bad_final_outcome",
+    "pending",
+]
+NoBetReason = Literal[
+    "skip_oracle_prob",
+    "skip_edge_below_floor",
+    "skip_edge_above_cap",
+    "skip_spread",
+    "skip_zero_stake",
+]
+
+# A shard where more than this fraction of lines fails to parse is treated as
+# corrupt input and aborts the run (strict >; blank lines count as lines).
+BAD_LINE_FRACTION_MAX = 0.5
+
 PLATFORM_LABELS = {"omen": "Omen", "polymarket": "Polymarket"}
+
+# --- Underlying-LLM ("model") provenance -----------------------------------
+# PRODUCTION rows carry a "model" field stamped by fetch_production from the
+# delivery payload's metadata (payload-derived, audited as accurate) -- it is
+# trusted as-is. TOURNAMENT rows carry the CI runner's --model argument as a
+# stamp, which is WRONG for tools that hardcode their model and ignore
+# kwargs["model"]:
+#   * the finetuned_prediction family
+#     (packages/valory/customs/finetuned_prediction): MODEL_BY_TOOL maps each
+#     tool name to a fixed vLLM served-model name, never reading the kwarg.
+#   * the claude-* prediction tools: prediction_request_v1 (valory) and
+#     prediction_request_rag_v1 / prediction_request_reasoning_v1 /
+#     prediction_url_cot_v1 (napthaai) all hardcode
+#     `if "claude" in tool: model = "claude-sonnet-4-6"`.
+# The overrides below therefore WIN over the tournament stamp. Every other
+# tournament tool verifiably resolves its LLM calls from kwargs["model"], so
+# the row's stamp equals the consumed model and is trusted. A row without a
+# usable model value resolves to MODEL_UNKNOWN.
+TOURNAMENT_MODEL_OVERRIDES = {
+    "predict-base": "qwen-14b-base",
+    "predict-fine-tuned": "qwen-14b-fine-tuned",
+    "predict-fine-tuned-calibrated": "qwen-14b-fine-tuned-calibrated",
+}
+# Mirrors the tool sources' own selector (`if "claude" in tool`).
+CLAUDE_HARDCODED_MODEL = "claude-sonnet-4-6"
+
+MODEL_UNKNOWN = "unknown"
+
+# Short display names for the report tables (JSON keeps the full name).
+MODEL_DISPLAY = {
+    "gpt-4.1-2025-04-14": "gpt-4.1",
+    "gpt-4o-2024-08-06": "gpt-4o",
+}
 
 
 @dataclass(frozen=True)
@@ -287,6 +352,20 @@ def window_bounds(as_of: date, window_days: int) -> tuple[datetime, datetime]:
 # ---------------------------------------------------------------------------
 
 
+def _input_error(message: str) -> NoReturn:
+    """Abort on an input-integrity failure, visibly in CI.
+
+    Logs at ERROR, prints a GitHub Actions ``::error::`` annotation (picked
+    up from stdout when the module runs inside a workflow) and exits 1 so
+    the run can never publish a plausible-but-empty report on broken input.
+
+    :param message: human-readable description of the input failure.
+    """
+    log.error(message)
+    print(f"::error::roi_sim: {message}")
+    sys.exit(1)
+
+
 def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, Any]]:
     """Load and dedup all input rows from the benchmark artifacts.
 
@@ -297,6 +376,12 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
     (collector re-emission), so first-seen-wins in sorted filename order is
     the deterministic rule. Rows without a string row_id are kept as-is
     (never deduped).
+
+    Bad-line policy: unparseable lines (bad JSON or a non-dict top level)
+    are skipped and counted, with a WARNING per affected file; but when more
+    than BAD_LINE_FRACTION_MAX of any single file's lines fail to parse the
+    file is treated as corrupt and the run aborts via :func:`_input_error`
+    rather than silently thinning the data.
 
     :param logs_dir: directory holding production_log_*.jsonl shards.
     :param tournament_input: path to tournament_scored.jsonl (resolved rows
@@ -321,18 +406,21 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
     n_duplicates = 0
     n_bad_lines = 0
     for path in paths:
+        n_file_lines = 0
+        n_file_bad = 0
         with path.open(encoding="utf-8") as handle:
             for line in handle:
+                n_file_lines += 1
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
-                    n_bad_lines += 1
+                    n_file_bad += 1
                     continue
                 if not isinstance(row, dict):
-                    n_bad_lines += 1
+                    n_file_bad += 1
                     continue
                 row_id = row.get("row_id")
                 if isinstance(row_id, str):
@@ -341,6 +429,19 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
                         continue
                     seen_ids.add(row_id)
                 rows.append(row)
+        if n_file_bad:
+            log.warning(
+                "%s: skipped %d unparseable line(s) out of %d",
+                path.name,
+                n_file_bad,
+                n_file_lines,
+            )
+            if n_file_bad > BAD_LINE_FRACTION_MAX * n_file_lines:
+                _input_error(
+                    f"{n_file_bad}/{n_file_lines} lines in {path.name} "
+                    "failed to parse — corrupt or mislaid shard"
+                )
+        n_bad_lines += n_file_bad
     log.info(
         "Loaded %d rows from %d files (%d duplicate row_ids dropped, "
         "%d unparseable lines skipped)",
@@ -359,7 +460,7 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
 
 def eligibility_reason(
     row: dict[str, Any], window_start: datetime, window_end: datetime
-) -> str | None:
+) -> RejectReason | None:
     """Apply the eligibility ladder to one row; first failure wins.
 
     Ladder (in order): predicted_at parses and lies in the window;
@@ -400,7 +501,7 @@ def eligibility_reason(
 # ---------------------------------------------------------------------------
 
 
-def simulate_row(row: dict[str, Any], gates: GateConfig) -> Bet | str:
+def simulate_row(row: dict[str, Any], gates: GateConfig) -> Bet | NoBetReason:
     """Run one ELIGIBLE row through the trader's gates and settle it.
 
     Side selection: bet the side the tool favors relative to the captured
@@ -578,7 +679,7 @@ def _top3_pnl_share(bets: list[Bet]) -> float | None:
 def compute_group_stats(
     eligible_rows: list[dict[str, Any]], gates: GateConfig
 ) -> dict[str, Any]:
-    """Simulate one (platform, tool, mode) group and compute its stats.
+    """Simulate one (platform, tool, mode, model) group and compute stats.
 
     ROI is POOLED and capital-weighted: 100 * sum(pnl) / sum(stake) -- never
     a mean of per-bet ROIs. Each price variant gets its own market-clustered
@@ -649,6 +750,33 @@ def _mode_label(row: dict[str, Any]) -> str:
     return str(mode)
 
 
+def _resolve_model(row: dict[str, Any], mode: str) -> str:
+    """Resolve the underlying LLM a row's tool actually ran on.
+
+    Provenance rules (see the TOURNAMENT_MODEL_OVERRIDES comment): production
+    rows carry a payload-derived model that is trusted as-is; tournament rows
+    carry a runner stamp that is corrected for tools known to hardcode their
+    model (the finetuned_prediction family and the claude-* tools) and
+    trusted otherwise. Missing/empty/non-string models resolve to
+    MODEL_UNKNOWN.
+
+    :param row: input row.
+    :param mode: report mode label from :func:`_mode_label`.
+    :return: resolved model name, or MODEL_UNKNOWN.
+    """
+    if mode == "tournament":
+        tool_name = str(row.get("tool_name") or "")
+        override = TOURNAMENT_MODEL_OVERRIDES.get(tool_name)
+        if override is None and "claude" in tool_name:
+            override = CLAUDE_HARDCODED_MODEL
+        if override is not None:
+            return override
+    model = row.get("model")
+    if isinstance(model, str) and model:
+        return model
+    return MODEL_UNKNOWN
+
+
 def _parse_reliability_flag(parse_reliability: float) -> str:
     """Build the low-parse-reliability flag text.
 
@@ -663,10 +791,13 @@ def _parse_reliability_flag(parse_reliability: float) -> str:
 def simulate(
     rows: list[dict[str, Any]], window_start: datetime, window_end: datetime
 ) -> list[dict[str, Any]]:
-    """Group rows by (platform, tool, mode) and simulate every group.
+    """Group rows by (platform, tool, mode, model) and simulate every group.
 
-    Every group present in the data is simulated -- no tool allowlist. Rows
-    on platforms without a gate config are ignored (and counted in the log).
+    Every group present in the data is simulated -- no tool allowlist. The
+    model is the underlying LLM the tool ran on (see :func:`_resolve_model`);
+    a tool that ran on multiple models within a (platform, tool, mode) yields
+    one row per model. Rows on platforms without a gate config are ignored
+    (and counted in the log).
     n_rows_seen is WINDOW-SCOPED (certified contract): it counts the group's
     deduped rows whose predicted_at parses and falls in the window, before
     the parse/validity rungs; pending (unresolved) rows are counted in
@@ -690,7 +821,7 @@ def simulate(
         for row in rows
         if row.get("prediction_parse_status") == "valid"
     }
-    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     n_skipped_platform = 0
     for row in rows:
         platform = row.get("platform")
@@ -699,7 +830,8 @@ def simulate(
             continue
         tool_name = str(row.get("tool_name") or "unknown")
         mode = _mode_label(row)
-        key = (platform, tool_name, mode)
+        model = _resolve_model(row, mode)
+        key = (platform, tool_name, mode, model)
         group = grouped.setdefault(
             key,
             {
@@ -725,7 +857,7 @@ def simulate(
         )
 
     results: list[dict[str, Any]] = []
-    for (platform, tool_name, mode), group in grouped.items():
+    for (platform, tool_name, mode, model), group in grouped.items():
         stats = compute_group_stats(group["eligible"], PLATFORM_GATES[platform])
         # Parse reliability over IN-WINDOW rows, counted at the parse rung:
         # every in-window row either rejects as invalid_parse or passes the
@@ -751,6 +883,7 @@ def simulate(
             "platform": platform,
             "tool_name": tool_name,
             "mode": mode,
+            "model": model,
             "n_rows_seen": group["n_rows_seen"],
             "n_pending": group["n_pending"],
             "rejects": group["rejects"],
@@ -766,6 +899,7 @@ def simulate(
             0 if r["mode"] == "production" else 1,
             r["mode"],
             r["tool_name"],
+            r["model"],
         )
     )
     return results
@@ -911,19 +1045,21 @@ def render_report(
             -g["n_bets"],
             g["tool_name"],
             g["mode"],
+            g["model"],
         )
     )
     lines.append(
-        "| tool | mode | n preds | n bets | Brier all->bets | staked "
+        "| tool | mode | model | n preds | n bets | Brier all->bets | staked "
         "| ROI (95% CI) | ROI w/ costs | flags |"
     )
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for g in rows:
         lines.append(
-            "| {tool} | {mode} | {n_preds} | {n_bets} | {brier} | {staked} "
-            "| {roi} | {roi_h} | {flags} |".format(
+            "| {tool} | {mode} | {model} | {n_preds} | {n_bets} | {brier} "
+            "| {staked} | {roi} | {roi_h} | {flags} |".format(
                 tool=g["tool_name"],
                 mode=g["mode"],
+                model=MODEL_DISPLAY.get(g["model"], g["model"]),
                 n_preds=g["n_eligible"],
                 n_bets=g["n_bets"],
                 brier=_fmt_brier(g["brier_all"], g["brier_bets"]),
@@ -999,7 +1135,7 @@ def main() -> None:
     )
     parser = argparse.ArgumentParser(
         description=(
-            "Simulate trader ROI per (platform, tool, mode) from stored "
+            "Simulate trader ROI per (platform, tool, mode, model) from stored "
             "benchmark predictions over a trailing window."
         )
     )
@@ -1052,6 +1188,13 @@ def main() -> None:
         window_end.isoformat(),
     )
     rows = load_input_rows(args.logs_dir, args.tournament_input)
+    if not rows:
+        # Defense-in-depth: the CI workflow's benchmark-data download already
+        # uses if_no_artifact_found: fail, but an artifact-layout drift (e.g.
+        # shards extracted under a different path) would still reach here
+        # with zero rows and would otherwise exit 0 after publishing a
+        # well-formed "no data" report that nobody is alerted to.
+        _input_error("no input rows loaded — check artifact layout")
     groups = simulate(rows, window_start, window_end)
     log.info(
         "Simulated %d groups (%d bets total)",

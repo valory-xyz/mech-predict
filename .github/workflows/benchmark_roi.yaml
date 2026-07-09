@@ -36,10 +36,10 @@ jobs:
   # -----------------------------------------------------------------------
   # ROI companion simulation. Pure read-side consumer of the flywheel's
   # persisted artifacts: no new data capture, no LLM calls, no secrets, no
-  # Slack, and nothing is written back to the repo. Phase 1 of the staged
-  # rollout in the ROI companion sim one-pager — a dedicated Slack post is
-  # phase 2 and folding ROI into the main daily reports is phase 3; neither
-  # belongs in this workflow yet.
+  # Slack, and nothing is written back to the repo. This standalone workflow
+  # is the artifact + job-summary surface for the ROI sim. The per-platform
+  # Slack ROI section ships separately, appended to the daily benchmark posts
+  # by the flywheel's notify_slack hook — it deliberately does not run here.
   # -----------------------------------------------------------------------
   roi-sim:
     runs-on: ubuntu-22.04

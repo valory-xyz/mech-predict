@@ -56,6 +56,7 @@ from benchmark.roi_sim import (
     load_input_rows,
     main,
     render_report,
+    roi_display_sort_key,
     simulate,
     simulate_row,
     window_bounds,
@@ -1386,6 +1387,39 @@ class TestDeterministicOrdering:
     def test_mode_label_unknown_mode_passthrough(self) -> None:
         """An unknown mode string passes through verbatim (stays visible)."""
         assert _mode_label({"mode": "shadow"}) == "shadow"
+
+
+class TestSharedDisplaySortKey:
+    """roi_display_sort_key is the single ordering unit for both renderers."""
+
+    def test_best_roi_first(self) -> None:
+        """A higher ROI yields a smaller key (sorts earlier)."""
+        assert roi_display_sort_key(25.0, 5, "t", "m", "x") < roi_display_sort_key(
+            3.0, 50, "t", "m", "x"
+        )
+
+    def test_none_roi_sorts_last(self) -> None:
+        """A None/non-numeric ROI sorts after any numeric ROI."""
+        assert roi_display_sort_key(5.0, 10, "t", "m", "x") < roi_display_sort_key(
+            None, 10, "t", "m", "x"
+        )
+        # The no-bet bucket flag is 1, betting rows are 0.
+        assert roi_display_sort_key(None, 0, "t", "m", "x")[0] == 1
+        assert roi_display_sort_key(0.0, 0, "t", "m", "x")[0] == 0
+
+    def test_equal_roi_breaks_on_bets_then_names(self) -> None:
+        """Equal ROI falls back to bet count desc, then tool/mode/model."""
+        assert roi_display_sort_key(10.0, 30, "t", "m", "x") < roi_display_sort_key(
+            10.0, 3, "t", "m", "x"
+        )
+        assert roi_display_sort_key(10.0, 3, "a", "m", "x") < roi_display_sort_key(
+            10.0, 3, "b", "m", "x"
+        )
+
+    def test_matches_render_report_inline_shape(self) -> None:
+        """The key mirrors what render_report builds per row (6-tuple)."""
+        key = roi_display_sort_key(12.3, 20, "tool", "production", "gpt-4.1")
+        assert key == (0, -12.3, -20, "tool", "production", "gpt-4.1")
 
 
 # ---------------------------------------------------------------------------

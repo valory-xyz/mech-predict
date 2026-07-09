@@ -29,6 +29,8 @@ from benchmark import notify_slack
 from benchmark.roi_slack import (
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
+    _HEADERS,
+    _render_table,
     build_roi_section,
 )
 
@@ -940,3 +942,35 @@ class TestNotifySlackHook:
         posted = self._run_main(monkeypatch, tmp_path, roi_env="off")
         assert len(posted) == 1
         assert "LLM SUMMARY" in posted[0]
+
+
+# ---------------------------------------------------------------------------
+# _render_table structural guards
+# ---------------------------------------------------------------------------
+
+
+class TestRenderTableGuards:
+    """_render_table protects against empty input and column drift."""
+
+    def test_empty_rows_returns_no_lines(self) -> None:
+        """No rows -> no lines (never a max() on an empty header width)."""
+        lines = _render_table([])
+        assert isinstance(lines, list) and not lines
+
+    def test_full_width_row_renders(self) -> None:
+        """A correctly-sized row produces header + divider + one data line."""
+        row = tuple(f"c{i}" for i in range(len(_HEADERS)))
+        lines = _render_table([row])
+        assert len(lines) == 3
+
+    def test_short_row_raises_not_silently_truncates(self) -> None:
+        """A row with fewer cells than _HEADERS raises rather than dropping a column."""
+        short = tuple(f"c{i}" for i in range(len(_HEADERS) - 1))
+        with pytest.raises(AssertionError):
+            _render_table([short])
+
+    def test_long_row_raises(self) -> None:
+        """A row with more cells than _HEADERS also raises."""
+        long_row = tuple(f"c{i}" for i in range(len(_HEADERS) + 1))
+        with pytest.raises(AssertionError):
+            _render_table([long_row])

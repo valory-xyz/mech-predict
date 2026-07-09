@@ -33,9 +33,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any
 
-from benchmark.roi_sim import MODEL_DISPLAY
+from benchmark.roi_sim import MODEL_DISPLAY, _is_number, roi_display_sort_key
 
 # Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
 # wide table renders fine; MAX_LINE_WIDTH is only a truncation backstop for
@@ -103,17 +103,11 @@ _FLAGS_MIN = 6
 
 _ELLIPSIS = "…"
 
-
-def _is_num(value: object) -> TypeGuard[float]:
-    """Return True for a real (non-bool) int/float.
-
-    The TypeGuard narrows the value to float for the caller's arithmetic
-    (mirrors ``benchmark.roi_sim._is_number``).
-
-    :param value: candidate value.
-    :return: True when usable as a number.
-    """
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+# _HEADERS, _CAPS, and _row_cells() are parallel per-column tuples that
+# _render_table zips together; a length mismatch would silently drop a
+# column. Pin the header/cap coupling at import time; _render_table pins the
+# row arity at render time.
+assert len(_HEADERS) == len(_CAPS), "_HEADERS and _CAPS must stay the same length"
 
 
 def _as_int(value: object) -> int:
@@ -122,7 +116,7 @@ def _as_int(value: object) -> int:
     :param value: candidate value.
     :return: integer value, or 0 when not a number.
     """
-    return int(value) if _is_num(value) else 0
+    return int(value) if _is_number(value) else 0
 
 
 def _as_float(value: object) -> float:
@@ -131,7 +125,7 @@ def _as_float(value: object) -> float:
     :param value: candidate value.
     :return: float value, or 0.0 when not a number.
     """
-    return float(value) if _is_num(value) else 0.0
+    return float(value) if _is_number(value) else 0.0
 
 
 def _fmt_signed(value: float) -> str:
@@ -153,26 +147,17 @@ def _fmt_roi_ci(roi: object, ci: object) -> str:
     :param ci: [low, high] CI bounds, or None.
     :return: display string, e.g. ``+12.3% (+4.1,+20.9)``.
     """
-    if not _is_num(roi):
+    if not _is_number(roi):
         return "n/a"
     roi_text = f"{_fmt_signed(float(roi))}%"
-    if isinstance(ci, list) and len(ci) == 2 and _is_num(ci[0]) and _is_num(ci[1]):
+    if (
+        isinstance(ci, list)
+        and len(ci) == 2
+        and _is_number(ci[0])
+        and _is_number(ci[1])
+    ):
         return f"{roi_text} ({_fmt_signed(float(ci[0]))},{_fmt_signed(float(ci[1]))})"
     return roi_text
-
-
-def _fmt_roi_point(roi: object) -> str:
-    """Format the "w/costs" table cell (point estimate only).
-
-    The haircut CI stays in the full report; the compact table keeps
-    the with-costs column to the point value so lines fit the width cap.
-
-    :param roi: haircut ROI in percent, or None.
-    :return: display string.
-    """
-    if not _is_num(roi):
-        return "n/a"
-    return f"{_fmt_signed(float(roi))}%"
 
 
 def _fmt_brier(group: dict[str, Any]) -> tuple[str, str]:
@@ -187,8 +172,8 @@ def _fmt_brier(group: dict[str, Any]) -> tuple[str, str]:
     """
     brier_all = group.get("brier_all")
     brier_bets = group.get("brier_bets")
-    left = f"{float(brier_all):.3f}" if _is_num(brier_all) else "n/a"
-    right = f"{float(brier_bets):.3f}" if _is_num(brier_bets) else "n/a"
+    left = f"{float(brier_all):.3f}" if _is_number(brier_all) else "n/a"
+    right = f"{float(brier_bets):.3f}" if _is_number(brier_bets) else "n/a"
     return left, right
 
 
@@ -267,9 +252,18 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     tool/flag text), the tool column shrinks first, then flags -- numeric
     columns are never touched.
 
-    :param rows: pre-formatted cell tuples, one per table row.
+    :param rows: pre-formatted cell tuples, one per table row. Each tuple
+        MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
+        lines (callers only render the block when there are bet rows).
     :return: table lines (no code-block fences).
     """
+    if not rows:
+        return []
+    for row in rows:
+        assert len(row) == len(_HEADERS), (
+            f"row has {len(row)} cells, expected {len(_HEADERS)} "
+            "(_HEADERS / _CAPS / _row_cells out of sync)"
+        )
     widths = []
     for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
         content = max(len(header), *(len(row[i]) for row in rows))
@@ -323,7 +317,9 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
         brier_bets_cell,
         _fmt_staked(group),
         _fmt_roi_ci(group.get("roi_mid"), group.get("roi_ci")),
-        _fmt_roi_point(group.get("roi_haircut")),
+        # w/costs is point-only: passing ci=None makes _fmt_roi_ci emit the
+        # bare "+X.X%" (or "n/a") with no CI suffix.
+        _fmt_roi_ci(group.get("roi_haircut"), None),
         _compact_flags(group.get("flags")),
     )
 
@@ -331,20 +327,18 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
 def _display_sort_key(
     group: dict[str, Any],
 ) -> tuple[int, float, int, str, str, str]:
-    """Table display order: simulated ROI descending (best first).
+    """Table display order for one group: delegates to the shared key.
 
-    Rows with no bet (a None or non-numeric ``roi_mid``) sort last. Bet
-    count descending, then tool name / mode / model break ties so split
-    groups (one row per underlying LLM) render in a stable order.
+    Extracts the group's scalars and hands them to
+    :func:`benchmark.roi_sim.roi_display_sort_key` so this Slack table and
+    the markdown report can never disagree on row order.
 
     :param group: group dict from roi_results.json.
     :return: sort key tuple.
     """
-    roi_mid = group.get("roi_mid")
-    return (
-        0 if _is_num(roi_mid) else 1,
-        -_as_float(roi_mid) if _is_num(roi_mid) else 0.0,
-        -_as_int(group.get("n_bets")),
+    return roi_display_sort_key(
+        group.get("roi_mid"),
+        _as_int(group.get("n_bets")),
         str(group.get("tool_name") or ""),
         str(group.get("mode") or ""),
         str(group.get("model") or ""),
@@ -398,7 +392,9 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
 
     window_days = payload.get("window_days")
     window_text = (
-        f"trailing {int(window_days)}d" if _is_num(window_days) else "trailing window"
+        f"trailing {int(window_days)}d"
+        if _is_number(window_days)
+        else "trailing window"
     )
     lines = [
         f"*Simulated trader ROI* — {window_text}, same decision rules for "

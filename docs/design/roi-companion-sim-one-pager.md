@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | Repository | **mech-predict** (same repo as the accuracy benchmark) |
-| Trigger | **new standalone workflow** `benchmark_roi.yaml` (daily cron after the flywheel + manual dispatch) - the existing flywheel and replay workflows are **not modified** |
+| Trigger | three surfaces, all shipped in this PR: (a) standalone `benchmark_roi.yaml` (daily cron after the flywheel + manual dispatch), (b) a `continue-on-error` companion step inside `benchmark_flywheel.yaml`, and (c) a guarded ROI section appended to the daily per-platform Slack posts via the `notify_slack` hook |
 | Inputs | the flywheel's own persisted CI artifacts (`benchmark-data` production shards + `tournament-predictions` scored rows) - **no new capture, no LLM calls, no secrets** |
 | Output | `benchmark/results/report_roi_{omen,polymarket}.md` + machine-readable `roi_results.json`, uploaded as a `benchmark-roi` artifact; tables show only currently-deployed production tools and the active tournament roster - resolved live per run via the deployment-status procedure (trader service.yaml `valid_mechs` -> mech metadata) - everything else stays in `roi_results.json` |
 | Modes covered | **production** (deliveries from live traders; price/spread/liquidity captured natively) **and tournament** (CI predictions; price captured, no spread -> that gate self-skips) |
@@ -78,13 +78,15 @@ paired, both-bet-decomposed delta when it is switched on.
 The binding count is **bets, not predictions** (gates cut hard); the report shows both and flags
 low-bet rows. A longer trailing window (90d) is the default remedy for thin segments.
 
-## Slack visibility - staged, current pipeline untouched
+## Where it surfaces (shipped)
 
-| Phase | What | Existing pipeline touched? |
+Three surfaces, all live in this PR:
+
+| Surface | What | Failure mode |
 |---|---|---|
-| 1 (ships first) | artifacts + job-summary visibility only: the `benchmark-roi` artifact plus the per-platform reports surfaced in the Actions run summary - **no Slack code path at all** (the Slack toggle arrives with the phase-2 PR) | no |
-| 2 | the ROI workflow posts its **own** daily Slack message via the existing webhook + summarizer machinery | no |
-| 3 (optional, later) | fold an ROI section into the main daily benchmark reports | yes - own PR, only after the numbers are trusted |
+| Standalone workflow | `benchmark_roi.yaml` runs the sim on its own daily cron (+ manual dispatch), uploads the `benchmark-roi` artifact, and prints the per-platform reports to the Actions run summary - no Slack code path | independent of the flywheel |
+| Flywheel companion | a `continue-on-error` step in `benchmark_flywheel.yaml` reruns the sim over the same data the benchmark job just fetched/scored, so a fresh `roi_results.json` is ready for the Slack step | never fails the flywheel |
+| Daily Slack | `notify_slack` appends a per-platform ROI section to each daily benchmark message, behind a guard so a missing/broken section degrades to posting without it (`ROI_SECTION=off` disables it) | best-effort append |
 
 ## Correctness - verified while building, then ONE pipeline ships
 

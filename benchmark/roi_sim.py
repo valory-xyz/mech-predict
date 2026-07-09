@@ -226,10 +226,12 @@ NOTICE_ROSTER_UNAVAILABLE = (
 #   * the finetuned_prediction family
 #     (packages/valory/customs/finetuned_prediction): MODEL_BY_TOOL maps each
 #     tool name to a fixed vLLM served-model name, never reading the kwarg.
-#   * the claude-* prediction tools: prediction_request_v1 (valory) and
-#     prediction_request_rag_v1 / prediction_request_reasoning_v1 /
-#     prediction_url_cot_v1 (napthaai) all hardcode
-#     `if "claude" in tool: model = "claude-sonnet-4-6"`.
+#   * the claude-* prediction tools all force claude-sonnet-4-6 whenever
+#     "claude" is in the tool name. The three napthaai tools
+#     (prediction_request_rag_v1 / prediction_request_reasoning_v1 /
+#     prediction_url_cot_v1) select it through a `model` variable;
+#     prediction_request_v1 (valory) does the same through an `engine`
+#     variable. Same effect, same hardcoded model, on all four.
 # The overrides below therefore WIN over the tournament stamp. Every other
 # tournament tool verifiably resolves its LLM calls from kwargs["model"], so
 # the row's stamp equals the consumed model and is trusted. A row without a
@@ -1150,6 +1152,40 @@ def _not_deployed_line(inactive: list[dict[str, Any]]) -> str:
     )
 
 
+def roi_display_sort_key(
+    roi_mid: object,
+    n_bets: int,
+    tool: str,
+    mode: str,
+    model: str,
+) -> tuple[int, float, int, str, str, str]:
+    """Shared table-ordering key: simulated ROI descending (best first).
+
+    Rows with no bet (a None or non-numeric ``roi_mid``) sort last; then bet
+    count descending; then tool / mode / model so split groups (one row per
+    underlying LLM) render in a stable order. Used by BOTH renderers -- this
+    module's markdown report and the Slack companion -- so their row order
+    can never disagree.
+
+    :param roi_mid: pooled mid ROI in percent, or None/non-numeric for a
+        no-bet row.
+    :param n_bets: simulated bet count.
+    :param tool: tool name.
+    :param mode: deployment mode label.
+    :param model: underlying LLM name.
+    :return: sort key tuple.
+    """
+    roi_val = float(roi_mid) if _is_number(roi_mid) else None
+    return (
+        0 if roi_val is not None else 1,
+        -roi_val if roi_val is not None else 0.0,
+        -n_bets,
+        tool,
+        mode,
+        model,
+    )
+
+
 def render_report(
     platform: str,
     groups: list[dict[str, Any]],
@@ -1233,13 +1269,8 @@ def render_report(
         return "\n".join(lines) + "\n"
 
     rows.sort(
-        key=lambda g: (
-            0 if _is_number(g["roi_mid"]) else 1,
-            -g["roi_mid"] if _is_number(g["roi_mid"]) else 0.0,
-            -g["n_bets"],
-            g["tool_name"],
-            g["mode"],
-            g["model"],
+        key=lambda g: roi_display_sort_key(
+            g["roi_mid"], g["n_bets"], g["tool_name"], g["mode"], g["model"]
         )
     )
     lines.append(

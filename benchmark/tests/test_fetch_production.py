@@ -1496,7 +1496,8 @@ class TestFetchDeliveriesSchemaShapes:
         )
         monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
 
-        deliveries = fp.fetch_deliveries("http://gnosis", 0)
+        deliveries, unparsed_cap = fp.fetch_deliveries("http://gnosis", 0)
+        assert unparsed_cap is None
         assert "parsedDelivery" in captured["query"]
         assert "toolResponse" not in captured["query"]
         assert deliveries[0]["tool_response"] == '{"p_yes": 0.7, "p_no": 0.3}'
@@ -1532,7 +1533,7 @@ class TestFetchDeliveriesSchemaShapes:
         )
         monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
 
-        deliveries = fp.fetch_deliveries("http://polygon", 0)
+        deliveries, _ = fp.fetch_deliveries("http://polygon", 0)
         assert "toolResponse" in captured["query"]
         assert "parsedDelivery" not in captured["query"]
         assert deliveries[0]["tool_response"] == '{"p_yes": 0.2, "p_no": 0.8}'
@@ -1828,6 +1829,93 @@ class TestDedupPending:
         assert refetched.get("deferred_market") is None  # input not mutated
 
 
+@pytest.mark.usefixtures("clear_schema_cache")
+class TestUnparsedRequestCursorCap:
+    """Delivers skipped for a lagging parsedRequest hold the delivery cursor."""
+
+    @staticmethod
+    def _raw_deliver(ts: int, parsed_request: Any) -> dict[str, Any]:
+        """Build a raw subgraph deliver with the given parsedRequest."""
+        return {
+            "id": f"0x{ts}",
+            "blockTimestamp": str(ts),
+            "parsedDelivery": None,
+            "request": {
+                "id": "0xreq",
+                "blockTimestamp": str(ts - 10),
+                "parsedRequest": parsed_request,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("age_seconds", "expect_cap"),
+        [
+            (3600, True),  # recent skip: FDS lag -> hold the cursor
+            (PARSED_DELIVERY_GRACE_SECONDS + 3600, False),  # permanent skip
+        ],
+        ids=["recent_lag", "permanently_unparseable"],
+    )
+    def test_null_parsed_request_caps_cursor_within_grace(
+        self, monkeypatch: pytest.MonkeyPatch, age_seconds: int, expect_cap: bool
+    ) -> None:
+        """Only grace-fresh null-parsedRequest delivers return a cursor cap."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        ts = int(time.time()) - age_seconds
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(
+            fp,
+            "_paginated_fetch",
+            lambda *a, **k: [self._raw_deliver(ts, None)],
+        )
+        deliveries, cap = fp.fetch_deliveries("http://gnosis", 0)
+        assert deliveries == []
+        assert cap == (ts - 1 if expect_cap else None)
+
+    def test_cap_holds_platform_delivery_cursor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cap wins over a newer built row's delivery timestamp."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        now = int(time.time())
+        matched = {
+            "deliver_id": "0xmatched",
+            "timestamp": now,  # newer than the lagging deliver
+            "request_timestamp": now - 10,
+            "model": "gpt-4.1",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+            "tool": "superforcaster",
+            "question_title": "will it match?",
+            "market_id": "0xmarket",
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+            "parsed_missing": False,
+        }
+        markets = ResolvedMarkets()
+        markets.add(
+            "0xmarket", "will it match?", {"outcome": True, "resolved_at_ts": now}
+        )
+        lagging_cap = now - 600
+        monkeypatch.setattr(
+            fp, "fetch_deliveries", lambda url, ts: ([matched], lagging_cap)
+        )
+        monkeypatch.setattr(
+            fp, "_enrich_rows_with_ipfs_metadata", lambda rows, url: None
+        )
+
+        rows, _, max_delivery_ts, _ = fp.process_platform(
+            "omen", "http://gnosis", markets, 0, set(), []
+        )
+        assert len(rows) == 1
+        assert max_delivery_ts == lagging_cap
+
+
 class TestPendingSurvivesQuietRun:
     """The pending store must not be wiped by a run with no resolutions."""
 
@@ -1861,7 +1949,9 @@ class TestPendingSurvivesQuietRun:
             "market_close_at": None,
             "parsed_missing": False,
         }
-        monkeypatch.setattr(fp, "fetch_deliveries", lambda url, ts: [new_delivery])
+        monkeypatch.setattr(
+            fp, "fetch_deliveries", lambda url, ts: ([new_delivery], None)
+        )
 
         rows, all_pending, _, _ = fp.process_platform(
             "omen",

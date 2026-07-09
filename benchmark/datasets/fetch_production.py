@@ -1011,15 +1011,25 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 def fetch_deliveries(
     marketplace_url: str,
     timestamp_gt: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], Optional[int]]:
     """Bulk fetch all recent deliveries with prediction data.
 
     Skips deliveries with null parsedRequest (IPFS failures on subgraph side).
     Extracts market_id from request_context when available (schema v2.0+).
 
+    ParsedRequest is written by the same async file-data-source as
+    ParsedDelivery, so a freshly-indexed deliver can have a null
+    parsedRequest purely due to indexing lag. Those recent skips return a
+    cursor cap (one below the youngest such deliver) so the caller keeps
+    the delivery cursor behind them and they are refetched next run once
+    the file handler catches up. Skips older than
+    ``PARSED_DELIVERY_GRACE_SECONDS`` are permanently-unparseable request
+    files; they never cap the cursor, or one bad upload would pin it
+    forever.
+
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
-    :return: list of delivery dicts.
+    :return: tuple of (delivery dicts, delivery-cursor cap or None).
     """
     schema = detect_delivers_schema(marketplace_url)
     query_template = (
@@ -1034,11 +1044,21 @@ def fetch_deliveries(
 
     deliveries = []
     skipped = 0
+    unparsed_request_cap: Optional[int] = None
+    now_ts = int(time.time())
     for d in raw:
         request = d.get("request") or {}
         parsed = request.get("parsedRequest")
         if not parsed:
             skipped += 1
+            delivery_ts = int(d["blockTimestamp"])
+            if now_ts - delivery_ts < PARSED_DELIVERY_GRACE_SECONDS:
+                cap = delivery_ts - 1
+                unparsed_request_cap = (
+                    cap
+                    if unparsed_request_cap is None
+                    else min(unparsed_request_cap, cap)
+                )
             continue
 
         question_title = _extract_question_title(parsed.get("questionTitle", ""))
@@ -1073,7 +1093,7 @@ def fetch_deliveries(
     if deliveries:
         log.info("  %d/%d deliveries have market_id", has_market_id, len(deliveries))
 
-    return deliveries
+    return deliveries, unparsed_request_cap
 
 
 # ---------------------------------------------------------------------------
@@ -2194,7 +2214,9 @@ def process_platform(
 
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)
-    new_deliveries = fetch_deliveries(marketplace_url, delivery_ts_gt)
+    new_deliveries, unparsed_request_cap = fetch_deliveries(
+        marketplace_url, delivery_ts_gt
+    )
     log.info(
         "%s: %d new deliveries, %d resolved markets, %d pending from before",
         platform,
@@ -2219,6 +2241,15 @@ def process_platform(
             max_delivery_ts,
             max_resolved_ts,
         ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
+
+    # Hold the delivery cursor behind delivers skipped for a (recent) null
+    # parsedRequest so they are refetched once the async file handler has
+    # indexed them, instead of being lost when a newer row advances the
+    # cursor past them this run.
+    if unparsed_request_cap is not None and (
+        not max_delivery_ts or unparsed_request_cap < max_delivery_ts
+    ):
+        max_delivery_ts = unparsed_request_cap
 
     all_rows = rows_from_pending + rows_from_new
     all_pending = _dedup_pending(remaining_pending + new_pending)

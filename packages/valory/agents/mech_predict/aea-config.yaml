@@ -73,7 +73,7 @@ customs:
 - nickcom007/prediction_request_sme:0.1.0:bafybeifsk4og24t22agcrj7mm6fz3wxwfbdg554yjhc6odpxal5ofg22ti
 - valory/factual_research:0.1.0:bafybeidcxmqemvzm7cz2ydyjsmu53zflsqpcj2gpco5kwn3ldvf22rqx4i
 - valory/factual_research_v3:0.1.0:bafybeiboyjc2u42lcsi7er6hywwdz27ae6r57y3jnqck5nk7tj4qosoyqa
-- valory/propose_question:0.1.0:bafybeifs2tczqwrbyi6nyhonvnbllz6nxbe2xoo4lslc6aeudi4waufzyi
+- valory/propose_question:0.1.0:bafybeid4lx2couni3y752eple5zs56kb3vymt2h6vox3fntpimdrb4gd4m
 - valory/superforcaster_full_search:0.1.0:bafybeihba6ch6g7gndfwv75dtpfrpnvg4dw6wq6lxexch5h3n3vjafuxsm
 - valory/superforcaster_calibrated_full_search:0.1.0:bafybeialuhbtfumvlbdtzimfn7wdacqwccn2ny5cbhi4tkri6iih6pfgxe
 default_ledger: ethereum

@@ -1162,8 +1162,9 @@ def render_report(
 ) -> str:
     """Render one platform's markdown ROI report.
 
-    Rows are sorted production-first, then by bet count descending; rows
-    below sample thresholds are flagged, never dropped. The table shows
+    Rows are sorted by simulated ROI descending (best first); rows with no
+    bet (no ROI) sort last. Rows below sample thresholds are flagged, never
+    dropped. The table shows
     prediction-tool groups that are currently active (production: in the
     platform's deployment set; tournament: in the tournament roster, per
     each group's ``active`` stamp from :func:`annotate_active`; groups
@@ -1233,7 +1234,8 @@ def render_report(
 
     rows.sort(
         key=lambda g: (
-            0 if g["mode"] == "production" else 1,
+            0 if _is_number(g["roi_mid"]) else 1,
+            -g["roi_mid"] if _is_number(g["roi_mid"]) else 0.0,
             -g["n_bets"],
             g["tool_name"],
             g["mode"],

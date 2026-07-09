@@ -328,17 +328,22 @@ def _row_cells(group: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _display_sort_key(group: dict[str, Any]) -> tuple[int, int, str, str, str]:
-    """Table display order: production first, then bet count descending.
+def _display_sort_key(
+    group: dict[str, Any],
+) -> tuple[int, float, int, str, str, str]:
+    """Table display order: simulated ROI descending (best first).
 
-    Tool name / mode / model break ties so split groups (one row per
-    underlying LLM) render in a stable order.
+    Rows with no bet (a None or non-numeric ``roi_mid``) sort last. Bet
+    count descending, then tool name / mode / model break ties so split
+    groups (one row per underlying LLM) render in a stable order.
 
     :param group: group dict from roi_results.json.
     :return: sort key tuple.
     """
+    roi_mid = group.get("roi_mid")
     return (
-        0 if group.get("mode") == "production" else 1,
+        0 if _is_num(roi_mid) else 1,
+        -_as_float(roi_mid) if _is_num(roi_mid) else 0.0,
         -_as_int(group.get("n_bets")),
         str(group.get("tool_name") or ""),
         str(group.get("mode") or ""),

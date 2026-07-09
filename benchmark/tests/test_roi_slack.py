@@ -263,34 +263,55 @@ class TestBuildRoiSectionHappyPath:
         assert "0.207" in rows[0]
         assert rows[0].count("n/a") == 1
 
-    def test_production_sorts_before_tournament(self, tmp_path: Path) -> None:
-        """Production rows precede tournament rows regardless of bet count.
+    def test_sorted_by_roi_desc_across_modes(self, tmp_path: Path) -> None:
+        """Higher ROI ranks first even when it is a tournament tool.
+
+        A tournament tool with better ROI now legitimately precedes a
+        lower-ROI production tool -- mode is no longer a sort key.
 
         :param tmp_path: pytest tmp_path fixture.
         """
         path = _write_results(
             tmp_path,
             [
-                _group(tool="t-big", mode="tournament", n_bets=99),
-                _group(tool="p-small", mode="production", n_bets=5),
+                _group(tool="p-low", mode="production", roi_mid=3.0, n_bets=50),
+                _group(tool="t-high", mode="tournament", roi_mid=25.0, n_bets=5),
             ],
         )
         section = build_roi_section(path, "omen")
         assert section is not None
         rows = _code_block_lines(section)[2:]
-        assert "p-small" in rows[0]
-        assert "t-big" in rows[1]
+        assert "t-high" in rows[0]
+        assert "p-low" in rows[1]
 
-    def test_within_mode_sorted_by_bets_desc(self, tmp_path: Path) -> None:
-        """Within one mode, more bets rank higher.
+    def test_roi_none_sorts_last(self, tmp_path: Path) -> None:
+        """A group with a None ROI sorts below every ROI-bearing row.
 
         :param tmp_path: pytest tmp_path fixture.
         """
         path = _write_results(
             tmp_path,
             [
-                _group(tool="few", n_bets=3),
-                _group(tool="many", n_bets=30),
+                _group(tool="no-roi", roi_mid=None, n_bets=10),
+                _group(tool="has-roi", roi_mid=5.0, n_bets=10),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        rows = _code_block_lines(section)[2:]
+        assert "has-roi" in rows[0]
+        assert "no-roi" in rows[1]
+
+    def test_equal_roi_sorted_by_bets_desc(self, tmp_path: Path) -> None:
+        """Equal-ROI rows fall back to bet count descending.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(
+            tmp_path,
+            [
+                _group(tool="few", roi_mid=10.0, n_bets=3),
+                _group(tool="many", roi_mid=10.0, n_bets=30),
             ],
         )
         section = build_roi_section(path, "omen")

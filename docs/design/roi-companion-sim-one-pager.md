@@ -47,14 +47,15 @@ ROI = total PnL / total staked on bets placed *in this window* (not all-time, no
 
 | Tool | mode | model | n preds | n bets | Brier all | Brier bets | staked | ROI (95% CI) | ROI w/ costs | flags |
 |---|---|---|---|---|---|---|---|---|---|---|
+| tournament-only tool | tourn | gpt-4.1 | 310 | 22 | 0.25 | 0.31 | 48 USDC | -1.0% (-19.4, +18.2) | -3.2% | few bets - anecdotal |
 | fine-tuned tool | tourn | qwen-14b-fine-tuned | 1,240 | 96 | 0.21 | 0.26 | 212 USDC | **-2.9%** (-10.1, +4.6) | -5.1% | |
 | live production tool | prod | gpt-4.1 | 3,410 | 187 | 0.24 | 0.33 | 421 USDC | -6.3% (-11.2, -1.5) | -8.8% | |
-| tournament-only tool | tourn | gpt-4.1 | 310 | 22 | 0.25 | 0.31 | 48 USDC | -1.0% (-19.4, +18.2) | -3.2% | few bets - anecdotal |
 
 model = the LLM the tool ran on, payload-derived for production; tournament stamps corrected for
 tools that hardcode their model - a tool that ran on several models splits into one row per model.
 Brier/accuracy = over ALL eligible predictions (same basis as the accuracy benchmark); a Brier bets
 worse than Brier all means the gate is selecting the tool's weaker forecasts.
+Rows are sorted by simulated ROI (best first); rows with no bet (no ROI) sort last.
 Rows below the sample threshold are **shown and flagged, never dropped**; likewise every prediction
 tool is always shown (zero-eligible ones flagged "no eligible rows in window"), non-prediction tools
 (no parseable prediction in any row) are summarized on one line below the table, and a

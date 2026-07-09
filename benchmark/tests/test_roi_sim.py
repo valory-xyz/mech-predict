@@ -870,9 +870,18 @@ class TestEndToEnd:
         for report in (report_omen, report_poly):
             assert "| tool | mode | model | n preds | n bets |" in report
             assert "tool-a" in report
-        # Production rows sort before tournament rows in the table.
-        assert report_omen.index("| tool-a | production |") < report_omen.index(
-            "| tool-a | tournament |"
+        # Rows sort by simulated ROI descending; the tool-a tournament
+        # group (both bets win) outperforms the mixed-outcome tool-a
+        # production group, so it renders first.
+        omen_by_key = {
+            (g["tool_name"], g["mode"]): g for g in groups if g["platform"] == "omen"
+        }
+        assert (
+            omen_by_key[("tool-a", "tournament")]["roi_mid"]
+            > omen_by_key[("tool-a", "production")]["roi_mid"]
+        )
+        assert report_omen.index("| tool-a | tournament |") < report_omen.index(
+            "| tool-a | production |"
         )
 
         # Byte-identical on a second run with the same artifacts + as-of.
@@ -1280,15 +1289,64 @@ class TestSentinelTypes:
 class TestDeterministicOrdering:
     """Ordering under ties is part of the byte-reproducibility contract."""
 
-    def test_report_sort_tool_name_tie_break_on_equal_n_bets(self) -> None:
-        """Two tools with equal n_bets sort by tool_name in the report."""
+    def test_report_sorted_by_roi_desc_no_bet_row_last(self) -> None:
+        """Report rows descend by ROI; the no-bet (None ROI) row lands last.
+
+        Tool names are deliberately out of alphabetical agreement with the
+        ROI order so an alphabetical (or bets-first) sort would fail here.
+        """
+        rows = [
+            # winner -> positive ROI (best); alphabetically last of the three.
+            _row(tool="zzz-win", p_yes=0.9, market_prob=0.5, outcome=True),
+            # loser -> negative ROI (worst betting row).
+            _row(tool="aaa-lose", p_yes=0.9, market_prob=0.5, outcome=False),
+            # edge below floor -> no bet -> roi_mid None, must sort LAST.
+            _row(tool="mmm-nobet", p_yes=0.53, market_prob=0.50),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g for g in groups}
+        # Preconditions: distinct ROI buckets, with the no-bet row at None.
+        assert by_tool["zzz-win"]["roi_mid"] > 0
+        assert by_tool["aaa-lose"]["roi_mid"] < 0
+        assert by_tool["mmm-nobet"]["roi_mid"] is None
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert (
+            report.index("| zzz-win |")
+            < report.index("| aaa-lose |")
+            < report.index("| mmm-nobet |")
+        )
+
+    def test_report_sort_n_bets_tie_break_on_equal_roi(self) -> None:
+        """Equal-ROI tools sort by bet count descending in the report."""
+        rows = [  # inserted in REVERSE of the expected report order
+            _row(tool="few", p_yes=0.7, market_prob=0.5, market_id="f1"),
+            _row(tool="many", p_yes=0.7, market_prob=0.5, market_id="m1"),
+            _row(tool="many", p_yes=0.7, market_prob=0.5, market_id="m2"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        by_tool = {g["tool_name"]: g for g in groups}
+        # Precondition: identical per-bet params -> equal pooled ROI, so the
+        # -n_bets key is the decisive tie-break.
+        assert by_tool["many"]["roi_mid"] == by_tool["few"]["roi_mid"]
+        assert by_tool["many"]["n_bets"] == 2
+        assert by_tool["few"]["n_bets"] == 1
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert report.index("| many |") < report.index("| few |")
+
+    def test_report_sort_tool_name_tie_break_on_equal_roi_and_n_bets(self) -> None:
+        """Equal ROI and equal n_bets sort by tool_name in the report."""
         rows = [  # inserted in REVERSE of the expected report order
             _row(tool="b-tool", p_yes=0.7, market_prob=0.5),
             _row(tool="a-tool", p_yes=0.7, market_prob=0.5),
         ]
         groups = simulate(rows, WINDOW_START, WINDOW_END)
         by_tool = {g["tool_name"]: g for g in groups}
-        # Precondition: the -n_bets sort key genuinely ties.
+        # Precondition: the ROI and -n_bets keys both genuinely tie.
+        assert by_tool["a-tool"]["roi_mid"] == by_tool["b-tool"]["roi_mid"]
         assert by_tool["a-tool"]["n_bets"] == by_tool["b-tool"]["n_bets"] == 1
         report = render_report(
             "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END

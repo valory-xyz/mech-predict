@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+from benchmark import roi_sim
 from benchmark.roi_sim import (
     Bet,
     CLAUDE_HARDCODED_MODEL,
@@ -35,6 +36,8 @@ from benchmark.roi_sim import (
     MAX_BET,
     MODEL_DISPLAY,
     MODEL_UNKNOWN,
+    NOTICE_DEPLOYMENT_UNAVAILABLE,
+    NOTICE_ROSTER_UNAVAILABLE,
     NO_BET_GATES,
     NoBetReason,
     PENDING,
@@ -43,8 +46,10 @@ from benchmark.roi_sim import (
     RELIABILITY_GATE,
     RejectReason,
     TOURNAMENT_MODEL_OVERRIDES,
+    _active_tools_for_platform,
     _mode_label,
     _resolve_model,
+    annotate_active,
     cluster_bootstrap_ci,
     compute_group_stats,
     eligibility_reason,
@@ -55,6 +60,34 @@ from benchmark.roi_sim import (
     simulate_row,
     window_bounds,
 )
+
+# Deployment names as declared in benchmark.tool_usage (one per platform).
+OMEN_DEPLOYMENT = "omenstrat Pearl"
+POLYMARKET_DEPLOYMENT = "polystrat Pearl"
+
+
+def _patch_deployments(
+    monkeypatch: pytest.MonkeyPatch,
+    valid: dict[str, list[str] | None],
+    roster: dict[str, str] | None,
+) -> None:
+    """Stub the live deployment fetch and the tournament-roster loader.
+
+    :param monkeypatch: pytest monkeypatch fixture.
+    :param valid: canned ``fetch_valid_tools()`` return value.
+    :param roster: canned tool->CID roster; ``None`` makes the loader raise
+        ``FileNotFoundError`` (roster-unavailable path).
+    """
+    monkeypatch.setattr(roi_sim, "fetch_valid_tools", lambda: valid)
+    if roster is None:
+
+        def _raise() -> dict[str, str]:
+            raise FileNotFoundError("roster gone")
+
+        monkeypatch.setattr(roi_sim, "load_tournament_tools", _raise)
+    else:
+        monkeypatch.setattr(roi_sim, "load_tournament_tools", lambda: roster)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -750,13 +783,25 @@ class TestEndToEnd:
         tournament: Path,
         results: Path,
     ) -> None:
-        """Invoke main() with a synthetic argv.
+        """Invoke main() with a synthetic argv and stubbed deployment fetch.
+
+        Every synthetic tool is stubbed as deployed AND tournament-active,
+        so this class keeps exercising the unfiltered rendering paths (the
+        active filter has its own test class).
 
         :param monkeypatch: pytest monkeypatch fixture.
         :param logs: logs directory.
         :param tournament: tournament_scored.jsonl path.
         :param results: results output directory.
         """
+        _patch_deployments(
+            monkeypatch,
+            valid={
+                OMEN_DEPLOYMENT: ["tool-a", "tool-b"],
+                POLYMARKET_DEPLOYMENT: ["tool-a", "tool-b"],
+            },
+            roster={"tool-a": "cid-a", "tool-b": "cid-b"},
+        )
         argv = [
             "roi_sim",
             "--logs-dir",
@@ -816,6 +861,7 @@ class TestEndToEnd:
             assert "low sample" in group["flags"]  # all n_eligible < 30
             assert group["is_prediction_tool"] is True  # all rows parse
             assert group["parse_reliability"] == pytest.approx(1.0)
+            assert group["active"] is True  # all tools stubbed as deployed
 
         report_omen = (results_1 / "report_roi_omen.md").read_text(encoding="utf-8")
         report_poly = (results_1 / "report_roi_polymarket.md").read_text(
@@ -1365,3 +1411,363 @@ class TestModelColumn:
         assert report.index("| tool-a | production | a-model |") < report.index(
             "| tool-a | production | b-model |"
         )
+
+
+# ---------------------------------------------------------------------------
+# Active-tool restriction (deployment set + tournament roster; tables only)
+# ---------------------------------------------------------------------------
+
+
+class TestActiveFilter:
+    """Tables show deployed / tournament-active tools only; JSON keeps all."""
+
+    def _build_inputs(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Write shards with deployed + undeployed tools on both platforms.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :return: (logs_dir, tournament_input) paths.
+        """
+        logs = tmp_path / "logs"
+        logs.mkdir(exist_ok=True)  # some tests run main() twice
+        production = [
+            _row(tool="deployed-tool", p_yes=0.7, market_prob=0.5),
+            _row(tool="legacy_tool", p_yes=0.8, market_prob=0.5, outcome=False),
+            _row(
+                tool="deployed-tool",
+                platform="polymarket",
+                p_yes=0.65,
+                market_prob=0.55,
+                spread=0.05,
+            ),
+            _row(
+                tool="poly-legacy",
+                platform="polymarket",
+                p_yes=0.70,
+                market_prob=0.55,
+                spread=0.05,
+            ),
+        ]
+        _write_jsonl(logs / "production_log_2026_07_01.jsonl", production)
+        tournament = [
+            _row(tool="roster-tool", mode="tournament", p_yes=0.7, market_prob=0.5),
+            _row(tool="retired-tool", mode="tournament", p_yes=0.6, market_prob=0.5),
+        ]
+        tournament_path = tmp_path / "tournament_scored.jsonl"
+        _write_jsonl(tournament_path, tournament)
+        return logs, tournament_path
+
+    def _run_main(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        results: Path,
+        extra_argv: list[str] | None = None,
+    ) -> None:
+        """Invoke main() over this class's synthetic inputs.
+
+        Deployment / roster stubs must be installed by the caller via
+        ``_patch_deployments`` BEFORE calling this (except with
+        ``--skip-deployment-fetch``, which must not touch the fetch).
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        :param results: results output directory.
+        :param extra_argv: extra CLI arguments.
+        """
+        logs, tournament = self._build_inputs(tmp_path)
+        argv = [
+            "roi_sim",
+            "--logs-dir",
+            str(logs),
+            "--tournament-input",
+            str(tournament),
+            "--results-dir",
+            str(results),
+            "--as-of",
+            "2026-07-08",
+            "--window-days",
+            "90",
+        ] + (extra_argv or [])
+        monkeypatch.setattr(sys, "argv", argv)
+        main()
+
+    def test_filter_keeps_and_drops_per_platform(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only each platform's deployed tools stay in its table.
+
+        The undeployed production tool and the off-roster tournament tool
+        move to the not-deployed line; every group survives in JSON with
+        the correct ``active`` stamp and untouched stats.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        _patch_deployments(
+            monkeypatch,
+            valid={
+                OMEN_DEPLOYMENT: ["deployed-tool"],
+                POLYMARKET_DEPLOYMENT: ["deployed-tool"],
+            },
+            roster={"roster-tool": "cid"},
+        )
+        results = tmp_path / "results"
+        self._run_main(monkeypatch, tmp_path, results)
+
+        report_omen = (results / "report_roi_omen.md").read_text(encoding="utf-8")
+        assert "| deployed-tool | production |" in report_omen
+        assert "| roster-tool | tournament |" in report_omen
+        assert "| legacy_tool |" not in report_omen
+        assert "| retired-tool |" not in report_omen
+        assert (
+            "Not currently deployed/active (full stats in roi_results.json): "
+            in report_omen
+        )
+        assert "legacy_tool (production, 1 bet)" in report_omen
+        assert "retired-tool (tournament, 1 bet)" in report_omen
+        assert NOTICE_DEPLOYMENT_UNAVAILABLE not in report_omen
+        assert NOTICE_ROSTER_UNAVAILABLE not in report_omen
+
+        report_poly = (results / "report_roi_polymarket.md").read_text(encoding="utf-8")
+        assert "| deployed-tool | production |" in report_poly
+        assert "| poly-legacy |" not in report_poly
+        assert "poly-legacy (production, 1 bet)" in report_poly
+
+        payload = json.loads((results / "roi_results.json").read_text(encoding="utf-8"))
+        active_by_key = {
+            (g["platform"], g["tool_name"], g["mode"]): g["active"]
+            for g in payload["groups"]
+        }
+        assert active_by_key == {
+            ("omen", "deployed-tool", "production"): True,
+            ("omen", "legacy_tool", "production"): False,
+            ("omen", "roster-tool", "tournament"): True,
+            ("omen", "retired-tool", "tournament"): False,
+            ("polymarket", "deployed-tool", "production"): True,
+            ("polymarket", "poly-legacy", "production"): False,
+        }
+        for group in payload["groups"]:  # dropped rows keep full stats
+            assert group["n_bets"] == 1
+
+    def test_hyphen_underscore_normalization(self) -> None:
+        """Deployment / roster spellings match rows across _ vs - variants."""
+        rows = [
+            _row(tool="prediction_request_v1"),  # underscores in the rows
+            _row(tool="other-tool"),
+            _row(tool="under_scored", mode="tournament"),
+        ]
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        # Deployment metadata spells the tool with hyphens; roster with
+        # underscores vs the row's... both directions must match.
+        active = _active_tools_for_platform(
+            {OMEN_DEPLOYMENT: ["prediction-request-v1"], POLYMARKET_DEPLOYMENT: None},
+            "omen",
+            {g["tool_name"] for g in groups if g["platform"] == "omen"},
+        )
+        assert active == frozenset({"prediction_request_v1"})
+        annotate_active(
+            groups, {"omen": active}, tournament_roster=frozenset({"under-scored"})
+        )
+        by_tool = {g["tool_name"]: g["active"] for g in groups}
+        assert by_tool == {
+            "prediction_request_v1": True,
+            "other-tool": False,
+            "under_scored": True,
+        }
+
+    def test_fetch_failure_fallback_shows_all_with_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full-platform fetch failure shows ALL production rows + notice.
+
+        Tournament filtering is unaffected: the off-roster tool still
+        drops to the not-deployed line.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        _patch_deployments(
+            monkeypatch,
+            valid={OMEN_DEPLOYMENT: None, POLYMARKET_DEPLOYMENT: None},
+            roster={"roster-tool": "cid"},
+        )
+        results = tmp_path / "results"
+        self._run_main(monkeypatch, tmp_path, results)
+
+        report_omen = (results / "report_roi_omen.md").read_text(encoding="utf-8")
+        assert NOTICE_DEPLOYMENT_UNAVAILABLE in report_omen
+        assert "| deployed-tool | production |" in report_omen
+        assert "| legacy_tool | production |" in report_omen  # shown, not hidden
+        assert "| roster-tool | tournament |" in report_omen
+        assert "| retired-tool |" not in report_omen  # roster still filters
+        assert "retired-tool (tournament, 1 bet)" in report_omen
+
+        payload = json.loads((results / "roi_results.json").read_text(encoding="utf-8"))
+        for group in payload["groups"]:
+            expected = group["mode"] != "tournament" or (
+                group["tool_name"] == "roster-tool"
+            )
+            assert group["active"] is expected
+
+    def test_skip_deployment_fetch_equals_fallback(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """--skip-deployment-fetch is byte-identical to a failed fetch.
+
+        The flag must never touch the network: the stubbed fetch raises if
+        called.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        roster = {"roster-tool": "cid"}
+        _patch_deployments(
+            monkeypatch,
+            valid={OMEN_DEPLOYMENT: None, POLYMARKET_DEPLOYMENT: None},
+            roster=roster,
+        )
+        results_failed = tmp_path / "results_failed"
+        self._run_main(monkeypatch, tmp_path, results_failed)
+
+        def _boom() -> dict[str, list[str] | None]:
+            raise AssertionError("fetch_valid_tools called despite skip flag")
+
+        monkeypatch.setattr(roi_sim, "fetch_valid_tools", _boom)
+        monkeypatch.setattr(roi_sim, "load_tournament_tools", lambda: roster)
+        results_skipped = tmp_path / "results_skipped"
+        self._run_main(
+            monkeypatch,
+            tmp_path,
+            results_skipped,
+            extra_argv=["--skip-deployment-fetch"],
+        )
+
+        for name in (
+            "roi_results.json",
+            "report_roi_omen.md",
+            "report_roi_polymarket.md",
+        ):
+            assert (results_failed / name).read_bytes() == (
+                results_skipped / name
+            ).read_bytes()
+        assert NOTICE_DEPLOYMENT_UNAVAILABLE in (
+            results_skipped / "report_roi_omen.md"
+        ).read_text(encoding="utf-8")
+
+    def test_roster_unavailable_shows_all_tournament_with_notice(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A roster load failure shows all tournament rows plus a notice.
+
+        Production filtering is unaffected.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        _patch_deployments(
+            monkeypatch,
+            valid={
+                OMEN_DEPLOYMENT: ["deployed-tool"],
+                POLYMARKET_DEPLOYMENT: ["deployed-tool"],
+            },
+            roster=None,
+        )
+        results = tmp_path / "results"
+        self._run_main(monkeypatch, tmp_path, results)
+
+        report_omen = (results / "report_roi_omen.md").read_text(encoding="utf-8")
+        assert NOTICE_ROSTER_UNAVAILABLE in report_omen
+        assert "| roster-tool | tournament |" in report_omen
+        assert "| retired-tool | tournament |" in report_omen
+        assert "| legacy_tool |" not in report_omen  # deployment still filters
+        assert "legacy_tool (production, 1 bet)" in report_omen
+
+    def test_not_deployed_line_sorted_by_bets_desc(self) -> None:
+        """The not-deployed line sorts by bet count desc; models collapse."""
+        rows = (
+            [_row(tool="kept-tool")]
+            + [
+                _row(tool="big-legacy", model=model, market_id=f"m{i}")
+                for i, model in enumerate(["model-a", "model-a", "model-b"])
+            ]
+            + [_row(tool="small-legacy")]
+        )
+        groups = simulate(rows, WINDOW_START, WINDOW_END)
+        annotate_active(groups, {"omen": frozenset({"kept-tool"})}, None)
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        # big-legacy's two model groups collapse into one 3-bet entry.
+        assert (
+            "Not currently deployed/active (full stats in roi_results.json): "
+            "big-legacy (production, 3 bets), small-legacy (production, 1 bet)"
+            in report
+        )
+
+    def test_all_filtered_platform_keeps_line_and_no_table(self) -> None:
+        """Every group inactive: no-data line + not-deployed line, no table."""
+        groups = simulate([_row(tool="legacy-only")], WINDOW_START, WINDOW_END)
+        annotate_active(groups, {"omen": frozenset()}, None)
+        report = render_report(
+            "omen", groups, date(2026, 7, 8), 90, WINDOW_START, WINDOW_END
+        )
+        assert (
+            "_No currently deployed/active tool data for this platform "
+            "in the window._" in report
+        )
+        assert "legacy-only (production, 1 bet)" in report
+        assert "| tool | mode |" not in report
+
+    def test_active_field_present_on_every_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """roi_results.json stamps a bool ``active`` on every group.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        _patch_deployments(
+            monkeypatch,
+            valid={
+                OMEN_DEPLOYMENT: ["deployed-tool"],
+                POLYMARKET_DEPLOYMENT: ["deployed-tool"],
+            },
+            roster={"roster-tool": "cid"},
+        )
+        results = tmp_path / "results"
+        self._run_main(monkeypatch, tmp_path, results)
+        payload = json.loads((results / "roi_results.json").read_text(encoding="utf-8"))
+        assert payload["groups"]
+        for group in payload["groups"]:
+            assert isinstance(group["active"], bool)
+
+    def test_behavioral_equivalence_with_analyze(self) -> None:
+        """The local intersection matches analyze._active_tools_for_platform.
+
+        Same fixture through both implementations (roi_sim passes the
+        benchmarked universe directly; analyze derives it from scores
+        dicts): full-failure -> None, partial data, _ / - normalization,
+        and the empty-map case must all agree.
+        """
+        analyze = pytest.importorskip("benchmark.analyze")
+        analyze_impl = (
+            analyze._active_tools_for_platform  # pylint: disable=protected-access
+        )
+        benchmarked = {"tool_a", "tool-b", "tool-c", "unrelated"}
+        scores: dict[str, Any] = {"by_tool": {name: {} for name in benchmarked}}
+        fixtures: list[dict[str, list[str] | None] | None] = [
+            {OMEN_DEPLOYMENT: ["tool-a", "tool_b"], POLYMARKET_DEPLOYMENT: None},
+            {OMEN_DEPLOYMENT: None, POLYMARKET_DEPLOYMENT: None},
+            {OMEN_DEPLOYMENT: [], POLYMARKET_DEPLOYMENT: ["tool-c"]},
+            {},
+            None,
+        ]
+        for valid in fixtures:
+            for platform in ("omen", "polymarket"):
+                assert _active_tools_for_platform(
+                    valid, platform, benchmarked
+                ) == analyze_impl(valid, platform, scores), (valid, platform)
+        # Pin one concrete value so the fixture sweep can't degenerate.
+        assert _active_tools_for_platform(
+            fixtures[0], "omen", benchmarked
+        ) == frozenset({"tool_a", "tool-b"})

@@ -10,7 +10,7 @@
 | Repository | **mech-predict** (same repo as the accuracy benchmark) |
 | Trigger | **new standalone workflow** `benchmark_roi.yaml` (daily cron after the flywheel + manual dispatch) - the existing flywheel and replay workflows are **not modified** |
 | Inputs | the flywheel's own persisted CI artifacts (`benchmark-data` production shards + `tournament-predictions` scored rows) - **no new capture, no LLM calls, no secrets** |
-| Output | `benchmark/results/report_roi_{omen,polymarket}.md` + machine-readable `roi_results.json`, uploaded as a `benchmark-roi` artifact |
+| Output | `benchmark/results/report_roi_{omen,polymarket}.md` + machine-readable `roi_results.json`, uploaded as a `benchmark-roi` artifact; tables show only currently-deployed production tools and the active tournament roster - resolved live per run via the deployment-status procedure (trader service.yaml `valid_mechs` -> mech metadata) - everything else stays in `roi_results.json` |
 | Modes covered | **production** (deliveries from live traders; price/spread/liquidity captured natively) **and tournament** (CI predictions; price captured, no spread -> that gate self-skips) |
 
 ```mermaid

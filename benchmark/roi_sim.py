@@ -29,8 +29,10 @@ and a market-clustered bootstrap CI with fixed seeds.
 
 Inputs are the benchmark's own accumulated artifacts (daily production log
 shards plus the scored tournament predictions) -- no new data capture, no
-LLM calls, no network access. Stdlib only by design so light CI jobs can run
-it without the full dependency stack.
+LLM calls. The only network access is the deployment-status resolution (the
+same trader service.yaml valid_mechs -> mech metadata procedure the daily
+report uses; disable with --skip-deployment-fetch). Stdlib only by design so
+light CI jobs can run it without the full dependency stack.
 
 Tool policy (data-driven, mirroring the accuracy benchmark's no-allowlist +
 reliability-flag approach): every (platform, tool, mode, model) group
@@ -52,10 +54,26 @@ are flagged as a possible response-format gap. Non-prediction groups
 are omitted from the table and summarized on one compact line below it; a
 known prediction tool appearing on that line indicates a parser/format gap.
 
-Determinism: the outputs are a pure function of the input artifacts and the
+Active-tool restriction (tables only): the markdown tables show only tools a
+live trader can currently select -- production rows are restricted to each
+platform's active deployment set (resolved per run via the daily report's
+deployment-status procedure: latest trader release -> service.yaml
+valid_mechs -> mech metadata -> IPFS tools list), and tournament rows to the
+active tournament roster (tournament_tools.json). Filtered-out prediction
+groups are summarized on one compact line below the table. roi_results.json
+keeps EVERY group (identical numbers), each stamped with an "active" bool.
+When the deployment fetch fails for a whole platform (or with
+--skip-deployment-fetch) the table shows all production rows plus a
+"deployment config unavailable" notice -- unavailability is never rendered
+as "no tools", mirroring the daily report's fallback.
+
+Determinism: the numbers are a pure function of the input artifacts and the
 --as-of date. Fixed bootstrap seeds and no wall-clock dependence beyond the
 window cutoff mean that re-running with the same artifacts and the same
---as-of produces byte-identical roi_results.json and report files.
+--as-of produces roi_results.json group stats and report rows byte-identical
+up to the "active" stamps / table row selection, which additionally depend
+on the deployment state resolved at run time (pinned by
+--skip-deployment-fetch, which drops the network dependence entirely).
 
 Usage:
     python -m benchmark.roi_sim
@@ -77,6 +95,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Final, Literal, NoReturn, TypeGuard
+
+# Both imports are stdlib-only modules (deliberately, like this one), so the
+# light-CI constraint in the module docstring still holds.
+from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
+from benchmark.tournament_tools import load_tournament_tools
 
 log = logging.getLogger(__name__)
 
@@ -185,6 +208,14 @@ NoBetReason = Literal[
 BAD_LINE_FRACTION_MAX = 0.5
 
 PLATFORM_LABELS = {"omen": "Omen", "polymarket": "Polymarket"}
+
+# Table notices for the active-tool restriction fallbacks. Mirrors the daily
+# report's philosophy (analyze.section_tool_deployment_status): a failed
+# fetch renders as "unavailable", never as "no tools".
+NOTICE_DEPLOYMENT_UNAVAILABLE = "> ⚠ deployment config unavailable — showing all tools"
+NOTICE_ROSTER_UNAVAILABLE = (
+    "> ⚠ tournament roster unavailable — showing all tournament tools"
+)
 
 # --- Underlying-LLM ("model") provenance -----------------------------------
 # PRODUCTION rows carry a "model" field stamped by fetch_production from the
@@ -906,6 +937,114 @@ def simulate(
 
 
 # ---------------------------------------------------------------------------
+# Active-tool resolution (tables only; roi_results.json keeps every group)
+# ---------------------------------------------------------------------------
+
+
+def _active_tools_for_platform(
+    valid: dict[str, list[str] | None] | None,
+    platform: str,
+    benchmarked: set[str],
+) -> frozenset[str] | None:
+    """Return tools currently selectable on at least one deployment of ``platform``.
+
+    Local replication of ``benchmark.analyze._active_tools_for_platform``
+    (same semantics; ``analyze`` is not imported because it drags in the
+    scorer / release-map stack this stdlib-only module deliberately avoids).
+    A unit test pins behavioral equivalence against the ``analyze`` original
+    on a shared fixture. The only interface difference: the benchmarked-tool
+    universe is passed directly (here: tools present in the loaded rows for
+    the platform) instead of being derived from scores dicts.
+
+    :param valid: ``{deployment: [tool_names] | None}`` map of selectable
+        tools, where ``None`` marks a fetch/parse failure for that
+        deployment. ``None`` (or an empty dict) for the whole map means
+        "no deployment data available".
+    :param platform: platform key (``"omen"`` / ``"polymarket"``).
+    :param benchmarked: tool names present in the loaded rows for
+        ``platform`` (the intersection universe).
+    :return: frozenset of active tool names (as spelled in ``benchmarked``),
+        or ``None`` when every deployment of this platform is unavailable --
+        the caller falls back to "show all tools" plus a notice.
+    """
+    if not valid:
+        return None
+
+    deployments = deployments_for_platform(platform)
+    relevant = [valid.get(name) for name in deployments]
+    if all(valid_tools is None for valid_tools in relevant):
+        # Every deployment for this platform failed -- caller renders the
+        # notice and shows all tools rather than blanking the table.
+        return None
+
+    active: set[str] = set()
+    for valid_tools in relevant:
+        if valid_tools is None:
+            continue
+        valid_set = {t.replace("_", "-") for t in valid_tools}
+        for tool in benchmarked:
+            if tool.replace("_", "-") in valid_set:
+                active.add(tool)
+
+    return frozenset(active)
+
+
+def _load_tournament_roster() -> frozenset[str] | None:
+    """Load the active tournament roster (tournament_tools.json tool names).
+
+    Every tool listed in the roster file is active in the tournament; a
+    missing/malformed file degrades to ``None`` (tables show all tournament
+    rows plus a notice) rather than blocking the run.
+
+    :return: frozenset of roster tool names, or ``None`` on a load failure.
+    """
+    try:
+        return frozenset(load_tournament_tools())
+    except (FileNotFoundError, ValueError) as exc:
+        log.warning("tournament roster load failed: %s", exc)
+        return None
+
+
+def annotate_active(
+    groups: list[dict[str, Any]],
+    active_by_platform: dict[str, frozenset[str] | None],
+    tournament_roster: frozenset[str] | None,
+) -> None:
+    """Stamp every group with an ``active`` bool (in place).
+
+    Tournament groups are active when their tool is in the tournament
+    roster; every other group (production, plus any unknown pass-through
+    mode, which is production-shaped data) is active when its tool is in
+    the platform's deployment set. Tool names are compared with underscores
+    and hyphens interchangeable (same normalization as the daily report).
+    An unavailable side (platform set ``None`` / roster ``None``) marks its
+    groups active -- unavailability must never hide a tool.
+
+    :param groups: per-group stats from :func:`simulate`.
+    :param active_by_platform: per-platform active sets from
+        :func:`_active_tools_for_platform` (``None`` = unavailable).
+    :param tournament_roster: active tournament roster, or ``None`` when
+        unavailable.
+    """
+    roster_normalized = (
+        {t.replace("_", "-") for t in tournament_roster}
+        if tournament_roster is not None
+        else None
+    )
+    for group in groups:
+        if group["mode"] == "tournament":
+            group["active"] = (
+                roster_normalized is None
+                or group["tool_name"].replace("_", "-") in roster_normalized
+            )
+        else:
+            active_set = active_by_platform.get(group["platform"])
+            # active_set members are spelled as in the loaded rows, so a
+            # direct membership test is exact (no re-normalization needed).
+            group["active"] = active_set is None or group["tool_name"] in active_set
+
+
+# ---------------------------------------------------------------------------
 # Rendering + serialization
 # ---------------------------------------------------------------------------
 
@@ -986,6 +1125,34 @@ def _excluded_line(excluded: list[dict[str, Any]]) -> str:
     )
 
 
+def _not_deployed_line(inactive: list[dict[str, Any]]) -> str:
+    """Summarize active-filtered prediction groups on one compact line.
+
+    Aggregated per (tool, mode) over the platform's inactive prediction
+    groups (a tool that ran on several models collapses into one entry with
+    its bets summed); sorted by bet count descending, then tool name, then
+    mode.
+
+    :param inactive: prediction-tool groups with ``active`` False (one
+        platform).
+    :return: single-line summary string.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for group in inactive:
+        key = (group["tool_name"], group["mode"])
+        counts[key] = counts.get(key, 0) + group["n_bets"]
+    parts = [
+        f"{tool} ({mode}, {n} bet{'s' if n != 1 else ''})"
+        for (tool, mode), n in sorted(
+            counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+    return (
+        "Not currently deployed/active (full stats in roi_results.json): "
+        + ", ".join(parts)
+    )
+
+
 def render_report(
     platform: str,
     groups: list[dict[str, Any]],
@@ -993,15 +1160,22 @@ def render_report(
     window_days: int,
     window_start: datetime,
     window_end: datetime,
+    deployment_unavailable: bool = False,
+    roster_unavailable: bool = False,
 ) -> str:
     """Render one platform's markdown ROI report.
 
     Rows are sorted production-first, then by bet count descending; rows
     below sample thresholds are flagged, never dropped. The table shows
-    prediction-tool groups only (ALL of them, including zero-eligible ones,
-    which carry the "no eligible rows in window" flag); non-prediction
-    groups are summarized on one compact line below the table, sorted by
-    row count descending.
+    prediction-tool groups that are currently active (production: in the
+    platform's deployment set; tournament: in the tournament roster, per
+    each group's ``active`` stamp from :func:`annotate_active`; groups
+    without the stamp count as active so direct callers see every group).
+    Inactive prediction groups are summarized on one compact line below the
+    table, sorted by bet count descending; non-prediction groups keep their
+    own line, sorted by row count descending. Zero-eligible active
+    prediction groups stay in the table with the "no eligible rows in
+    window" flag.
 
     :param platform: platform key ("omen" / "polymarket").
     :param groups: all group stats (any platform; filtered here).
@@ -1009,6 +1183,11 @@ def render_report(
     :param window_days: window length in days.
     :param window_start: inclusive window start.
     :param window_end: exclusive window end.
+    :param deployment_unavailable: render the "deployment config
+        unavailable" notice (fetch failure / --skip-deployment-fetch; the
+        production rows are then unfiltered by construction).
+    :param roster_unavailable: render the "tournament roster unavailable"
+        notice (tournament rows unfiltered by construction).
     :return: markdown document text.
     """
     label = PLATFORM_LABELS.get(platform, platform)
@@ -1029,11 +1208,27 @@ def render_report(
         ),
         "",
     ]
+    if deployment_unavailable:
+        lines.append(NOTICE_DEPLOYMENT_UNAVAILABLE)
+        lines.append("")
+    if roster_unavailable:
+        lines.append(NOTICE_ROSTER_UNAVAILABLE)
+        lines.append("")
     platform_groups = [g for g in groups if g["platform"] == platform]
-    rows = [g for g in platform_groups if g["is_prediction_tool"]]
+    prediction = [g for g in platform_groups if g["is_prediction_tool"]]
     excluded = [g for g in platform_groups if not g["is_prediction_tool"]]
+    rows = [g for g in prediction if g.get("active", True)]
+    inactive = [g for g in prediction if not g.get("active", True)]
     if not rows:
-        lines.append("_No data for this platform in the window._")
+        lines.append(
+            "_No currently deployed/active tool data for this platform "
+            "in the window._"
+            if inactive
+            else "_No data for this platform in the window._"
+        )
+        if inactive:
+            lines.append("")
+            lines.append(_not_deployed_line(inactive))
         if excluded:
             lines.append("")
             lines.append(_excluded_line(excluded))
@@ -1069,6 +1264,9 @@ def render_report(
                 flags="; ".join(g["flags"]),
             )
         )
+    if inactive:
+        lines.append("")
+        lines.append(_not_deployed_line(inactive))
     if excluded:
         lines.append("")
         lines.append(_excluded_line(excluded))
@@ -1082,19 +1280,29 @@ def write_outputs(
     window_days: int,
     window_start: datetime,
     window_end: datetime,
+    active_by_platform: dict[str, frozenset[str] | None] | None = None,
+    roster_available: bool = True,
 ) -> None:
     """Write roi_results.json plus the two per-platform markdown reports.
 
     Outputs carry no timestamps other than the as_of / window fields, and
-    JSON keys are sorted -- same artifacts + same as-of reproduce all three
-    files byte-for-byte.
+    JSON keys are sorted -- same artifacts + same as-of + same resolved
+    deployment state reproduce all three files byte-for-byte. The JSON
+    keeps every group; only the markdown tables are active-filtered (via
+    the groups' ``active`` stamps).
 
-    :param groups: per-group stats from :func:`simulate`.
+    :param groups: per-group stats from :func:`simulate`, already stamped
+        by :func:`annotate_active`.
     :param results_dir: output directory (created if missing).
     :param as_of: window as-of date.
     :param window_days: window length in days.
     :param window_start: inclusive window start.
     :param window_end: exclusive window end.
+    :param active_by_platform: per-platform active sets (``None`` per
+        platform = fetch failure -> notice + unfiltered table). ``None``
+        for the whole map disables the notices (direct callers that never
+        resolved deployments).
+    :param roster_available: False renders the tournament-roster notice.
     """
     results_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -1111,10 +1319,20 @@ def write_outputs(
     )
     log.info("Wrote %s", json_path)
     for platform in sorted(PLATFORM_GATES):
+        deployment_unavailable = (
+            active_by_platform is not None and active_by_platform.get(platform) is None
+        )
         report_path = results_dir / f"report_roi_{platform}.md"
         report_path.write_text(
             render_report(
-                platform, groups, as_of, window_days, window_start, window_end
+                platform,
+                groups,
+                as_of,
+                window_days,
+                window_start,
+                window_end,
+                deployment_unavailable=deployment_unavailable,
+                roster_unavailable=not roster_available,
             ),
             encoding="utf-8",
         )
@@ -1173,6 +1391,13 @@ def main() -> None:
         help="Last (fully included) day of the window, YYYY-MM-DD. "
         "Default: today UTC.",
     )
+    parser.add_argument(
+        "--skip-deployment-fetch",
+        action="store_true",
+        help="Skip the live deployment-status resolution; tables then show "
+        "ALL production tools plus the 'deployment config unavailable' "
+        "notice (exactly the fetch-failure fallback).",
+    )
     args = parser.parse_args()
 
     as_of = (
@@ -1201,8 +1426,37 @@ def main() -> None:
         len(groups),
         sum(g["n_bets"] for g in groups),
     )
+
+    # Active-tool resolution: one fetch per run (same procedure as the daily
+    # report's Tool Deployment Status section); --skip-deployment-fetch is
+    # exactly the fetch-failure fallback (valid=None -> every platform None).
+    valid = None if args.skip_deployment_fetch else fetch_valid_tools()
+    active_by_platform: dict[str, frozenset[str] | None] = {}
+    for platform in sorted(PLATFORM_GATES):
+        benchmarked = {g["tool_name"] for g in groups if g["platform"] == platform}
+        active = _active_tools_for_platform(valid, platform, benchmarked)
+        active_by_platform[platform] = active
+        log.info(
+            "%s active deployment tools: %s",
+            platform,
+            "unavailable" if active is None else sorted(active),
+        )
+    tournament_roster = _load_tournament_roster()
+    log.info(
+        "tournament active roster: %s",
+        "unavailable" if tournament_roster is None else sorted(tournament_roster),
+    )
+    annotate_active(groups, active_by_platform, tournament_roster)
+
     write_outputs(
-        groups, args.results_dir, as_of, args.window_days, window_start, window_end
+        groups,
+        args.results_dir,
+        as_of,
+        args.window_days,
+        window_start,
+        window_end,
+        active_by_platform=active_by_platform,
+        roster_available=tournament_roster is not None,
     )
 
 

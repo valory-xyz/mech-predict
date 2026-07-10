@@ -1,0 +1,101 @@
+# Trader-ROI Companion Simulation - One-Pager
+
+**Question:** does a better prediction tool improve a trader agent's realized ROI - not just its Brier score?
+**Answer method:** replay every tool's stored predictions through the production trader's own decision rules, at the captured market price, and settle with the known resolution.
+
+## Where it runs
+
+| | |
+|---|---|
+| Repository | **mech-predict** (same repo as the accuracy benchmark) |
+| Trigger | three surfaces, all shipped in this PR: (a) standalone `benchmark_roi.yaml` (daily cron after the flywheel + manual dispatch), (b) a `continue-on-error` companion step inside `benchmark_flywheel.yaml`, and (c) a guarded ROI section appended to the daily per-platform Slack posts via the `notify_slack` hook |
+| Inputs | the flywheel's own persisted CI artifacts (`benchmark-data` production shards + `tournament-predictions` scored rows) - **no new capture, no LLM calls, no secrets** |
+| Output | `benchmark/results/report_roi_{omen,polymarket}.md` + machine-readable `roi_results.json`, uploaded as a `benchmark-roi` artifact; tables show only currently-deployed production tools and the active tournament roster - resolved live per run via the deployment-status procedure (trader service.yaml `valid_mechs` -> mech metadata) - everything else stays in `roi_results.json` |
+| Modes covered | **production** (deliveries from live traders; price/spread/liquidity captured natively) **and tournament** (CI predictions; price captured, no spread -> that gate self-skips) |
+
+```mermaid
+flowchart LR
+  A[benchmark rows<br/>p_yes + captured price<br/>+ resolution] --> B[trader wrapper<br/>production gates + Kelly-proxy stake]
+  B --> C[PnL per bet<br/>settled at real outcome]
+  C --> D[ROI per<br/>platform x tool x mode]
+  D --> E[report: ROI table<br/>+ CI + flags]
+```
+
+## How the simulated trader works
+
+One frozen trader config per platform - the strategy defaults the live traders run, identical for every tool. Per prediction (all inputs are prediction-time snapshots; nothing future-observable enters a gate):
+
+```
+tool says p_yes = 0.62, market price = 0.54  ->  bet the favored side (p_side >= 0.5)
+  -> edge 0.08 passes the platform's gates     [Omen: edge > 0.03, no cap; Polymarket: 0.01 < edge < 0.30, spread <= 0.10]
+  -> Kelly-proxy stake  f = edge/(1-price), capped at 2.5 USDC on a 100 USDC nominal bankroll
+  -> market resolves YES -> PnL = stake * (1/price - 1)
+ROI = total PnL / total staked  over ALL its bets (capital-weighted; skips count too: no bet = no stake)
+```
+
+Costs are platform-native and reported as a second variant of the same bet set: Omen +0.02 on the buy price (AMM-fee proxy), Polymarket +0.08 (half-spread proxy). The method is the certified simulation contract already cross-validated against the live traders' own ledgers (independent re-implementation triangulated to exact agreement; market-clustered bootstrap CIs with fixed seeds).
+
+Each daily run re-reads the accumulated artifacts and recomputes a **trailing window (default 90 days, on prediction date)** so the report answers:
+> *"A trader using tool X for the last 90 days would have earned ROI x.x% (95% CI) on n bets."*
+
+**Idempotent and reconstructible by design:** the report is a pure function of the input artifacts (fixed bootstrap seeds, no wall-clock dependence beyond the window cutoff date) - re-running on the same day with the same artifacts reproduces the report byte-for-byte.
+
+## Example output (ILLUSTRATIVE numbers)
+
+**Simulated trader ROI - trailing 90 days - Polymarket**
+ROI = total PnL / total staked on bets placed *in this window* (not all-time, not annualized).
+
+| Tool | mode | model | n preds | n bets | Brier all | Brier bets | staked | ROI (95% CI) | ROI w/ costs | flags |
+|---|---|---|---|---|---|---|---|---|---|---|
+| tournament-only tool | tourn | gpt-4.1 | 310 | 22 | 0.25 | 0.31 | 48 USDC | -1.0% (-19.4, +18.2) | -3.2% | few bets - anecdotal |
+| fine-tuned tool | tourn | qwen-14b-fine-tuned | 1,240 | 96 | 0.21 | 0.26 | 212 USDC | **-2.9%** (-10.1, +4.6) | -5.1% | |
+| live production tool | prod | gpt-4.1 | 3,410 | 187 | 0.24 | 0.33 | 421 USDC | -6.3% (-11.2, -1.5) | -8.8% | |
+
+model = the LLM the tool ran on, payload-derived for production; tournament stamps corrected for
+tools that hardcode their model - a tool that ran on several models splits into one row per model.
+Brier/accuracy = over ALL eligible predictions (same basis as the accuracy benchmark); a Brier bets
+worse than Brier all means the gate is selecting the tool's weaker forecasts.
+Rows are sorted by simulated ROI (best first); rows with no bet (no ROI) sort last.
+Rows below the sample threshold are **shown and flagged, never dropped**; likewise every prediction
+tool is always shown (zero-eligible ones flagged "no eligible rows in window"), non-prediction tools
+(no parseable prediction in any row) are summarized on one line below the table, and a
+parse-reliability flag mirrors the accuracy benchmark's reliability gate (< 0.80).
+
+**"vs baseline" paired comparison** (same markets, same trader, only the tool changes): deferred to a
+second iteration - which tool anchors the comparison is TBD; the certified method already defines the
+paired, both-bet-decomposed delta when it is switched on.
+
+## Data sufficiency (measured, trailing 30 days of resolved predictions)
+
+| segment | 30-day n | read |
+|---|---|---|
+| Omen production (top tools) | 5,400-11,500 | rich |
+| Omen tournament (per tool) | 150-480 | adequate |
+| Polymarket production (current deploys) | 340-1,770 | adequate |
+| Polymarket production (new/legacy deploys) | 14-35 | thin - flagged |
+| Polymarket tournament (per tool) | 43-104 | marginal - flagged |
+
+The binding count is **bets, not predictions** (gates cut hard); the report shows both and flags
+low-bet rows. A longer trailing window (90d) is the default remedy for thin segments.
+
+## Where it surfaces (shipped)
+
+Three surfaces, all live in this PR:
+
+| Surface | What | Failure mode |
+|---|---|---|
+| Standalone workflow | `benchmark_roi.yaml` runs the sim on its own daily cron (+ manual dispatch), uploads the `benchmark-roi` artifact, and prints the per-platform reports to the Actions run summary - no Slack code path | independent of the flywheel |
+| Flywheel companion | a `continue-on-error` step in `benchmark_flywheel.yaml` reruns the sim over the same data the benchmark job just fetched/scored, so a fresh `roi_results.json` is ready for the Slack step | never fails the flywheel |
+| Daily Slack | `notify_slack` appends a per-platform ROI section to each daily benchmark message, behind a guard so a missing/broken section degrades to posting without it (`ROI_SECTION=off` disables it) | best-effort append |
+
+## Correctness - verified while building, then ONE pipeline ships
+
+| Phase | Assurance |
+|---|---|
+| Development | port of an already-certified simulator (spec contract + independent re-implementation triangulated exactly + adversarial review); unit tests pin gate boundaries, settlement invariants, dedup, and CI determinism |
+| Production | the **single certified pipeline** runs daily (no multi-route logic in CI); weak results quoted honestly as *"measured, not robust"* |
+
+## Status
+
+Design complete -> **implementation in progress** (standalone workflow + `benchmark/` module, demoed on a sandbox repo before the PR).
+Known limits (disclosed): price-taker (no market impact), no order-book depth, tournament rows carry no spread (cost proxy only), hypothetical for tools no trader actually selects.

@@ -33,6 +33,7 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
+from benchmark.roi_slack import build_roi_section
 from benchmark.scorer import MIN_SAMPLE_SIZE
 from benchmark.tools import TOOL_REGISTRY
 
@@ -231,7 +232,11 @@ OUR_TOOLS: set[str] = set(TOOL_REGISTRY)
 
 
 def _tool_ownership_context(report_text: str) -> str:
-    """List third-party tools found in the report so the LLM can ignore them."""
+    """List third-party tools found in the report so the LLM can ignore them.
+
+    :param report_text: full markdown report for a single platform.
+    :return: a context line naming third-party tools, or an empty string.
+    """
     report_tools: list[str] = []
     for line in report_text.splitlines():
         # "1. **tool-name** — ..."
@@ -354,6 +359,12 @@ _PLATFORM_LABEL_BY_STEM: Mapping[str, str] = MappingProxyType(
     {f"report_{key}": label for key, label in PLATFORM_LABELS.items()}
 )
 
+# Reverse of PLATFORM_LABELS: deployment label -> platform key, used to
+# look up the platform's groups in roi_results.json.
+_PLATFORM_KEY_BY_LABEL: Mapping[str, str] = MappingProxyType(
+    {label: key for key, label in PLATFORM_LABELS.items()}
+)
+
 
 def _infer_platform_label(report_path: Path) -> str | None:
     """Derive the deployment label from the report filename.
@@ -382,6 +393,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print summary without posting to Slack"
+    )
+    parser.add_argument(
+        "--roi-results",
+        type=Path,
+        default=Path("benchmark/results/roi_results.json"),
+        help=(
+            "Path to roi_results.json (from benchmark.roi_sim) for the "
+            "appended ROI companion section."
+        ),
     )
     args = parser.parse_args()
 
@@ -427,6 +447,26 @@ def main() -> None:
     report_url = _build_report_url()
     if report_url:
         summary += f"\n<{report_url}|Full report>"
+
+    # ROI companion section: appended to the end of the same per-platform
+    # message. Best-effort by design -- a broken/missing ROI section must
+    # NEVER break the daily post, so any failure here degrades to posting
+    # the summary without it. ROI_SECTION=off disables the append entirely.
+    if os.environ.get("ROI_SECTION", "on").strip().lower() != "off":
+        try:
+            platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
+            roi_section = (
+                build_roi_section(args.roi_results, platform_key)
+                if platform_key is not None
+                else None
+            )
+            if roi_section:
+                summary += f"\n\n{roi_section}"
+        except Exception:  # pylint: disable=broad-except
+            log.warning(
+                "ROI section build failed; posting summary without it.",
+                exc_info=True,
+            )
 
     if args.dry_run:
         print(summary)

@@ -804,7 +804,7 @@ class TestLineWidth:
 
 
 class TestNotifySlackHook:
-    """notify_slack appends the ROI section without ever breaking the post."""
+    """notify_slack posts the ROI section as its own best-effort message."""
 
     @staticmethod
     def _run_main(
@@ -812,6 +812,7 @@ class TestNotifySlackHook:
         tmp_path: Path,
         extra_argv: list[str] | None = None,
         roi_env: str | None = None,
+        post_stub: Any = None,
     ) -> list[str]:
         """Drive notify_slack.main with network + LLM stubbed; return posts.
 
@@ -819,6 +820,8 @@ class TestNotifySlackHook:
         :param tmp_path: pytest tmp_path fixture.
         :param extra_argv: extra CLI arguments appended after --report.
         :param roi_env: value for the ROI_SECTION env var, or None to leave it unset.
+        :param post_stub: optional post_to_slack replacement (url, text) -> None;
+            defaults to one that records the posted text.
         :return: texts posted to the Slack webhook stub.
         """
         report = tmp_path / "report_omen.md"
@@ -843,17 +846,22 @@ class TestNotifySlackHook:
             notify_slack, "summarize_report", lambda *a, **k: "LLM SUMMARY"
         )
         monkeypatch.setattr(
-            notify_slack, "post_to_slack", lambda url, text: posted.append(text)
+            notify_slack,
+            "post_to_slack",
+            post_stub or (lambda url, text: posted.append(text)),
         )
         argv = ["notify_slack", "--report", str(report)] + (extra_argv or [])
         monkeypatch.setattr(sys, "argv", argv)
         notify_slack.main()
         return posted
 
-    def test_section_appended_after_summary(
+    def test_section_posted_as_separate_message(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The builder's text lands at the end of the posted message.
+        """The ROI section is a second, standalone message after the digest.
+
+        Posting it separately keeps its fenced code block from being split by
+        Slack's long-text rendering when the digest is large.
 
         :param monkeypatch: pytest monkeypatch fixture.
         :param tmp_path: pytest tmp_path fixture.
@@ -866,11 +874,40 @@ class TestNotifySlackHook:
 
         monkeypatch.setattr(notify_slack, "build_roi_section", _fake_builder)
         posted = self._run_main(monkeypatch, tmp_path)
-        assert len(posted) == 1
-        assert posted[0].index("LLM SUMMARY") < posted[0].index("ROI_MARKER_SECTION")
-        assert posted[0].endswith("ROI_MARKER_SECTION")
+        assert len(posted) == 2
+        assert "LLM SUMMARY" in posted[0]
+        assert "ROI_MARKER_SECTION" not in posted[0]
+        assert posted[1] == "ROI_MARKER_SECTION"
         # Platform key derived from the report's platform label.
         assert calls == [(Path("benchmark/results/roi_results.json"), "omen")]
+
+    def test_roi_post_failure_never_breaks_digest(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failure posting the ROI message leaves the digest post intact.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        monkeypatch.setattr(
+            notify_slack, "build_roi_section", lambda *a, **k: "ROI_MARKER_SECTION"
+        )
+        posted: list[str] = []
+
+        def _post(url: str, text: str) -> None:
+            posted.append(text)
+            if text == "ROI_MARKER_SECTION":
+                raise RuntimeError("slack down")
+
+        with caplog.at_level(logging.WARNING, logger="benchmark.notify_slack"):
+            self._run_main(monkeypatch, tmp_path, post_stub=_post)
+        assert "LLM SUMMARY" in posted[0]
+        assert posted[1] == "ROI_MARKER_SECTION"
+        assert "Posting the ROI section failed" in caplog.text
 
     def test_roi_results_flag_passed_through(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

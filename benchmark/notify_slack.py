@@ -448,32 +448,41 @@ def main() -> None:
     if report_url:
         summary += f"\n<{report_url}|Full report>"
 
-    # ROI companion section: appended to the end of the same per-platform
-    # message. Best-effort by design -- a broken/missing ROI section must
-    # NEVER break the daily post, so any failure here degrades to posting
-    # the summary without it. ROI_SECTION=off disables the append entirely.
+    # ROI companion section: posted as its OWN message right after the
+    # per-platform digest, NOT appended to it. A fenced code block appended
+    # to a long digest is split (and its ``` fence broken) by Slack's
+    # ~3000-char text rendering; a standalone message keeps the block intact.
+    # Best-effort by design -- a broken/missing ROI section, or a failure
+    # posting it, must NEVER break the daily digest. ROI_SECTION=off disables
+    # it entirely.
+    roi_section = None
     if os.environ.get("ROI_SECTION", "on").strip().lower() != "off":
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
-            roi_section = (
-                build_roi_section(args.roi_results, platform_key)
-                if platform_key is not None
-                else None
-            )
-            if roi_section:
-                summary += f"\n\n{roi_section}"
+            if platform_key is not None:
+                roi_section = build_roi_section(args.roi_results, platform_key)
         except Exception:  # pylint: disable=broad-except
             log.warning(
-                "ROI section build failed; posting summary without it.",
+                "ROI section build failed; posting digest without it.",
                 exc_info=True,
             )
 
     if args.dry_run:
         print(summary)
+        if roi_section:
+            print(f"\n\n{roi_section}")
         return
 
     log.info("Posting to Slack...")
     post_to_slack(webhook_url, summary)
+    if roi_section:
+        try:
+            post_to_slack(webhook_url, roi_section)
+        except Exception:  # pylint: disable=broad-except
+            log.warning(
+                "Posting the ROI section failed; digest was posted.",
+                exc_info=True,
+            )
     log.info("Done.")
 
 

@@ -107,6 +107,13 @@ LOGS_DIR = Path(__file__).parent / "logs"
 LEGACY_LOG_PATH = Path(__file__).parent / "production_log.jsonl"
 DEDUP_LOOKBACK_DAYS = 7  # how many daily files to scan on state-loss recovery
 
+# Normal-case dedup lookback. A lagging-parsedRequest deliver can hold the
+# delivery cursor back up to PARSED_DELIVERY_GRACE_SECONDS, so deliveries
+# whose rows were already written within that window are legitimately
+# refetched on later runs; the dedup scan must cover the whole grace
+# window (+1 for today's partial day) or they are rebuilt as duplicates.
+GRACE_DEDUP_LOOKBACK_DAYS = PARSED_DELIVERY_GRACE_SECONDS // 86400 + 1
+
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
 # Falls back to "other" if no keywords match.
@@ -1707,21 +1714,19 @@ def load_existing_row_ids(
 ) -> set[str]:
     """Load existing row IDs from daily log files for deduplication.
 
-    Normal case: reads only today's file (handles cursor overlap and
-    same-day reruns).  State-loss recovery: reads the last
-    ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates across
-    the lookback window.
+    Normal case: reads the last ``GRACE_DEDUP_LOOKBACK_DAYS`` daily files —
+    the delivery cursor can be held back up to the parsedRequest grace
+    window, so rows built within it can be refetched on later runs and
+    must dedup against more than today's file. State-loss recovery: reads
+    the last ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates
+    across the whole lookback window.
 
     :param logs_dir: directory containing daily log files.
     :param state_loss: if True, widen dedup scope to last 7 days.
     :return: set of row IDs already written.
     """
-    if state_loss:
-        files = _daily_log_files(logs_dir, DEDUP_LOOKBACK_DAYS)
-    else:
-        files = [daily_log_path(logs_dir)]
-        if not files[0].exists():
-            files = []
+    lookback = DEDUP_LOOKBACK_DAYS if state_loss else GRACE_DEDUP_LOOKBACK_DAYS
+    files = _daily_log_files(logs_dir, lookback)
     ids: set[str] = set()
     for path in files:
         ids |= _load_ids_from_file(path)

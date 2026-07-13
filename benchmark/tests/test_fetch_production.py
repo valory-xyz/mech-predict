@@ -30,6 +30,7 @@ from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
     DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
+    GRACE_DEDUP_LOOKBACK_DAYS,
     PARSED_DELIVERY_GRACE_SECONDS,
     PENDING_MAX_AGE_DAYS,
     ResolvedMarkets,
@@ -909,22 +910,26 @@ class TestDailyLogRotation:
         lines = output.read_text().strip().split("\n")
         assert len(lines) == 2
 
-    def test_dedup_reads_todays_file_only(self, tmp_path: Path) -> None:
-        """Normal dedup (state_loss=False) reads only today's file."""
+    def test_dedup_covers_grace_window(self, tmp_path: Path) -> None:
+        """Normal dedup reads the grace window of daily files.
 
+        The delivery cursor can lag by the parsedRequest grace period, so
+        rows built within it are refetched and must dedup against the
+        files of those days — not just today's.
+        """
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
-        # Write to yesterday's file
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        old_path = daily_log_path(logs_dir, yesterday)
-        old_path.write_text('{"row_id": "old_row"}\n')
-        # Write to today's file
-        today_path = daily_log_path(logs_dir)
-        today_path.write_text('{"row_id": "today_row"}\n')
+        now = datetime.now(timezone.utc)
+        for i in range(GRACE_DEDUP_LOOKBACK_DAYS + 1):
+            p = daily_log_path(logs_dir, now - timedelta(days=i))
+            p.write_text(f'{{"row_id": "row_day_{i}"}}\n')
 
         ids = load_existing_row_ids(logs_dir, state_loss=False)
-        assert "today_row" in ids
-        assert "old_row" not in ids
+        # Days inside the grace window are deduped ...
+        for i in range(GRACE_DEDUP_LOOKBACK_DAYS):
+            assert f"row_day_{i}" in ids
+        # ... the day just outside it is not.
+        assert f"row_day_{GRACE_DEDUP_LOOKBACK_DAYS}" not in ids
 
     def test_dedup_reads_7_days_on_state_loss(self, tmp_path: Path) -> None:
         """State-loss recovery reads the last DEDUP_LOOKBACK_DAYS files."""

@@ -282,6 +282,29 @@ jobs:
         if: always() && !cancelled()
         run: python -m benchmark.analyze --platform polymarket --include-tournament
 
+      # Companion ROI simulation over the same data the benchmark job just
+      # fetched/scored. continue-on-error: the companion must not fail the
+      # flywheel -- when it breaks, the daily Slack posts simply go out
+      # without the ROI section (notify_slack degrades gracefully when
+      # roi_results.json is missing).
+      - name: Simulate trader ROI (companion)
+        if: always() && !cancelled()
+        continue-on-error: true
+        run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          python -m benchmark.roi_sim \
+            --logs-dir benchmark/datasets/logs/ \
+            $TOURNAMENT_FLAG
+          for report in benchmark/results/report_roi_omen.md benchmark/results/report_roi_polymarket.md; do
+            if [ -f "$report" ]; then
+              cat "$report" >> "$GITHUB_STEP_SUMMARY"
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       # Upload state + scores (small, needed for next run).
       # include-hidden-files: true is required so .fetch_state.json
       # (leading dot = hidden under v4's default filter) actually ships
@@ -307,6 +330,9 @@ jobs:
             benchmark/results/scored_row_ids.json
             benchmark/results/report_omen.md
             benchmark/results/report_polymarket.md
+            benchmark/results/roi_results.json
+            benchmark/results/report_roi_omen.md
+            benchmark/results/report_roi_polymarket.md
             benchmark/results/tool_improvement_triage_state.json
           retention-days: 90
 

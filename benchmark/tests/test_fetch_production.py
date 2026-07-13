@@ -25,10 +25,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 from benchmark.datasets.fetch_production import (
     DEDUP_LOOKBACK_DAYS,
     DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
+    GRACE_DEDUP_LOOKBACK_DAYS,
     PARSED_DELIVERY_GRACE_SECONDS,
     PENDING_MAX_AGE_DAYS,
     ResolvedMarkets,
@@ -908,22 +910,28 @@ class TestDailyLogRotation:
         lines = output.read_text().strip().split("\n")
         assert len(lines) == 2
 
-    def test_dedup_reads_todays_file_only(self, tmp_path: Path) -> None:
-        """Normal dedup (state_loss=False) reads only today's file."""
+    def test_dedup_covers_grace_window(self, tmp_path: Path) -> None:
+        """Normal dedup reads the grace window of daily files.
 
+        The delivery cursor can lag by the parsedRequest grace period, so
+        rows built within it are refetched and must dedup against the
+        files of those days — not just today's.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()
-        # Write to yesterday's file
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        old_path = daily_log_path(logs_dir, yesterday)
-        old_path.write_text('{"row_id": "old_row"}\n')
-        # Write to today's file
-        today_path = daily_log_path(logs_dir)
-        today_path.write_text('{"row_id": "today_row"}\n')
+        now = datetime.now(timezone.utc)
+        for i in range(GRACE_DEDUP_LOOKBACK_DAYS + 1):
+            p = daily_log_path(logs_dir, now - timedelta(days=i))
+            p.write_text(f'{{"row_id": "row_day_{i}"}}\n')
 
         ids = load_existing_row_ids(logs_dir, state_loss=False)
-        assert "today_row" in ids
-        assert "old_row" not in ids
+        # Days inside the grace window are deduped ...
+        for i in range(GRACE_DEDUP_LOOKBACK_DAYS):
+            assert f"row_day_{i}" in ids
+        # ... the day just outside it is not.
+        assert f"row_day_{GRACE_DEDUP_LOOKBACK_DAYS}" not in ids
 
     def test_dedup_reads_7_days_on_state_loss(self, tmp_path: Path) -> None:
         """State-loss recovery reads the last DEDUP_LOOKBACK_DAYS files."""
@@ -1496,13 +1504,42 @@ class TestFetchDeliveriesSchemaShapes:
         )
         monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
 
-        deliveries = fp.fetch_deliveries("http://gnosis", 0)
+        deliveries, unparsed_cap = fp.fetch_deliveries("http://gnosis", 0)
+        assert unparsed_cap is None
         assert "parsedDelivery" in captured["query"]
         assert "toolResponse" not in captured["query"]
         assert deliveries[0]["tool_response"] == '{"p_yes": 0.7, "p_no": 0.3}'
         assert deliveries[0]["model"] == "gpt-4.1"
         assert deliveries[0]["tool_hash"] == "bafytool"
         assert deliveries[0]["parsed_missing"] is False
+
+    def test_sentinel_request_tool_maps_to_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sentinel parsedRequest.tool collapses into the "unknown" bucket.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        raw = self._raw_deliver(
+            {
+                "response": '{"p_yes": 0.7, "p_no": 0.3}',
+                "model": "gpt-4.1",
+                "tool": "superforcaster",
+                "toolHash": "bafytool",
+            }
+        )
+        raw["request"]["parsedRequest"]["tool"] = SUBGRAPH_UNHANDLED_TYPE
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(fp, "_paginated_fetch", lambda *a, **k: [raw])
+
+        deliveries, _ = fp.fetch_deliveries("http://gnosis", 0)
+        assert deliveries[0]["tool"] == "unknown"
 
     def test_legacy_schema_maps_flat_fields(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1532,7 +1569,7 @@ class TestFetchDeliveriesSchemaShapes:
         )
         monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
 
-        deliveries = fp.fetch_deliveries("http://polygon", 0)
+        deliveries, _ = fp.fetch_deliveries("http://polygon", 0)
         assert "toolResponse" in captured["query"]
         assert "parsedDelivery" not in captured["query"]
         assert deliveries[0]["tool_response"] == '{"p_yes": 0.2, "p_no": 0.8}'
@@ -1594,11 +1631,93 @@ class TestDeferUnparsedDeliveries:
         )
         if expect_deferred:
             assert not rows
-            assert still_pending == [delivery]
+            # The deferred entry snapshots the matched market so it can
+            # still build once the market leaves the resolution cursor.
+            assert len(still_pending) == 1
+            snapshot = still_pending[0]["deferred_market"]
+            assert snapshot["outcome"] is True
+            assert snapshot["match_confidence"] == 1.0
         else:
             assert len(rows) == 1
             assert rows[0]["prediction_parse_status"] == "missing_fields"
             assert not still_pending
+
+    def test_deferred_entry_builds_after_market_leaves_cursor(self) -> None:
+        """Two-run strand scenario: the snapshot still produces a row.
+
+        Deferred in run 1; the market is no longer fetchable in run 2.
+        """
+        now = int(time.time())
+        delivery = self._delivery(now - 3600, True)
+
+        # Run 1: matched but unindexed -> deferred with market snapshot.
+        rows, still_pending, *_ = _match_and_build(
+            [delivery], self._markets(), set(), "omen"
+        )
+        assert not rows
+        deferred = still_pending[0]
+
+        # Run 2: the refresh healed the parsed fields; the resolved-markets
+        # cursor has advanced, so the market is gone from the fetch.
+        healed = {
+            **deferred,
+            "tool_response": '{"p_yes": 0.7, "p_no": 0.3}',
+            "parsed_missing": False,
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [healed], ResolvedMarkets(), set(), "omen"
+        )
+        assert not still_pending
+        assert len(rows) == 1
+        assert rows[0]["p_yes"] == 0.7
+        assert rows[0]["final_outcome"] is True
+        assert rows[0]["prediction_parse_status"] == "valid"
+
+    def test_deferred_entry_expires_after_market_leaves_cursor(self) -> None:
+        """A never-healed deferred entry still surfaces as missing_fields.
+
+        Grace expired and the market is no longer fetchable — the snapshot
+        alone must be enough to build the row.
+        """
+        now = int(time.time())
+        expired = {
+            **self._delivery(now - PARSED_DELIVERY_GRACE_SECONDS - 3600, True),
+            "deferred_market": {
+                "outcome": False,
+                "resolved_at_ts": now - PARSED_DELIVERY_GRACE_SECONDS,
+                "match_confidence": 0.8,
+            },
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [expired], ResolvedMarkets(), set(), "omen"
+        )
+        assert not still_pending
+        assert len(rows) == 1
+        assert rows[0]["prediction_parse_status"] == "missing_fields"
+        assert rows[0]["final_outcome"] is False
+        assert rows[0]["match_confidence"] == 0.8
+
+    def test_deferred_entry_redefers_within_grace(self) -> None:
+        """Still-unindexed, still-recent entries keep waiting.
+
+        The re-deferred entry retains its market snapshot even when the
+        market is no longer fetchable.
+        """
+        now = int(time.time())
+        deferred = {
+            **self._delivery(now - 3600, True),
+            "deferred_market": {
+                "outcome": True,
+                "resolved_at_ts": now,
+                "match_confidence": 1.0,
+            },
+        }
+        rows, still_pending, *_ = _match_and_build(
+            [deferred], ResolvedMarkets(), set(), "omen"
+        )
+        assert not rows
+        assert len(still_pending) == 1
+        assert still_pending[0]["deferred_market"]["outcome"] is True
 
     def test_should_defer_unparsed_explicit_now(self) -> None:
         """_should_defer_unparsed honors the injected clock."""
@@ -1689,6 +1808,43 @@ class TestRefreshUnparsedPending:
         refreshed = refresh_unparsed_pending([stale], "http://gnosis")
         assert refreshed == [stale]
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("GraphQL errors from http://gnosis: store error"),
+            requests.exceptions.ConnectionError("connection refused"),
+        ],
+        ids=["graphql_error", "network_error"],
+    )
+    def test_batch_failure_keeps_stale_entries(
+        self, monkeypatch: pytest.MonkeyPatch, exc: Exception
+    ) -> None:
+        """A failed refresh batch keeps the stale entries unchanged.
+
+        Neither exception type may crash the run or drop pending entries.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param exc: the exception the refresh query raises.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+
+        def fail(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            raise exc
+
+        monkeypatch.setattr(fp, "_post_graphql", fail)
+
+        stale = self._pending("0xstale", None)
+        pending = [stale]
+        result = refresh_unparsed_pending(pending, "http://gnosis")
+        assert result == pending
+        assert result[0] is stale  # same object — kept, not rebuilt
+        assert stale["tool_response"] is None  # and not mutated
+
     def test_noop_on_legacy_schema(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Legacy endpoints have nothing to refresh from."""
         # pylint: disable-next=import-outside-toplevel
@@ -1731,6 +1887,172 @@ class TestDedupPending:
         by_id = {d["deliver_id"]: d for d in result}
         assert by_id["0xdup"] is fresh
         assert by_id["0xother"] is other
+
+    def test_deferred_market_snapshot_survives_refetch(self) -> None:
+        """A refetched copy must not clobber the deferred market snapshot.
+
+        The refetched copy has no snapshot of its own, and the market is
+        no longer re-matchable.
+        """
+        snapshot = {"outcome": True, "resolved_at_ts": 123, "match_confidence": 1.0}
+        deferred = {
+            "deliver_id": "0xdup",
+            "tool_response": None,
+            "deferred_market": snapshot,
+        }
+        refetched = {
+            "deliver_id": "0xdup",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+        }
+        result = _dedup_pending([deferred, refetched])
+        assert len(result) == 1
+        merged = result[0]
+        # Fresh parsed fields win; the snapshot is carried over.
+        assert merged["tool_response"] == '{"p_yes": 0.5, "p_no": 0.5}'
+        assert merged["deferred_market"] == snapshot
+        assert refetched.get("deferred_market") is None  # input not mutated
+
+
+@pytest.mark.usefixtures("clear_schema_cache")
+class TestUnparsedRequestCursorCap:
+    """Delivers skipped for a lagging parsedRequest hold the delivery cursor."""
+
+    @staticmethod
+    def _raw_deliver(ts: int, parsed_request: Any) -> dict[str, Any]:
+        """Build a raw subgraph deliver with the given parsedRequest."""
+        return {
+            "id": f"0x{ts}",
+            "blockTimestamp": str(ts),
+            "parsedDelivery": None,
+            "request": {
+                "id": "0xreq",
+                "blockTimestamp": str(ts - 10),
+                "parsedRequest": parsed_request,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("age_seconds", "expect_cap"),
+        [
+            (3600, True),  # recent skip: FDS lag -> hold the cursor
+            (PARSED_DELIVERY_GRACE_SECONDS + 3600, False),  # permanent skip
+        ],
+        ids=["recent_lag", "permanently_unparseable"],
+    )
+    def test_null_parsed_request_caps_cursor_within_grace(
+        self, monkeypatch: pytest.MonkeyPatch, age_seconds: int, expect_cap: bool
+    ) -> None:
+        """Only grace-fresh null-parsedRequest delivers return a cursor cap."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        ts = int(time.time()) - age_seconds
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(
+            fp,
+            "_paginated_fetch",
+            lambda *a, **k: [self._raw_deliver(ts, None)],
+        )
+        deliveries, cap = fp.fetch_deliveries("http://gnosis", 0)
+        assert not deliveries
+        assert cap == (ts - 1 if expect_cap else None)
+
+    def test_cap_holds_platform_delivery_cursor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cap wins over a newer built row's delivery timestamp."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        now = int(time.time())
+        matched = {
+            "deliver_id": "0xmatched",
+            "timestamp": now,  # newer than the lagging deliver
+            "request_timestamp": now - 10,
+            "model": "gpt-4.1",
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',
+            "tool": "superforcaster",
+            "question_title": "will it match?",
+            "market_id": "0xmarket",
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+            "parsed_missing": False,
+        }
+        markets = ResolvedMarkets()
+        markets.add(
+            "0xmarket", "will it match?", {"outcome": True, "resolved_at_ts": now}
+        )
+        lagging_cap = now - 600
+        monkeypatch.setattr(
+            fp, "fetch_deliveries", lambda url, ts: ([matched], lagging_cap)
+        )
+        monkeypatch.setattr(
+            fp, "_enrich_rows_with_ipfs_metadata", lambda rows, url: None
+        )
+
+        rows, _, max_delivery_ts, _ = fp.process_platform(
+            "omen", "http://gnosis", markets, 0, set(), []
+        )
+        assert len(rows) == 1
+        assert max_delivery_ts == lagging_cap
+
+
+class TestPendingSurvivesQuietRun:
+    """The pending store must not be wiped by a run with no resolutions."""
+
+    def test_pending_survives_run_without_resolved_markets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A quiet run must carry the pending store forward.
+
+        Zero newly-resolved markets must not overwrite the state with
+        just the new deliveries.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        old_pending = {
+            "deliver_id": "0xold",
+            # Recent enough to survive the PENDING_MAX_AGE_DAYS prune.
+            "timestamp": int(time.time()) - 3600,
+            "tool_response": '{"p_yes": 0.5, "p_no": 0.5}',  # no refresh needed
+            "question_title": "old pending question",
+            "market_id": None,
+        }
+        new_delivery = {
+            "deliver_id": "0xnew",
+            "timestamp": int(time.time()),
+            "request_timestamp": None,
+            "model": None,
+            "tool_response": None,
+            "tool": "superforcaster",
+            "question_title": "new unmatched question",
+            "market_id": None,
+            "market_prob": None,
+            "market_liquidity_usd": None,
+            "market_close_at": None,
+            "parsed_missing": False,
+        }
+        monkeypatch.setattr(
+            fp, "fetch_deliveries", lambda url, ts: ([new_delivery], None)
+        )
+
+        rows, all_pending, _, _ = fp.process_platform(
+            "omen",
+            "http://gnosis",
+            ResolvedMarkets(),  # nothing resolved this run
+            0,
+            set(),
+            [old_pending],
+        )
+        assert not rows
+        pending_ids = {d["deliver_id"] for d in all_pending}
+        assert pending_ids == {"0xold", "0xnew"}
 
 
 class TestEnrichmentSkipsPrefilled:

@@ -107,6 +107,13 @@ LOGS_DIR = Path(__file__).parent / "logs"
 LEGACY_LOG_PATH = Path(__file__).parent / "production_log.jsonl"
 DEDUP_LOOKBACK_DAYS = 7  # how many daily files to scan on state-loss recovery
 
+# Normal-case dedup lookback. A lagging-parsedRequest deliver can hold the
+# delivery cursor back up to PARSED_DELIVERY_GRACE_SECONDS, so deliveries
+# whose rows were already written within that window are legitimately
+# refetched on later runs; the dedup scan must cover the whole grace
+# window (+1 for today's partial day) or they are rebuilt as duplicates.
+GRACE_DEDUP_LOOKBACK_DAYS = PARSED_DELIVERY_GRACE_SECONDS // 86400 + 1
+
 # Category keywords for classifying prediction market questions.
 # Matched using word boundaries (\b) to avoid substring false positives.
 # Falls back to "other" if no keywords match.
@@ -1011,15 +1018,25 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 def fetch_deliveries(
     marketplace_url: str,
     timestamp_gt: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], Optional[int]]:
     """Bulk fetch all recent deliveries with prediction data.
 
     Skips deliveries with null parsedRequest (IPFS failures on subgraph side).
     Extracts market_id from request_context when available (schema v2.0+).
 
+    ParsedRequest is written by the same async file-data-source as
+    ParsedDelivery, so a freshly-indexed deliver can have a null
+    parsedRequest purely due to indexing lag. Those recent skips return a
+    cursor cap (one below the youngest such deliver) so the caller keeps
+    the delivery cursor behind them and they are refetched next run once
+    the file handler catches up. Skips older than
+    ``PARSED_DELIVERY_GRACE_SECONDS`` are permanently-unparseable request
+    files; they never cap the cursor, or one bad upload would pin it
+    forever.
+
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
-    :return: list of delivery dicts.
+    :return: tuple of (delivery dicts, delivery-cursor cap or None).
     """
     schema = detect_delivers_schema(marketplace_url)
     query_template = (
@@ -1034,11 +1051,21 @@ def fetch_deliveries(
 
     deliveries = []
     skipped = 0
+    unparsed_request_cap: Optional[int] = None
+    now_ts = int(time.time())
     for d in raw:
         request = d.get("request") or {}
         parsed = request.get("parsedRequest")
         if not parsed:
             skipped += 1
+            delivery_ts = int(d["blockTimestamp"])
+            if now_ts - delivery_ts < PARSED_DELIVERY_GRACE_SECONDS:
+                cap = delivery_ts - 1
+                unparsed_request_cap = (
+                    cap
+                    if unparsed_request_cap is None
+                    else min(unparsed_request_cap, cap)
+                )
             continue
 
         question_title = _extract_question_title(parsed.get("questionTitle", ""))
@@ -1056,7 +1083,9 @@ def fetch_deliveries(
                 "timestamp": delivery_ts,
                 "request_timestamp": request_ts,
                 **extract_delivery_fields(d, schema),
-                "tool": parsed.get("tool") or "unknown",
+                # parsedRequest.tool uses the same sentinel convention as
+                # ParsedDelivery — collapse it into the "unknown" bucket.
+                "tool": _normalize_subgraph_string(parsed.get("tool")) or "unknown",
                 "question_title": question_title,
                 "market_id": ctx.get("market_id"),
                 "market_prob": ctx.get("market_prob"),
@@ -1073,7 +1102,7 @@ def fetch_deliveries(
     if deliveries:
         log.info("  %d/%d deliveries have market_id", has_market_id, len(deliveries))
 
-    return deliveries
+    return deliveries, unparsed_request_cap
 
 
 # ---------------------------------------------------------------------------
@@ -1687,21 +1716,19 @@ def load_existing_row_ids(
 ) -> set[str]:
     """Load existing row IDs from daily log files for deduplication.
 
-    Normal case: reads only today's file (handles cursor overlap and
-    same-day reruns).  State-loss recovery: reads the last
-    ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates across
-    the lookback window.
+    Normal case: reads the last ``GRACE_DEDUP_LOOKBACK_DAYS`` daily files —
+    the delivery cursor can be held back up to the parsedRequest grace
+    window, so rows built within it can be refetched on later runs and
+    must dedup against more than today's file. State-loss recovery: reads
+    the last ``DEDUP_LOOKBACK_DAYS`` daily files to catch duplicates
+    across the whole lookback window.
 
     :param logs_dir: directory containing daily log files.
     :param state_loss: if True, widen dedup scope to last 7 days.
     :return: set of row IDs already written.
     """
-    if state_loss:
-        files = _daily_log_files(logs_dir, DEDUP_LOOKBACK_DAYS)
-    else:
-        files = [daily_log_path(logs_dir)]
-        if not files[0].exists():
-            files = []
+    lookback = DEDUP_LOOKBACK_DAYS if state_loss else GRACE_DEDUP_LOOKBACK_DAYS
+    files = _daily_log_files(logs_dir, lookback)
     ids: set[str] = set()
     for path in files:
         ids |= _load_ids_from_file(path)
@@ -1809,12 +1836,29 @@ def _dedup_pending(pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
     The fetch cursor only advances past matched deliveries, so unresolved
     deliveries are refetched on every run and would otherwise accumulate as
     duplicate snapshots. Last copy wins: a refetched delivery carries the
-    freshest parsed fields.
+    freshest parsed fields. A ``deferred_market`` snapshot is carried over
+    from earlier copies — the refetched copy cannot re-match the market
+    (its resolution left the cursor window), so dropping the snapshot
+    would strand the delivery in pending permanently.
 
     :param pending: pending delivery dicts, possibly with duplicates.
     :return: deduplicated list (insertion order of first occurrence).
     """
-    return list({d.get("deliver_id"): d for d in pending}.values())
+    merged: dict[Optional[str], dict[str, Any]] = {}
+    for delivery in pending:
+        key: Optional[str] = delivery.get("deliver_id")
+        previous = merged.get(key)
+        if (
+            previous is not None
+            and previous.get("deferred_market")
+            and not delivery.get("deferred_market")
+        ):
+            delivery = {
+                **delivery,
+                "deferred_market": previous["deferred_market"],
+            }
+        merged[key] = delivery
+    return list(merged.values())
 
 
 def _match_and_build(
@@ -1849,14 +1893,37 @@ def _match_and_build(
 
         market, confidence = _match_delivery(delivery, resolved_markets)
         if market is None:
-            still_pending.append(delivery)
-            continue
+            # A market matched in an earlier run leaves the resolved-markets
+            # window once the resolution cursor advances past it. Deferred
+            # entries carry a snapshot of that match so they can still build
+            # a row (healed or grace-expired) instead of stranding in
+            # pending until the max-age prune drops them.
+            snapshot = delivery.get("deferred_market")
+            if snapshot is None:
+                still_pending.append(delivery)
+                continue
+            market = {
+                "outcome": snapshot["outcome"],
+                "resolved_at_ts": snapshot["resolved_at_ts"],
+            }
+            confidence = snapshot.get("match_confidence", 1.0)
 
         # The market resolved but the subgraph's async file handler has not
         # indexed the ParsedDelivery yet — wait for it instead of writing a
         # permanently-invalid row (rows are deduped and never revisited).
+        # The matched market is snapshotted onto the deferred entry because
+        # it may no longer be fetchable when the entry is retried.
         if _should_defer_unparsed(delivery):
-            still_pending.append(delivery)
+            still_pending.append(
+                {
+                    **delivery,
+                    "deferred_market": {
+                        "outcome": market["outcome"],
+                        "resolved_at_ts": market["resolved_at_ts"],
+                        "match_confidence": confidence,
+                    },
+                }
+            )
             continue
 
         if delivery.get("market_id") and confidence == 1.0:
@@ -2131,7 +2198,7 @@ def process_platform(
 
     # 1. Retry pending deliveries from previous runs
     rows_from_pending: list[dict[str, Any]] = []
-    remaining_pending: list[dict[str, Any]] = []
+    remaining_pending: list[dict[str, Any]]
     if pending_deliveries and resolved_markets:
         rows_from_pending, remaining_pending, _, _, _, _ = _match_and_build(
             pending_deliveries,
@@ -2145,10 +2212,18 @@ def process_platform(
                 platform,
                 len(rows_from_pending),
             )
+    else:
+        # No resolved markets this run: skip the matching work but carry
+        # the pending store forward — the platform state is overwritten
+        # with remaining_pending + new_pending below, so leaving this
+        # empty would silently wipe every previously-pending delivery.
+        remaining_pending = pending_deliveries
 
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)
-    new_deliveries = fetch_deliveries(marketplace_url, delivery_ts_gt)
+    new_deliveries, unparsed_request_cap = fetch_deliveries(
+        marketplace_url, delivery_ts_gt
+    )
     log.info(
         "%s: %d new deliveries, %d resolved markets, %d pending from before",
         platform,
@@ -2173,6 +2248,15 @@ def process_platform(
             max_delivery_ts,
             max_resolved_ts,
         ) = _match_and_build(new_deliveries, resolved_markets, existing_ids, platform)
+
+    # Hold the delivery cursor behind delivers skipped for a (recent) null
+    # parsedRequest so they are refetched once the async file handler has
+    # indexed them, instead of being lost when a newer row advances the
+    # cursor past them this run.
+    if unparsed_request_cap is not None and (
+        not max_delivery_ts or unparsed_request_cap < max_delivery_ts
+    ):
+        max_delivery_ts = unparsed_request_cap
 
     all_rows = rows_from_pending + rows_from_new
     all_pending = _dedup_pending(remaining_pending + new_pending)

@@ -916,6 +916,8 @@ class TestDailyLogRotation:
         The delivery cursor can lag by the parsedRequest grace period, so
         rows built within it are refetched and must dedup against the
         files of those days — not just today's.
+
+        :param tmp_path: pytest tmp_path fixture.
         """
         logs_dir = tmp_path / "logs"
         logs_dir.mkdir()

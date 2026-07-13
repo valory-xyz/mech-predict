@@ -1083,7 +1083,9 @@ def fetch_deliveries(
                 "timestamp": delivery_ts,
                 "request_timestamp": request_ts,
                 **extract_delivery_fields(d, schema),
-                "tool": parsed.get("tool") or "unknown",
+                # parsedRequest.tool uses the same sentinel convention as
+                # ParsedDelivery — collapse it into the "unknown" bucket.
+                "tool": _normalize_subgraph_string(parsed.get("tool")) or "unknown",
                 "question_title": question_title,
                 "market_id": ctx.get("market_id"),
                 "market_prob": ctx.get("market_prob"),

@@ -1511,6 +1511,34 @@ class TestFetchDeliveriesSchemaShapes:
         assert deliveries[0]["tool_hash"] == "bafytool"
         assert deliveries[0]["parsed_missing"] is False
 
+    def test_sentinel_request_tool_maps_to_unknown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A sentinel parsedRequest.tool collapses into the "unknown" bucket.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        raw = self._raw_deliver(
+            {
+                "response": '{"p_yes": 0.7, "p_no": 0.3}',
+                "model": "gpt-4.1",
+                "tool": "superforcaster",
+                "toolHash": "bafytool",
+            }
+        )
+        raw["request"]["parsedRequest"]["tool"] = SUBGRAPH_UNHANDLED_TYPE
+
+        monkeypatch.setattr(
+            fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
+        )
+        monkeypatch.setattr(fp, "_paginated_fetch", lambda *a, **k: [raw])
+
+        deliveries, _ = fp.fetch_deliveries("http://gnosis", 0)
+        assert deliveries[0]["tool"] == "unknown"
+
     def test_legacy_schema_maps_flat_fields(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

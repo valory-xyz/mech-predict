@@ -675,9 +675,10 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 # ---------------------------------------------------------------------------
 
 # Marketplace: bulk fetch all recent deliveries with prediction data.
-# New schema: the IPFS-parsed response/model/toolHash live on the nested
-# ParsedDelivery entity (the flat Deliver.model/toolResponse fields were
-# removed in valory-xyz/autonolas-subgraph#113).
+# New schema: the IPFS-parsed response/model live on the separate top-level
+# ParsedDelivery entity, which shares its id with the Deliver it parses but
+# is NOT reachable as a nested field on Deliver — the parsed payload is
+# joined in a second query by id (see PARSED_DELIVERIES_BY_IDS_QUERY).
 DELIVERS_QUERY = """
 {
   delivers(
@@ -689,12 +690,6 @@ DELIVERS_QUERY = """
   ) {
     id
     blockTimestamp
-    parsedDelivery {
-      response
-      model
-      tool
-      toolHash
-    }
     request {
       id
       blockTimestamp
@@ -736,23 +731,30 @@ DELIVERS_QUERY_LEGACY = """
 }
 """
 
-# Re-read the parsed fields for specific deliveries (pending-store refresh).
-DELIVERS_PARSED_BY_IDS_QUERY = """
+# Batch-fetch ParsedDelivery rows by their ids (== the Deliver ids). Used
+# by the delivers join and the pending-store refresh. %(extra_fields)s is
+# filled per endpoint: tool/toolHash exist only once autonolas-subgraph#113
+# is deployed there (see _parsed_delivery_extra_fields).
+PARSED_DELIVERIES_BY_IDS_QUERY = """
 {
-  delivers(
+  parsedDeliveries(
     first: %(first)s
     where: { id_in: [%(ids)s] }
   ) {
     id
-    parsedDelivery {
-      response
-      model
-      tool
-      toolHash
-    }
+    response
+    model%(extra_fields)s
   }
 }
 """
+
+# One-row probes for per-endpoint schema detection.
+PARSED_DELIVERIES_PROBE_QUERY = "{ parsedDeliveries(first: 1) { id } }"
+PARSED_FIELDS_PROBE_QUERY = "{ parsedDeliveries(first: 1) { id tool toolHash } }"
+
+# Optional ParsedDelivery selection, present only on schema versions with
+# autonolas-subgraph#113 deployed. Indentation matches the query template.
+PARSED_DELIVERY_EXTRA_FIELDS = "\n    tool\n    toolHash"
 
 DELIVERS_BY_IDS_QUERY = """
 {
@@ -911,21 +913,96 @@ def detect_delivers_schema(marketplace_url: str) -> str:
     if cached is not None:
         return cached
 
-    probe = DELIVERS_QUERY % {"first": 1, "skip": 0, "timestamp_gt": 0}
     try:
-        _post_graphql(marketplace_url, {"query": probe})
+        _post_graphql(marketplace_url, {"query": PARSED_DELIVERIES_PROBE_QUERY})
         schema = DELIVERS_SCHEMA_PARSED
     except RuntimeError as exc:
         if not _is_unknown_field_error(exc):
             raise
         log.info(
-            "delivers schema: %s has no parsedDelivery — using legacy fields",
+            "delivers schema: %s has no parsedDeliveries — using legacy fields",
             marketplace_url,
         )
         schema = DELIVERS_SCHEMA_LEGACY
 
     _DELIVERS_SCHEMA_CACHE[marketplace_url] = schema
     return schema
+
+
+# Per-endpoint optional ParsedDelivery selection, probed once per process.
+_PARSED_FIELDS_CACHE: dict[str, str] = {}
+
+
+def _parsed_delivery_extra_fields(marketplace_url: str) -> str:
+    """Return the optional ParsedDelivery field selection for the endpoint.
+
+    ``tool``/``toolHash`` exist only on schema versions with
+    autonolas-subgraph#113 deployed. Probing once per endpoint lets the
+    fetcher select them where available and upgrade automatically on
+    deploy day without a code change.
+
+    :param marketplace_url: subgraph endpoint URL.
+    :return: ``PARSED_DELIVERY_EXTRA_FIELDS`` or an empty string.
+    """
+    cached = _PARSED_FIELDS_CACHE.get(marketplace_url)
+    if cached is not None:
+        return cached
+
+    try:
+        _post_graphql(marketplace_url, {"query": PARSED_FIELDS_PROBE_QUERY})
+        fields = PARSED_DELIVERY_EXTRA_FIELDS
+    except RuntimeError as exc:
+        if not _is_unknown_field_error(exc):
+            raise
+        log.info(
+            "delivers schema: %s has no ParsedDelivery.tool/toolHash yet",
+            marketplace_url,
+        )
+        fields = ""
+
+    _PARSED_FIELDS_CACHE[marketplace_url] = fields
+    return fields
+
+
+def fetch_parsed_deliveries(
+    marketplace_url: str,
+    deliver_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Batch-fetch ParsedDelivery rows for *deliver_ids*, keyed by id.
+
+    ParsedDelivery is a separate top-level entity that shares its id with
+    the Deliver it parses — it is NOT reachable as a nested field on
+    Deliver, so the parsed payload is joined in a second query by id.
+    Batch failures are logged and skipped; ids missing from the result are
+    treated by callers as "not indexed yet" (async file-data-source lag).
+
+    :param marketplace_url: subgraph endpoint URL.
+    :param deliver_ids: deliver ids to look up (duplicates are collapsed).
+    :return: mapping of id to raw ParsedDelivery row.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    if not deliver_ids:
+        return result
+
+    extra_fields = _parsed_delivery_extra_fields(marketplace_url)
+    unique_ids = list(dict.fromkeys(deliver_ids))
+    for i in range(0, len(unique_ids), DEFAULT_BATCH_SIZE):
+        batch = unique_ids[i : i + DEFAULT_BATCH_SIZE]
+        ids_str = ", ".join(f'"{did}"' for did in batch)
+        query = PARSED_DELIVERIES_BY_IDS_QUERY % {
+            "first": len(batch),
+            "ids": ids_str,
+            "extra_fields": extra_fields,
+        }
+        try:
+            data = _post_graphql(marketplace_url, {"query": query})
+        except (RuntimeError, requests.exceptions.RequestException) as e:
+            log.warning("parsedDeliveries batch failed (%s), skipping batch", e)
+            continue
+        for row in data.get("parsedDeliveries", []):
+            result[row["id"]] = row
+
+    return result
 
 
 def _normalize_subgraph_string(value: Optional[str]) -> Optional[str]:
@@ -954,7 +1031,12 @@ def extract_delivery_fields(deliver: dict[str, Any], schema: str) -> dict[str, A
       signal for deferring row construction rather than recording a
       permanently-invalid row.
 
-    :param deliver: raw deliver dict from the subgraph.
+    For the parsed schema the ParsedDelivery row is fetched separately
+    (see :func:`fetch_parsed_deliveries`) and attached under the
+    ``parsedDelivery`` key of *deliver* by the caller before this runs.
+
+    :param deliver: deliver dict — raw from the subgraph (legacy), or with
+        the joined ParsedDelivery row attached (parsed).
     :param schema: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.
     :return: dict with model, tool_response, tool_hash, parsed_missing.
     """
@@ -1077,23 +1159,40 @@ def fetch_deliveries(
         delivery_ts = int(d["blockTimestamp"])
         ctx = _parse_request_context(parsed.get("content", ""))
 
-        deliveries.append(
-            {
-                "deliver_id": d["id"],
-                "timestamp": delivery_ts,
-                "request_timestamp": request_ts,
-                **extract_delivery_fields(d, schema),
-                # parsedRequest.tool uses the same sentinel convention as
-                # ParsedDelivery — collapse it into the "unknown" bucket.
-                "tool": _normalize_subgraph_string(parsed.get("tool")) or "unknown",
-                "question_title": question_title,
-                "market_id": ctx.get("market_id"),
-                "market_prob": ctx.get("market_prob"),
-                "market_liquidity_usd": ctx.get("market_liquidity_usd"),
-                "market_close_at": ctx.get("market_close_at"),
-                "market_spread": ctx.get("market_spread"),
-            }
+        entry = {
+            "deliver_id": d["id"],
+            "timestamp": delivery_ts,
+            "request_timestamp": request_ts,
+            # parsedRequest.tool uses the same sentinel convention as
+            # ParsedDelivery — collapse it into the "unknown" bucket.
+            "tool": _normalize_subgraph_string(parsed.get("tool")) or "unknown",
+            "question_title": question_title,
+            "market_id": ctx.get("market_id"),
+            "market_prob": ctx.get("market_prob"),
+            "market_liquidity_usd": ctx.get("market_liquidity_usd"),
+            "market_close_at": ctx.get("market_close_at"),
+            "market_spread": ctx.get("market_spread"),
+        }
+        if schema == DELIVERS_SCHEMA_LEGACY:
+            entry.update(extract_delivery_fields(d, schema))
+        deliveries.append(entry)
+
+    # Parsed schema: the ParsedDelivery rows live in a separate entity —
+    # join them by id in a second batched query.
+    if schema == DELIVERS_SCHEMA_PARSED and deliveries:
+        parsed_map = fetch_parsed_deliveries(
+            marketplace_url, [e["deliver_id"] for e in deliveries]
         )
+        deliveries = [
+            {
+                **entry,
+                **extract_delivery_fields(
+                    {"parsedDelivery": parsed_map.get(entry["deliver_id"])},
+                    schema,
+                ),
+            }
+            for entry in deliveries
+        ]
 
     if skipped:
         log.info("  skipped %d deliveries with null parsedRequest", skipped)
@@ -1796,20 +1895,11 @@ def refresh_unparsed_pending(
     if detect_delivers_schema(marketplace_url) != DELIVERS_SCHEMA_PARSED:
         return pending
 
-    fetched: dict[str, dict[str, Any]] = {}
-    for i in range(0, len(stale_ids), DEFAULT_BATCH_SIZE):
-        batch = stale_ids[i : i + DEFAULT_BATCH_SIZE]
-        ids_str = ", ".join(f'"{did}"' for did in batch)
-        query = DELIVERS_PARSED_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
-        try:
-            data = _post_graphql(marketplace_url, {"query": query})
-        except (RuntimeError, requests.exceptions.RequestException) as e:
-            log.warning("pending refresh: batch failed (%s), keeping stale", e)
-            continue
-        for d in data.get("delivers", []):
-            fields = extract_delivery_fields(d, DELIVERS_SCHEMA_PARSED)
-            if not fields["parsed_missing"]:
-                fetched[d["id"]] = fields
+    parsed_map = fetch_parsed_deliveries(marketplace_url, stale_ids)
+    fetched = {
+        pid: extract_delivery_fields({"parsedDelivery": row}, DELIVERS_SCHEMA_PARSED)
+        for pid, row in parsed_map.items()
+    }
 
     if not fetched:
         return pending

@@ -51,6 +51,7 @@ from benchmark.datasets.fetch_production import (
     detect_delivers_schema,
     extract_delivery_fields,
     fetch_omen_resolved,
+    fetch_parsed_deliveries,
     fetch_polymarket_resolved,
     parse_tool_response,
 )
@@ -82,8 +83,9 @@ HTTP_TIMEOUT = 60
 DEFAULT_BATCH_SIZE = 1000
 
 # Delivery query that includes ipfsHashBytes in the same call. New schema:
-# the IPFS-parsed response/model/toolHash live on the nested ParsedDelivery
-# (valory-xyz/autonolas-subgraph#113).
+# the IPFS-parsed response/model live on the separate top-level
+# ParsedDelivery entity (same id as the Deliver, not nested under it) and
+# are joined in a second query via fetch_parsed_deliveries.
 DELIVERS_WITH_IPFS_QUERY = """
 {
   delivers(
@@ -95,12 +97,6 @@ DELIVERS_WITH_IPFS_QUERY = """
   ) {
     id
     blockTimestamp
-    parsedDelivery {
-      response
-      model
-      tool
-      toolHash
-    }
     marketplaceDelivery {
       ipfsHashBytes
     }
@@ -251,18 +247,34 @@ def fetch_deliveries(
         except (json.JSONDecodeError, TypeError):
             pass
 
-        deliveries.append(
-            {
-                "deliver_id": d["id"],
-                "timestamp": int(d["blockTimestamp"]),
-                "request_timestamp": int(request.get("blockTimestamp") or 0) or None,
-                **extract_delivery_fields(d, schema),
-                "tool": tool,
-                "question_title": question_title,
-                "market_id": market_id,
-                "ipfs_hash": ipfs_hash,
-            }
+        entry = {
+            "deliver_id": d["id"],
+            "timestamp": int(d["blockTimestamp"]),
+            "request_timestamp": int(request.get("blockTimestamp") or 0) or None,
+            "tool": tool,
+            "question_title": question_title,
+            "market_id": market_id,
+            "ipfs_hash": ipfs_hash,
+        }
+        if schema != DELIVERS_SCHEMA_PARSED:
+            entry.update(extract_delivery_fields(d, schema))
+        deliveries.append(entry)
+
+    # Parsed schema: join the separately-stored ParsedDelivery rows by id.
+    if schema == DELIVERS_SCHEMA_PARSED and deliveries:
+        parsed_map = fetch_parsed_deliveries(
+            marketplace_url, [e["deliver_id"] for e in deliveries]
         )
+        deliveries = [
+            {
+                **entry,
+                **extract_delivery_fields(
+                    {"parsedDelivery": parsed_map.get(entry["deliver_id"])},
+                    schema,
+                ),
+            }
+            for entry in deliveries
+        ]
 
     if skipped:
         log.info("  skipped %d deliveries (null parsedRequest or title)", skipped)

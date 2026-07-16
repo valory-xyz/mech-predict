@@ -1497,7 +1497,9 @@ class TestFetchDeliveriesSchemaShapes:
             captured["query"] = query
             return [self._raw_deliver("0xdeliver"), self._raw_deliver("0xlagging")]
 
-        def fake_parsed(url: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+        def fake_parsed(
+            url: str, ids: list[str]
+        ) -> tuple[dict[str, dict[str, Any]], bool]:
             captured["ids"] = ids
             return {
                 "0xdeliver": {
@@ -1507,7 +1509,7 @@ class TestFetchDeliveriesSchemaShapes:
                     "tool": "superforcaster",
                     "toolHash": "bafytool",
                 }
-            }
+            }, False
 
         monkeypatch.setattr(
             fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
@@ -1548,7 +1550,7 @@ class TestFetchDeliveriesSchemaShapes:
             fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
         )
         monkeypatch.setattr(fp, "_paginated_fetch", lambda *a, **k: [raw])
-        monkeypatch.setattr(fp, "fetch_parsed_deliveries", lambda url, ids: {})
+        monkeypatch.setattr(fp, "fetch_parsed_deliveries", lambda url, ids: ({}, False))
 
         deliveries, _ = fp.fetch_deliveries("http://gnosis", 0)
         assert deliveries[0]["tool"] == "unknown"
@@ -1772,7 +1774,9 @@ class TestRefreshUnparsedPending:
             fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
         )
 
-        def fake_parsed(url: str, ids: list[str]) -> dict[str, dict[str, Any]]:
+        def fake_parsed(
+            url: str, ids: list[str]
+        ) -> tuple[dict[str, dict[str, Any]], bool]:
             assert ids == ["0xstale"]  # only stale entries are re-queried
             return {
                 "0xstale": {
@@ -1782,7 +1786,7 @@ class TestRefreshUnparsedPending:
                     "tool": "superforcaster",
                     "toolHash": "bafytool",
                 }
-            }
+            }, False
 
         monkeypatch.setattr(fp, "fetch_parsed_deliveries", fake_parsed)
 
@@ -1808,7 +1812,7 @@ class TestRefreshUnparsedPending:
         monkeypatch.setattr(
             fp, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
         )
-        monkeypatch.setattr(fp, "fetch_parsed_deliveries", lambda url, ids: {})
+        monkeypatch.setattr(fp, "fetch_parsed_deliveries", lambda url, ids: ({}, False))
         stale = self._pending("0xstale", None)
         refreshed = refresh_unparsed_pending([stale], "http://gnosis")
         assert refreshed == [stale]
@@ -1868,9 +1872,33 @@ class TestFetchParsedDeliveries:
 
         monkeypatch.setattr(fp, "_post_graphql", fake_post)
         # Duplicate ids collapse; ids missing upstream are absent from the map.
-        result = fp.fetch_parsed_deliveries("http://gnosis", ["0xa", "0xb", "0xa"])
+        result, had_error = fp.fetch_parsed_deliveries(
+            "http://gnosis", ["0xa", "0xb", "0xa"]
+        )
         assert set(result) == {"0xa"}
         assert result["0xa"]["response"] == '{"p_yes": 0.6}'
+        assert had_error is False
+
+    def test_batch_size_splits_queries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The batch_size override splits the ids across queries.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(fp, "_parsed_delivery_extra_fields", lambda url: "")
+        queries: list[str] = []
+
+        def fake_post(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            queries.append(payload["query"])
+            return {"parsedDeliveries": []}
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+        fp.fetch_parsed_deliveries("http://gnosis", ["0xa", "0xb"], batch_size=1)
+        assert len(queries) == 2
+        assert '"0xa"' in queries[0]
+        assert '"0xb"' in queries[1]
 
     @pytest.mark.parametrize(
         "exc",
@@ -1900,7 +1928,7 @@ class TestFetchParsedDeliveries:
             raise exc
 
         monkeypatch.setattr(fp, "_post_graphql", fail)
-        assert not fp.fetch_parsed_deliveries("http://gnosis", ["0xa"])
+        assert fp.fetch_parsed_deliveries("http://gnosis", ["0xa"]) == ({}, True)
 
     def test_no_ids_no_query(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An empty id list makes no network calls at all."""
@@ -1911,7 +1939,7 @@ class TestFetchParsedDeliveries:
             raise AssertionError("must not query without ids")
 
         monkeypatch.setattr(fp, "_post_graphql", boom)
-        assert not fp.fetch_parsed_deliveries("http://gnosis", [])
+        assert fp.fetch_parsed_deliveries("http://gnosis", []) == ({}, False)
 
 
 @pytest.mark.usefixtures("clear_schema_cache")

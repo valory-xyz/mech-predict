@@ -968,7 +968,8 @@ def _parsed_delivery_extra_fields(marketplace_url: str) -> str:
 def fetch_parsed_deliveries(
     marketplace_url: str,
     deliver_ids: list[str],
-) -> dict[str, dict[str, Any]]:
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> tuple[dict[str, dict[str, Any]], bool]:
     """Batch-fetch ParsedDelivery rows for *deliver_ids*, keyed by id.
 
     ParsedDelivery is a separate top-level entity that shares its id with
@@ -976,19 +977,26 @@ def fetch_parsed_deliveries(
     Deliver, so the parsed payload is joined in a second query by id.
     Batch failures are logged and skipped; ids missing from the result are
     treated by callers as "not indexed yet" (async file-data-source lag).
+    The returned flag reports whether any batch failed, for callers that
+    must distinguish "not indexed" from "could not ask" (e.g. the shard
+    backfill's force-rebuild gating); callers whose retry semantics make
+    the distinction irrelevant simply ignore it.
 
     :param marketplace_url: subgraph endpoint URL.
     :param deliver_ids: deliver ids to look up (duplicates are collapsed).
-    :return: mapping of id to raw ParsedDelivery row.
+    :param batch_size: max ids per GraphQL request.
+    :return: ``(rows, had_error)`` — mapping of id to raw ParsedDelivery
+        row, and True when at least one batch failed.
     """
     result: dict[str, dict[str, Any]] = {}
     if not deliver_ids:
-        return result
+        return result, False
 
     extra_fields = _parsed_delivery_extra_fields(marketplace_url)
     unique_ids = list(dict.fromkeys(deliver_ids))
-    for i in range(0, len(unique_ids), DEFAULT_BATCH_SIZE):
-        batch = unique_ids[i : i + DEFAULT_BATCH_SIZE]
+    had_error = False
+    for i in range(0, len(unique_ids), batch_size):
+        batch = unique_ids[i : i + batch_size]
         ids_str = ", ".join(f'"{did}"' for did in batch)
         query = PARSED_DELIVERIES_BY_IDS_QUERY % {
             "first": len(batch),
@@ -999,11 +1007,12 @@ def fetch_parsed_deliveries(
             data = _post_graphql(marketplace_url, {"query": query})
         except (RuntimeError, requests.exceptions.RequestException) as e:
             log.warning("parsedDeliveries batch failed (%s), skipping batch", e)
+            had_error = True
             continue
         for row in data.get("parsedDeliveries", []):
             result[row["id"]] = row
 
-    return result
+    return result, had_error
 
 
 def _normalize_subgraph_string(value: Optional[str]) -> Optional[str]:
@@ -1179,9 +1188,11 @@ def fetch_deliveries(
         deliveries.append(entry)
 
     # Parsed schema: the ParsedDelivery rows live in a separate entity —
-    # join them by id in a second batched query.
+    # join them by id in a second batched query. Batch failures are
+    # deliberately ignored: affected delivers surface as parsed_missing
+    # and the deferral machinery retries them next run.
     if schema == DELIVERS_SCHEMA_PARSED and deliveries:
-        parsed_map = fetch_parsed_deliveries(
+        parsed_map, _ = fetch_parsed_deliveries(
             marketplace_url, [e["deliver_id"] for e in deliveries]
         )
         deliveries = [
@@ -1896,7 +1907,9 @@ def refresh_unparsed_pending(
     if detect_delivers_schema(marketplace_url) != DELIVERS_SCHEMA_PARSED:
         return pending
 
-    parsed_map = fetch_parsed_deliveries(marketplace_url, stale_ids)
+    # Batch failures are deliberately ignored: affected entries simply
+    # stay stale and are retried on the next run.
+    parsed_map, _ = fetch_parsed_deliveries(marketplace_url, stale_ids)
     fetched = {
         pid: extract_delivery_fields({"parsedDelivery": row}, DELIVERS_SCHEMA_PARSED)
         for pid, row in parsed_map.items()

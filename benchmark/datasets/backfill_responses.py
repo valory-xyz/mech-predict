@@ -96,11 +96,10 @@ from benchmark.datasets.fetch_production import (
     LOGS_DIR,
     MECH_MARKETPLACE_GNOSIS_URL,
     MECH_MARKETPLACE_POLYGON_URL,
-    PARSED_DELIVERIES_BY_IDS_QUERY,
     _compute_config_hash,
-    _parsed_delivery_extra_fields,
     detect_delivers_schema,
     extract_delivery_fields,
+    fetch_parsed_deliveries,
     parse_tool_response,
 )
 from benchmark.datasets.subgraph import post_graphql
@@ -203,13 +202,13 @@ def fetch_tool_responses(
     """Requery the marketplace subgraph for tool responses by deliver id.
 
     The endpoint's delivers shape is probed once via
-    :func:`detect_delivers_schema`: on the parsed schema the payload lives
-    in the separate top-level ParsedDelivery entity (same id as the
-    Deliver, queried via ``id_in``; ``tool``/``toolHash`` selected only
-    where deployed), on the legacy schema in the flat Deliver fields.
-    Every returned row is mapped through
-    :func:`extract_delivery_fields`, so a future schema change only needs
-    handling in ``fetch_production``. Deliveries whose parsed payload has
+    :func:`detect_delivers_schema`. On the parsed schema the payload lives
+    in the separate top-level ParsedDelivery entity, fetched via
+    :func:`fetch_parsed_deliveries` — the single owner of that query
+    shape — so a future schema change only needs handling in
+    ``fetch_production``. On the legacy schema the flat Deliver fields are
+    batch-requeried here. Every returned row is mapped through
+    :func:`extract_delivery_fields`. Deliveries whose parsed payload has
     not been indexed upstream yet are absent from the result.
 
     Queries in batches. A failed probe or batch is logged and skipped (its
@@ -227,11 +226,6 @@ def fetch_tool_responses(
     responses: dict[str, dict[str, Any]] = {}
     try:
         schema = detect_delivers_schema(marketplace_url)
-        extra_fields = (
-            _parsed_delivery_extra_fields(marketplace_url)
-            if schema == DELIVERS_SCHEMA_PARSED
-            else ""
-        )
     except Exception as e:  # pylint: disable=broad-except
         log.warning(
             "Delivers schema probe failed against %s: %s -- skipping",
@@ -239,21 +233,34 @@ def fetch_tool_responses(
             e,
         )
         return responses, True
+
+    if schema == DELIVERS_SCHEMA_PARSED:
+        try:
+            parsed_map, had_error = fetch_parsed_deliveries(
+                marketplace_url, deliver_ids, batch_size=batch_size
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            # The optional-fields probe inside fetch_parsed_deliveries
+            # propagates non-schema errors; treat it like a failed probe.
+            log.warning(
+                "ParsedDelivery fields probe failed against %s: %s -- skipping",
+                marketplace_url,
+                e,
+            )
+            return responses, True
+        # Ids without a ParsedDelivery row yet are absent from the map --
+        # their rows stay candidates for a future run.
+        responses = {
+            pid: extract_delivery_fields({"parsedDelivery": row}, schema)
+            for pid, row in parsed_map.items()
+        }
+        return responses, had_error
+
     had_error = False
     for i in range(0, len(deliver_ids), batch_size):
         batch = deliver_ids[i : i + batch_size]
         ids_str = ", ".join(f'"{did}"' for did in batch)
-        if schema == DELIVERS_SCHEMA_PARSED:
-            query = PARSED_DELIVERIES_BY_IDS_QUERY % {
-                "first": len(batch),
-                "ids": ids_str,
-                "extra_fields": extra_fields,
-            }
-        else:
-            query = DELIVERS_LEGACY_BY_IDS_QUERY % {
-                "first": len(batch),
-                "ids": ids_str,
-            }
+        query = DELIVERS_LEGACY_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
         try:
             data = _post_graphql(marketplace_url, {"query": query})
         except Exception as e:  # pylint: disable=broad-except
@@ -265,16 +272,8 @@ def fetch_tool_responses(
             )
             had_error = True
             continue
-        if schema == DELIVERS_SCHEMA_PARSED:
-            # Ids without a ParsedDelivery row yet simply don't come back
-            # -- their rows stay candidates for a future run.
-            for row in data.get("parsedDeliveries", []):
-                responses[row["id"]] = extract_delivery_fields(
-                    {"parsedDelivery": row}, schema
-                )
-        else:
-            for deliver in data.get("delivers", []):
-                responses[deliver["id"]] = extract_delivery_fields(deliver, schema)
+        for deliver in data.get("delivers", []):
+            responses[deliver["id"]] = extract_delivery_fields(deliver, schema)
     return responses, had_error
 
 

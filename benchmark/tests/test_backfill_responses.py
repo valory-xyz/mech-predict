@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import pytest
 from benchmark.datasets import backfill_responses as br
+from benchmark.datasets import fetch_production as fp
 from benchmark.datasets.fetch_production import (
     DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
@@ -144,9 +145,10 @@ def _stub_schema_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         br, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_LEGACY
     )
-    # Pin the optional-fields probe too, so parsed-schema tests don't emit
-    # a probe call that would pollute per-test call recording.
-    monkeypatch.setattr(br, "_parsed_delivery_extra_fields", lambda url: "")
+    # Pin the optional-fields probe too (it lives in fetch_production and
+    # runs inside fetch_parsed_deliveries), so parsed-schema tests don't
+    # emit a probe call that would pollute per-test call recording.
+    monkeypatch.setattr(fp, "_parsed_delivery_extra_fields", lambda url: "")
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +492,9 @@ class TestSchemaRouting:
             queries.append(payload["query"])
             return fake(url, payload)
 
-        monkeypatch.setattr(br, "_post_graphql", spy)
+        # Parsed-schema queries flow through fetch_production's
+        # fetch_parsed_deliveries, so patch that module's seam.
+        monkeypatch.setattr(fp, "_post_graphql", spy)
 
         summary = br.backfill(tmp_path)
 
@@ -538,7 +542,7 @@ class TestSchemaRouting:
             br, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_PARSED
         )
         monkeypatch.setattr(
-            br,
+            fp,
             "_post_graphql",
             _make_fake_post_graphql({}, schema=DELIVERS_SCHEMA_PARSED),
         )

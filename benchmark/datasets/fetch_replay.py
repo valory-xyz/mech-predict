@@ -261,8 +261,9 @@ def fetch_deliveries(
         deliveries.append(entry)
 
     # Parsed schema: join the separately-stored ParsedDelivery rows by id.
+    # Batch failures are ignored — affected rows just parse as missing.
     if schema == DELIVERS_SCHEMA_PARSED and deliveries:
-        parsed_map = fetch_parsed_deliveries(
+        parsed_map, _ = fetch_parsed_deliveries(
             marketplace_url, [e["deliver_id"] for e in deliveries]
         )
         deliveries = [

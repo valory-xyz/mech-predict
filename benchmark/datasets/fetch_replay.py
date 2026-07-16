@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from benchmark.datasets.fetch_production import (
+    DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
     IPFS_FETCH_DELAY,
     MECH_MARKETPLACE_GNOSIS_URL,
@@ -256,7 +257,7 @@ def fetch_deliveries(
             "market_id": market_id,
             "ipfs_hash": ipfs_hash,
         }
-        if schema != DELIVERS_SCHEMA_PARSED:
+        if schema == DELIVERS_SCHEMA_LEGACY:
             entry.update(extract_delivery_fields(d, schema))
         deliveries.append(entry)
 

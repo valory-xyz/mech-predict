@@ -899,12 +899,13 @@ def _is_unknown_field_error(exc: RuntimeError) -> bool:
 def detect_delivers_schema(marketplace_url: str) -> str:
     """Detect which delivers query shape *marketplace_url* supports.
 
-    Probes with a one-row nested-ParsedDelivery query. An unknown-field
-    validation error means the endpoint still runs the legacy schema with
-    flat ``Deliver.model``/``toolResponse`` fields. Any other error
-    propagates — a transient failure must not silently lock the process
-    into the wrong shape. The result is cached per URL for the process
-    lifetime.
+    Probes with a one-row query against the top-level ``parsedDeliveries``
+    collection. An unknown-field validation error means the endpoint does
+    not expose the ParsedDelivery entity, i.e. it still runs the legacy
+    schema with flat ``Deliver.model``/``toolResponse`` fields. Any other
+    error propagates — a transient failure must not silently lock the
+    process into the wrong shape. The result is cached per URL for the
+    process lifetime.
 
     :param marketplace_url: subgraph endpoint URL.
     :return: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.

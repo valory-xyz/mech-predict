@@ -42,8 +42,9 @@ Design:
      class this module heals -- must never abort the scan) and an
      unreadable or undecodable shard is isolated so it cannot sink the run.
   2. Batch-requery each platform's marketplace subgraph for those deliver
-     ids, using the query shape the endpoint supports (nested
-     ParsedDelivery vs legacy flat fields, probed once per endpoint via
+     ids, using the query shape the endpoint supports (the separate
+     top-level ParsedDelivery entity, joined by id, vs legacy flat
+     Deliver fields — probed once per endpoint via
      ``fetch_production.detect_delivers_schema``).
   3. Rows whose response is now available are re-parsed with the same
      parser the fetcher uses; rows that parse to a valid prediction are
@@ -90,13 +91,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from benchmark.datasets.fetch_production import (
-    DELIVERS_PARSED_BY_IDS_QUERY,
     DELIVERS_SCHEMA_PARSED,
     HTTP_TIMEOUT,
     LOGS_DIR,
     MECH_MARKETPLACE_GNOSIS_URL,
     MECH_MARKETPLACE_POLYGON_URL,
+    PARSED_DELIVERIES_BY_IDS_QUERY,
     _compute_config_hash,
+    _parsed_delivery_extra_fields,
     detect_delivers_schema,
     extract_delivery_fields,
     parse_tool_response,
@@ -157,9 +159,9 @@ PLATFORM_MARKETPLACE_URLS: dict[str, str] = {
 # GraphQL query
 # ---------------------------------------------------------------------------
 
-# Legacy-schema counterpart of fetch_production.DELIVERS_PARSED_BY_IDS_QUERY:
+# Legacy-schema counterpart of fetch_production.PARSED_DELIVERIES_BY_IDS_QUERY:
 # re-read the flat Deliver fields for specific deliveries on endpoints that
-# do not expose the nested ParsedDelivery entity. The field shape mirrors
+# do not expose the ParsedDelivery entity. The field shape mirrors
 # fetch_production.DELIVERS_QUERY_LEGACY so the result feeds
 # extract_delivery_fields unchanged.
 DELIVERS_LEGACY_BY_IDS_QUERY = """
@@ -200,12 +202,15 @@ def fetch_tool_responses(
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Requery the marketplace subgraph for tool responses by deliver id.
 
-    The endpoint's delivers shape (nested ParsedDelivery vs legacy flat
-    fields) is probed once via :func:`detect_delivers_schema`, and every
-    returned deliver is mapped through :func:`extract_delivery_fields`, so
-    a future schema change only needs handling in ``fetch_production``.
-    Deliveries whose parsed payload has not been indexed upstream yet are
-    omitted from the result.
+    The endpoint's delivers shape is probed once via
+    :func:`detect_delivers_schema`: on the parsed schema the payload lives
+    in the separate top-level ParsedDelivery entity (same id as the
+    Deliver, queried via ``id_in``; ``tool``/``toolHash`` selected only
+    where deployed), on the legacy schema in the flat Deliver fields.
+    Every returned row is mapped through
+    :func:`extract_delivery_fields`, so a future schema change only needs
+    handling in ``fetch_production``. Deliveries whose parsed payload has
+    not been indexed upstream yet are absent from the result.
 
     Queries in batches. A failed probe or batch is logged and skipped (its
     rows simply stay unrepaired until the next run) so a subgraph failure
@@ -222,6 +227,11 @@ def fetch_tool_responses(
     responses: dict[str, dict[str, Any]] = {}
     try:
         schema = detect_delivers_schema(marketplace_url)
+        extra_fields = (
+            _parsed_delivery_extra_fields(marketplace_url)
+            if schema == DELIVERS_SCHEMA_PARSED
+            else ""
+        )
     except Exception as e:  # pylint: disable=broad-except
         log.warning(
             "Delivers schema probe failed against %s: %s -- skipping",
@@ -229,16 +239,21 @@ def fetch_tool_responses(
             e,
         )
         return responses, True
-    query_template = (
-        DELIVERS_PARSED_BY_IDS_QUERY
-        if schema == DELIVERS_SCHEMA_PARSED
-        else DELIVERS_LEGACY_BY_IDS_QUERY
-    )
     had_error = False
     for i in range(0, len(deliver_ids), batch_size):
         batch = deliver_ids[i : i + batch_size]
         ids_str = ", ".join(f'"{did}"' for did in batch)
-        query = query_template % {"first": len(batch), "ids": ids_str}
+        if schema == DELIVERS_SCHEMA_PARSED:
+            query = PARSED_DELIVERIES_BY_IDS_QUERY % {
+                "first": len(batch),
+                "ids": ids_str,
+                "extra_fields": extra_fields,
+            }
+        else:
+            query = DELIVERS_LEGACY_BY_IDS_QUERY % {
+                "first": len(batch),
+                "ids": ids_str,
+            }
         try:
             data = _post_graphql(marketplace_url, {"query": query})
         except Exception as e:  # pylint: disable=broad-except
@@ -250,13 +265,16 @@ def fetch_tool_responses(
             )
             had_error = True
             continue
-        for deliver in data.get("delivers", []):
-            fields = extract_delivery_fields(deliver, schema)
-            if fields["parsed_missing"]:
-                # Parsed payload not indexed upstream yet -- leave the row
-                # a candidate for a future run.
-                continue
-            responses[deliver["id"]] = fields
+        if schema == DELIVERS_SCHEMA_PARSED:
+            # Ids without a ParsedDelivery row yet simply don't come back
+            # -- their rows stay candidates for a future run.
+            for row in data.get("parsedDeliveries", []):
+                responses[row["id"]] = extract_delivery_fields(
+                    {"parsedDelivery": row}, schema
+                )
+        else:
+            for deliver in data.get("delivers", []):
+                responses[deliver["id"]] = extract_delivery_fields(deliver, schema)
     return responses, had_error
 
 

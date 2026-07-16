@@ -89,40 +89,44 @@ def _make_fake_post_graphql(
 ) -> Any:
     """Build a fake _post_graphql returning canned tool responses.
 
-    Serves the deliver shape matching *schema*: legacy flat
-    ``model``/``toolResponse`` fields, or the nested ``parsedDelivery``
-    entity (a None response is served as a not-yet-indexed delivery,
-    i.e. ``parsedDelivery: null``).
+    Serves the entity shape matching *schema*: legacy flat
+    ``model``/``toolResponse`` fields under ``delivers``, or top-level
+    ``parsedDeliveries`` rows joined by id (a None response is served as a
+    not-yet-indexed delivery, i.e. its id is absent from the result --
+    exactly how the real entity behaves).
 
     :param responses: deliver_id -> tool response to serve.
     :param calls: optional list collecting (url, queried ids) per call.
-    :param schema: deliver shape to serve (legacy or parsed).
+    :param schema: entity shape to serve (legacy or parsed).
     :return: fake function with the _post_graphql signature.
     """
 
-    def _deliver(did: str) -> dict[str, Any]:
-        """Build one canned deliver in the configured schema shape."""
-        response = responses.get(did)
-        if schema == DELIVERS_SCHEMA_LEGACY:
-            return {"id": did, "model": None, "toolResponse": response}
-        if response is None:
-            return {"id": did, "parsedDelivery": None}
+    def _legacy_deliver(did: str) -> dict[str, Any]:
+        """Build one canned legacy-shape deliver."""
+        return {"id": did, "model": None, "toolResponse": responses.get(did)}
+
+    def _parsed_row(did: str) -> dict[str, Any]:
+        """Build one canned ParsedDelivery row."""
         return {
             "id": did,
-            "parsedDelivery": {
-                "response": response,
-                "model": "gpt-4o",
-                "tool": "factual_research",
-                "toolHash": None,
-            },
+            "response": responses[did],
+            "model": "gpt-4o",
+            "tool": "factual_research",
+            "toolHash": None,
         }
 
     def fake(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Serve canned delivers for the ids found in the query."""
+        """Serve canned rows for the ids found in the query."""
         ids = _ids_in_query(payload["query"])
         if calls is not None:
             calls.append((url, ids))
-        return {"delivers": [_deliver(did) for did in ids]}
+        if schema == DELIVERS_SCHEMA_LEGACY:
+            return {"delivers": [_legacy_deliver(did) for did in ids]}
+        return {
+            "parsedDeliveries": [
+                _parsed_row(did) for did in ids if responses.get(did) is not None
+            ]
+        }
 
     return fake
 
@@ -140,6 +144,9 @@ def _stub_schema_detection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         br, "detect_delivers_schema", lambda url: DELIVERS_SCHEMA_LEGACY
     )
+    # Pin the optional-fields probe too, so parsed-schema tests don't emit
+    # a probe call that would pollute per-test call recording.
+    monkeypatch.setattr(br, "_parsed_delivery_extra_fields", lambda url: "")
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +464,7 @@ class TestBatchingAndRouting:
 
 
 # ---------------------------------------------------------------------------
-# Schema-aware querying (nested ParsedDelivery vs legacy flat fields)
+# Schema-aware querying (separate ParsedDelivery entity vs legacy flat fields)
 # ---------------------------------------------------------------------------
 
 
@@ -467,7 +474,7 @@ class TestSchemaRouting:
     def test_parsed_schema_uses_parsed_query_and_repairs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A parsed-schema endpoint is queried for parsedDelivery and repaired."""
+        """A parsed-schema endpoint is queried via parsedDeliveries and repaired."""
         shard = tmp_path / "production_log_2026_07_01.jsonl"
         _write_shard(shard, [_row("0xbb")])
         monkeypatch.setattr(
@@ -488,7 +495,7 @@ class TestSchemaRouting:
         summary = br.backfill(tmp_path)
 
         assert summary["repaired"] == 1
-        assert all("parsedDelivery" in q for q in queries)
+        assert all("parsedDeliveries(" in q for q in queries)
         assert all("toolResponse" not in q for q in queries)
         repaired = _read_shard(shard)[0]
         assert repaired["p_yes"] == 0.72
@@ -524,7 +531,7 @@ class TestSchemaRouting:
     def test_parsed_delivery_not_indexed_leaves_row_untouched(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A deliver whose parsedDelivery is still null stays a candidate."""
+        """A deliver with no ParsedDelivery row yet stays a candidate."""
         shard = tmp_path / "production_log_2026_07_01.jsonl"
         _write_shard(shard, [_row("0xbb")])
         monkeypatch.setattr(

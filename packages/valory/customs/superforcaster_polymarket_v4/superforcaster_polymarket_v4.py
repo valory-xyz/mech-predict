@@ -436,6 +436,44 @@ def extract_question(prompt: str) -> str:
     return question
 
 
+def extract_result_json(content: Optional[str]) -> str:
+    """Return the trailing JSON object as a compact, json.loads-parseable string.
+
+    v4's prompt lets the model emit reasoning prose (facts/thinking/answer tags)
+    before the final JSON object, so the raw completion is not itself
+    json.loads-parseable and the strict trader consumer rejects it. Extract the
+    last balanced ``{...}`` block (the prediction) and re-serialize it compact,
+    mirroring ``finetuned_prediction.canonical_prediction``. On any failure
+    return a parseable null-prediction JSON so the on-chain result never breaks
+    the trader's flat ``json.loads`` (mirrors
+    ``superforcaster_calibrated_full_search``).
+
+    :param content: the raw model completion (prose + trailing JSON), or None.
+    :return: a compact JSON string that ``json.loads`` parses to the prediction.
+    """
+    null_prediction = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    if not content:
+        return null_prediction
+    end = content.rfind("}")
+    if end == -1:
+        return null_prediction
+    depth = 0
+    for i in range(end, -1, -1):
+        if content[i] == "}":
+            depth += 1
+        elif content[i] == "{":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(content[i : end + 1])
+                except ValueError:
+                    return null_prediction
+                return json.dumps(obj, separators=(",", ":"))
+    return null_prediction
+
+
 @with_key_rotation
 def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     """Run the task"""
@@ -517,7 +555,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting prompt response...")
-        extracted_block, counter_callback = generate_prediction_with_retry(
+        raw_completion, counter_callback = generate_prediction_with_retry(
             client=llm_client,
             model=model,
             messages=messages,
@@ -527,6 +565,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             delay=COMPLETION_DELAY,
             counter_callback=counter_callback,
         )
+        # v4's prompt permits reasoning prose before the final JSON object, so the
+        # raw completion is not flat-``json.loads``-parseable; extract the trailing
+        # JSON before returning so the strict trader consumer can parse the result.
+        extracted_block = extract_result_json(raw_completion)
 
         used_params = {
             "model": model,

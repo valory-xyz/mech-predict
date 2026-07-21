@@ -399,8 +399,8 @@ def main() -> None:
         type=Path,
         default=Path("benchmark/results/roi_results.json"),
         help=(
-            "Path to roi_results.json (from benchmark.roi_sim) for the "
-            "appended ROI companion section."
+            "Path to roi_results.json (from benchmark.roi_sim) for the ROI "
+            "companion message posted after the digest."
         ),
     )
     args = parser.parse_args()

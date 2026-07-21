@@ -16,26 +16,29 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Render the ROI companion section appended to the daily benchmark Slack post.
+"""Render the ROI companion section posted as its own message after the daily benchmark Slack digest.
 
 Pure builder over ``roi_results.json`` (written by ``benchmark.roi_sim``):
 no network, no LLM, stdlib only (the model display-name map is imported from
 ``benchmark.roi_sim``, itself stdlib-only). :func:`build_roi_section` returns a Slack
 mrkdwn snippet -- one intro line plus a compact fixed-width table inside a
-fenced code block -- or None when there is nothing to append (missing or
+fenced code block -- or None when there is nothing to post (missing or
 unparseable results file, or no groups for the platform). Callers treat
-None as "append nothing"; a broken ROI section must never break the daily
+None as "skip the section"; a broken ROI section must never break the daily
 post, so this module never raises for bad input data.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
 
 from benchmark.roi_sim import MODEL_DISPLAY, _is_number, roi_display_sort_key
+
+log = logging.getLogger(__name__)
 
 # Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
 # wide table renders fine; MAX_LINE_WIDTH is only a truncation backstop for
@@ -348,14 +351,34 @@ def _display_sort_key(
 def _load_results(results_path: Path) -> dict[str, Any] | None:
     """Read and parse roi_results.json, tolerating any failure.
 
+    A missing file is expected (the roi_sim step may have produced no results
+    yet) and stays quiet. A present-but-unreadable or malformed file signals
+    upstream pipeline breakage (a broken roi_sim step, a truncated artifact),
+    so it is logged at WARNING -- otherwise the vanished ROI section is
+    indistinguishable from "no data yet".
+
     :param results_path: path to the results file.
     :return: parsed payload dict, or None when missing/unparseable.
     """
     try:
         payload = json.loads(results_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "ROI results at %s are present but unreadable (%s); "
+            "skipping the ROI section.",
+            results_path,
+            exc,
+        )
         return None
     if not isinstance(payload, dict):
+        log.warning(
+            "ROI results at %s parsed to %s, not an object; "
+            "skipping the ROI section.",
+            results_path,
+            type(payload).__name__,
+        )
         return None
     return payload
 

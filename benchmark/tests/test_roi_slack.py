@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 import pytest
 from benchmark import notify_slack
@@ -799,7 +799,7 @@ class TestLineWidth:
 
 
 # ---------------------------------------------------------------------------
-# notify_slack append hook
+# notify_slack separate-message hook
 # ---------------------------------------------------------------------------
 
 
@@ -812,7 +812,7 @@ class TestNotifySlackHook:
         tmp_path: Path,
         extra_argv: list[str] | None = None,
         roi_env: str | None = None,
-        post_stub: Any = None,
+        post_stub: Optional[Callable[[str, str], None]] = None,
     ) -> list[str]:
         """Drive notify_slack.main with network + LLM stubbed; return posts.
 
@@ -842,14 +842,17 @@ class TestNotifySlackHook:
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/T000")
         posted: list[str] = []
+
+        def _record(url: str, text: str) -> None:
+            """Record every posted text, then delegate to ``post_stub`` if given."""
+            posted.append(text)
+            if post_stub is not None:
+                post_stub(url, text)
+
         monkeypatch.setattr(
             notify_slack, "summarize_report", lambda *a, **k: "LLM SUMMARY"
         )
-        monkeypatch.setattr(
-            notify_slack,
-            "post_to_slack",
-            post_stub or (lambda url, text: posted.append(text)),
-        )
+        monkeypatch.setattr(notify_slack, "post_to_slack", _record)
         argv = ["notify_slack", "--report", str(report)] + (extra_argv or [])
         monkeypatch.setattr(sys, "argv", argv)
         notify_slack.main()
@@ -880,6 +883,27 @@ class TestNotifySlackHook:
         assert posted[1] == "ROI_MARKER_SECTION"
         # Platform key derived from the report's platform label.
         assert calls == [(Path("benchmark/results/roi_results.json"), "omen")]
+
+    def test_dry_run_prints_digest_and_roi_section(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """--dry-run prints both the digest and the ROI section and posts nothing.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        monkeypatch.setattr(
+            notify_slack, "build_roi_section", lambda *a, **k: "ROI_MARKER_SECTION"
+        )
+        posted = self._run_main(monkeypatch, tmp_path, extra_argv=["--dry-run"])
+        out = capsys.readouterr().out
+        assert "LLM SUMMARY" in out
+        assert "ROI_MARKER_SECTION" in out
+        assert posted == []  # dry-run must never call post_to_slack
 
     def test_roi_post_failure_never_breaks_digest(
         self,

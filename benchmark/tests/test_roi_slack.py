@@ -903,7 +903,7 @@ class TestNotifySlackHook:
         out = capsys.readouterr().out
         assert "LLM SUMMARY" in out
         assert "ROI_MARKER_SECTION" in out
-        assert posted == []  # dry-run must never call post_to_slack
+        assert not posted  # dry-run must never call post_to_slack
 
     def test_roi_post_failure_never_breaks_digest(
         self,

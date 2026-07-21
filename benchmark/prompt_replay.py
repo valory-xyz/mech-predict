@@ -963,6 +963,11 @@ _STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
         "packages.valory.customs.superforcaster.superforcaster",
         "PredictionResult",
     ),
+    "superforcaster-polymarket-v4": (
+        "packages.valory.customs.superforcaster_polymarket_v4."
+        "superforcaster_polymarket_v4",
+        "PredictionResult",
+    ),
     "factual_research": (
         "packages.valory.customs.factual_research.factual_research",
         "PredictionResult",

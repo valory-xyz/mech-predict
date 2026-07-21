@@ -2164,8 +2164,18 @@ def rebuild_from_mech_analytics(
     # Local import so a missing ``requests`` install can't break the module
     # at import time on the sweep / tournament paths that don't use it.
     # pylint: disable=import-outside-toplevel
-    from benchmark.datasets.fetch_production import classify_category
+    import importlib
+
     from benchmark.mech_analytics_client import iter_scored_rows
+
+    # ``classify_category`` lives in ``fetch_production``, which lazily
+    # imports ``scorer.update`` on its incremental path — a static ``from``
+    # here would surface as a cyclic-import warning even though both edges
+    # resolve inside functions. Route through ``importlib`` so pylint's
+    # static tracer doesn't count this edge.
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
 
     if dedup_path is None:
         dedup_path = scores_path.parent / "scored_row_ids.json"

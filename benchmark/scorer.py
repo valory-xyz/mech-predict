@@ -2163,6 +2163,7 @@ def rebuild_from_mech_analytics(
     """
     # Local import so a missing ``requests`` install can't break the module
     # at import time on the sweep / tournament paths that don't use it.
+    # pylint: disable=import-outside-toplevel
     from benchmark.datasets.fetch_production import classify_category
     from benchmark.mech_analytics_client import iter_scored_rows
 
@@ -2227,7 +2228,9 @@ def rebuild_from_mech_analytics(
             emit_history=False,
         )
         _derive_platform_path(tournament_scores_path, platform).write_text(
-            json.dumps(_finalize_scores(_empty_scores(empty_scores["current_month"])), indent=2)
+            json.dumps(
+                _finalize_scores(_empty_scores(empty_scores["current_month"])), indent=2
+            )
         )
 
     return prod_result
@@ -2578,14 +2581,16 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
     reroutes to :func:`rebuild_from_mech_analytics` instead of reading
     log files. Off-chain migration: mech-analytics is the new source of
     the scored-row stream. Defaults off; nothing changes until we flip.
+
+    :param args: parsed CLI namespace with ``output``, ``history``,
+        ``logs_dir``, and ``tournament_input``.
+    :param output_tournament: derived path for the tournament scores json.
     """
     if _use_mech_analytics_rows():
         default_days = 30  # matches the sweep default and covers the report windows
         now = datetime.now(timezone.utc)
         since = now - timedelta(days=default_days)
-        print(
-            f"Rebuilding scores from mech-analytics (since {since.isoformat()})"
-        )
+        print(f"Rebuilding scores from mech-analytics (since {since.isoformat()})")
         result = rebuild_from_mech_analytics(
             since=since,
             scores_path=args.output,
@@ -2613,7 +2618,11 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
 
 def _use_mech_analytics_rows() -> bool:
     """Return True when the feature flag routes rebuilds via mech-analytics."""
-    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in {"1", "true", "yes"}
+    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _cli_legacy_full_recompute(

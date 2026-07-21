@@ -25,6 +25,8 @@ a queue of fake responses so we exercise the real code paths without a
 network dependency.
 """
 
+# pylint: disable=redefined-outer-name,protected-access
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -33,7 +35,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from benchmark import mech_analytics_client as mac
 
 
@@ -59,9 +60,12 @@ def sample_api_row() -> dict[str, Any]:
 
 
 class TestMapRow:
+    """Field mapping from the endpoint's response shape to the accumulator shape."""
+
     def test_maps_scored_row_to_accumulator_shape(
         self, sample_api_row: dict[str, Any]
     ) -> None:
+        """Endpoint field names route onto the exact keys ``_accumulate_row`` reads."""
         # Fields the accumulator reads are what we care about — assert on
         # the exact keys _accumulate_row keys off, not on incidental fields.
         row = mac._map_row(sample_api_row)
@@ -76,38 +80,40 @@ class TestMapRow:
         assert row["market_liquidity_at_prediction"] == 12000.0
 
     def test_resolved_outcome_1_maps_to_true(self, sample_api_row: dict) -> None:
+        """Numeric 1.0 resolves to ``final_outcome=True``."""
         assert mac._map_row(sample_api_row)["final_outcome"] is True
 
     def test_resolved_outcome_0_maps_to_false(self, sample_api_row: dict) -> None:
+        """Numeric 0.0 resolves to ``final_outcome=False``."""
         sample_api_row["resolved_outcome"] = 0.0
         assert mac._map_row(sample_api_row)["final_outcome"] is False
 
     def test_resolved_outcome_none_stays_none(self, sample_api_row: dict) -> None:
-        # Unresolved rows must reach _accumulate_row with final_outcome=None
+        """Unresolved rows pass through with ``final_outcome=None`` so the accumulator skips them."""
         # so the calibration + worst/best paths skip them.
         sample_api_row["resolved_outcome"] = None
         assert mac._map_row(sample_api_row)["final_outcome"] is None
 
     def test_latency_derived_from_timestamps(self, sample_api_row: dict) -> None:
+        """``latency_s`` is derived from ``delivered_at - requested_at``."""
         # delivered_at - requested_at = 30s in the fixture.
         assert mac._map_row(sample_api_row)["latency_s"] == 30.0
 
     def test_negative_latency_clamped_to_none(self, sample_api_row: dict) -> None:
-        # A clock-skew or bookkeeping bug that produces delivered_at <
-        # requested_at must not feed a nonsense negative into the latency
+        """A clock-skew delivered<requested must not feed a negative into the reservoir."""
         # reservoir (which the accumulator reservoir-samples for reports).
         sample_api_row["delivered_at"] = "2026-06-30T23:59:00Z"
         assert mac._map_row(sample_api_row)["latency_s"] is None
 
-    def test_missing_timestamps_gives_none_latency(
-        self, sample_api_row: dict
-    ) -> None:
+    def test_missing_timestamps_gives_none_latency(self, sample_api_row: dict) -> None:
+        """Missing timestamps yield ``latency_s=None`` rather than raising."""
         sample_api_row["delivered_at"] = None
         assert mac._map_row(sample_api_row)["latency_s"] is None
 
     def test_grouping_fields_absent_on_endpoint_are_none(
         self, sample_api_row: dict
     ) -> None:
+        """Grouping keys absent on the endpoint stay None so the accumulator uses defaults."""
         # by_mode / by_config_hash / by_horizon depend on fields the
         # endpoint doesn't carry today. Absent → None so the accumulator
         # uses its own defaults instead of KeyError.
@@ -129,6 +135,7 @@ class TestIterScoredRowsPaging:
     def test_single_page_yields_all_rows_once(
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
+        """A single-page response yields each row exactly once, then stops."""
         monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
         responses = [self._fake_response([sample_api_row], next_cursor=None)]
         with patch.object(
@@ -143,6 +150,7 @@ class TestIterScoredRowsPaging:
     def test_multi_page_walks_cursor_until_exhausted(
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
+        """The paginator follows ``next_cursor`` across pages until it goes null."""
         monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
         second_row = dict(sample_api_row, request_id="req-2")
         third_row = dict(sample_api_row, request_id="req-3")
@@ -165,6 +173,7 @@ class TestIterScoredRowsPaging:
     def test_missing_url_raises_before_any_http(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Missing ``MECH_ANALYTICS_URL`` raises immediately, before any HTTP call."""
         monkeypatch.delenv("MECH_ANALYTICS_URL", raising=False)
         with pytest.raises(mac.MechAnalyticsError, match="MECH_ANALYTICS_URL"):
             # Consume the generator so the pre-flight config check fires.

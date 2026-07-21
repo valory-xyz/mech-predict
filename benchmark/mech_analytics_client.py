@@ -72,6 +72,9 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
     Fields not present on the endpoint stay ``None`` (or default in
     ``_accumulate_row``) so the report keeps working while grouping-dimension
     decisions land: ``mode``, ``config_hash``, ``prediction_lead_time_days``.
+
+    :param api_row: one entry from the endpoint's ``rows`` array.
+    :return: a dict shaped like the row ``_accumulate_row`` expects.
     """
     delivered_at = _parse_iso(api_row.get("delivered_at"))
     requested_at = _parse_iso(api_row.get("requested_at"))
@@ -158,6 +161,9 @@ def iter_scored_rows(
     :param page_size: batch size per HTTP call.
     :param timeout_s: per-request timeout in seconds.
     :param max_pages: runaway guard.
+    :yield: one accumulator-shaped row per yielded value.
+    :raises MechAnalyticsError: if the endpoint is unreachable, the config
+        (``MECH_ANALYTICS_URL``) is missing, or the paginator hits ``max_pages``.
     """
     base = _base_url()
     session = requests.Session()

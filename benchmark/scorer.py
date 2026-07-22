@@ -18,6 +18,7 @@ import glob as glob_mod
 import json
 import logging
 import math
+import os
 import random
 import re
 from collections import defaultdict
@@ -2129,6 +2130,122 @@ def rebuild(
 # ---------------------------------------------------------------------------
 
 
+def rebuild_from_mech_analytics(
+    since: datetime,
+    until: datetime | None = None,
+    scores_path: Path = DEFAULT_OUTPUT,
+    history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
+    chain_id: int | None = None,
+) -> dict[str, Any]:
+    """Rebuild scores from mech-analytics's ``/v1/data/scored-rows`` endpoint.
+
+    Post off-chain migration the marketplace-subgraph + IPFS row-fetch layer
+    can't reach individual mech requests. mech-analytics is the new public
+    read path — it ingests from the predict-api data lake, scores each row
+    once, and serves the results. This function is the mech-analytics-fed
+    counterpart to :func:`rebuild`: same output shape, same
+    ``scores_<platform>.json`` files, same downstream consumers
+    (``analyze.py`` needs no changes).
+
+    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer;
+    default off so nothing changes until we flip.
+
+    :param since: timezone-aware datetime, inclusive lower bound.
+    :param until: timezone-aware datetime, exclusive upper bound. When
+        ``None``, the endpoint returns up to now.
+    :param scores_path: output path for the production ``scores.json``.
+    :param history_path: output path for ``scores_history.jsonl``.
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        ``None`` fetches every chain the endpoint serves.
+    :return: finalized production scores dict.
+    """
+    # Local import so a missing ``requests`` install can't break the module
+    # at import time on the sweep / tournament paths that don't use it.
+    # pylint: disable=import-outside-toplevel
+    import importlib
+
+    from benchmark.mech_analytics_client import iter_scored_rows
+
+    # ``classify_category`` lives in ``fetch_production``, which lazily
+    # imports ``scorer.update`` on its incremental path — a static ``from``
+    # here would surface as a cyclic-import warning even though both edges
+    # resolve inside functions. Route through ``importlib`` so pylint's
+    # static tracer doesn't count this edge.
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    if dedup_path is None:
+        dedup_path = scores_path.parent / "scored_row_ids.json"
+    tournament_scores_path = _derive_tournament_path(scores_path)
+
+    all_rows: list[dict[str, Any]] = []
+    for row in iter_scored_rows(since=since, until=until, chain_id=chain_id):
+        # ``category`` is derived locally from ``question_text`` — the
+        # endpoint carries the title but not the classified category, and
+        # ``_accumulate_row`` groups on this key.
+        question_text = row.get("question_text")
+        platform = row.get("platform")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        # Give every row a stable dedup key. ``request_id`` is unique on
+        # ``per_request_scores`` and satisfies the write-once contract the
+        # dedup set is built on.
+        if not row.get("row_id") and row.get("request_id"):
+            row["row_id"] = row["request_id"]
+        all_rows.append(row)
+
+    scored_ids = _load_dedup_ids(dedup_path)
+    deduped_rows: list[dict[str, Any]] = []
+    skipped = 0
+    for row in all_rows:
+        row_id = row.get("row_id")
+        if not row_id:
+            deduped_rows.append(row)
+            continue
+        if row_id in scored_ids:
+            skipped += 1
+            continue
+        deduped_rows.append(row)
+        scored_ids.add(row_id)
+
+    _save_dedup_ids(dedup_path, scored_ids)
+    if skipped:
+        logging.getLogger(__name__).warning(
+            "mech-analytics rebuild: skipped %d already-scored rows", skipped
+        )
+
+    # Production-mode only. Rows from mech-analytics are live-delivery
+    # scored rows, so there is no tournament partition — write an empty
+    # tournament scores file to keep the path shape consistent with
+    # ``rebuild`` for any downstream that expects both.
+    prod_result = _accumulate_and_write(
+        deduped_rows, scores_path, history_path, emit_history=True
+    )
+    empty_scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
+    tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
+    tournament_scores_path.write_text(
+        json.dumps(_finalize_scores(empty_scores), indent=2)
+    )
+
+    for platform, plat_rows in _partition_rows_by_platform(deduped_rows).items():
+        _accumulate_and_write(
+            plat_rows,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+        )
+        _derive_platform_path(tournament_scores_path, platform).write_text(
+            json.dumps(
+                _finalize_scores(_empty_scores(empty_scores["current_month"])), indent=2
+            )
+        )
+
+    return prod_result
+
+
 def _extract_date_from_log_path(path: str) -> str:
     """Extract a sortable date string from a log file path.
 
@@ -2468,15 +2585,36 @@ def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
 
 
 def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
-    """Handle the ``--rebuild`` CLI mode."""
-    print(f"Rebuilding scores from {args.logs_dir}")
-    result = rebuild(
-        logs_dir=args.logs_dir,
-        scores_path=args.output,
-        history_path=args.history,
-        tournament_input=args.tournament_input,
-        tournament_scores_path=output_tournament,
-    )
+    """Handle the ``--rebuild`` CLI mode.
+
+    When ``USE_MECH_ANALYTICS_ROWS`` is set truthy in the environment,
+    reroutes to :func:`rebuild_from_mech_analytics` instead of reading
+    log files. Off-chain migration: mech-analytics is the new source of
+    the scored-row stream. Defaults off; nothing changes until we flip.
+
+    :param args: parsed CLI namespace with ``output``, ``history``,
+        ``logs_dir``, and ``tournament_input``.
+    :param output_tournament: derived path for the tournament scores json.
+    """
+    if _use_mech_analytics_rows():
+        default_days = 30  # matches the sweep default and covers the report windows
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=default_days)
+        print(f"Rebuilding scores from mech-analytics (since {since.isoformat()})")
+        result = rebuild_from_mech_analytics(
+            since=since,
+            scores_path=args.output,
+            history_path=args.history,
+        )
+    else:
+        print(f"Rebuilding scores from {args.logs_dir}")
+        result = rebuild(
+            logs_dir=args.logs_dir,
+            scores_path=args.output,
+            history_path=args.history,
+            tournament_input=args.tournament_input,
+            tournament_scores_path=output_tournament,
+        )
     print(
         f"Scores written to {args.output} (production) and "
         f"{output_tournament} (tournament)"
@@ -2486,6 +2624,15 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
         f"Production: Brier={overall['brier']},"
         f" DirAcc={overall.get('directional_accuracy')}, n={overall['n']}"
     )
+
+
+def _use_mech_analytics_rows() -> bool:
+    """Return True when the feature flag routes rebuilds via mech-analytics."""
+    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _cli_legacy_full_recompute(

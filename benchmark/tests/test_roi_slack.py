@@ -21,6 +21,7 @@
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -30,6 +31,7 @@ from benchmark.roi_slack import (
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
     _HEADERS,
+    _load_results,
     _render_table,
     build_roi_section,
 )
@@ -111,20 +113,25 @@ def _write_results(
     tmp_path: Path,
     groups: list[dict[str, Any]],
     window_days: int = 90,
+    as_of: Optional[str] = None,
 ) -> Path:
     """Write a roi_results.json fixture and return its path.
 
     :param tmp_path: pytest tmp_path fixture.
     :param groups: group entries to embed in the payload.
     :param window_days: trailing window length in days.
+    :param as_of: results timestamp; defaults to today so the freshness guard
+        treats the fixture as current. Pass an old date to exercise staleness.
     :return: path of the written roi_results.json.
     """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc).date().isoformat()
     path = tmp_path / "roi_results.json"
     payload = {
-        "as_of": "2026-07-06",
+        "as_of": as_of,
         "window_days": window_days,
         "window_start": "2026-04-08T00:00:00+00:00",
-        "window_end": "2026-07-07T00:00:00+00:00",
+        "window_end": f"{as_of}T00:00:00+00:00",
         "groups": groups,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1035,3 +1042,53 @@ class TestRenderTableGuards:
         long_row = tuple(f"c{i}" for i in range(len(_HEADERS) + 1))
         with pytest.raises(AssertionError):
             _render_table([long_row])
+
+
+# ---------------------------------------------------------------------------
+# Freshness + malformed-payload robustness
+# ---------------------------------------------------------------------------
+
+
+class TestRoiSectionFreshness:
+    """Stale results are flagged; malformed payloads are logged, not silent."""
+
+    def test_fresh_results_have_no_stale_marker(self, tmp_path: Path) -> None:
+        """A results file dated today renders without the stale marker."""
+        section = build_roi_section(_write_results(tmp_path, [_group()]), "omen")
+        assert section is not None
+        assert "stale" not in section
+
+    def test_old_results_are_marked_stale(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Results older than the cadence get a visible marker + a WARNING."""
+        path = _write_results(tmp_path, [_group()], as_of="2020-01-01")
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "*(stale — as of 2020-01-01)*" in section
+        assert "days old" in caplog.text
+
+    def test_malformed_groups_warns_and_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A payload whose 'groups' is not a list is logged, not silently dropped."""
+        path = tmp_path / "roi_results.json"
+        path.write_text(json.dumps({"groups": {"oops": 1}}), encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert build_roi_section(path, "omen") is None
+        assert "no 'groups' list" in caplog.text
+
+    def test_load_results_quiet_on_missing_warns_on_broken(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Missing file stays silent (no data yet); a corrupt file warns."""
+        with caplog.at_level(logging.WARNING):
+            assert _load_results(tmp_path / "absent.json") is None
+        assert not caplog.records
+
+        corrupt = tmp_path / "roi_results.json"
+        corrupt.write_text("{not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert _load_results(corrupt) is None
+        assert "unreadable" in caplog.text

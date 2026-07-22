@@ -48,9 +48,9 @@ log = logging.getLogger(__name__)
 STALE_AFTER_DAYS = 2.0
 
 # Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
-# wide table renders fine; MAX_LINE_WIDTH is only a truncation backstop for
-# pathological tool/flag text. Numeric columns are never capped (see _CAPS),
-# so a full mirror of the report table fits comfortably under this bound.
+# wide table renders fine. The tool name and numeric columns are never
+# truncated; MAX_LINE_WIDTH is only a backstop that shrinks the free-form
+# FLAGS column when pathological flag text would otherwise blow the line out.
 MAX_LINE_WIDTH = 160
 
 # Truncation guard for very wide deployments: keep the top rows by staked
@@ -73,15 +73,14 @@ _HEADERS = (
     "w/costs",
     "flags",
 )
-# Per-column width caps. Only the TOOL name and the FLAGS text may ever
-# ellipsize; every other column -- mode, model, and all numeric cells
-# (preds, bets, Brier all, Brier bets, staked, ROI, w/costs) -- is
-# content-driven with NO cap (None), so a 6-digit bet count like 109722
+# Per-column width caps. Only the free-form FLAGS text may ellipsize; every
+# other column -- the tool name, mode, model, and all numeric cells (preds,
+# bets, Brier all, Brier bets, staked, ROI, w/costs) -- is content-driven
+# with NO cap (None), so a long tool name or a 6-digit bet count like 109722
 # always renders in full.
-_TOOL_CAP = 30
 _FLAGS_CAP = 24
 _CAPS: tuple[int | None, ...] = (
-    _TOOL_CAP,  # tool
+    None,  # tool (never truncated -- Slack scrolls)
     None,  # mode
     None,  # model
     None,  # preds
@@ -105,10 +104,9 @@ _FLAG_SHORT = {
 }
 _PARSE_RELIABILITY_RE = re.compile(r"(\d+)% parse reliability")
 _SEP = " | "
-# Backstop only: if even the capped tool/flags widths push a line past
-# MAX_LINE_WIDTH (pathological text), shrink the tool column first (down to
-# this floor), then flags. Numeric columns are never touched.
-_TOOL_MIN = 12
+# Backstop only: if a line still exceeds MAX_LINE_WIDTH (pathological flag
+# text), shrink the FLAGS column down to this floor. The tool name and the
+# numeric columns are never touched.
 _FLAGS_MIN = 6
 
 _ELLIPSIS = "…"
@@ -255,12 +253,12 @@ def _format_line(cells: tuple[str, ...], widths: list[int]) -> str:
 def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     """Render header + divider + data lines.
 
-    Each column width is content-driven: max(header, widest cell). Numeric
-    columns (and mode/model) carry no cap, so their cells never ellipsize.
-    The tool and flags columns are capped; only they may be truncated. As a
-    backstop, if the resulting line still exceeds MAX_LINE_WIDTH (pathological
-    tool/flag text), the tool column shrinks first, then flags -- numeric
-    columns are never touched.
+    Each column width is content-driven: max(header, widest cell). Only the
+    free-form flags column is capped; the tool name and every numeric column
+    render in full (Slack code blocks scroll horizontally). As a backstop, if
+    a line still exceeds MAX_LINE_WIDTH (pathological flag text) the flags
+    column shrinks to its floor -- the tool and numeric columns are never
+    touched.
 
     :param rows: pre-formatted cell tuples, one per table row. Each tuple
         MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
@@ -279,10 +277,6 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
         content = max(len(header), *(len(row[i]) for row in rows))
         widths.append(content if cap is None else min(cap, content))
     overflow = sum(widths) + len(_SEP) * (len(_HEADERS) - 1) - MAX_LINE_WIDTH
-    if overflow > 0:
-        take = min(overflow, widths[0] - _TOOL_MIN)
-        widths[0] -= take
-        overflow -= take
     if overflow > 0:
         widths[-1] = max(_FLAGS_MIN, widths[-1] - overflow)
     lines = [

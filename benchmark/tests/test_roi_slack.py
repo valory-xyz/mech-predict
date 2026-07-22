@@ -738,20 +738,21 @@ class TestTruncation:
 
 
 class TestLineWidth:
-    """Lines stay within the backstop; numeric cells are never ellipsized."""
+    """The tool name + numeric cells are never truncated; flags may shrink."""
 
-    def test_long_names_and_flags_fit(self, tmp_path: Path) -> None:
-        """Very long tool names / flags are truncated, not overflowed.
+    def test_long_tool_name_renders_in_full(self, tmp_path: Path) -> None:
+        """A long tool name is never truncated (Slack scrolls horizontally).
 
-        Numeric columns (preds, bets, Brier, staked, ROI, w/costs) must
-        never carry the ellipsis marker, however extreme their values.
+        Numeric columns (preds, bets, Brier, staked, ROI, w/costs) never carry
+        the ellipsis marker, however extreme their values.
 
         :param tmp_path: pytest tmp_path fixture.
         """
+        long_tool = "a-very-long-tool-name-that-exceeds-the-old-column-cap-x" * 2
         long_flag = "⚠ 45% parse reliability — possible response-format gap"
         groups = [
             _group(
-                tool="a-very-long-tool-name-that-exceeds-the-column-cap-x" * 2,
+                tool=long_tool,
                 model="claude-3-5-sonnet-20241022",
                 n_eligible=999999,
                 n_bets=888888,
@@ -767,11 +768,10 @@ class TestLineWidth:
         path = _write_results(tmp_path, groups)
         section = build_roi_section(path, "omen")
         assert section is not None
-        block = _code_block_lines(section)
-        for line in block:
-            assert len(line) <= MAX_LINE_WIDTH, f"too wide: {line!r}"
-        # Only tool + flags may ellipsize; every numeric value renders in full.
-        data_row = block[2]
+        data_row = _code_block_lines(section)[2]
+        # The tool cell is the first column, left-justified to its own width,
+        # so the row starts with the full name -- no ellipsis.
+        assert data_row.startswith(long_tool)
         for value in ("999999", "888888", "0.123", "0.654", "1234567.89"):
             assert value in data_row, f"numeric cell truncated: {value}"
 

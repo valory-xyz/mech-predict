@@ -1764,8 +1764,12 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
+                # Key the structured-output lookup on the CANDIDATE tool, not the
+                # baseline: for an in-place edit the two names match, but for a
+                # new-version candidate (e.g. superforcaster-polymarket-v1 ->
+                # -v4) the candidate may be structured while the baseline is not.
                 structured_schema = (
-                    _get_structured_output_schema(tool_name)
+                    _get_structured_output_schema(candidate_tool_name)
                     if "claude" not in model
                     else None
                 )

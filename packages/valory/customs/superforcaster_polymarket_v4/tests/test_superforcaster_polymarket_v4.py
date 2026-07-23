@@ -169,3 +169,51 @@ class TestPredictionResultSchema:
         """_parse_completion takes the client and a response_format schema."""
         params = list(inspect.signature(_parse_completion).parameters)
         assert "client" in params and "response_format" in params
+
+    def test_numeric_fields_are_declared_last(self) -> None:
+        """The four numeric fields stay last in the schema.
+
+        Structured outputs emit fields in declaration order, so keeping the
+        numbers after the reasoning chain is what preserves v4's calibration.
+        A future reorder that breaks this must fail here.
+        """
+        assert list(PredictionResult.model_fields)[-4:] == [
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+        ]
+
+
+class TestFailurePathContract:
+    """Any failure still yields a flat-json.loads-parseable null prediction."""
+
+    @patch(f"{V4_MODULE}._parse_completion", side_effect=RuntimeError("boom"))
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_run_failure_returns_parseable_null_prediction(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_parse: MagicMock,
+    ) -> None:
+        """A raising run() still yields flat-json.loads null JSON, p_yes None."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)  # trader consumer path -- must NOT raise
+        assert on_chain.startswith("{")
+        assert parsed["p_yes"] is None and parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        assert "error" in parsed

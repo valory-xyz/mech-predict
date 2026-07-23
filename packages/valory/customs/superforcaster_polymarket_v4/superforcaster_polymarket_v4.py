@@ -22,7 +22,7 @@ What superforcaster-polymarket-v4 does (vs superforcaster-polymarket-v1)
 -----------------------------------------------------------------------
 v4 adds a mandatory evidence-reliability screen at PREDICTION_PROMPT step 4
 (gate-visible: downstream of source_content injection, exercised by PR-CI's
-cached replay) and raises max_tokens from 500 to 1500 so the full
+cached replay) and raises max_tokens from 500 to 4096 so the full
 chain-of-thought executes before the JSON is emitted. It targets systematic
 overconfident-YES on Polymarket (high Brier in the >=0.9 p_yes bucket). One
 coherent mechanism -- evidence classification before probability formation --
@@ -140,6 +140,11 @@ class PredictionResult(BaseModel):
             "final forecast."
         ),
     )
+    # IMPORTANT: the four numeric fields below MUST stay LAST in this schema.
+    # Structured outputs generate JSON fields in declaration order, so keeping
+    # the numbers after the reasoning fields is what conditions them on the
+    # chain-of-thought -- i.e. it preserves v4's calibration. Do not reorder or
+    # alphabetize (Pydantic won't complain and the schema still validates).
     p_yes: float = Field(
         ...,
         ge=0.0,
@@ -210,6 +215,11 @@ def with_key_rotation(func: Callable) -> Callable:
                 api_keys.rotate("openrouter")
                 return execute()
             except Exception as e:  # noqa: BLE001
+                # Log the permanent failure (repo convention: the custom tools
+                # print) -- an AuthenticationError / BadRequestError etc. lands
+                # here on the first attempt with no retry or rotation, so
+                # without this it would leave no trace but a null on-chain result.
+                print(f"[superforcaster-polymarket-v4] permanent failure: {e}")
                 # Return a parseable null-prediction JSON (matches
                 # superforcaster_calibrated_full_search) so the strict trader
                 # consumer sees an explicit no-prediction rather than a raw
@@ -267,9 +277,11 @@ def count_tokens(text: str, model: str) -> int:
 
 
 DEFAULT_OPENAI_SETTINGS = {
-    # Raised from 500 to 1500 (in v4) to allow the full chain-of-thought reasoning
-    # (steps 1-6) to execute before the final JSON is emitted.
-    "max_tokens": 1500,
+    # 4096 (matches superforcaster_calibrated_full_search): the six reasoning
+    # fields -- notably the long evidence-reliability screen -- need headroom to
+    # complete before the numbers, otherwise a truncated completion raises
+    # openai.LengthFinishReasonError and degrades to a null prediction.
+    "max_tokens": 4096,
     "limit_max_tokens": 4096,
     "temperature": 0,
 }
@@ -331,7 +343,7 @@ def _parse_completion(
     messages: List[Dict[str, str]],
     response_format: Any,
     temperature: float = 0,
-    max_tokens: int = 1500,
+    max_tokens: int = 4096,
     retries: int = COMPLETION_RETRIES,
     delay: int = COMPLETION_DELAY,
     counter_callback: Optional[Callable] = None,
@@ -386,10 +398,14 @@ def _parse_completion(
             return parsed, counter_callback
         except (
             openai.APIConnectionError,
-            openai.RateLimitError,
             openai.InternalServerError,
             ValueError,
         ) as e:
+            # NB: openai.RateLimitError is deliberately NOT caught here.
+            # Letting it propagate to the with_key_rotation decorator lets the
+            # decorator rotate API keys on a rate-limit hit -- retrying in-place
+            # on the same throttled key never rotates. Transient connection /
+            # server / validation failures stay here and retry on the same key.
             print(f"[superforcaster-polymarket-v4] Attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
             attempt += 1
@@ -406,7 +422,10 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "Content-Type": "application/json",
     }
 
-    response = requests.request("POST", url, headers=headers, data=payload)
+    # timeout matches the fleet's other Serper callers (factual_research,
+    # superforcaster_calibrated_full_search); a hung connection must not block
+    # the task indefinitely.
+    response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
     return response
 
@@ -514,6 +533,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
             serper_response = fetch_additional_sources(question, serper_api_key)
+            # Raise on a 4xx/5xx error body (credit / auth error) instead of
+            # calling .json() on it and feeding the model an empty <background>
+            # block that looks like a healthy run (matches the fleet pattern).
+            serper_response.raise_for_status()
             sources_data = serper_response.json()
             # mode tag included for consistency across tools; content is identical
             # regardless of mode since Serper returns structured JSON, not HTML

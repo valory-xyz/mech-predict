@@ -49,8 +49,10 @@ STALE_AFTER_DAYS = 2.0
 
 # Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
 # wide table renders fine. The tool name and numeric columns are never
-# truncated; MAX_LINE_WIDTH is only a backstop that shrinks the free-form
-# FLAGS column when pathological flag text would otherwise blow the line out.
+# truncated; MAX_LINE_WIDTH is a best-effort target. The free-form FLAGS column
+# shrinks toward its floor ONLY when that alone brings a line back under the
+# target -- a long tool name may still exceed it (flags is kept intact rather
+# than clipped for nothing).
 MAX_LINE_WIDTH = 160
 
 # Truncation guard for very wide deployments: keep the top rows by staked
@@ -255,10 +257,11 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
 
     Each column width is content-driven: max(header, widest cell). Only the
     free-form flags column is capped; the tool name and every numeric column
-    render in full (Slack code blocks scroll horizontally). As a backstop, if
-    a line still exceeds MAX_LINE_WIDTH (pathological flag text) the flags
-    column shrinks to its floor -- the tool and numeric columns are never
-    touched.
+    render in full (Slack code blocks scroll horizontally). MAX_LINE_WIDTH is a
+    best-effort target: the flags column shrinks toward its floor ONLY when that
+    alone brings the line back under it. When a long tool name is the cause,
+    clipping flags cannot restore the bound, so flags is left intact and the
+    line may exceed the target.
 
     :param rows: pre-formatted cell tuples, one per table row. Each tuple
         MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
@@ -276,9 +279,13 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
         content = max(len(header), *(len(row[i]) for row in rows))
         widths.append(content if cap is None else min(cap, content))
+    # Best-effort width backstop: shrink flags ONLY when doing so brings the
+    # line back under MAX_LINE_WIDTH (flags is the overflow cause). A long tool
+    # name alone can exceed the target; clipping flags then cannot restore it
+    # and would only destroy useful text, so flags is left intact.
     overflow = sum(widths) + len(_SEP) * (len(_HEADERS) - 1) - MAX_LINE_WIDTH
-    if overflow > 0:
-        widths[-1] = max(_FLAGS_MIN, widths[-1] - overflow)
+    if 0 < overflow <= widths[-1] - _FLAGS_MIN:
+        widths[-1] -= overflow
     lines = [
         _format_line(_HEADERS, widths),
         _format_line(tuple("-" * width for width in widths), widths),
@@ -384,14 +391,18 @@ def _load_results(results_path: Path) -> dict[str, Any] | None:
     return payload
 
 
-def _payload_age_days(payload: dict[str, Any]) -> float | None:
-    """Age in days of the ROI results, from ``as_of`` (else ``window_end``).
+def _payload_age_days(stamp: Any) -> float | None:
+    """Age in days from an ISO ``as_of`` timestamp.
 
-    :param payload: parsed roi_results.json payload.
-    :return: age in days, or None when no usable timestamp is present.
+    Anchors on ``as_of`` only (the run date). ``window_end`` is deliberately
+    not a fallback: it is ``as_of + 1 day``, so using it would under-report age
+    by a day and let a stale payload dodge the boundary.
+
+    :param stamp: the ``as_of`` value from the payload (any type).
+    :return: age in days, or None when the stamp is absent, not a string, or
+        not ISO-parseable -- the caller distinguishes absent from garbled.
     """
-    stamp = payload.get("as_of") or payload.get("window_end")
-    if not isinstance(stamp, str):
+    if not isinstance(stamp, str) or not stamp:
         return None
     try:
         parsed = datetime.fromisoformat(stamp)
@@ -443,9 +454,18 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
         else "trailing window"
     )
     stale_suffix = ""
-    age_days = _payload_age_days(payload)
+    as_of = payload.get("as_of")
+    age_days = _payload_age_days(as_of)
+    if age_days is None and as_of not in (None, ""):
+        # Present-but-unparseable stamp: a plausible symptom of the roi_sim
+        # failure this guard exists to surface, so log it like the other
+        # present-but-broken signals rather than silently skipping the check.
+        log.warning(
+            "ROI results carry an unparseable 'as_of' timestamp (%r); cannot "
+            "check freshness -- posting the section without a stale marker.",
+            as_of,
+        )
     if age_days is not None and age_days > STALE_AFTER_DAYS:
-        as_of = payload.get("as_of") or payload.get("window_end")
         stale_suffix = f" *(stale — as of {as_of})*"
         log.warning(
             "ROI results are %.1f days old (as of %s); the roi_sim step likely "

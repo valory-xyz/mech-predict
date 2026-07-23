@@ -21,15 +21,17 @@
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from unittest.mock import MagicMock
 
 import pytest
-from benchmark import notify_slack
+from benchmark import notify_slack, roi_slack
 from benchmark.roi_slack import (
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
+    STALE_AFTER_DAYS,
     _HEADERS,
     _load_results,
     _render_table,
@@ -774,6 +776,30 @@ class TestLineWidth:
         assert data_row.startswith(long_tool)
         for value in ("999999", "888888", "0.123", "0.654", "1234567.89"):
             assert value in data_row, f"numeric cell truncated: {value}"
+        # Flags is NOT sacrificed: the long tool name is the overflow cause, so
+        # clipping flags cannot restore MAX_LINE_WIDTH. The backstop leaves flags
+        # at its own cap instead of shrinking it to the floor ("⚠ par…").
+        assert "parse 45%" in data_row
+
+    def test_backstop_shrinks_flags_only_when_it_restores_the_bound(self) -> None:
+        """Flags shrinks iff that alone brings the line under the target.
+
+        Tool-caused overflow: flags keeps its capped width (clipping it cannot
+        help). Flags-caused (small) overflow: flags shrinks and the line fits.
+        """
+        n = len(_HEADERS)
+        # (1) Tool is the cause -> line far over the target; flags untouched.
+        tool_row = ("x" * 200,) + ("y",) * (n - 2) + ("flagflag",)
+        line = _render_table([tool_row])[-1]
+        assert len(line) > MAX_LINE_WIDTH
+        assert line.split(" | ")[-1] == "flagflag"  # not shrunk to the floor
+
+        # (2) A moderate tool leaves a small overflow that flags (capped) can
+        # absorb -> flags shrinks and the line lands on the target.
+        flags_row = ("t" * 50,) + ("y",) * (n - 2) + ("f" * 30,)
+        line2 = _render_table([flags_row])[-1]
+        assert len(line2) <= MAX_LINE_WIDTH
+        assert line2.split(" | ")[-1].endswith("…")  # flags was shrunk
 
     def test_six_digit_bets_not_ellipsized(self, tmp_path: Path) -> None:
         """A 6-digit bet count renders in full, never '1097…'.
@@ -1092,3 +1118,59 @@ class TestRoiSectionFreshness:
         with caplog.at_level(logging.WARNING):
             assert _load_results(corrupt) is None
         assert "unreadable" in caplog.text
+
+    def test_garbled_timestamp_warns_and_skips_marker(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A present-but-unparseable as_of logs a WARNING and skips the marker."""
+        for bad in ("not-a-date", 12345):
+            path = tmp_path / "roi_results.json"
+            path.write_text(
+                json.dumps({"window_days": 90, "as_of": bad, "groups": [_group()]}),
+                encoding="utf-8",
+            )
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                section = build_roi_section(path, "omen")
+            assert section is not None and "stale" not in section
+            assert "unparseable 'as_of'" in caplog.text
+
+    def test_absent_timestamp_is_quiet(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A legacy payload with no as_of skips the check silently (age unknown)."""
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"window_days": 90, "groups": [_group()]}), encoding="utf-8"
+        )
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None and "stale" not in section
+        assert not caplog.records
+
+    def test_future_dated_results_are_not_stale(self, tmp_path: Path) -> None:
+        """A future as_of (negative age) is never marked stale."""
+        future = (datetime.now(timezone.utc) + timedelta(days=5)).date().isoformat()
+        section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=future), "omen"
+        )
+        assert section is not None and "stale" not in section
+
+    def test_stale_boundary_is_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Age == STALE_AFTER_DAYS is not stale (`>` is strict); just over is."""
+        frozen = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+        fake_dt = MagicMock(wraps=datetime)
+        fake_dt.now.return_value = frozen
+        monkeypatch.setattr(roi_slack, "datetime", fake_dt)
+        at = (frozen - timedelta(days=STALE_AFTER_DAYS)).isoformat()
+        over = (frozen - timedelta(days=STALE_AFTER_DAYS, seconds=1)).isoformat()
+        at_section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=at), "omen"
+        )
+        over_section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=over), "omen"
+        )
+        assert at_section is not None and "stale" not in at_section
+        assert over_section is not None and "stale" in over_section

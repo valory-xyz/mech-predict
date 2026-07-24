@@ -24,6 +24,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from pydantic import ValidationError
 
 from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
@@ -216,4 +217,67 @@ class TestFailurePathContract:
         assert on_chain.startswith("{")
         assert parsed["p_yes"] is None and parsed["p_no"] is None
         assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
-        assert "error" in parsed
+        # error + error_type let ops tell a systemic failure from a one-off.
+        assert parsed["error"] and parsed["error_type"] == "RuntimeError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_serper_http_error_surfaces_as_null_prediction(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A Serper 4xx/5xx (raise_for_status) yields the null-prediction JSON."""
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("402 no credits")
+        mock_fetch.return_value = resp
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "HTTPError"
+
+
+class TestParseCompletion:
+    """_parse_completion's own retry / refusal / success behaviour."""
+
+    def test_returns_parsed_on_success(self) -> None:
+        """A successful parse returns the model instance (schema is honored)."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        parsed, _ = _parse_completion(
+            client=client,
+            model="gpt-4.1-2025-04-14",
+            messages=[{"role": "user", "content": "x"}],
+            response_format=PredictionResult,
+            counter_callback=None,
+        )
+        assert parsed is FAKE_PREDICTION
+        assert (
+            client.beta.chat.completions.parse.call_args.kwargs["response_format"]
+            is PredictionResult
+        )
+
+    def test_refusal_retries_then_raises_chained_runtimeerror(self) -> None:
+        """A refusal (parsed=None) retries and raises RuntimeError with the cause."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(parsed=None, refusal="policy"))]
+        )
+        with pytest.raises(RuntimeError, match="after 2 attempts"):
+            _parse_completion(
+                client=client,
+                model="gpt-4.1-2025-04-14",
+                messages=[{"role": "user", "content": "x"}],
+                response_format=PredictionResult,
+                retries=2,
+                delay=0,
+            )
+        assert client.beta.chat.completions.parse.call_count == 2

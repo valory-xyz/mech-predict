@@ -20,10 +20,12 @@
 
 What superforcaster-polymarket-v4 does (vs superforcaster-polymarket-v1)
 -----------------------------------------------------------------------
-v4 adds a mandatory evidence-reliability screen at PREDICTION_PROMPT step 4
-(gate-visible: downstream of source_content injection, exercised by PR-CI's
-cached replay) and raises max_tokens from 500 to 4096 so the full
-chain-of-thought executes before the JSON is emitted. It targets systematic
+v4 adds a mandatory evidence-reliability screen as the ``evidence_reliability_
+screen`` field of the PredictionResult schema (4th in reasoning order, filled
+before the numbers; gate-visible: downstream of source_content injection,
+exercised by PR-CI's cached replay) and raises max_tokens from 500 to 4096 so
+the full chain-of-thought executes before the numbers are emitted. The response
+is a single structured object, not prose plus a trailing JSON blob. It targets systematic
 overconfident-YES on Polymarket (high Brier in the >=0.9 p_yes bucket). One
 coherent mechanism -- evidence classification before probability formation --
 via four sub-steps:
@@ -184,6 +186,32 @@ class PredictionResult(BaseModel):
         return self
 
 
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable null-prediction tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than a raw exception string. ``error_type``
+    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
+    hitting every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -194,21 +222,33 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost queries return a bare float; do NOT append api_keys
+                # (the pricing caller expects the float, not a 6-tuple).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
-                # try with a new key again
+                # Rotate keys on a rate-limit hit. Once every key is exhausted,
+                # honor the null-prediction contract instead of re-raising: a
+                # raw exception raised here escapes wrapper() (a sibling except
+                # cannot catch it), breaking the exact contract this tool exists
+                # to hold on the path -- fleet-wide throttling -- most likely to
+                # hit many requests at once.
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
+                    print(f"[superforcaster-polymarket-v4] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 retries_left["openai"] -= 1
                 retries_left["openrouter"] -= 1
                 api_keys.rotate("openai")
@@ -217,23 +257,9 @@ def with_key_rotation(func: Callable) -> Callable:
             except Exception as e:  # noqa: BLE001
                 # Log the permanent failure (repo convention: the custom tools
                 # print) -- an AuthenticationError / BadRequestError etc. lands
-                # here on the first attempt with no retry or rotation, so
-                # without this it would leave no trace but a null on-chain result.
+                # here on the first attempt with no retry or rotation.
                 print(f"[superforcaster-polymarket-v4] permanent failure: {e}")
-                # Return a parseable null-prediction JSON (matches
-                # superforcaster_calibrated_full_search) so the strict trader
-                # consumer sees an explicit no-prediction rather than a raw
-                # exception string that its flat ``json.loads`` would reject.
-                error_json = json.dumps(
-                    {
-                        "p_yes": None,
-                        "p_no": None,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                        "error": str(e),
-                    }
-                )
-                return error_json, "", None, None, None, api_keys
+                return _null_prediction_response(e, api_keys)
 
         mech_response = execute()
         return mech_response
@@ -350,10 +376,12 @@ def _parse_completion(
 ) -> Tuple[Any, Optional[Callable]]:
     """Call OpenAI Structured Outputs and parse into a Pydantic model.
 
-    ``client.beta.chat.completions.parse()`` guarantees the response conforms to
-    the supplied Pydantic schema, so no prompt-side JSON-format instruction or
-    output extraction is required -- the on-chain result is always a clean,
-    flat-``json.loads``-parseable object.
+    ``client.beta.chat.completions.parse()`` guarantees the completion is
+    well-formed JSON matching the schema's field names and types, so no
+    prompt-side JSON-format instruction or output extraction is required. It
+    does NOT enforce the custom ``model_validator`` (``p_yes + p_no ~= 1``):
+    that raises ``pydantic.ValidationError`` (a ``ValueError``) inside
+    ``.parse()``, which is why ``ValueError`` is in the retry tuple below.
 
     :param client: an initialised ``openai.OpenAI`` client.
     :param model: OpenAI model identifier.
@@ -368,6 +396,7 @@ def _parse_completion(
     :raises RuntimeError: if all retries are exhausted without a successful parse.
     """
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.beta.chat.completions.parse(
@@ -407,10 +436,14 @@ def _parse_completion(
             # on the same throttled key never rotates. Transient connection /
             # server / validation failures stay here and retry on the same key.
             print(f"[superforcaster-polymarket-v4] Attempt {attempt + 1} failed: {e}")
+            last_error = e
             time.sleep(delay)
             attempt += 1
 
-    raise RuntimeError("Failed to get structured LLM completion after retries")
+    raise RuntimeError(
+        f"Failed to get structured LLM completion after {retries} attempts: "
+        f"{last_error}"
+    ) from last_error
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:

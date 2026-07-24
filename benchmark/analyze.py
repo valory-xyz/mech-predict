@@ -35,11 +35,11 @@ from benchmark.categories import (  # noqa: F401  # pylint: disable=unused-impor
     POLYMARKET_ACTIVE_CATEGORIES,
 )
 from benchmark.io import load_jsonl
-from benchmark.scorer import (
+from benchmark.scorer import brier_sort_key
+from benchmark.scoring_primitives import (
     DISAGREE_THRESHOLD,
     LARGE_TRADE_THRESHOLD,
     MIN_SAMPLE_SIZE,
-    brier_sort_key,
 )
 from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
 from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools

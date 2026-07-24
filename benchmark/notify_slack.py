@@ -34,7 +34,7 @@ from benchmark.analyze import (
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
 from benchmark.roi_slack import build_roi_section
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)

@@ -19,7 +19,7 @@
 """Tests for benchmark/mech_analytics_client.py.
 
 Focus: the mapping from mech-analytics's endpoint response to the row shape
-``_accumulate_row`` reads, and the paging + cursor behaviour of
+``accumulate_row`` reads, and the paging + cursor behaviour of
 ``iter_scored_rows``. No live HTTP — ``requests.Session.get`` is patched with
 a queue of fake responses so we exercise the real code paths without a
 network dependency.
@@ -65,9 +65,9 @@ class TestMapRow:
     def test_maps_scored_row_to_accumulator_shape(
         self, sample_api_row: dict[str, Any]
     ) -> None:
-        """Endpoint field names route onto the exact keys ``_accumulate_row`` reads."""
+        """Endpoint field names route onto the exact keys ``accumulate_row`` reads."""
         # Fields the accumulator reads are what we care about — assert on
-        # the exact keys _accumulate_row keys off, not on incidental fields.
+        # the exact keys accumulate_row keys off, not on incidental fields.
         row = mac._map_row(sample_api_row)
 
         assert row["tool_name"] == "superforcaster"

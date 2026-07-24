@@ -62,7 +62,7 @@ from benchmark.analyze import (
     section_version_deltas,
     section_weak_spots,
 )
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 
 
 @pytest.fixture(autouse=True)

@@ -17,9 +17,7 @@ import argparse
 import glob as glob_mod
 import json
 import logging
-import math
 import os
-import random
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -31,8 +29,30 @@ import numpy as np
 # isort treats `benchmark` as third-party (not in known_first_party=autonomy);
 # pylint treats it as first-party. The two views disagree on import order.
 # isort wins; silence pylint's complaint about the resulting block.
-from benchmark.io import load_jsonl as load_rows  # pylint: disable=wrong-import-order
-from scipy.optimize import minimize  # type: ignore[import-untyped]
+from benchmark.grouping import (  # pylint: disable=wrong-import-order
+    _derive_group,
+    accumulate_row,
+)
+from benchmark.io import load_jsonl as load_rows
+from benchmark.scoring_primitives import (
+    CALIBRATION_BINS,
+    LATENCY_RESERVOIR_SIZE,
+    MIN_SAMPLE_SIZE,
+    WORST_BEST_SIZE,
+    _bin_label,
+    _empty_group,
+    brier_score,
+    classify_difficulty,
+    classify_disagreement,
+    classify_horizon,
+    classify_liquidity,
+    disagree_bucket,
+    edge_score,
+    log_loss_score,
+)
+from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
+    minimize,
+)
 
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
@@ -67,7 +87,7 @@ def _partition_rows_by_mode(
     """Split rows into (production, tournament) lists.
 
     Rows are routed by ``row["mode"]``. Missing mode defaults to
-    production — matches the historical default in ``_accumulate_row``.
+    production — matches the historical default in ``accumulate_row``.
 
     :param rows: input rows (any mode).
     :return: tuple of (production_rows, tournament_rows).
@@ -132,21 +152,8 @@ def _partition_rows_by_platform(
     return buckets
 
 
-LATENCY_RESERVOIR_SIZE = 200
-CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
-_RESERVOIR_RNG = random.Random(
-    42
-)  # nosec B311 — reservoir sampling for reproducible scoring
-WORST_BEST_SIZE = 10
-
 RELIABILITY_GATE = 0.80
-MIN_SAMPLE_SIZE = 30
 MIN_CALIBRATION_BIN_SIZE = 20
-
-# Diagnostic edge metric thresholds (PROPOSAL.md Stage 4).
-# Fixed for now — will version if changed.
-DISAGREE_THRESHOLD = 0.03
-LARGE_TRADE_THRESHOLD = 0.10
 
 # Keys that must be persisted in scores.json for incremental resume.
 # Used in update() and rebuild() when merging accumulators into output.
@@ -207,44 +214,6 @@ def _save_dedup_ids(dedup_path: Path, ids: set[str]) -> None:
     dedup_path.write_text(json.dumps(sorted(ids)))
 
 
-def brier_score(p_yes: float, outcome: bool) -> float:
-    """Compute Brier score for a single prediction."""
-    return (p_yes - (1.0 if outcome else 0.0)) ** 2
-
-
-def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
-    """Compute edge over market for a single prediction.
-
-    Edge = market_brier - tool_brier. Positive means the tool's prediction
-    was closer to the outcome than the market's price.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :param outcome: actual outcome (True = yes).
-    :return: edge score (positive = tool beat market).
-    """
-    outcome_val = 1.0 if outcome else 0.0
-    market_brier = (market_prob - outcome_val) ** 2
-    tool_brier = (p_yes - outcome_val) ** 2
-    return market_brier - tool_brier
-
-
-_LOG_LOSS_EPSILON = 1e-15
-
-
-def log_loss_score(p_yes: float, outcome: bool) -> float:
-    """Compute log loss for a single prediction.
-
-    :param p_yes: predicted probability of yes.
-    :param outcome: actual outcome.
-    :return: log loss value (lower is better).
-    """
-    p = max(_LOG_LOSS_EPSILON, min(1 - _LOG_LOSS_EPSILON, p_yes))
-    if outcome:
-        return -math.log(p)
-    return -math.log(1 - p)
-
-
 def _is_edge_eligible(row: dict[str, Any]) -> bool:
     """Check if a row has all fields needed for edge-over-market calculation."""
     return (
@@ -253,89 +222,6 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
         and row.get("p_yes") is not None
         and row.get("market_prob_at_prediction") is not None
     )
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic edge metric helpers (PROPOSAL.md Stage 4)
-# ---------------------------------------------------------------------------
-
-
-def classify_disagreement(p_yes: float, market_prob: float, outcome: bool) -> str:
-    """Classify whether tool or market was closer to the outcome.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :param outcome: actual outcome (True = yes).
-    :return: ``"tool_win"``, ``"market_win"``, or ``"tie"``.
-    """
-    outcome_val = 1.0 if outcome else 0.0
-    tool_dist = abs(p_yes - outcome_val)
-    market_dist = abs(market_prob - outcome_val)
-    if tool_dist < market_dist:
-        return "tool_win"
-    if tool_dist > market_dist:
-        return "market_win"
-    return "tie"
-
-
-def disagree_bucket(p_yes: float, market_prob: float) -> str:
-    """Bucket a prediction by disagreement magnitude with the market.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :return: ``"no_trade"``, ``"small_trade"``, or ``"large_trade"``.
-    """
-    d = round(abs(p_yes - market_prob), 10)
-    if d <= DISAGREE_THRESHOLD:
-        return "no_trade"
-    if d <= LARGE_TRADE_THRESHOLD:
-        return "small_trade"
-    return "large_trade"
-
-
-# ---------------------------------------------------------------------------
-# Difficulty and liquidity classification
-# ---------------------------------------------------------------------------
-
-# Thresholds are initial values from PROPOSAL.md. Adjust after inspecting
-# the actual data distribution from the first scorer run.
-DIFFICULTY_THRESHOLDS = (0.15, 0.3)
-LIQUIDITY_THRESHOLDS = (500.0, 5000.0)
-
-
-def classify_difficulty(market_prob: float | None) -> str:
-    """Classify market difficulty based on distance from 0.5.
-
-    Uses market_prob_at_prediction (not final market price).
-
-    :param market_prob: market probability at prediction time.
-    :return: difficulty bucket name.
-    """
-    if market_prob is None:
-        return "unknown"
-    distance = round(abs(market_prob - 0.5), 10)
-    lo, hi = DIFFICULTY_THRESHOLDS
-    if distance < lo:
-        return "hard"
-    if distance <= hi:
-        return "medium"
-    return "easy"
-
-
-def classify_liquidity(liquidity_usd: float | None) -> str:
-    """Classify market liquidity into buckets.
-
-    :param liquidity_usd: market liquidity in USD at prediction time.
-    :return: liquidity bucket name.
-    """
-    if liquidity_usd is None:
-        return "unknown"
-    lo, hi = LIQUIDITY_THRESHOLDS
-    if liquidity_usd < lo:
-        return "low"
-    if liquidity_usd <= hi:
-        return "medium"
-    return "high"
 
 
 _DIAGNOSTIC_NONE: dict[str, Any] = {
@@ -535,22 +421,6 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Horizon classification
-# ---------------------------------------------------------------------------
-
-
-def classify_horizon(lead_time_days: float | None) -> str:
-    """Classify prediction lead time into a horizon bucket."""
-    if lead_time_days is None:
-        return "unknown"
-    if lead_time_days < 7:
-        return "short_lt_7d"
-    if lead_time_days <= 30:
-        return "medium_7_30d"
-    return "long_gt_30d"
-
-
-# ---------------------------------------------------------------------------
 # Grouping helpers
 # ---------------------------------------------------------------------------
 
@@ -628,25 +498,6 @@ def group_by_composite(
 # ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
-
-CALIBRATION_BINS = [
-    (0.0, 0.1),
-    (0.1, 0.2),
-    (0.2, 0.3),
-    (0.3, 0.4),
-    (0.4, 0.5),
-    (0.5, 0.6),
-    (0.6, 0.7),
-    (0.7, 0.8),
-    (0.8, 0.9),
-    (0.9, 1.01),
-]
-
-
-def _bin_label(lo: float, hi: float) -> str:
-    """Human-readable label for a calibration bin."""
-    hi_display = 1.0 if hi > 1.0 else hi
-    return f"{lo:.1f}-{hi_display:.1f}"
 
 
 def compute_calibration(
@@ -1099,35 +950,6 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
 # ---------------------------------------------------------------------------
 
 
-def _empty_group() -> dict[str, Any]:
-    """Return a fresh group accumulator."""
-    return {
-        "n": 0,
-        "valid_n": 0,
-        "brier_sum": 0.0,
-        "correct_count": 0,
-        "n_directional": 0,
-        "no_signal_count": 0,
-        "sharpness_sum": 0.0,
-        "outcome_yes_count": 0,
-        "log_loss_sum": 0.0,
-        "edge_sum": 0.0,
-        "edge_n": 0,
-        "edge_positive_count": 0,
-        # Diagnostic edge metrics
-        "disagree_tool_win_count": 0,
-        "disagree_n": 0,
-        "brier_sum_no_trade": 0.0,
-        "n_no_trade": 0,
-        "brier_sum_small_trade": 0.0,
-        "n_small_trade": 0,
-        "brier_sum_large_trade": 0.0,
-        "n_large_trade": 0,
-        "bias_sum": 0.0,
-        "n_bias_losses": 0,
-    }
-
-
 def _empty_scores(current_month: str) -> dict[str, Any]:
     """Return a fresh scores.json structure with empty accumulators.
 
@@ -1163,353 +985,6 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "best_10": [],
         "calibration_pairs": [],
     }
-
-
-def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
-    """Merge one row into a group accumulator (mutates *group*).
-
-    :param group: accumulator dict with n, valid_n, brier_sum, etc.
-    :param row: a production log row dict.
-    """
-    group["n"] += 1
-    is_valid = (
-        row.get("prediction_parse_status") == "valid"
-        and row.get("final_outcome") is not None
-        and row.get("p_yes") is not None
-    )
-    if is_valid:
-        group["valid_n"] += 1
-        p_yes = row["p_yes"]
-        outcome = row["final_outcome"]
-        group["brier_sum"] += brier_score(p_yes, outcome)
-        group["log_loss_sum"] += log_loss_score(p_yes, outcome)
-        # Directional accuracy — exclude p_yes == 0.5
-        if p_yes != 0.5:
-            group["n_directional"] += 1
-            if (p_yes > 0.5) == outcome:
-                group["correct_count"] += 1
-        else:
-            group["no_signal_count"] += 1
-        group["sharpness_sum"] += abs(p_yes - 0.5)
-        if outcome:
-            group["outcome_yes_count"] += 1
-        # Edge over market
-        market_prob = row.get("market_prob_at_prediction")
-        if market_prob is not None:
-            brier = brier_score(p_yes, outcome)
-            edge = edge_score(p_yes, market_prob, outcome)
-            group["edge_sum"] += edge
-            group["edge_n"] += 1
-            if edge > 0:
-                group["edge_positive_count"] += 1
-            # Diagnostic edge metrics
-            bucket = disagree_bucket(p_yes, market_prob)
-            group[f"brier_sum_{bucket}"] += brier
-            group[f"n_{bucket}"] += 1
-            if bucket != "no_trade":
-                result = classify_disagreement(p_yes, market_prob, outcome)
-                if result != "tie":
-                    group["disagree_n"] += 1
-                    if result == "tool_win":
-                        group["disagree_tool_win_count"] += 1
-                    else:
-                        group["bias_sum"] += p_yes - (1.0 if outcome else 0.0)
-                        group["n_bias_losses"] += 1
-
-
-def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
-    """Compute derived fields from a group accumulator.
-
-    Returns a new dict with all accumulator fields plus derived
-    brier, accuracy, sharpness, reliability, and decision_worthy.
-
-    :param group: accumulator dict.
-    :return: dict with accumulators and derived stats.
-    """
-    result = dict(group)
-    n = group["n"]
-    valid_n = group["valid_n"]
-    if n == 0:
-        result.update(
-            brier=None,
-            directional_accuracy=None,
-            no_signal_rate=None,
-            log_loss=None,
-            sharpness=None,
-            reliability=None,
-            decision_worthy=False,
-            outcome_yes_rate=None,
-            baseline_brier=None,
-            brier_skill_score=None,
-        )
-    elif valid_n == 0:
-        result.update(
-            brier=None,
-            directional_accuracy=None,
-            no_signal_rate=None,
-            log_loss=None,
-            sharpness=None,
-            reliability=round(0.0, 4),
-            decision_worthy=False,
-            outcome_yes_rate=None,
-            baseline_brier=None,
-            brier_skill_score=None,
-        )
-    else:
-        brier = round(group["brier_sum"] / valid_n, 4)
-        yes_rate = group["outcome_yes_count"] / valid_n
-        baseline_brier = round(yes_rate * (1 - yes_rate), 4)
-        n_dir = group.get("n_directional", 0)
-        no_sig = group.get("no_signal_count", 0)
-        result["brier"] = brier
-        result["directional_accuracy"] = (
-            round(group["correct_count"] / n_dir, 4) if n_dir > 0 else None
-        )
-        result["n_directional"] = n_dir
-        result["no_signal_count"] = no_sig
-        result["no_signal_rate"] = round(no_sig / valid_n, 4)
-        result["log_loss"] = round(group["log_loss_sum"] / valid_n, 4)
-        result["sharpness"] = round(group["sharpness_sum"] / valid_n, 4)
-        result["reliability"] = round(valid_n / n, 4)
-        result["decision_worthy"] = valid_n >= MIN_SAMPLE_SIZE
-        result["outcome_yes_rate"] = round(yes_rate, 4)
-        result["baseline_brier"] = baseline_brier
-        if baseline_brier > 0:
-            result["brier_skill_score"] = round(1 - (brier / baseline_brier), 4)
-        else:
-            result["brier_skill_score"] = None
-
-    # Edge over market — derived from edge accumulators
-    edge_n = group.get("edge_n", 0)
-    result["edge_n"] = edge_n
-    if edge_n > 0:
-        result["edge"] = round(group["edge_sum"] / edge_n, 4)
-        result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
-    else:
-        result["edge"] = None
-        result["edge_positive_rate"] = None
-
-    # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias
-    _derive_diagnostic_metrics(group, result)
-
-    return result
-
-
-def _derive_diagnostic_metrics(group: dict[str, Any], result: dict[str, Any]) -> None:
-    """Derive diagnostic edge metrics from accumulators into *result*.
-
-    :param group: accumulator dict with diagnostic keys.
-    :param result: output dict to populate (mutated in place).
-    """
-    disagree_n = group.get("disagree_n", 0)
-    result["disagree_n"] = disagree_n
-    if disagree_n >= MIN_SAMPLE_SIZE:
-        result["conditional_accuracy_rate"] = round(
-            group["disagree_tool_win_count"] / disagree_n, 4
-        )
-    else:
-        result["conditional_accuracy_rate"] = None
-
-    for bucket in ("no_trade", "small_trade", "large_trade"):
-        n_bucket = group.get(f"n_{bucket}", 0)
-        result[f"n_{bucket}"] = n_bucket
-        if n_bucket >= MIN_SAMPLE_SIZE:
-            result[f"brier_{bucket}"] = round(
-                group[f"brier_sum_{bucket}"] / n_bucket, 4
-            )
-        else:
-            result[f"brier_{bucket}"] = None
-
-    n_losses = group.get("n_bias_losses", 0)
-    result["n_bias_losses"] = n_losses
-    if n_losses >= MIN_SAMPLE_SIZE:
-        result["directional_bias"] = round(group["bias_sum"] / n_losses, 4)
-    else:
-        result["directional_bias"] = None
-
-
-def _ensure_and_accumulate(
-    dimension: dict[str, dict[str, Any]],
-    key: str,
-    row: dict[str, Any],
-) -> None:
-    """Ensure a key exists in a dimension dict and accumulate the row into it.
-
-    :param dimension: dict mapping group keys to accumulator dicts.
-    :param key: the group key to accumulate into.
-    :param row: a production log row dict.
-    """
-    if key not in dimension:
-        dimension[key] = _empty_group()
-    _accumulate_group(dimension[key], row)
-
-
-def _update_extreme_list(
-    entries: list[dict[str, Any]],
-    new_entry: dict[str, Any],
-    keep: str = "worst",
-) -> list[dict[str, Any]]:
-    """Update a deduplicated worst/best list with a new entry.
-
-    Keeps one entry per unique ``question_text``. For ``keep="worst"``,
-    replaces an existing entry only if the new Brier is higher. For
-    ``keep="best"``, replaces only if lower.
-
-    :param entries: current list of extreme entries.
-    :param new_entry: candidate entry to insert.
-    :param keep: ``"worst"`` to keep highest Brier, ``"best"`` for lowest.
-    :return: updated list, sorted and truncated to ``WORST_BEST_SIZE``.
-    """
-    question = new_entry["question_text"]
-    existing = {e["question_text"]: e for e in entries}
-    is_better = (
-        (lambda new, old: new > old)
-        if keep == "worst"
-        else (lambda new, old: new < old)
-    )
-
-    if question in existing:
-        if is_better(new_entry["brier"], existing[question]["brier"]):
-            entries = [e for e in entries if e["question_text"] != question]
-            entries.append(new_entry)
-    else:
-        entries.append(new_entry)
-
-    reverse = keep == "worst"
-    entries.sort(key=lambda x: x["brier"], reverse=reverse)
-    return entries[:WORST_BEST_SIZE]
-
-
-def _accumulate_calibration(scores: dict[str, Any], row: dict[str, Any]) -> None:
-    """Accumulate calibration bins and pairs for a valid row.
-
-    :param scores: the full scores dict with calibration accumulators.
-    :param row: a valid production log row dict.
-    """
-    p = row["p_yes"]
-    for lo, hi in CALIBRATION_BINS:
-        if lo <= p < hi:
-            label = _bin_label(lo, hi)
-            bucket = scores["calibration"][label]
-            bucket["count"] += 1
-            bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
-            bucket["predicted_sum"] += p
-            break
-    # Store (p_yes, outcome) for row-level calibration regression.
-    # Reservoir sampling: once at capacity, randomly replace entries
-    # so the sample remains representative without unbounded growth.
-    pair = [p, 1 if row["final_outcome"] else 0]
-    pairs = scores["calibration_pairs"]
-    if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-        pairs.append(pair)
-    else:
-        idx = _RESERVOIR_RNG.randint(0, scores["overall"]["valid_n"] - 1)
-        if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-            pairs[idx] = pair
-
-
-def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
-    """Merge one row into all accumulator dimensions (mutates *scores*).
-
-    :param scores: the full scores dict with accumulators.
-    :param row: a production log row dict.
-    """
-    _accumulate_group(scores["overall"], row)
-
-    tool = row.get("tool_name") or "unknown"
-    platform = row.get("platform") or "unknown"
-    category = row.get("category") or "unknown"
-    horizon = classify_horizon(row.get("prediction_lead_time_days"))
-    # Production rows store the IPFS hash in `tool_version`; tournament rows
-    # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
-    tool_version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-    mode = row.get("mode") or "production_replay"
-    config_hash = row.get("config_hash") or "unknown"
-
-    _ensure_and_accumulate(scores["by_tool"], tool, row)
-    _ensure_and_accumulate(scores["by_platform"], platform, row)
-    _ensure_and_accumulate(scores["by_category"], category, row)
-    _ensure_and_accumulate(scores["by_horizon"], horizon, row)
-    _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
-    _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
-    _ensure_and_accumulate(
-        scores["by_category_platform"], f"{category} | {platform}", row
-    )
-    _ensure_and_accumulate(
-        scores["by_tool_category_platform"],
-        f"{tool} | {category} | {platform}",
-        row,
-    )
-    _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
-    _ensure_and_accumulate(
-        scores["by_tool_version_mode"],
-        f"{tool} | {tool_version} | {mode}",
-        row,
-    )
-    _ensure_and_accumulate(scores["by_config"], f"{tool} | {config_hash}", row)
-
-    difficulty = classify_difficulty(row.get("market_prob_at_prediction"))
-    _ensure_and_accumulate(scores["by_difficulty"], difficulty, row)
-
-    liquidity = classify_liquidity(row.get("market_liquidity_at_prediction"))
-    _ensure_and_accumulate(scores["by_liquidity"], liquidity, row)
-
-    _ensure_and_accumulate(
-        scores["by_platform_difficulty"], f"{platform} | {difficulty}", row
-    )
-    _ensure_and_accumulate(
-        scores["by_platform_liquidity"], f"{platform} | {liquidity}", row
-    )
-
-    # Calibration buckets + pairs
-    is_valid = (
-        row.get("prediction_parse_status") == "valid"
-        and row.get("final_outcome") is not None
-        and row.get("p_yes") is not None
-    )
-    if is_valid:
-        _accumulate_calibration(scores, row)
-
-    # Parse breakdown
-    status = row.get("prediction_parse_status") or "unknown"
-    if tool not in scores["parse_breakdown"]:
-        scores["parse_breakdown"][tool] = {}
-    tool_pb = scores["parse_breakdown"][tool]
-    tool_pb[status] = tool_pb.get(status, 0) + 1
-
-    # Latency reservoir (last N per tool)
-    latency = row.get("latency_s")
-    if latency is not None:
-        if tool not in scores["latency_reservoir"]:
-            scores["latency_reservoir"][tool] = []
-        reservoir = scores["latency_reservoir"][tool]
-        reservoir.append(latency)
-        if len(reservoir) > LATENCY_RESERVOIR_SIZE:
-            reservoir.pop(0)
-
-    # Worst / best 10 (deduplicated by question_text)
-    question_text = row.get("question_text")
-    if is_valid and question_text:
-        row_brier = brier_score(row["p_yes"], row["final_outcome"])
-        entry = {
-            "question_text": question_text,
-            "tool_name": tool,
-            "p_yes": row["p_yes"],
-            "final_outcome": row["final_outcome"],
-            "brier": round(row_brier, 4),
-            "platform": platform,
-            "category": category,
-        }
-        scores["worst_10"] = _update_extreme_list(
-            scores["worst_10"],
-            entry,
-            keep="worst",
-        )
-        scores["best_10"] = _update_extreme_list(
-            scores["best_10"],
-            entry,
-            keep="best",
-        )
 
 
 def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
@@ -1653,7 +1128,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
 
     The saved format includes both derived fields (brier, directional_accuracy)
     and raw accumulators (brier_sum, correct_count). This function extracts
-    the raw accumulators into the internal format used by ``_accumulate_row``.
+    the raw accumulators into the internal format used by ``accumulate_row``.
 
     :param scores_path: path to ``scores.json``.
     :return: raw accumulator dict or None.
@@ -1787,7 +1262,7 @@ def _accumulate_and_write(
     scores.pop("scored_row_ids", None)
 
     for row in rows:
-        _accumulate_row(scores, row)
+        accumulate_row(scores, row)
 
     finalized = _finalize_scores(scores)
     output = dict(finalized)
@@ -1987,7 +1462,7 @@ def _rebuild_single_mode(
             row_id = row.get("row_id")
             if row_id and row_id in all_row_ids:
                 continue
-            _accumulate_row(scores, row)
+            accumulate_row(scores, row)
             if row_id:
                 all_row_ids.add(row_id)
         if emit_history and history_path is not None:
@@ -1998,7 +1473,7 @@ def _rebuild_single_mode(
         row_id = row.get("row_id")
         if row_id and row_id in all_row_ids:
             continue
-        _accumulate_row(scores, row)
+        accumulate_row(scores, row)
         if row_id:
             all_row_ids.add(row_id)
 
@@ -2185,7 +1660,7 @@ def rebuild_from_mech_analytics(
     for row in iter_scored_rows(since=since, until=until, chain_id=chain_id):
         # ``category`` is derived locally from ``question_text`` — the
         # endpoint carries the title but not the classified category, and
-        # ``_accumulate_row`` groups on this key.
+        # ``accumulate_row`` groups on this key.
         question_text = row.get("question_text")
         platform = row.get("platform")
         if question_text:

@@ -8,7 +8,7 @@ is the new public read path: it ingests from the predict-api data lake,
 scores each row once, and serves the results over HTTP.
 
 This module pages ``/v1/data/scored-rows`` for a report window and yields
-rows in the shape ``scorer._accumulate_row`` already expects — so the
+rows in the shape ``grouping.accumulate_row`` already expects — so the
 substrate refactor is confined to how rows arrive; the accumulator and
 everything downstream (``analyze.py``, Slack rendering) is untouched.
 
@@ -54,12 +54,12 @@ def _to_iso_z(dt: datetime) -> str:
 
 
 def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
-    """Map a scored-rows response entry onto the keys ``_accumulate_row`` reads.
+    """Map a scored-rows response entry onto the keys ``accumulate_row`` reads.
 
     Field alignment worth calling out:
 
     - ``tool`` (endpoint) → ``tool_name`` (accumulator).
-    - ``question_title`` → ``question_text``; ``_accumulate_row`` also reads it
+    - ``question_title`` → ``question_text``; ``accumulate_row`` also reads it
       to key worst/best-10 lists, and the caller applies ``classify_category``
       on the same value to fill the ``category`` grouping.
     - ``resolved_outcome`` (0.0 / 1.0 / None) → ``final_outcome``; the accumulator
@@ -70,11 +70,11 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
       endpoint doesn't materialise it as a column today.
 
     Fields not present on the endpoint stay ``None`` (or default in
-    ``_accumulate_row``) so the report keeps working while grouping-dimension
+    ``accumulate_row``) so the report keeps working while grouping-dimension
     decisions land: ``mode``, ``config_hash``, ``prediction_lead_time_days``.
 
     :param api_row: one entry from the endpoint's ``rows`` array.
-    :return: a dict shaped like the row ``_accumulate_row`` expects.
+    :return: a dict shaped like the row ``accumulate_row`` expects.
     """
     delivered_at = _parse_iso(api_row.get("delivered_at"))
     requested_at = _parse_iso(api_row.get("requested_at"))
@@ -99,7 +99,7 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         # Market context.
         "market_prob_at_prediction": api_row.get("market_prob_at_prediction"),
         "market_liquidity_at_prediction": api_row.get("market_liquidity_usd"),
-        # Resolution outcome. ``_accumulate_row`` expects final_outcome ∈ {0, 1, None}.
+        # Resolution outcome. ``accumulate_row`` expects final_outcome ∈ {0, 1, None}.
         "final_outcome": _outcome_bool(api_row.get("resolved_outcome")),
         # Derived / passthrough fields the accumulator reads.
         "latency_s": latency_s,
@@ -149,7 +149,7 @@ def iter_scored_rows(
 ) -> Iterator[dict[str, Any]]:
     """Page through ``/v1/data/scored-rows`` and yield rows one at a time.
 
-    Rows come back in the shape ``_accumulate_row`` expects (see ``_map_row``).
+    Rows come back in the shape ``accumulate_row`` expects (see ``_map_row``).
     Pagination uses the endpoint's opaque keyset cursor.
 
     :param since: timezone-aware datetime for the ``since`` filter (inclusive).

@@ -35,7 +35,7 @@ from benchmark.notify_slack import (
     _infer_platform_label,
     post_to_slack,
 )
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 
 
 # A "headline" prompt used by structural tests that don't care about the

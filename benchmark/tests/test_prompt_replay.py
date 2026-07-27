@@ -17,6 +17,7 @@ from benchmark.prompt_replay import (
     _baseline_family,
     _default_family_system_prompt,
     _extract_factual_research_prompt_components,
+    _get_structured_output_schema,
     _load_and_filter_rows,
     _log_replay_summary,
     _parse_vllm_candidate,
@@ -1107,3 +1108,69 @@ class TestVllmCandidateBaselineGuard:
                 model="qwen-14b-fine-tuned",
                 candidate_tool="predict-fine-tuned",
             )
+
+
+class TestStructuredSchemaResolution:
+    """The structured-output schema is resolved from the CANDIDATE tool."""
+
+    def test_v4_resolves_to_its_own_prediction_result(self) -> None:
+        """superforcaster-polymarket-v4 resolves to the v4 module's schema."""
+        schema = _get_structured_output_schema("superforcaster-polymarket-v4")
+        assert schema is not None
+        assert schema.__module__.endswith("superforcaster_polymarket_v4")
+        assert schema.__name__ == "PredictionResult"
+        # The baseline the aeb3d542 bug keyed on is NOT a structured tool, so
+        # the reverted (baseline-keyed) lookup would skip structured outputs.
+        assert _get_structured_output_schema("superforcaster-polymarket-v1") is None
+
+    def test_replay_sources_schema_from_candidate_not_baseline(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """replay() keys the structured schema on the candidate, not baseline.
+
+        Baseline -v1 has no structured schema; candidate -v4 does. The reverted
+        (baseline-keyed) lookup would skip _call_openai_structured entirely, so
+        asserting it runs with the v4 schema guards the aeb3d542 fix.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        dataset = tmp_path / "dataset.jsonl"
+        _write_jsonl(
+            dataset,
+            [
+                {
+                    "tool_name": "superforcaster-polymarket-v1",
+                    "deliver_id": "0xabc",
+                    "prediction_parse_status": "valid",
+                    "final_outcome": True,
+                    "question_text": "Will it rain tomorrow?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "extracted_user_prompt": "Will it rain tomorrow?",
+                    "extracted_today": "01/06/2026",
+                    "extracted_additional_information": "<background>x</background>",
+                }
+            ],
+        )
+        captured: dict = {}
+
+        def _fake_structured(*_a: Any, **kwargs: Any) -> str:
+            captured["response_format"] = kwargs.get("response_format")
+            return json.dumps(
+                {"p_yes": 0.6, "p_no": 0.4, "confidence": 0.7, "info_utility": 0.5}
+            )
+
+        monkeypatch.setattr(
+            "benchmark.prompt_replay._call_openai_structured", _fake_structured
+        )
+        replay(
+            dataset=dataset,
+            output_dir=tmp_path / "out",
+            model="gpt-4.1-2025-04-14",
+            candidate_tool="superforcaster-polymarket-v4",
+        )
+        schema = captured.get("response_format")
+        assert schema is not None, "_call_openai_structured was not invoked"
+        assert schema.__module__.endswith("superforcaster_polymarket_v4")

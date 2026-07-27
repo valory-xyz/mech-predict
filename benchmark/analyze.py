@@ -19,7 +19,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -92,6 +92,138 @@ def load_history(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return load_jsonl(path)
+
+
+# ---------------------------------------------------------------------------
+# mech-analytics self-contained mode
+# ---------------------------------------------------------------------------
+#
+# When ``USE_MECH_ANALYTICS_ROWS`` is truthy the analyzer skips reading
+# the scorer's on-disk ``scores_<platform>.json`` / ``rolling_*.json``
+# artifacts and fetches rows directly from mech-analytics's
+# ``/v1/data/scored-rows`` endpoint. Rows are fed through
+# ``grouping.accumulate_row`` and finalized into the same dict shape
+# ``load_scores`` returns, so every ``section_*()`` renderer keeps
+# working without changes.
+#
+# Tournament scores stay file-based: mech-analytics has no tournament
+# concept, tournament is a scorer-side partition.
+
+_PLATFORM_CHAIN_ID: Mapping[str, int] = MappingProxyType(
+    {
+        "omen": 100,
+        "polymarket": 137,
+    }
+)
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _use_mech_analytics_flag() -> bool:
+    """Return True when the analyzer should source rows from mech-analytics.
+
+    :return: True if ``USE_MECH_ANALYTICS_ROWS`` is set to a truthy value.
+    """
+    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in _TRUTHY
+
+
+def _start_of_current_month_utc() -> datetime:
+    """First moment of the current UTC month.
+
+    Used as the default ``--since`` for the main scores window in
+    self-contained mode. Mirrors the monthly-accumulator semantics of
+    today's ``scores_<platform>.json`` file, which resets on the 1st
+    (and gets snapshotted to history at the boundary).
+
+    :return: timezone-aware datetime at 00:00:00 UTC on day 1.
+    """
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _parse_iso_datetime_arg(text: str) -> datetime:
+    """Parse a CLI ``--since`` / ``--until`` argument.
+
+    Requires an ISO 8601 string with a timezone offset (``Z`` or
+    ``+HH:MM``); rejects naive datetimes so a caller can't accidentally
+    interpret their local clock as UTC.
+
+    :param text: raw CLI arg.
+    :return: timezone-aware datetime.
+    :raises ArgumentTypeError: on malformed / naive input.
+    """
+    normalised = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalised)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"not an ISO 8601 datetime: {text!r} ({exc})"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError(
+            f"timezone offset required: {text!r} " "(e.g. 2026-07-27T00:00:00+00:00)"
+        )
+    return parsed
+
+
+def _build_scores_from_mech_analytics(
+    platform: str,
+    since: datetime,
+    until: datetime | None,
+) -> dict[str, Any]:
+    """Build a finalized scores dict from mech-analytics rows for one window.
+
+    Mirrors ``scorer.rebuild_from_mech_analytics`` but returns the dict
+    in-memory instead of writing ``scores_<platform>.json`` files. The
+    output matches the shape ``load_scores`` returns today, so every
+    ``section_*()`` renderer keeps working without a change.
+
+    Endpoint / network failures propagate from the client rather
+    than being swallowed, so the nightly job fails loudly instead of
+    posting a silently empty report.
+
+    :param platform: ``"omen"`` or ``"polymarket"``. Passed to the
+        endpoint's ``platform`` filter and to ``classify_category`` for
+        the local category derivation.
+    :param since: timezone-aware lower bound (inclusive).
+    :param until: optional timezone-aware upper bound (exclusive).
+    :return: dict shaped like ``scorer._finalize_scores`` output.
+    """
+    # Lazy imports: keep the flag-off code path free of these
+    # dependencies at module load time. The importlib route on
+    # ``classify_category`` also matches ``scorer.rebuild_from_mech_analytics``
+    # — a static ``from`` here surfaces as a pylint cyclic-import
+    # warning against the existing ``fetch_production`` → ``scorer.update``
+    # edge, even though both edges resolve inside functions.
+    # pylint: disable=import-outside-toplevel,protected-access
+    import importlib
+
+    from benchmark.grouping import accumulate_row
+    from benchmark.mech_analytics_client import iter_scored_rows
+    from benchmark.scorer import _empty_scores, _finalize_scores
+
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    chain_id = _PLATFORM_CHAIN_ID.get(platform)
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    scores = _empty_scores(current_month)
+
+    for row in iter_scored_rows(
+        since=since,
+        until=until,
+        platform=platform,
+        chain_id=chain_id,
+    ):
+        # ``category`` is derived locally from question_text — the
+        # endpoint carries the title but not the classified category,
+        # and ``accumulate_row`` groups on category.
+        question_text = row.get("question_text")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        accumulate_row(scores, row)
+    return _finalize_scores(scores)
 
 
 # ---------------------------------------------------------------------------
@@ -2873,6 +3005,29 @@ def main() -> None:
             "merged Tool × Version × Mode, and Tournament Callouts)"
         ),
     )
+    # ``--since`` / ``--until`` only apply when USE_MECH_ANALYTICS_ROWS is
+    # truthy. Ignored on the file-load path. Kept unconditional on the
+    # parser so the CLI is a superset that works either way.
+    parser.add_argument(
+        "--since",
+        type=_parse_iso_datetime_arg,
+        default=None,
+        help=(
+            "ISO 8601 timezone-aware lower bound for the main scores window "
+            "when USE_MECH_ANALYTICS_ROWS is truthy. Default: 00:00 UTC on "
+            "the 1st of the current UTC month. Ignored when the flag is off."
+        ),
+    )
+    parser.add_argument(
+        "--until",
+        type=_parse_iso_datetime_arg,
+        default=None,
+        help=(
+            "ISO 8601 timezone-aware upper bound (exclusive) for the main "
+            "scores window when USE_MECH_ANALYTICS_ROWS is truthy. Default: "
+            "now. Ignored when the flag is off."
+        ),
+    )
     args = parser.parse_args()
     results_dir = DEFAULT_RESULTS_DIR
     history = load_history(args.history)
@@ -2906,10 +3061,33 @@ def main() -> None:
     def _maybe_load(path: Path | None) -> dict[str, Any] | None:
         return load_scores(path) if path and path.exists() else None
 
-    scores = load_scores(scores_path)
-    rolling = _maybe_load(rolling_path)
-    prev_rolling = _maybe_load(prev_rolling_path)
-    scores_tournament = _maybe_load(scores_tournament_path)
+    # Annotate the two that widen across branches (mech-analytics returns
+    # dict, file-load returns dict|None). Leaves ``scores`` /
+    # ``scores_tournament`` / ``source_label`` to inference.
+    rolling: dict[str, Any] | None
+    prev_rolling: dict[str, Any] | None
+    if _use_mech_analytics_flag():
+        # Self-contained mode: skip the on-disk scores / rolling artifacts
+        # and rebuild each dict in-memory from mech-analytics rows.
+        # Tournament stays file-based because mech-analytics has no
+        # tournament partition.
+        since = args.since or _start_of_current_month_utc()
+        until = args.until
+        now = datetime.now(timezone.utc)
+        window = timedelta(days=ROLLING_WINDOW_DAYS)
+        scores = _build_scores_from_mech_analytics(platform, since, until)
+        rolling = _build_scores_from_mech_analytics(platform, now - window, None)
+        prev_rolling = _build_scores_from_mech_analytics(
+            platform, now - 2 * window, now - window
+        )
+        scores_tournament = _maybe_load(scores_tournament_path)
+        source_label = "mech-analytics"
+    else:
+        scores = load_scores(scores_path)
+        rolling = _maybe_load(rolling_path)
+        prev_rolling = _maybe_load(prev_rolling_path)
+        scores_tournament = _maybe_load(scores_tournament_path)
+        source_label = str(scores_path)
     # Scope the tournament view to candidates still under evaluation.
     active_tournament_cids = (
         load_active_tournament_cids() if args.include_tournament else None
@@ -2917,7 +3095,8 @@ def main() -> None:
 
     print(
         f"Loaded scores ({scores.get('total_rows', 0)} rows) for "
-        f"{PLATFORM_LABELS[platform]}, {len(history)} months of history"
+        f"{PLATFORM_LABELS[platform]} from {source_label}, "
+        f"{len(history)} months of history"
     )
 
     report = generate_report(

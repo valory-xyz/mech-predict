@@ -3268,6 +3268,7 @@ class TestStartOfCurrentMonthUtc:
         class _DatetimeShim:
             @staticmethod
             def now(tz: Any = None) -> _datetime:
+                """Return the fixed test datetime for any tz."""
                 return fixed_now if tz is None else fixed_now.astimezone(tz)
 
         monkeypatch.setattr(analyze, "datetime", _DatetimeShim)
@@ -3481,7 +3482,7 @@ class TestBuildScoresFromMechAnalytics:
         analyze._build_scores_from_mech_analytics(
             "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
         )
-        assert captured["classify_calls"] == []
+        assert not captured["classify_calls"]
 
     def test_empty_row_stream_produces_empty_scores(
         self, monkeypatch: pytest.MonkeyPatch

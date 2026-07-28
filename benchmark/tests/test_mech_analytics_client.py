@@ -140,6 +140,72 @@ class TestMapRow:
         assert row["prediction_lead_time_days"] is None
 
 
+class TestValidatedProbability:
+    """Range + type gate for p_yes / p_no / market_prob."""
+
+    @pytest.mark.parametrize("value", [0.0, 0.5, 1.0, 0.99, "0.7"])
+    def test_valid_values_pass(self, value: Any) -> None:
+        """In-range numbers (and numeric strings) coerce cleanly."""
+        result, ok = mac._validated_probability(value)
+        assert ok is True
+        assert result == float(value)
+
+    def test_none_passes_as_none(self) -> None:
+        """None (absent field) is not a validation failure."""
+        result, ok = mac._validated_probability(None)
+        assert result is None
+        assert ok is True
+
+    @pytest.mark.parametrize("value", [-0.01, 1.01, 1.5, -1.0, float("inf"), float("nan")])
+    def test_out_of_range_fails(self, value: float) -> None:
+        """Values outside [0, 1] (including NaN / inf) are rejected."""
+        result, ok = mac._validated_probability(value)
+        assert result is None
+        assert ok is False
+
+    @pytest.mark.parametrize("value", ["nope", {}, [], object()])
+    def test_non_numeric_fails(self, value: Any) -> None:
+        """Non-numeric junk is rejected without raising."""
+        result, ok = mac._validated_probability(value)
+        assert result is None
+        assert ok is False
+
+
+class TestMapRowPredictionValidation:
+    """Prediction-parse-status demotion when the endpoint ships invalid ranges."""
+
+    def test_valid_row_stays_valid(self, sample_api_row: dict) -> None:
+        """A row with in-range fields keeps its parse status."""
+        row = mac._map_row(sample_api_row)
+        assert row["prediction_parse_status"] == "valid"
+        assert row["p_yes"] == 0.7
+
+    def test_out_of_range_p_yes_demotes_valid_to_malformed(
+        self, sample_api_row: dict, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An out-of-range p_yes demotes the parse status and nulls the field."""
+        sample_api_row["p_yes"] = 1.5
+        with caplog.at_level("WARNING", logger=mac.log.name):
+            row = mac._map_row(sample_api_row)
+        assert row["prediction_parse_status"] == "malformed"
+        assert row["p_yes"] is None
+        assert any("out-of-range" in r.message for r in caplog.records)
+
+    def test_out_of_range_market_prob_demotes(self, sample_api_row: dict) -> None:
+        """An out-of-range market_prob also demotes to malformed."""
+        sample_api_row["market_prob_at_prediction"] = -0.2
+        row = mac._map_row(sample_api_row)
+        assert row["prediction_parse_status"] == "malformed"
+        assert row["market_prob_at_prediction"] is None
+
+    def test_already_malformed_stays_malformed(self, sample_api_row: dict) -> None:
+        """Non-valid rows aren't re-graded (invariant only enforced on 'valid')."""
+        sample_api_row["prediction_parse_status"] = "missing_fields"
+        sample_api_row["p_yes"] = 5.0
+        row = mac._map_row(sample_api_row)
+        assert row["prediction_parse_status"] == "missing_fields"
+
+
 class TestIterScoredRowsPaging:
     """Cursor-based paging through the endpoint, no live HTTP."""
 

@@ -100,6 +100,28 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
             )
             latency_s = None
 
+    # Re-validate probability ranges: the local producer (fetch_production)
+    # only tags rows "valid" after range-checking, and every downstream
+    # consumer relies on that invariant without re-checking. If the
+    # externally-versioned endpoint ever ships an out-of-range value on
+    # a "valid" row, demote to "malformed" so accumulators skip it.
+    p_yes, p_yes_ok = _validated_probability(api_row.get("p_yes"))
+    p_no, p_no_ok = _validated_probability(api_row.get("p_no"))
+    market_prob, market_prob_ok = _validated_probability(
+        api_row.get("market_prob_at_prediction")
+    )
+    parse_status = api_row.get("prediction_parse_status")
+    if parse_status == "valid" and not (p_yes_ok and p_no_ok and market_prob_ok):
+        log.warning(
+            "mech-analytics row %s tagged 'valid' but has out-of-range "
+            "p_yes=%r p_no=%r market_prob=%r; demoting to 'malformed'",
+            api_row.get("request_id"),
+            api_row.get("p_yes"),
+            api_row.get("p_no"),
+            api_row.get("market_prob_at_prediction"),
+        )
+        parse_status = "malformed"
+
     return {
         # Identity / grouping keys.
         "request_id": api_row.get("request_id"),
@@ -108,12 +130,12 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         "platform": api_row.get("platform"),
         "question_text": api_row.get("question_title"),
         # Prediction fields.
-        "p_yes": api_row.get("p_yes"),
-        "p_no": api_row.get("p_no"),
+        "p_yes": p_yes,
+        "p_no": p_no,
         "confidence": api_row.get("confidence"),
-        "prediction_parse_status": api_row.get("prediction_parse_status"),
+        "prediction_parse_status": parse_status,
         # Market context.
-        "market_prob_at_prediction": api_row.get("market_prob_at_prediction"),
+        "market_prob_at_prediction": market_prob,
         "market_liquidity_at_prediction": api_row.get("market_liquidity_usd"),
         # Resolution outcome. ``accumulate_row`` expects final_outcome ∈ {0, 1, None}.
         "final_outcome": _outcome_bool(api_row.get("resolved_outcome")),
@@ -128,6 +150,29 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         "config_hash": None,
         "prediction_lead_time_days": None,
     }
+
+
+def _validated_probability(value: Any) -> tuple[float | None, bool]:
+    """Coerce a probability to float in [0, 1]; report whether coercion succeeded.
+
+    Returns ``(value, ok)``. ``ok`` is False when the input was neither
+    None nor a finite float in [0, 1]. Callers use ``ok`` to decide
+    whether to demote ``prediction_parse_status`` on the row.
+
+    :param value: raw p_yes / p_no / market_prob_at_prediction from the endpoint.
+    :return: coerced float (or None if input was None) and an ok flag.
+    """
+    if value is None:
+        return None, True
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        return None, False
+    if as_float != as_float:  # NaN
+        return None, False
+    if not 0.0 <= as_float <= 1.0:
+        return None, False
+    return as_float, True
 
 
 def _outcome_bool(resolved_outcome: Any) -> bool | None:

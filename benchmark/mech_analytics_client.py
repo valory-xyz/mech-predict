@@ -30,7 +30,12 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PAGE_SIZE = 5000  # matches the endpoint's DEFAULT_LIMIT
 DEFAULT_TIMEOUT_S = 60.0
-DEFAULT_MAX_PAGES = 10_000  # runaway guard (~50M rows at 5k/page)
+# Runaway guard on the pagination loop. 2000 pages at 5000 rows/page is
+# ~10M rows, which comfortably covers a 7d report window at peak Omen
+# volume while catching a cursor cycle within minutes rather than the
+# ~1h a 10_000-page cap would allow. Trader's client caps lower (200)
+# because it pages one Safe; the benchmark pulls the whole window.
+DEFAULT_MAX_PAGES = 2_000
 
 
 class MechAnalyticsError(RuntimeError):
@@ -82,6 +87,17 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
     if delivered_at is not None and requested_at is not None:
         latency_s = (delivered_at - requested_at).total_seconds()
         if latency_s < 0:
+            # ``requested_at`` and ``delivered_at`` land through separate
+            # lake write paths, so a negative delta means clock skew or
+            # an ingest bug. Warn on the row so the source shows up in
+            # logs instead of silently thinning the latency stats.
+            log.warning(
+                "mech-analytics row %s has negative latency "
+                "(requested_at=%s > delivered_at=%s); dropping value",
+                api_row.get("request_id"),
+                api_row.get("requested_at"),
+                api_row.get("delivered_at"),
+            )
             latency_s = None
 
     return {
@@ -195,7 +211,18 @@ def iter_scored_rows(
                 f"mech-analytics scored-rows fetch failed (page {pages}): {exc}"
             ) from exc
 
-        rows = payload.get("rows") or []
+        rows = payload.get("rows")
+        # Explicit shape guard: a schema drift that ships e.g. rows={} or
+        # rows="..." would otherwise surface as an AttributeError halfway
+        # through iteration. Matches the trader-side client's guard on
+        # the same endpoint.
+        if rows is None:
+            rows = []
+        elif not isinstance(rows, list):
+            raise MechAnalyticsError(
+                f"mech-analytics scored-rows page {pages}: "
+                f"'rows' has unexpected type {type(rows).__name__}"
+            )
         for api_row in rows:
             yield _map_row(api_row)
         total_rows += len(rows)

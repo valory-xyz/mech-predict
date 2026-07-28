@@ -105,6 +105,23 @@ class TestMapRow:
         sample_api_row["delivered_at"] = "2026-06-30T23:59:00Z"
         assert mac._map_row(sample_api_row)["latency_s"] is None
 
+    def test_negative_latency_logs_warning(
+        self, sample_api_row: dict, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Negative latency logs a warning naming the offending row."""
+        # Silent None on a negative delta would thin the latency stats
+        # without any breadcrumb; the warning gives operators something
+        # to grep for on an ingest anomaly.
+        sample_api_row["delivered_at"] = "2026-06-30T23:59:00Z"
+        with caplog.at_level("WARNING", logger=mac.log.name):
+            result = mac._map_row(sample_api_row)
+        assert result["latency_s"] is None
+        assert any(
+            "negative latency" in rec.message
+            and sample_api_row["request_id"] in rec.message
+            for rec in caplog.records
+        ), f"expected a negative-latency warning; got: {[r.message for r in caplog.records]}"
+
     def test_missing_timestamps_gives_none_latency(self, sample_api_row: dict) -> None:
         """Missing timestamps yield ``latency_s=None`` rather than raising."""
         sample_api_row["delivered_at"] = None
@@ -178,3 +195,25 @@ class TestIterScoredRowsPaging:
         with pytest.raises(mac.MechAnalyticsError, match="MECH_ANALYTICS_URL"):
             # Consume the generator so the pre-flight config check fires.
             list(mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+
+    def test_non_list_rows_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Endpoint schema drift on ``rows`` surfaces as MechAnalyticsError."""
+        # Without the isinstance guard a payload like {"rows": {}} would
+        # raise an opaque AttributeError mid-iteration. The guard raises
+        # a typed error at the boundary instead.
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: {"rows": {"unexpected": "dict"}, "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="unexpected type dict"):
+                list(
+                    mac.iter_scored_rows(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )

@@ -37,9 +37,12 @@ Flip `USE_MECH_ANALYTICS_ROWS=false` and rerun. Two known gotchas:
 2. **`scores.json` gets rebuilt from cache.** The mech-analytics rebuild
    path unlinks `scores.json` before each rebuild. The legacy incremental
    `update()` path reads it. First legacy-mode run after a flag-on period
-   sees whatever the last flag-on write produced (~month-to-date). If the
-   report needs true all-time on that first run, use `force_rebuild=true`
-   in the workflow input.
+   sees whatever the last flag-on write produced (~month-to-date).
+   `update()` detects the mech-analytics source stamp and auto-rebuilds
+   from `logs/` before merging incoming rows, so the request_id /
+   platform:deliver_id dedup namespaces never overlap. The auto-rebuild
+   only sees rows the fetch step has already backfilled into `logs/`, so
+   still bump `lookback_days` to cover the flag-on window (see item 1).
 
 ## First-time setup (fresh benchmark repo)
 

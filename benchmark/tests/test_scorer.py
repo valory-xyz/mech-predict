@@ -31,6 +31,8 @@ import pytest
 from benchmark.grouping import _accumulate_group, _derive_group
 from benchmark.scorer import (
     PLATFORMS,
+    SOURCE_LEGACY_LOGS,
+    SOURCE_MECH_ANALYTICS,
     _cli_legacy_full_recompute,
     _cli_period,
     _derive_platform_path,
@@ -1625,6 +1627,84 @@ class TestUpdateDedup:
         # The dedup file should now contain the migrated ID
         dedup_ids = json.loads(dedup_path.read_text())
         assert "legacy1" in dedup_ids
+
+    def test_update_rebuilds_after_source_flip(self, tmp_path: Path) -> None:
+        """update() must rebuild from logs when scores.json is mech-analytics.
+
+        Regression for the flag-rollback double-count. The two paths dedup on
+        disjoint namespaces (request_id vs platform:deliver_id). Without the
+        source-flip guard, the incremental merge on flag-off would resume the
+        request-id-keyed totals in scores.json and add the fetch-window rows
+        on top — the same rows that live in logs/ would then be counted a
+        second time under platform:deliver_id keys.
+        """
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        tourn_path = tmp_path / "scores_tournament.json"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        log_row = _row(
+            p_yes=0.7,
+            outcome=True,
+            row_id="omen:d1",
+            predicted_at="2026-03-10T10:00:00Z",
+        )
+        with open(logs_dir / "production_log_test.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(log_row) + "\n")
+
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            # Seed a valid resumable scores.json by running a warm-up update
+            # over five stand-in rows keyed on synthetic request_ids — this
+            # simulates the mech-analytics-fed accumulator before the
+            # rollback. n=5 baked in.
+            warmup_rows = [
+                _row(
+                    p_yes=0.6,
+                    outcome=True,
+                    row_id=f"req_{i}",
+                    predicted_at="2026-03-05T10:00:00Z",
+                )
+                for i in range(5)
+            ]
+            update(
+                warmup_rows,
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+            # Flip the on-disk source marker to mimic what
+            # rebuild_from_mech_analytics would have stamped.
+            stale = json.loads(scores_path.read_text())
+            assert stale["overall"]["n"] == 5
+            stale["source"] = SOURCE_MECH_ANALYTICS
+            scores_path.write_text(json.dumps(stale))
+            # Legacy dedup file is untouched by the mech-analytics path, so
+            # clear it — the request_ids in there would otherwise dedup
+            # against the legacy platform:deliver_id keys spuriously.
+            dedup_path.unlink()
+
+            # Now the flag flips back off. fetch has repopulated logs/;
+            # update() gets the fresh 7-day slice.
+            result = update(
+                [log_row],
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+
+        saved = json.loads(scores_path.read_text())
+        assert saved.get("source") == SOURCE_LEGACY_LOGS
+        # Without the guard: resume from n=5 and add the incoming log_row
+        # (fresh dedup namespace, not in scored_row_ids.json) -> n=6.
+        # With the guard: rebuild from logs -> n=1, then dedup skips the
+        # incoming row -> n=1.
+        assert result["overall"]["n"] == 1
 
 
 # ---------------------------------------------------------------------------

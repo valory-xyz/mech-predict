@@ -61,6 +61,17 @@ DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
 
+# Data-source markers written into ``scores.json``. The legacy incremental
+# path (``update``) and legacy log-based ``rebuild`` stamp
+# ``SOURCE_LEGACY_LOGS``. The mech-analytics-fed rebuild stamps
+# ``SOURCE_MECH_ANALYTICS``. ``update()`` reads this on entry so a
+# ``USE_MECH_ANALYTICS_ROWS`` rollback can detect a source flip and rebuild
+# from ``logs/`` before merging incremental rows — the two paths dedup on
+# disjoint key namespaces (``request_id`` vs ``platform:deliver_id``), so
+# without the rebuild every row inside the fetch lookback double-counts.
+SOURCE_LEGACY_LOGS = "legacy_logs"
+SOURCE_MECH_ANALYTICS = "mech_analytics"
+
 PRODUCTION_MODE = "production_replay"
 TOURNAMENT_MODE = "tournament"
 _KNOWN_MODES = frozenset({PRODUCTION_MODE, TOURNAMENT_MODE})
@@ -1226,6 +1237,7 @@ def _accumulate_and_write(
     scores_path: Path,
     history_path: Path | None,
     emit_history: bool,
+    source: str = SOURCE_LEGACY_LOGS,
 ) -> dict[str, Any]:
     """Load existing scores (if any), accumulate *rows*, write output.
 
@@ -1238,6 +1250,7 @@ def _accumulate_and_write(
     :param scores_path: output path for the accumulator dict.
     :param history_path: optional history file for monthly snapshots.
     :param emit_history: when False, skip the snapshot step entirely.
+    :param source: data-source marker stamped into the finalized file.
     :return: finalized scores dict (also written to disk).
     """
     today_month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -1294,11 +1307,78 @@ def _accumulate_and_write(
             }
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
+    output["source"] = source
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
 
     return finalized
+
+
+def _read_scores_source(scores_path: Path) -> str | None:
+    """Read the ``source`` marker from an existing scores file.
+
+    Returns ``None`` when the file is missing, malformed, or predates
+    the marker (all treated the same: no rollback signal available).
+
+    :param scores_path: path to ``scores.json``.
+    :return: source marker string, or ``None``.
+    """
+    if not scores_path.exists():
+        return None
+    try:
+        data = json.loads(scores_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    source = data.get("source")
+    return source if isinstance(source, str) else None
+
+
+def _maybe_rebuild_after_source_flip(
+    scores_path: Path,
+    history_path: Path,
+    dedup_path: Path,
+    tournament_scores_path: Path,
+) -> None:
+    """Detect a rollback from a non-legacy source and rebuild from logs.
+
+    Reads the ``source`` marker on ``scores_path``. If it names anything
+    other than ``SOURCE_LEGACY_LOGS`` (typically
+    ``SOURCE_MECH_ANALYTICS`` after a ``USE_MECH_ANALYTICS_ROWS``
+    flag-off), wipes ``scores.json``, its per-platform siblings, and
+    ``scored_row_ids.json``, then invokes :func:`rebuild` to
+    repopulate all-time state from ``logs/``. Downstream ``update()``
+    then merges the incoming ``new_rows`` on top of a matching dedup
+    namespace and cannot double-count.
+
+    :param scores_path: path to production ``scores.json``.
+    :param history_path: path to ``scores_history.jsonl``.
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :param tournament_scores_path: path to ``scores_tournament.json``.
+    """
+    source = _read_scores_source(scores_path)
+    if source is None or source == SOURCE_LEGACY_LOGS:
+        return
+
+    log = logging.getLogger(__name__)
+    log.warning(
+        "scores.json carries source=%r (non-legacy); wiping and "
+        "rebuilding from %s so the request_id / platform:deliver_id "
+        "dedup namespaces stop overlapping.",
+        source,
+        DEFAULT_LOGS_DIR,
+    )
+    scores_path.unlink(missing_ok=True)
+    dedup_path.unlink(missing_ok=True)
+    for platform in PLATFORMS:
+        _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
+    rebuild(
+        logs_dir=DEFAULT_LOGS_DIR,
+        scores_path=scores_path,
+        history_path=history_path,
+        dedup_path=dedup_path,
+        tournament_scores_path=tournament_scores_path,
+    )
 
 
 def update(
@@ -1329,6 +1409,18 @@ def update(
         dedup_path = scores_path.parent / "scored_row_ids.json"
     if tournament_scores_path is None:
         tournament_scores_path = _derive_tournament_path(scores_path)
+
+    # Detect a rollback from the mech-analytics path. That path keys the
+    # accumulator on ``request_id``; the legacy incremental path here
+    # keys on ``platform:deliver_id``. The two dedup namespaces never
+    # collide, so if we resumed the mech-analytics-stamped file, every
+    # row inside the fetch lookback would enter ``update()`` as "new"
+    # and be counted a second time on top of the already-baked-in
+    # request_id-keyed totals. Wipe scores + dedup and rebuild from
+    # ``logs/`` once so subsequent incremental merges are safe.
+    _maybe_rebuild_after_source_flip(
+        scores_path, history_path, dedup_path, tournament_scores_path
+    )
 
     scored_ids = _load_dedup_ids(dedup_path)
     # Legacy migration: if an older scores.json still carries scored_row_ids
@@ -1437,6 +1529,7 @@ def _rebuild_single_mode(
     if not mode_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
         finalized = _finalize_scores(scores)
+        finalized["source"] = SOURCE_LEGACY_LOGS
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
         return finalized, set()
@@ -1507,6 +1600,7 @@ def _rebuild_single_mode(
             }
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
+    output["source"] = SOURCE_LEGACY_LOGS
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1554,6 +1648,7 @@ def rebuild(
     if not all_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
         finalized = _finalize_scores(scores)
+        finalized["source"] = SOURCE_LEGACY_LOGS
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
         tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1740,7 +1835,11 @@ def rebuild_from_mech_analytics(
     # and the subsequent workflow ``--update`` step would merge only
     # that run's fresh tournament rows onto the emptied file.
     prod_result = _accumulate_and_write(
-        all_rows, scores_path, history_path, emit_history=True
+        all_rows,
+        scores_path,
+        history_path,
+        emit_history=True,
+        source=SOURCE_MECH_ANALYTICS,
     )
 
     for platform, plat_rows in _partition_rows_by_platform(all_rows).items():
@@ -1749,6 +1848,7 @@ def rebuild_from_mech_analytics(
             _derive_platform_path(scores_path, platform),
             None,
             emit_history=False,
+            source=SOURCE_MECH_ANALYTICS,
         )
 
     return prod_result

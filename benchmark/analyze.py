@@ -19,6 +19,7 @@ import argparse
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -3034,6 +3035,12 @@ def main() -> None:
     history = load_history(args.history)
 
     if args.fleet:
+        if _use_mech_analytics_flag():
+            sys.exit(
+                "--fleet is not supported in mech-analytics self-contained mode "
+                "(cross-platform aggregation from mech-analytics is not yet "
+                "implemented). Unset USE_MECH_ANALYTICS_ROWS or run per-platform."
+            )
         scores_path = args.scores or results_dir / "scores.json"
         output_path = args.output or results_dir / "report_fleet.md"
         scores = load_scores(scores_path)

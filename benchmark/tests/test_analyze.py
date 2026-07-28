@@ -3338,6 +3338,26 @@ def _sample_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+class TestFleetPlusFlagExits:
+    """--fleet is not supported alongside USE_MECH_ANALYTICS_ROWS."""
+
+    def test_fleet_with_flag_on_raises_sysexit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Running --fleet with the flag on should sys.exit with a clear message."""
+        from benchmark import analyze
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["analyze.py", "--fleet"],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            analyze.main()
+        # Message should mention the incompatibility rather than a crash.
+        assert "self-contained mode" in str(excinfo.value)
+
+
 class TestBuildScoresFromMechAnalytics:
     """The main worker that turns mech-analytics rows into a scores dict.
 

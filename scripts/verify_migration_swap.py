@@ -244,7 +244,7 @@ def _report_final_outcome_diff(
 
     for rid in overlap:
         mp_o = mp_by_id[rid].get("final_outcome")
-        lake_o = _lake_outcome_to_bool(lake_by_id[rid].get("resolved_outcome"))
+        lake_o = lake_by_id[rid].get("final_outcome")
         if mp_o is None and lake_o is None:
             unresolved_both += 1
         elif mp_o is not None and lake_o is None:
@@ -260,9 +260,7 @@ def _report_final_outcome_diff(
                         {
                             "request_id": rid,
                             "mp_final_outcome": mp_o,
-                            "lake_resolved_outcome": lake_by_id[rid].get(
-                                "resolved_outcome"
-                            ),
+                            "lake_final_outcome": lake_o,
                             "market_id": mp_by_id[rid].get("market_id"),
                         }
                     )
@@ -401,7 +399,7 @@ def _report_null_provenance(lake_rows: list[dict[str, Any]]) -> None:
         return
     for field in (
         "market_prob_at_prediction",
-        "market_liquidity_usd",
+        "market_liquidity_at_prediction",
         "market_spread_at_prediction",
     ):
         nulls = sum(1 for r in lake_rows if r.get(field) is None)
@@ -434,7 +432,7 @@ def _report_per_tool_aggregate(
     for rid in overlap:
         mp_r, lake_r = mp_by_id[rid], lake_by_id[rid]
         mp_o = mp_r.get("final_outcome")
-        lake_o = _lake_outcome_to_bool(lake_r.get("resolved_outcome"))
+        lake_o = lake_r.get("final_outcome")
         if mp_o is None or lake_o is None:
             continue
         if bool(mp_o) != bool(lake_o):

@@ -73,6 +73,11 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
       difficulty/liquidity classifiers read the ``_at_prediction`` name).
     - ``latency_s`` is derived from ``delivered_at - requested_at`` — the
       endpoint doesn't materialise it as a column today.
+    - Extra pass-through fields (``market_id``, ``market_spread_at_prediction``,
+      ``resolved_at``, ``brier``, ``log_loss``, ``edge``, ``directional_correct``)
+      are not read by ``accumulate_row`` but are surfaced for the parity
+      script (``verify_migration_swap.py``) and any downstream that wants
+      the endpoint's pre-computed per-row scores.
 
     Fields not present on the endpoint stay ``None`` (or default in
     ``accumulate_row``) so the report keeps working while grouping-dimension
@@ -137,8 +142,18 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         # Market context.
         "market_prob_at_prediction": market_prob,
         "market_liquidity_at_prediction": api_row.get("market_liquidity_usd"),
+        "market_spread_at_prediction": api_row.get("market_spread_at_prediction"),
+        "market_id": api_row.get("market_id"),
         # Resolution outcome. ``accumulate_row`` expects final_outcome ∈ {0, 1, None}.
         "final_outcome": _outcome_bool(api_row.get("resolved_outcome")),
+        "resolved_at": api_row.get("resolved_at"),
+        # Pre-computed per-row scores from mech-analytics. Not read by
+        # accumulate_row (which recomputes from p_yes + final_outcome),
+        # but the parity script diffs them to catch scoring drift.
+        "brier": api_row.get("brier"),
+        "log_loss": api_row.get("log_loss"),
+        "edge": api_row.get("edge"),
+        "directional_correct": api_row.get("directional_correct"),
         # Derived / passthrough fields the accumulator reads.
         "latency_s": latency_s,
         "requested_at": api_row.get("requested_at"),

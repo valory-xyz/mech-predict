@@ -53,7 +53,14 @@ def sample_api_row() -> dict[str, Any]:
         "prediction_parse_status": "valid",
         "market_prob_at_prediction": 0.55,
         "market_liquidity_usd": 12000.0,
+        "market_spread_at_prediction": 0.02,
+        "market_id": "0xabcd",
         "resolved_outcome": 1.0,
+        "resolved_at": "2026-07-02T12:00:00Z",
+        "brier": 0.09,
+        "log_loss": 0.3567,
+        "edge": 0.15,
+        "directional_correct": True,
         "requested_at": "2026-07-01T00:00:00Z",
         "delivered_at": "2026-07-01T00:00:30Z",
     }
@@ -126,6 +133,19 @@ class TestMapRow:
         """Missing timestamps yield ``latency_s=None`` rather than raising."""
         sample_api_row["delivered_at"] = None
         assert mac._map_row(sample_api_row)["latency_s"] is None
+
+    def test_passthrough_fields_carry_endpoint_values(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """market_id + resolved_at + brier/log_loss/edge/directional pass through."""
+        row = mac._map_row(sample_api_row)
+        assert row["market_id"] == "0xabcd"
+        assert row["market_spread_at_prediction"] == 0.02
+        assert row["resolved_at"] == "2026-07-02T12:00:00Z"
+        assert row["brier"] == 0.09
+        assert row["log_loss"] == 0.3567
+        assert row["edge"] == 0.15
+        assert row["directional_correct"] is True
 
     def test_grouping_fields_absent_on_endpoint_are_none(
         self, sample_api_row: dict

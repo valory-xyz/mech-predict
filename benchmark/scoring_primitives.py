@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 import os
 import random
+from datetime import datetime, timezone
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,19 @@ def use_mech_analytics_rows() -> bool:
         os.getenv(USE_MECH_ANALYTICS_ROWS_ENV, "").strip().lower()
         in _TRUTHY_FLAG_VALUES
     )
+
+
+def start_of_current_month_utc() -> datetime:
+    """First moment of the current UTC month.
+
+    Shared "main scores" window anchor for the mech-analytics-fed
+    scorer and analyzer paths. Mirrors the monthly-accumulator
+    semantics of on-disk ``scores_<platform>.json``.
+
+    :return: timezone-aware datetime at 00:00:00 UTC on day 1.
+    """
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
 # ---------------------------------------------------------------------------

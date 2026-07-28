@@ -2085,9 +2085,9 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
     :param output_tournament: derived path for the tournament scores json.
     """
     if _use_mech_analytics_rows():
-        default_days = 30  # matches the sweep default and covers the report windows
-        now = datetime.now(timezone.utc)
-        since = now - timedelta(days=default_days)
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scoring_primitives import start_of_current_month_utc
+        since = start_of_current_month_utc()
         print(f"Rebuilding scores from mech-analytics (since {since.isoformat()})")
         result = rebuild_from_mech_analytics(
             since=since,

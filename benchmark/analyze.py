@@ -129,17 +129,10 @@ def _use_mech_analytics_flag() -> bool:
 
 
 def _start_of_current_month_utc() -> datetime:
-    """First moment of the current UTC month.
-
-    Used as the default ``--since`` for the main scores window in
-    self-contained mode. Mirrors the monthly-accumulator semantics of
-    today's ``scores_<platform>.json`` file, which resets on the 1st
-    (and gets snapshotted to history at the boundary).
-
-    :return: timezone-aware datetime at 00:00:00 UTC on day 1.
-    """
-    now = datetime.now(timezone.utc)
-    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    """Return first moment of the current UTC month (shared with scorer)."""
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import start_of_current_month_utc
+    return start_of_current_month_utc()
 
 
 def _parse_iso_datetime_arg(text: str) -> datetime:

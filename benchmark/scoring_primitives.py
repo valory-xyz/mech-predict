@@ -32,8 +32,25 @@ that lives in ``scorer``.
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Feature-flag parsing
+# ---------------------------------------------------------------------------
+
+USE_MECH_ANALYTICS_ROWS_ENV = "USE_MECH_ANALYTICS_ROWS"
+_TRUTHY_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def use_mech_analytics_rows() -> bool:
+    """Return True when USE_MECH_ANALYTICS_ROWS is set to a truthy value."""
+    return (
+        os.getenv(USE_MECH_ANALYTICS_ROWS_ENV, "").strip().lower()
+        in _TRUTHY_FLAG_VALUES
+    )
 
 # ---------------------------------------------------------------------------
 # Reservoir / sample-size constants

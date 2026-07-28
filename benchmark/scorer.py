@@ -2103,11 +2103,9 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
 
 def _use_mech_analytics_rows() -> bool:
     """Return True when the feature flag routes rebuilds via mech-analytics."""
-    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import use_mech_analytics_rows
+    return use_mech_analytics_rows()
 
 
 def _cli_legacy_full_recompute(

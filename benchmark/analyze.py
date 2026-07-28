@@ -116,15 +116,14 @@ _PLATFORM_CHAIN_ID: Mapping[str, int] = MappingProxyType(
     }
 )
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
 def _use_mech_analytics_flag() -> bool:
     """Return True when the analyzer should source rows from mech-analytics.
 
     :return: True if ``USE_MECH_ANALYTICS_ROWS`` is set to a truthy value.
     """
-    return os.getenv("USE_MECH_ANALYTICS_ROWS", "").strip().lower() in _TRUTHY
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import use_mech_analytics_rows
+    return use_mech_analytics_rows()
 
 
 def _start_of_current_month_utc() -> datetime:

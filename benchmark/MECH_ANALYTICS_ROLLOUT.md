@@ -17,7 +17,11 @@ variable.
   in-memory and writes them to disk for the triage step.
 - Simulate trader ROI (`benchmark.roi_sim`) — runs against `logs/`, which
   is frozen; outputs are cleared each run so the Slack section degrades
-  gracefully.
+  gracefully. Note: the standalone `benchmark_roi.yaml` workflow keeps
+  running against the frozen `logs/` from the artifact while the flag is
+  on. Its output is a job summary + artifact only, no Slack post, so
+  low-stakes — but readers of that job should ignore the numbers while
+  the flag is on.
 
 ## Rolling back to the legacy path
 

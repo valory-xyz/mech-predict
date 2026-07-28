@@ -199,14 +199,17 @@ jobs:
       # needs a fresh accumulator, so wiping scores.json + fetch state
       # from CI on the flag-on path is redundant but harmless. History
       # is the only line we must not cross.
+      # On flag-on, the mech-analytics rebuild handles its own snapshot +
+      # unlink of scores.json. Wiping it here would defeat the pre-wipe
+      # month snapshot (rebuild reads scores.json to detect month rollover).
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure'
         run: |
-          rm -f benchmark/results/scores.json \
-                benchmark/results/scored_row_ids.json \
-                benchmark/datasets/.fetch_state.json
+          rm -f benchmark/datasets/.fetch_state.json
           if [ "${USE_MECH_ANALYTICS_ROWS}" != "true" ]; then
-            rm -f benchmark/results/scores_history.jsonl
+            rm -f benchmark/results/scores.json \
+                  benchmark/results/scored_row_ids.json \
+                  benchmark/results/scores_history.jsonl
           fi
 
       # Fetch writes daily log file + calls scorer.update() inline (fast path).

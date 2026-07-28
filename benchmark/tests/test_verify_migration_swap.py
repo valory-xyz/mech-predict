@@ -27,10 +27,11 @@ on materially divergent data. These tests pin exit codes 0/2/3.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 import pytest
+
+from scripts import verify_migration_swap as vms
 
 
 def _mp_row(request_id: str, **overrides: Any) -> dict[str, Any]:
@@ -74,13 +75,6 @@ def _patch_pulls(
     deliver_to_request: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Replace both pull entry points so main() runs with synthetic data."""
-    import sys
-
-    scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import verify_migration_swap as vms
-
     dtr = deliver_to_request if deliver_to_request is not None else {
         "omen": {r["deliver_id"]: r["request_id"] for r in mp_rows},
     }
@@ -110,12 +104,6 @@ class TestDivergenceGate:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """100% overlap + no outcome mismatches passes the gate."""
-        import sys
-        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import verify_migration_swap as vms
-
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
         _patch_pulls(monkeypatch, rows, lake)
@@ -125,14 +113,8 @@ class TestDivergenceGate:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Either side under --min-rows returns 2 (vacuous window)."""
-        import sys
-        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import verify_migration_swap as vms
-
         rows = [_mp_row(f"r{i}") for i in range(10)]
-        lake = [_lake_row("r0"), _lake_row("r1")]  # only 2, threshold 5
+        lake = [_lake_row("r0"), _lake_row("r1")]
         _patch_pulls(monkeypatch, rows, lake)
         assert vms.main(_base_argv()) == 2
 
@@ -140,35 +122,25 @@ class TestDivergenceGate:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Overlap fraction below --min-overlap-fraction returns 3."""
-        import sys
-        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import verify_migration_swap as vms
-
-        # 10 mp rows, 10 lake rows, but only 2 overlap (20%).
-        rows = [_mp_row(f"mp{i}") for i in range(8)] + [_mp_row("shared0"), _mp_row("shared1")]
-        lake = [_lake_row(f"lake{i}") for i in range(8)] + [_lake_row("shared0"), _lake_row("shared1")]
+        rows = [_mp_row(f"mp{i}") for i in range(8)] + [
+            _mp_row("shared0"),
+            _mp_row("shared1"),
+        ]
+        lake = [_lake_row(f"lake{i}") for i in range(8)] + [
+            _lake_row("shared0"),
+            _lake_row("shared1"),
+        ]
         _patch_pulls(monkeypatch, rows, lake)
-        # Default --min-overlap-fraction is 0.90; 0.2 fails.
         assert vms.main(_base_argv()) == 3
 
     def test_outcome_mismatches_return_three(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Outcome-mismatch fraction above --max-outcome-mismatch-fraction returns 3."""
-        import sys
-        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import verify_migration_swap as vms
-
-        # 10 rows fully overlapping, but 5 have disagreeing outcomes
-        # (50% mismatch, default threshold is 0.02).
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = []
         for i in range(10):
-            outcome = False if i < 5 else True  # first 5 disagree with mp
+            outcome = not i < 5
             lake.append(_lake_row(f"r{i}", final_outcome=outcome))
         _patch_pulls(monkeypatch, rows, lake)
         assert vms.main(_base_argv()) == 3
@@ -182,17 +154,10 @@ class TestDivergenceGate:
         mismatch threshold and rejects the accepted-delta band Ojus
         called out in the migration plan.
         """
-        import sys
-        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
-        if scripts_dir not in sys.path:
-            sys.path.insert(0, scripts_dir)
-        import verify_migration_swap as vms
-
-        # 100 rows fully overlapping, 1 mismatch (1%, default max 2%).
         rows = [_mp_row(f"r{i}") for i in range(100)]
         lake = []
         for i in range(100):
-            outcome = False if i == 0 else True
+            outcome = i != 0
             lake.append(_lake_row(f"r{i}", final_outcome=outcome))
         _patch_pulls(monkeypatch, rows, lake)
         argv = _base_argv() + ["--min-rows", "50"]

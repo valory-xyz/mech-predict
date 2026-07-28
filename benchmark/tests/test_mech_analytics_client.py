@@ -262,8 +262,17 @@ class TestIterScoredRowsPaging:
             self._fake_response([second_row], next_cursor="cur-2"),
             self._fake_response([third_row], next_cursor=None),
         ]
+        captured_params: list[dict] = []
+
+        def _capturing_get(*_args: Any, **kwargs: Any) -> Any:
+            # Shallow-copy params: the client mutates the dict in place
+            # across pages (pop("since"), set("cursor")), so keeping a
+            # reference would collapse all captures to the final state.
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return responses.pop(0)
+
         with patch.object(
-            mac.requests.Session, "get", side_effect=lambda *a, **kw: responses.pop(0)
+            mac.requests.Session, "get", side_effect=_capturing_get
         ):
             request_ids = [
                 row["request_id"]
@@ -272,6 +281,18 @@ class TestIterScoredRowsPaging:
                 )
             ]
         assert request_ids == ["req-1", "req-2", "req-3"]
+
+        # Argument-aware assertions on the cursor handoff. A broken client
+        # that dropped ``params["cursor"] = cursor`` or kept ``since`` on
+        # page 2+ would still pass the rows-collected check above; these
+        # assertions are what actually validates the plumbing.
+        assert len(captured_params) == 3
+        assert captured_params[0].get("since") is not None
+        assert "cursor" not in captured_params[0]
+        assert captured_params[1].get("cursor") == "cur-1"
+        assert "since" not in captured_params[1]
+        assert captured_params[2].get("cursor") == "cur-2"
+        assert "since" not in captured_params[2]
 
     def test_missing_url_raises_before_any_http(
         self, monkeypatch: pytest.MonkeyPatch

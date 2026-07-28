@@ -162,3 +162,30 @@ class TestDivergenceGate:
         _patch_pulls(monkeypatch, rows, lake)
         argv = _base_argv() + ["--min-rows", "50"]
         assert vms.main(argv) == 0
+
+    def test_overlap_denominator_is_set_size_not_row_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Multi-delivery-per-request rows must not inflate the denominator.
+
+        Numerator is a set size (|intersection of request_ids|). Denominator
+        must also be a set size: min(|mp_ids|, |lake_ids|). If a future edit
+        reverts to ``min(len(mp_rows), len(lake_rows))`` the fraction dips
+        below any sane threshold on multi-deliver windows and the gate
+        rejects a perfectly aligned dataset.
+        """
+        # 6 request_ids on mp with 2 deliveries each (12 rows) and 8 unique
+        # request_ids on lake (8 rows). Only the 6 mp ids are shared with
+        # lake, so |intersection| = 6.
+        # Row-count denom (bug) = min(12, 8) = 8 -> 6/8 = 0.75 -> gate fails.
+        # Set-size denom (fix) = min(6, 8) = 6 -> 6/6 = 1.0 -> gate passes.
+        rows: list[dict[str, Any]] = []
+        for i in range(6):
+            rid = f"r{i}"
+            rows.append(_mp_row(rid, deliver_id=f"{rid}-d1"))
+            rows.append(_mp_row(rid, deliver_id=f"{rid}-d2"))
+        lake = [_lake_row(f"r{i}") for i in range(8)]
+        dtr = {"omen": {r["deliver_id"]: r["request_id"] for r in rows}}
+        _patch_pulls(monkeypatch, rows, lake, deliver_to_request=dtr)
+        argv = _base_argv() + ["--min-rows", "5", "--min-overlap-fraction", "0.9"]
+        assert vms.main(argv) == 0

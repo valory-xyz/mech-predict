@@ -189,10 +189,14 @@ def _pull_lake_rows(since: datetime, until: datetime) -> list[dict[str, Any]]:
     # pylint: disable=import-outside-toplevel
     from benchmark.mech_analytics_client import iter_scored_rows
 
+    # Match production's filter (scorer.rebuild_from_mech_analytics and
+    # analyze._build_scores_from_mech_analytics both pass resolved=True).
+    # Without it the gate compares against a population the report never
+    # sees, and only_lake inflates with unresolved rows.
     log.info(
         "pulling lake rows since=%s until=%s", since.isoformat(), until.isoformat()
     )
-    return list(iter_scored_rows(since=since, until=until))
+    return list(iter_scored_rows(since=since, until=until, resolved=True))
 
 
 # --------------------------------------------------------------------------- #
@@ -653,7 +657,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"mech-predict rows: {len(mp_rows)}   " f"lake rows: {len(lake_rows)}")
 
-    intersection, _only_mp, _only_lake = _report_row_set_overlap(mp_rows, lake_rows)
+    intersection, only_mp, only_lake = _report_row_set_overlap(mp_rows, lake_rows)
     resolved_both, outcome_mismatch = _report_final_outcome_diff(
         mp_rows, lake_rows, intersection
     )
@@ -664,7 +668,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print()
     _section("Divergence gate")
-    overlap_denom = min(len(mp_rows), len(lake_rows))
+    # Denominator is a set size to match the numerator (also a set size).
+    # Row counts would under-report on the two conditions this script
+    # explicitly measures elsewhere: rows without request_id (WARN in
+    # _report_row_set_overlap) and multi-deliver-per-request (class 4a
+    # in _report_dedup_granularity).
+    mp_ids_size = len(intersection) + len(only_mp)
+    lake_ids_size = len(intersection) + len(only_lake)
+    overlap_denom = min(mp_ids_size, lake_ids_size)
     overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
     mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
     print(

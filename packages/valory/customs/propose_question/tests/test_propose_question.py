@@ -779,6 +779,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "unknown-tool" in data["error"]
+        assert data["error_type"] == "invalid_input"
 
     def test_missing_resolution_time_returns_error(self) -> None:
         """Missing resolution_time returns an error JSON."""
@@ -792,6 +793,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "resolution_time" in data["error"]
+        assert data["error_type"] == "invalid_input"
 
     @patch(f"{_MODULE}.gather_articles")
     @patch(f"{_MODULE}.gather_latest_questions")
@@ -810,6 +812,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "articles" in data["error"].lower()
+        assert data["error_type"] == "upstream_error"
 
     @patch(f"{_MODULE}.gather_articles")
     @patch(f"{_MODULE}.gather_latest_questions")
@@ -828,6 +831,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "latest questions" in data["error"].lower()
+        assert data["error_type"] == "upstream_error"
 
     @patch(f"{_MODULE}.gather_articles")
     @patch(f"{_MODULE}.gather_latest_questions")
@@ -858,6 +862,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "flagged" in data["error"].lower()
+        assert data["error_type"] == "content_moderation"
 
     @patch(f"{_MODULE}.gather_articles")
     @patch(f"{_MODULE}.gather_latest_questions")
@@ -895,6 +900,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "scrape" in data["error"].lower()
+        assert data["error_type"] == "upstream_error"
 
     @patch(f"{_MODULE}.gather_articles")
     @patch(f"{_MODULE}.gather_latest_questions")
@@ -964,6 +970,14 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "rejected" in data["error"].lower()
+        assert data["error_type"] == "quality_rejection"
+        # Single candidate, rejected by self-review (authority_can_act_in_time
+        # is False) -- the per-gate breakdown attributes it correctly.
+        assert data["rejected"] == {
+            "self_review": 1,
+            "date_validation": 0,
+            "programmatic_dedup": 0,
+        }
 
     def test_unexpected_exception_returns_error(self) -> None:
         """Unhandled exception in run() returns error JSON, does not crash."""
@@ -980,6 +994,7 @@ class TestRunErrors:
         data = json.loads(result[0])
         assert "error" in data
         assert "exception" in data["error"].lower()
+        assert data["error_type"] == "internal_error"
 
 
 class TestRunNoneOutputPath:

@@ -388,6 +388,51 @@ MechResponse = Tuple[
 ]
 MaxCostResponse = float
 
+# Error-response taxonomy. ``error_type`` buckets each failure so downstream
+# consumers / dashboards can distinguish a caller mistake or an expected
+# content/quality outcome from an actual tool malfunction. Only
+# ``internal_error`` (and, arguably, ``upstream_error``) reflect on the mech's
+# own reliability; the rest are not the tool's fault:
+#   invalid_input      -- caller sent missing/invalid params (e.g. a prediction
+#                         request mis-routed here without ``resolution_time``)
+#   upstream_error     -- an external dependency failed (NewsAPI/subgraph/scrape)
+#   content_moderation -- OpenAI moderation blocked the content
+#   quality_rejection  -- the tool ran fully but its quality gate rejected every
+#                         candidate question
+#   internal_error     -- an unexpected tool/LLM failure
+ERROR_INVALID_INPUT = "invalid_input"
+ERROR_UPSTREAM = "upstream_error"
+ERROR_CONTENT_MODERATION = "content_moderation"
+ERROR_QUALITY_REJECTION = "quality_rejection"
+ERROR_INTERNAL = "internal_error"
+
+
+def _error_response(
+    tool: Any,
+    message: str,
+    error_type: str,
+    counter_callback: Any,
+    **extra: Any,
+) -> MechResponse:
+    """Build a standardized error ``MechResponse`` tagged with ``error_type``.
+
+    :param tool: the tool name to echo back in the payload (from kwargs, so it
+        may be ``None`` at the unknown-tool guard).
+    :param message: the human-readable error message.
+    :param error_type: one of the ``ERROR_*`` taxonomy constants.
+    :param counter_callback: the token/cost counter to return unchanged.
+    :param extra: optional extra fields to merge into the payload (e.g. the
+        per-gate ``rejected`` breakdown on a quality rejection).
+    :return: the 5-tuple MechResponse with a JSON error payload as element 0.
+    """
+    payload: Dict[str, Any] = {
+        "error": message,
+        "error_type": error_type,
+        "tool": tool,
+    }
+    payload.update(extra)
+    return json.dumps(payload), None, None, counter_callback, None
+
 
 class MeasurableState(BaseModel):
     """One measurable state extracted from an article."""
@@ -946,17 +991,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             return max_cost
 
         if not tool or tool not in ALLOWED_TOOLS:
-            return (
-                json.dumps(
-                    {
-                        "error": f"Tool {tool} is not in the list of supported tools.",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                f"Tool {tool} is not in the list of supported tools.",
+                ERROR_INVALID_INPUT,
                 counter_callback,
-                None,
             )
 
         # Decode resolution_time and num_questions from prompt JSON if present.
@@ -974,17 +1013,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             pass
 
         if resolution_time is None:
-            return (
-                json.dumps(
-                    {
-                        "error": "'resolution_time' is not defined.",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                "'resolution_time' is not defined.",
+                ERROR_INVALID_INPUT,
                 counter_callback,
-                None,
             )
         if num_questions is None:
             num_questions = 1
@@ -995,17 +1028,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         if latest_questions is None:
             latest_questions = gather_latest_questions(kwargs["api_keys"]["subgraph"])
         if latest_questions is None:
-            return (
-                json.dumps(
-                    {
-                        "error": "Failed to retrieve latest questions.",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                "Failed to retrieve latest questions.",
+                ERROR_UPSTREAM,
                 counter_callback,
-                None,
             )
 
         # Keep the MAX_LATEST_QUESTIONS most recent (subgraph already returns
@@ -1017,17 +1044,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         news_sources = kwargs.get("news_sources", NEWSAPI_DEFAULT_NEWS_SOURCES)
         articles = gather_articles(news_sources, kwargs["api_keys"]["newsapi"])
         if articles is None:
-            return (
-                json.dumps(
-                    {
-                        "error": "Failed to retrieve articles from NewsAPI.",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                "Failed to retrieve articles from NewsAPI.",
+                ERROR_UPSTREAM,
                 counter_callback,
-                None,
             )
 
         print(
@@ -1062,17 +1083,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             articles = clean_articles
 
         if not articles:
-            return (
-                json.dumps(
-                    {
-                        "error": "All articles were flagged by content moderation.",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                "All articles were flagged by content moderation.",
+                ERROR_CONTENT_MODERATION,
                 counter_callback,
-                None,
             )
 
         articles_string = ""
@@ -1099,17 +1114,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
             moderation_result = openai_client.moderations.create(input=prompt)
             if moderation_result.results[0].flagged:
-                return (
-                    json.dumps(
-                        {
-                            "error": "Moderation flagged the prompt as in violation of terms.",
-                            "tool": tool,
-                        }
-                    ),
-                    None,
-                    None,
+                return _error_response(
+                    tool,
+                    "Moderation flagged the prompt as in violation of terms.",
+                    ERROR_CONTENT_MODERATION,
                     counter_callback,
-                    None,
                 )
 
             messages = [
@@ -1143,20 +1152,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             article_id = response_data["article_id"]
             topic = response_data["topic"]
             if not isinstance(article_id, int) or not 0 <= article_id < len(articles):
-                return (
-                    json.dumps(
-                        {
-                            "error": (
-                                f"LLM returned invalid article_id {article_id!r} "
-                                f"(have {len(articles)} articles)."
-                            ),
-                            "tool": tool,
-                        }
-                    ),
-                    None,
-                    None,
+                return _error_response(
+                    tool,
+                    f"LLM returned invalid article_id {article_id!r} "
+                    f"(have {len(articles)} articles).",
+                    ERROR_INTERNAL,
                     counter_callback,
-                    None,
                 )
             article = articles[article_id]
             reasoning = (
@@ -1170,17 +1171,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             kwargs["api_keys"]["serperapi"], article.get("url", "")
         )
         if scrape_result is None:
-            return (
-                json.dumps(
-                    {
-                        "error": f"Failed to scrape url {article.get('url', '')}",
-                        "tool": tool,
-                    }
-                ),
-                None,
-                None,
+            return _error_response(
+                tool,
+                f"Failed to scrape url {article.get('url', '')}",
+                ERROR_UPSTREAM,
                 counter_callback,
-                None,
             )
 
         # Extract measurable states -- constrains the LLM to identify what CAN
@@ -1188,12 +1183,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # "Will X announce Y?" prior.
         _scraped_text = scrape_result.get("text", "")
         if not _scraped_text:
-            return (
-                json.dumps({"error": "Scraped article has no text.", "tool": tool}),
-                None,
-                None,
+            return _error_response(
+                tool,
+                "Scraped article has no text.",
+                ERROR_UPSTREAM,
                 counter_callback,
-                None,
             )
         article_text = _scraped_text[:ARTICLE_TEXT_MAX_CHARS]
         with OpenAIClientManager(kwargs["api_keys"]["openai"]) as openai_client:
@@ -1302,17 +1296,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
 
             moderation_result = openai_client.moderations.create(input=propose_prompt)
             if moderation_result.results[0].flagged:
-                return (
-                    json.dumps(
-                        {
-                            "error": "Moderation flagged the prompt as in violation of terms.",
-                            "tool": tool,
-                        }
-                    ),
-                    None,
-                    None,
+                return _error_response(
+                    tool,
+                    "Moderation flagged the prompt as in violation of terms.",
+                    ERROR_CONTENT_MODERATION,
                     counter_callback,
-                    None,
                 )
 
             messages = [
@@ -1398,6 +1386,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # Accept questions only when ALL seven self-review checks pass.
         accepted_questions = []
         rejected_questions = []
+        # Per-gate reject tallies, surfaced in the error payload so a consumer
+        # can see WHICH gate rejected the batch (LLM self-review vs programmatic
+        # date validation vs programmatic dedup) instead of a lumped string.
+        n_review_rejected = 0
+        n_date_rejected = 0
+        n_dedup_rejected = 0
         for rev in reviews:
             checks = [
                 rev.get("deadline_is_feasible", False),
@@ -1412,6 +1406,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             if passes == len(checks) and date_ok and not_dup and window_ok:
                 accepted_questions.append(rev["question"])
             else:
+                n_review_rejected += 1
                 rejected_questions.append(
                     {
                         "question": rev["question"],
@@ -1428,6 +1423,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         for q in accepted_questions:
             date_issue = validate_question_dates(q, int(resolution_time))
             if date_issue:
+                n_date_rejected += 1
                 rejected_questions.append(
                     {"question": q, "reason": f"DATE CHECK: {date_issue}"}
                 )
@@ -1448,6 +1444,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             if hit is None:
                 nondup_validated.append(q)
             else:
+                n_dedup_rejected += 1
                 match, score = hit
                 print(
                     f"  PROGRAMMATIC DEDUP REJECT (jaccard {score:.2f}): {q[:80]}...\n"
@@ -1455,14 +1452,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 )
 
         if not nondup_validated:
-            err_payload = {
-                "error": (
-                    f"All {n_candidates} proposed questions were rejected by "
-                    "self-review, date validation, or programmatic dedup."
-                ),
-                "tool": tool,
-            }
-            return json.dumps(err_payload), None, None, counter_callback, None
+            return _error_response(
+                tool,
+                f"All {n_candidates} proposed questions were rejected by "
+                "self-review, date validation, or programmatic dedup.",
+                ERROR_QUALITY_REJECTION,
+                counter_callback,
+                rejected={
+                    "self_review": n_review_rejected,
+                    "date_validation": n_date_rejected,
+                    "programmatic_dedup": n_dedup_rejected,
+                },
+            )
 
         questions = nondup_validated[:num_questions]
 
@@ -1499,15 +1500,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # swallowing it here would make that decorator dead code.
         raise
     except Exception as e:
-        return (
-            json.dumps(
-                {
-                    "error": f"An exception has occurred: {e}.",
-                    "tool": tool,
-                }
-            ),
-            None,
-            None,
+        return _error_response(
+            tool,
+            f"An exception has occurred: {e}.",
+            ERROR_INTERNAL,
             counter_callback,
-            None,
         )

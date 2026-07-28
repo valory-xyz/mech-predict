@@ -218,6 +218,61 @@ class TestIterScoredRowsPaging:
                     )
                 )
 
+    def test_non_dict_payload_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Top-level array or non-dict payload raises instead of AttributeError."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: ["unexpected", "array"],
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="expected dict"):
+                list(
+                    mac.iter_scored_rows(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+    def test_missing_rows_key_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing 'rows' key raises (distinct from a legitimate rows=[])."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: {"error": "something went wrong"},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="missing 'rows' key"):
+                list(
+                    mac.iter_scored_rows(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+    def test_empty_rows_list_ends_pagination_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit rows=[] with null cursor is a valid empty last page."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        empty_response = SimpleNamespace(
+            json=lambda: {"rows": [], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: empty_response
+        ):
+            rows = list(
+                mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc))
+            )
+        assert rows == []
+
     def test_max_pages_hit_with_cursor_pending_raises(
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:

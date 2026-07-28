@@ -212,14 +212,18 @@ def iter_scored_rows(
                 f"mech-analytics scored-rows fetch failed (page {pages}): {exc}"
             ) from exc
 
-        rows = payload.get("rows")
-        # Explicit shape guard: a schema drift that ships e.g. rows={} or
-        # rows="..." would otherwise surface as an AttributeError halfway
-        # through iteration. Matches the trader-side client's guard on
-        # the same endpoint.
-        if rows is None:
-            rows = []
-        elif not isinstance(rows, list):
+        if not isinstance(payload, dict):
+            raise MechAnalyticsError(
+                f"mech-analytics scored-rows page {pages}: "
+                f"payload is {type(payload).__name__}, expected dict"
+            )
+        if "rows" not in payload:
+            raise MechAnalyticsError(
+                f"mech-analytics scored-rows page {pages}: "
+                f"payload missing 'rows' key (got keys: {sorted(payload)})"
+            )
+        rows = payload["rows"]
+        if not isinstance(rows, list):
             raise MechAnalyticsError(
                 f"mech-analytics scored-rows page {pages}: "
                 f"'rows' has unexpected type {type(rows).__name__}"

@@ -38,6 +38,7 @@ from packages.valory.customs.propose_question.propose_question import (
     _VERIFY_CACHE,
     _cache_put,
     _dedup_tokens,
+    _missing_api_keys,
     filter_duplicate_articles,
     find_near_duplicate,
     format_utc_timestamp,
@@ -908,6 +909,60 @@ class TestRunErrors:
     @patch(f"{_MODULE}.scrape_url")
     @patch(f"{_MODULE}.OpenAIClientManager")
     @patch(f"{_MODULE}.requests.post")
+    def test_empty_scraped_text_returns_error(
+        self,
+        mock_serper: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+        mock_filter: MagicMock,
+        mock_q: MagicMock,
+        mock_articles: MagicMock,
+    ) -> None:
+        """A scrape that returns empty text is an upstream_error, not internal."""
+        mock_q.return_value = ["existing question"]
+        mock_articles.return_value = [SAMPLE_ARTICLE]
+        mock_filter.return_value = [SAMPLE_ARTICLE]
+        mock_scrape.return_value = {"text": ""}
+        openai_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=openai_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        openai_client.moderations.create.return_value = _make_moderation_clean()
+        openai_client.chat.completions.create.return_value = _make_openai_completion(
+            STORY_SELECTION_RESPONSE
+        )
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert "error" in data
+        assert "no text" in data["error"].lower()
+        assert data["error_type"] == "upstream_error"
+
+    def test_missing_api_key_returns_config_error(self) -> None:
+        """A missing api_keys entry is a config_error that names the key."""
+        # serperapi absent; openai/newsapi/subgraph present.
+        services = {"openai": ["k"], "newsapi": ["k"], "subgraph": ["k"]}
+        api_keys = MagicMock()
+        api_keys.get = lambda key, default="": services.get(key, [default])[0]
+        result = run(
+            tool="propose-question",
+            prompt=json.dumps({"resolution_time": FUTURE_TS}),
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+        data = json.loads(result[0])
+        assert data["error_type"] == "config_error"
+        assert "serperapi" in data["error"]
+
+    @patch(f"{_MODULE}.gather_articles")
+    @patch(f"{_MODULE}.gather_latest_questions")
+    @patch(f"{_MODULE}.filter_duplicate_articles")
+    @patch(f"{_MODULE}.scrape_url")
+    @patch(f"{_MODULE}.OpenAIClientManager")
+    @patch(f"{_MODULE}.requests.post")
     def test_all_questions_rejected_returns_error(
         self,
         mock_serper: MagicMock,
@@ -995,6 +1050,33 @@ class TestRunErrors:
         assert "error" in data
         assert "exception" in data["error"].lower()
         assert data["error_type"] == "internal_error"
+
+
+class TestMissingApiKeys:
+    """Unit tests for the _missing_api_keys config-validation helper."""
+
+    def test_none_reports_all_required(self) -> None:
+        """A None api_keys object means every required service is missing."""
+        assert _missing_api_keys(None, ["openai", "serperapi"]) == [
+            "openai",
+            "serperapi",
+        ]
+
+    def test_missing_subset_in_order(self) -> None:
+        """Only the absent/empty services are reported, in the given order."""
+        keys = {"openai": "k", "newsapi": "", "serperapi": "k"}
+        assert _missing_api_keys(keys, ["openai", "newsapi", "serperapi"]) == [
+            "newsapi"
+        ]
+
+    def test_all_present_returns_empty(self) -> None:
+        """No missing services returns an empty list."""
+        keys = {"openai": "k", "newsapi": "k", "serperapi": "k"}
+        assert _missing_api_keys(keys, ["openai", "newsapi", "serperapi"]) == []
+
+    def test_non_get_object_is_not_flagged(self) -> None:
+        """An object without a .get method is not false-flagged as missing."""
+        assert _missing_api_keys(object(), ["openai"]) == []
 
 
 class TestRunNoneOutputPath:
@@ -1361,6 +1443,7 @@ class TestRunAdditionalBranches:
         data = json.loads(result[0])
         assert "error" in data
         assert "moderation" in data["error"].lower()
+        assert data["error_type"] == "content_moderation"
 
     @patch(f"{_MODULE}.gather_latest_questions")
     @patch(f"{_MODULE}.gather_articles")
@@ -1413,6 +1496,7 @@ class TestRunAdditionalBranches:
         data = json.loads(result[0])
         assert "error" in data
         assert "moderation" in data["error"].lower()
+        assert data["error_type"] == "content_moderation"
 
     @patch(f"{_MODULE}.gather_latest_questions")
     @patch(f"{_MODULE}.gather_articles")
@@ -1485,6 +1569,14 @@ class TestRunAdditionalBranches:
         data = json.loads(result[0])
         assert "error" in data
         assert "rejected" in data["error"].lower()
+        assert data["error_type"] == "quality_rejection"
+        # The single candidate passes self-review but fails programmatic date
+        # validation -- the breakdown must attribute it to that gate alone.
+        assert data["rejected"] == {
+            "self_review": 0,
+            "date_validation": 1,
+            "programmatic_dedup": 0,
+        }
 
     @patch(f"{_MODULE}.gather_latest_questions")
     @patch(f"{_MODULE}.gather_articles")
@@ -1563,3 +1655,11 @@ class TestRunAdditionalBranches:
         data = json.loads(result[0])
         assert "error" in data
         assert "rejected" in data["error"].lower()
+        assert data["error_type"] == "quality_rejection"
+        # The single candidate passes self-review and date validation but is a
+        # token-identical duplicate -- attributed to the dedup gate alone.
+        assert data["rejected"] == {
+            "self_review": 0,
+            "date_validation": 0,
+            "programmatic_dedup": 1,
+        }

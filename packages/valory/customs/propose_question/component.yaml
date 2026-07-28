@@ -8,9 +8,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeic4s7syxr2m2q3wtta3pzkqmw4usib3ji5v6ziae2kxprz2swvoje
-  propose_question.py: bafybeicuuvvwewaqnr6odecefaoizmoy2okvkwzd6mfqtworsiebhtrtea
+  propose_question.py: bafybeigvolynfuxe73hhpehtnmddrdxoj77z3jplsxjyhbbchvqpcp6o3u
   tests/__init__.py: bafybeierlyi65bbyvrmmzse4s3j53ht54cpn3kwnt5ptgcwnqhuim25bvu
-  tests/test_propose_question.py: bafybeigktaqabawr7ooo33omzvz3auekeuy3imyeqhd4xp3zcekg75u3km
+  tests/test_propose_question.py: bafybeifbkmukb4rcnibuqpfktxrzy3d3qdimtnrrbpai6xmwqnpemf4dqe
 fingerprint_ignore_patterns: []
 entry_point: propose_question.py
 callable: run

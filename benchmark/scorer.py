@@ -1667,7 +1667,9 @@ def rebuild_from_mech_analytics(
         )
 
     all_rows: list[dict[str, Any]] = []
-    for row in iter_scored_rows(since=since, until=until, chain_id=chain_id):
+    for row in iter_scored_rows(
+        since=since, until=until, chain_id=chain_id, resolved=True
+    ):
         # ``category`` is derived locally from ``question_text`` — the
         # endpoint carries the title but not the classified category, and
         # ``accumulate_row`` groups on this key.

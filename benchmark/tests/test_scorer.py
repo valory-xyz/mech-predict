@@ -3219,18 +3219,22 @@ def _ma_row(**overrides: Any) -> dict[str, Any]:
 
 def _patch_iter_and_classifier(
     monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
-) -> None:
-    """Install fake iter_scored_rows + classify_category."""
+) -> list[dict[str, Any]]:
+    """Install fake iter_scored_rows + classify_category, return captured kwargs list."""
     from benchmark import mech_analytics_client
     from benchmark.datasets import fetch_production
 
-    def _fake_iter(**_kwargs: Any) -> Any:
+    captured: list[dict[str, Any]] = []
+
+    def _fake_iter(**kwargs: Any) -> Any:
+        captured.append(kwargs)
         yield from rows
 
     monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
     monkeypatch.setattr(
         fetch_production, "classify_category", lambda _text, _plat: "sports"
     )
+    return captured
 
 
 class TestRebuildFromMechAnalytics:
@@ -3254,7 +3258,7 @@ class TestRebuildFromMechAnalytics:
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
         self._write_history(history_path)
-        _patch_iter_and_classifier(
+        captured = _patch_iter_and_classifier(
             monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
         )
         result = rebuild_from_mech_analytics(
@@ -3266,6 +3270,9 @@ class TestRebuildFromMechAnalytics:
         assert scores_path.exists()
         on_disk = json.loads(scores_path.read_text())
         assert on_disk["overall"]["n"] == 2
+        # resolved=True is load-bearing: unresolved rows would dilute
+        # the accumulator's n and break reliability.
+        assert captured[0].get("resolved") is True
 
     def test_missing_request_id_raises(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

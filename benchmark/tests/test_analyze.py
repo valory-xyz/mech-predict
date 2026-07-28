@@ -3365,6 +3365,7 @@ class TestBuildScoresFromMechAnalytics:
             until: Any = None,
             platform: Any = None,
             chain_id: Any = None,
+            resolved: Any = None,
             **_kwargs: Any,
         ) -> Any:
             captured["iter_calls"].append(
@@ -3373,6 +3374,7 @@ class TestBuildScoresFromMechAnalytics:
                     "until": until,
                     "platform": platform,
                     "chain_id": chain_id,
+                    "resolved": resolved,
                 }
             )
             yield from rows
@@ -3428,6 +3430,9 @@ class TestBuildScoresFromMechAnalytics:
         since = _datetime(2026, 7, 1, tzinfo=_timezone.utc)
         until = _datetime(2026, 7, 27, tzinfo=_timezone.utc)
         analyze._build_scores_from_mech_analytics("omen", since, until)
+        # resolved=True is load-bearing: unresolved rows would dilute the
+        # denominator on the accumulator's reliability calculation.
+        assert captured["iter_calls"][0]["resolved"] is True
 
         assert len(captured["iter_calls"]) == 1
         call = captured["iter_calls"][0]

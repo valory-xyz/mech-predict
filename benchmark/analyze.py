@@ -219,6 +219,7 @@ def _build_scores_from_mech_analytics(
         until=until,
         platform=platform,
         chain_id=chain_id,
+        resolved=True,
     ):
         question_text = row.get("question_text")
         if question_text:

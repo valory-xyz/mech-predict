@@ -1654,6 +1654,17 @@ def rebuild_from_mech_analytics(
     if dedup_path is None:
         dedup_path = scores_path.parent / "scored_row_ids.json"
 
+    # pylint: disable=import-outside-toplevel
+    from benchmark.mech_analytics_client import MechAnalyticsError
+    if not history_path.exists() and scores_path.exists():
+        raise MechAnalyticsError(
+            f"scores_history.jsonl missing at {history_path}; "
+            "mech-analytics rebuild only fetches a trailing window and "
+            "cannot repopulate the historical snapshots. Run the legacy "
+            "rebuild (USE_MECH_ANALYTICS_ROWS unset) once to seed history, "
+            "then flip the flag back on."
+        )
+
     all_rows: list[dict[str, Any]] = []
     for row in iter_scored_rows(since=since, until=until, chain_id=chain_id):
         # ``category`` is derived locally from ``question_text`` — the

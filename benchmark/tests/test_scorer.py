@@ -3294,46 +3294,31 @@ class TestRebuildFromMechAnalytics:
                 history_path=history_path,
             )
 
-    def test_unresolved_row_not_added_to_dedup_set(
+    def test_dedup_file_neither_read_nor_written(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Unresolved rows can be re-fetched when they later resolve."""
+        """Rebuild does not touch scored_row_ids.json (owned by --update)."""
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
-        dedup_path = tmp_path / "scored_row_ids.json"
+        dedup_path = scores_path.parent / "scored_row_ids.json"
         self._write_history(history_path)
-        unresolved = _ma_row(request_id="pending-1", final_outcome=None)
-        _patch_iter_and_classifier(monkeypatch, [unresolved])
-        rebuild_from_mech_analytics(
+        # Pre-seed dedup with an id that also appears in the fetched
+        # rows. If the rebuild consulted this file, row "a" would be
+        # skipped and the accumulator would land at n=1 instead of 2.
+        dedup_path.write_text(json.dumps(["a"]))
+        _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
             since=datetime(2026, 7, 1, tzinfo=timezone.utc),
             scores_path=scores_path,
             history_path=history_path,
-            dedup_path=dedup_path,
         )
-        stored = json.loads(dedup_path.read_text()) if dedup_path.exists() else []
-        assert "pending-1" not in stored
-
-    def test_resolved_row_is_added_to_dedup_set(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        """Resolved rows go into the dedup set so re-runs don't double-count."""
-        from benchmark.scorer import rebuild_from_mech_analytics
-
-        scores_path = tmp_path / "scores.json"
-        history_path = tmp_path / "scores_history.jsonl"
-        dedup_path = tmp_path / "scored_row_ids.json"
-        self._write_history(history_path)
-        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="resolved-1")])
-        rebuild_from_mech_analytics(
-            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
-            scores_path=scores_path,
-            history_path=history_path,
-            dedup_path=dedup_path,
-        )
-        stored = json.loads(dedup_path.read_text())
-        assert "resolved-1" in stored
+        assert result["total_rows"] == 2, "full-window refetch must not dedup"
+        # And the pre-seeded content is untouched.
+        assert json.loads(dedup_path.read_text()) == ["a"]
 
     def test_starts_fresh_ignoring_existing_scores_json(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3362,17 +3347,17 @@ class TestRebuildFromMechAnalytics:
         )
         assert result["total_rows"] == 2  # not 99999+2
 
-    def test_missing_history_with_existing_scores_refuses_to_run(
+    def test_missing_history_refuses_to_run(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Force-rebuild scenario (history wiped) is refused, not destructive."""
+        """Rebuild refuses whenever history is absent, regardless of scores.json."""
         from benchmark.mech_analytics_client import MechAnalyticsError
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
-        scores_path.write_text("{}")  # scores exists
-        # history_path deliberately not created
+        # Neither scores nor history exists — this is the CI force-rebuild
+        # wipe path (both files deleted together). Guard must trip.
         _patch_iter_and_classifier(monkeypatch, [])
         with pytest.raises(MechAnalyticsError, match="scores_history.jsonl missing"):
             rebuild_from_mech_analytics(
@@ -3380,6 +3365,41 @@ class TestRebuildFromMechAnalytics:
                 scores_path=scores_path,
                 history_path=history_path,
             )
+
+    def test_missing_history_with_existing_scores_still_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The narrower version of this guard let CI's wipe through."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        scores_path.write_text("{}")
+        _patch_iter_and_classifier(monkeypatch, [])
+        with pytest.raises(MechAnalyticsError, match="scores_history.jsonl missing"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_cold_start_allowed_with_opt_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Explicit opt-in via env var lets a truly-fresh setup run."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        monkeypatch.setenv("MECH_ANALYTICS_ALLOW_EMPTY_HISTORY", "true")
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 1
 
     def test_tournament_scores_untouched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

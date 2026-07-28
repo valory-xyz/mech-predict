@@ -17,6 +17,7 @@ import argparse
 import glob as glob_mod
 import json
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -1609,7 +1610,6 @@ def rebuild_from_mech_analytics(
     until: datetime | None = None,
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
-    dedup_path: Path | None = None,
     chain_id: int | None = None,
 ) -> dict[str, Any]:
     """Rebuild scores from mech-analytics's ``/v1/data/scored-rows`` endpoint.
@@ -1630,10 +1630,14 @@ def rebuild_from_mech_analytics(
         ``None``, the endpoint returns up to now.
     :param scores_path: output path for the production ``scores.json``.
     :param history_path: output path for ``scores_history.jsonl``.
-    :param dedup_path: path to ``scored_row_ids.json``.
     :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
         ``None`` fetches every chain the endpoint serves.
     :return: finalized production scores dict.
+    :raises MechAnalyticsError: when ``scores_history.jsonl`` is missing
+        and the ``MECH_ANALYTICS_ALLOW_EMPTY_HISTORY`` opt-in is not set.
+        The rebuild only fetches a trailing window, so a missing history
+        file would silently start us from scratch and drop prior months'
+        trend rows on the floor.
     """
     # Local import so a missing ``requests`` install can't break the module
     # at import time on the sweep / tournament paths that don't use it.
@@ -1651,19 +1655,28 @@ def rebuild_from_mech_analytics(
         "benchmark.datasets.fetch_production"
     ).classify_category
 
-    if dedup_path is None:
-        dedup_path = scores_path.parent / "scored_row_ids.json"
-
     # pylint: disable=import-outside-toplevel
     from benchmark.mech_analytics_client import MechAnalyticsError
 
-    if not history_path.exists() and scores_path.exists():
+    # History guard. Refuse whenever ``scores_history.jsonl`` is missing,
+    # regardless of whether the current-month accumulator exists — the
+    # CI ``Clear cached scores`` step wipes both files together, and the
+    # narrower ``and scores_path.exists()`` version of this check let
+    # that wipe through undetected (prior months' trend rows silently
+    # gone). Truly-fresh setups opt in via
+    # ``MECH_ANALYTICS_ALLOW_EMPTY_HISTORY=true`` so the guard is a
+    # deliberate override, not a silent skip.
+    allow_empty_history = os.getenv(
+        "MECH_ANALYTICS_ALLOW_EMPTY_HISTORY", ""
+    ).strip().lower() in {"1", "true", "yes"}
+    if not history_path.exists() and not allow_empty_history:
         raise MechAnalyticsError(
-            f"scores_history.jsonl missing at {history_path}; "
+            f"scores_history.jsonl missing at {history_path}; the "
             "mech-analytics rebuild only fetches a trailing window and "
-            "cannot repopulate the historical snapshots. Run the legacy "
-            "rebuild (USE_MECH_ANALYTICS_ROWS unset) once to seed history, "
-            "then flip the flag back on."
+            "cannot repopulate historical snapshots on its own. Seed "
+            "history via the legacy rebuild path once, or set "
+            "MECH_ANALYTICS_ALLOW_EMPTY_HISTORY=true to accept starting "
+            "from an empty history."
         )
 
     all_rows: list[dict[str, Any]] = []
@@ -1683,27 +1696,16 @@ def rebuild_from_mech_analytics(
         row["row_id"] = row.get("row_id") or request_id
         all_rows.append(row)
 
-    scored_ids = _load_dedup_ids(dedup_path)
-    deduped_rows: list[dict[str, Any]] = []
-    skipped = 0
-    for row in all_rows:
-        row_id = row["row_id"]  # guaranteed by the fail-loud above
-        if row_id in scored_ids:
-            skipped += 1
-            continue
-        deduped_rows.append(row)
-        # Only add resolved rows to the dedup set. An unresolved row
-        # (final_outcome=None) that we skip today should come back and
-        # be re-scored once the market resolves — recording it here
-        # would permanently exclude it.
-        if row.get("final_outcome") is not None:
-            scored_ids.add(row_id)
-
-    _save_dedup_ids(dedup_path, scored_ids)
-    if skipped:
-        logging.getLogger(__name__).warning(
-            "mech-analytics rebuild: skipped %d already-scored rows", skipped
-        )
+    # No dedup filter on this path. ``iter_scored_rows`` returns the full
+    # ``since``..``until`` window every rebuild, so filtering against a
+    # persisted ``scored_row_ids.json`` would drop rows that legitimately
+    # appear in later runs' windows too. Combined with the
+    # ``scores_path.unlink`` below (fresh accumulator per rebuild), the
+    # earlier "read the dedup set, skip seen rows, save the union" logic
+    # collapsed the accumulator to a one-day slice from the second night
+    # onward. Full-window refetch is idempotent by construction; the
+    # dedup file is owned by the legacy ``--update`` incremental path
+    # and is neither read nor written here.
 
     # A "rebuild" must start from _empty_scores, not silently merge into
     # an existing accumulator. _accumulate_and_write resumes when the
@@ -1720,10 +1722,10 @@ def rebuild_from_mech_analytics(
     # and the subsequent workflow ``--update`` step would merge only
     # that run's fresh tournament rows onto the emptied file.
     prod_result = _accumulate_and_write(
-        deduped_rows, scores_path, history_path, emit_history=True
+        all_rows, scores_path, history_path, emit_history=True
     )
 
-    for platform, plat_rows in _partition_rows_by_platform(deduped_rows).items():
+    for platform, plat_rows in _partition_rows_by_platform(all_rows).items():
         _accumulate_and_write(
             plat_rows,
             _derive_platform_path(scores_path, platform),

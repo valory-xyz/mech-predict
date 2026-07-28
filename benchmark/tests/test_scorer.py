@@ -3179,3 +3179,212 @@ class TestScoreIncludesNewRollingFields:
         assert result["latency_reservoir"] == {}
         assert result["worst_10"] == []
         assert result["best_10"] == []
+
+
+# pylint: disable=import-outside-toplevel
+
+
+def _ma_row(**overrides: Any) -> dict[str, Any]:
+    """Base row shape produced by mech_analytics_client._map_row."""
+    row: dict[str, Any] = {
+        "request_id": "req-1",
+        "tool_name": "superforcaster",
+        "tool_version": "abc123",
+        "platform": "omen",
+        "question_text": "Will X happen?",
+        "p_yes": 0.7,
+        "p_no": 0.3,
+        "confidence": 0.85,
+        "prediction_parse_status": "valid",
+        "market_prob_at_prediction": 0.5,
+        "market_liquidity_at_prediction": 1000.0,
+        "market_spread_at_prediction": 0.02,
+        "market_id": "0xabcd",
+        "final_outcome": True,
+        "resolved_at": "2026-07-02T12:00:00Z",
+        "brier": 0.09,
+        "log_loss": 0.3567,
+        "edge": 0.15,
+        "directional_correct": True,
+        "latency_s": 5.0,
+        "requested_at": "2026-07-01T00:00:00Z",
+        "delivered_at": "2026-07-01T00:00:05Z",
+        "mode": None,
+        "config_hash": None,
+        "prediction_lead_time_days": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _patch_iter_and_classifier(
+    monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
+) -> None:
+    """Install fake iter_scored_rows + classify_category."""
+    from benchmark import mech_analytics_client
+    from benchmark.datasets import fetch_production
+
+    def _fake_iter(**_kwargs: Any) -> Any:
+        yield from rows
+
+    monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+    monkeypatch.setattr(
+        fetch_production, "classify_category", lambda _text, _plat: "sports"
+    )
+
+
+class TestRebuildFromMechAnalytics:
+    """Cover the mech-analytics-fed rebuild path end-to-end.
+
+    Mocks the HTTP client + category classifier; accumulate_row runs
+    for real so the on-disk output shape is genuinely produced. Each
+    test seeds a scratch tmp_path so history / dedup files start clean.
+    """
+
+    def _write_history(self, history_path: Path) -> None:
+        """Seed a minimal scores_history.jsonl so the missing-history gate passes."""
+        history_path.write_text('{"month": "2026-06", "brier": 0.2, "n": 100}\n')
+
+    def test_writes_scores_json_from_endpoint_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fetched rows land as scores.json with the expected total."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 2
+        assert scores_path.exists()
+        on_disk = json.loads(scores_path.read_text())
+        assert on_disk["overall"]["n"] == 2
+
+    def test_missing_request_id_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Row without request_id triggers a MechAnalyticsError (no silent double-count)."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        bad_row = _ma_row()
+        bad_row["request_id"] = None
+        _patch_iter_and_classifier(monkeypatch, [bad_row])
+        with pytest.raises(MechAnalyticsError, match="missing request_id"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_unresolved_row_not_added_to_dedup_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Unresolved rows can be re-fetched when they later resolve."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        dedup_path = tmp_path / "scored_row_ids.json"
+        self._write_history(history_path)
+        unresolved = _ma_row(request_id="pending-1", final_outcome=None)
+        _patch_iter_and_classifier(monkeypatch, [unresolved])
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        stored = json.loads(dedup_path.read_text()) if dedup_path.exists() else []
+        assert "pending-1" not in stored
+
+    def test_resolved_row_is_added_to_dedup_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Resolved rows go into the dedup set so re-runs don't double-count."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        dedup_path = tmp_path / "scored_row_ids.json"
+        self._write_history(history_path)
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="resolved-1")])
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+            dedup_path=dedup_path,
+        )
+        stored = json.loads(dedup_path.read_text())
+        assert "resolved-1" in stored
+
+    def test_starts_fresh_ignoring_existing_scores_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A pre-existing scores.json must not blend into the rebuilt output."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        scores_path.write_text(json.dumps({
+            "current_month": "2026-07",
+            "overall": {"n": 99999, "brier_sum": 1234.5},
+        }))
+        _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 2  # not 99999+2
+
+    def test_missing_history_with_existing_scores_refuses_to_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Force-rebuild scenario (history wiped) is refused, not destructive."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        scores_path.write_text("{}")  # scores exists
+        # history_path deliberately not created
+        _patch_iter_and_classifier(monkeypatch, [])
+        with pytest.raises(MechAnalyticsError, match="scores_history.jsonl missing"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_tournament_scores_untouched(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Existing scores_tournament*.json is not clobbered by the rebuild."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+        self._write_history(history_path)
+        tournament_path.write_text(json.dumps({"tournament": "preserved"}))
+        _patch_iter_and_classifier(monkeypatch, [_ma_row()])
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert json.loads(tournament_path.read_text()) == {"tournament": "preserved"}

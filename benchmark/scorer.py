@@ -1674,12 +1674,6 @@ def rebuild_from_mech_analytics(
         platform = row.get("platform")
         if question_text:
             row["category"] = classify_category(question_text, platform)
-        # Missing request_id would silently double-count the row on
-        # every re-run (no dedup key). Fail loud so the ingest problem
-        # shows up. Reuse the client's error type since this is data
-        # coming from that same source.
-        # pylint: disable=import-outside-toplevel
-        from benchmark.mech_analytics_client import MechAnalyticsError
         request_id = row.get("request_id")
         if not request_id:
             raise MechAnalyticsError(

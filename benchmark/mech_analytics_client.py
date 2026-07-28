@@ -19,6 +19,7 @@ current subgraph + IPFS path stays live and this module is dormant.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Iterator, Optional
@@ -183,7 +184,7 @@ def _validated_probability(value: Any) -> tuple[float | None, bool]:
         as_float = float(value)
     except (TypeError, ValueError):
         return None, False
-    if as_float != as_float:  # NaN
+    if math.isnan(as_float):
         return None, False
     if not 0.0 <= as_float <= 1.0:
         return None, False

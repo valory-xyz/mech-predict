@@ -1656,6 +1656,7 @@ def rebuild_from_mech_analytics(
 
     # pylint: disable=import-outside-toplevel
     from benchmark.mech_analytics_client import MechAnalyticsError
+
     if not history_path.exists() and scores_path.exists():
         raise MechAnalyticsError(
             f"scores_history.jsonl missing at {history_path}; "
@@ -1676,9 +1677,7 @@ def rebuild_from_mech_analytics(
             row["category"] = classify_category(question_text, platform)
         request_id = row.get("request_id")
         if not request_id:
-            raise MechAnalyticsError(
-                f"mech-analytics row missing request_id: {row!r}"
-            )
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
         row["row_id"] = row.get("row_id") or request_id
         all_rows.append(row)
 
@@ -2117,6 +2116,7 @@ def _use_mech_analytics_rows() -> bool:
     """Return True when the feature flag routes rebuilds via mech-analytics."""
     # pylint: disable=import-outside-toplevel
     from benchmark.scoring_primitives import use_mech_analytics_rows
+
     return use_mech_analytics_rows()
 
 

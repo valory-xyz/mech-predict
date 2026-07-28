@@ -36,7 +36,6 @@ import os
 import random
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Feature-flag parsing
 # ---------------------------------------------------------------------------
@@ -51,6 +50,7 @@ def use_mech_analytics_rows() -> bool:
         os.getenv(USE_MECH_ANALYTICS_ROWS_ENV, "").strip().lower()
         in _TRUTHY_FLAG_VALUES
     )
+
 
 # ---------------------------------------------------------------------------
 # Reservoir / sample-size constants

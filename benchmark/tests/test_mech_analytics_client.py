@@ -176,7 +176,9 @@ class TestValidatedProbability:
         assert result is None
         assert ok is True
 
-    @pytest.mark.parametrize("value", [-0.01, 1.01, 1.5, -1.0, float("inf"), float("nan")])
+    @pytest.mark.parametrize(
+        "value", [-0.01, 1.01, 1.5, -1.0, float("inf"), float("nan")]
+    )
     def test_out_of_range_fails(self, value: float) -> None:
         """Values outside [0, 1] (including NaN / inf) are rejected."""
         result, ok = mac._validated_probability(value)
@@ -271,9 +273,7 @@ class TestIterScoredRowsPaging:
             captured_params.append(dict(kwargs.get("params") or {}))
             return responses.pop(0)
 
-        with patch.object(
-            mac.requests.Session, "get", side_effect=_capturing_get
-        ):
+        with patch.object(mac.requests.Session, "get", side_effect=_capturing_get):
             request_ids = [
                 row["request_id"]
                 for row in mac.iter_scored_rows(
@@ -378,7 +378,7 @@ class TestIterScoredRowsPaging:
             rows = list(
                 mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc))
             )
-        assert rows == []
+        assert not rows
 
     def test_max_pages_hit_with_cursor_pending_raises(
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict

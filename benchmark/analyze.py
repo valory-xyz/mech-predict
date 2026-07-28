@@ -116,6 +116,7 @@ _PLATFORM_CHAIN_ID: Mapping[str, int] = MappingProxyType(
     }
 )
 
+
 def _use_mech_analytics_flag() -> bool:
     """Return True when the analyzer should source rows from mech-analytics.
 
@@ -123,6 +124,7 @@ def _use_mech_analytics_flag() -> bool:
     """
     # pylint: disable=import-outside-toplevel
     from benchmark.scoring_primitives import use_mech_analytics_rows
+
     return use_mech_analytics_rows()
 
 
@@ -165,10 +167,16 @@ def _parse_iso_datetime_arg(text: str) -> datetime:
     return parsed
 
 
+class EmptyMechAnalyticsWindow(RuntimeError):
+    """Raised when the endpoint returns zero rows for a window expected to have data."""
+
+
 def _build_scores_from_mech_analytics(
     platform: str,
     since: datetime,
     until: datetime | None,
+    *,
+    allow_empty: bool = False,
 ) -> dict[str, Any]:
     """Build a finalized scores dict from mech-analytics rows for one window.
 
@@ -177,23 +185,19 @@ def _build_scores_from_mech_analytics(
     output matches the shape ``load_scores`` returns today, so every
     ``section_*()`` renderer keeps working without a change.
 
-    Endpoint / network failures propagate from the client rather
-    than being swallowed, so the nightly job fails loudly instead of
-    posting a silently empty report.
-
     :param platform: ``"omen"`` or ``"polymarket"``. Passed to the
         endpoint's ``platform`` filter and to ``classify_category`` for
         the local category derivation.
     :param since: timezone-aware lower bound (inclusive).
     :param until: optional timezone-aware upper bound (exclusive).
+    :param allow_empty: when False (default), raises
+        ``EmptyMechAnalyticsWindow`` on a zero-row response so the
+        report doesn't render as plausible all-N/A. Set True on rolling
+        windows that legitimately can be empty.
     :return: dict shaped like ``scorer._finalize_scores`` output.
+    :raises EmptyMechAnalyticsWindow: if ``allow_empty`` is False and
+        the endpoint returned zero rows for the window.
     """
-    # Lazy imports: keep the flag-off code path free of these
-    # dependencies at module load time. The importlib route on
-    # ``classify_category`` also matches ``scorer.rebuild_from_mech_analytics``
-    # — a static ``from`` here surfaces as a pylint cyclic-import
-    # warning against the existing ``fetch_production`` → ``scorer.update``
-    # edge, even though both edges resolve inside functions.
     # pylint: disable=import-outside-toplevel,protected-access
     import importlib
 
@@ -209,19 +213,23 @@ def _build_scores_from_mech_analytics(
     current_month = datetime.now(timezone.utc).strftime("%Y-%m")
     scores = _empty_scores(current_month)
 
+    n_rows = 0
     for row in iter_scored_rows(
         since=since,
         until=until,
         platform=platform,
         chain_id=chain_id,
     ):
-        # ``category`` is derived locally from question_text — the
-        # endpoint carries the title but not the classified category,
-        # and ``accumulate_row`` groups on category.
         question_text = row.get("question_text")
         if question_text:
             row["category"] = classify_category(question_text, platform)
         accumulate_row(scores, row)
+        n_rows += 1
+    if n_rows == 0 and not allow_empty:
+        raise EmptyMechAnalyticsWindow(
+            f"mech-analytics returned zero rows for platform={platform} "
+            f"since={since.isoformat()} until={until.isoformat() if until else 'now'}"
+        )
     return _finalize_scores(scores)
 
 
@@ -3075,9 +3083,14 @@ def main() -> None:
         now = datetime.now(timezone.utc)
         window = timedelta(days=ROLLING_WINDOW_DAYS)
         scores = _build_scores_from_mech_analytics(platform, since, until)
-        rolling = _build_scores_from_mech_analytics(platform, now - window, None)
+        # Rolling windows are allowed to be empty (recent activity gap
+        # is legitimate); the main scores window is not (empty means the
+        # nightly job would silently render a plausible all-N/A report).
+        rolling = _build_scores_from_mech_analytics(
+            platform, now - window, None, allow_empty=True
+        )
         prev_rolling = _build_scores_from_mech_analytics(
-            platform, now - 2 * window, now - window
+            platform, now - 2 * window, now - window, allow_empty=True
         )
         scores_tournament = _maybe_load(scores_tournament_path)
         source_label = "mech-analytics"

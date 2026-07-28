@@ -3337,10 +3337,14 @@ class TestRebuildFromMechAnalytics:
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
         self._write_history(history_path)
-        scores_path.write_text(json.dumps({
-            "current_month": "2026-07",
-            "overall": {"n": 99999, "brier_sum": 1234.5},
-        }))
+        scores_path.write_text(
+            json.dumps(
+                {
+                    "current_month": "2026-07",
+                    "overall": {"n": 99999, "brier_sum": 1234.5},
+                }
+            )
+        )
         _patch_iter_and_classifier(
             monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
         )

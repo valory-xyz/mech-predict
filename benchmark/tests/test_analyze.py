@@ -3484,18 +3484,32 @@ class TestBuildScoresFromMechAnalytics:
         )
         assert not captured["classify_calls"]
 
-    def test_empty_row_stream_produces_empty_scores(
+    def test_empty_row_stream_raises_by_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Zero rows still returns a well-shaped (all-zero) finalized dict."""
+        """Zero rows raises EmptyMechAnalyticsWindow so the nightly fails loudly."""
+        from benchmark import analyze
+
+        self._patch_iter_and_classifier(monkeypatch, [])
+
+        with pytest.raises(analyze.EmptyMechAnalyticsWindow, match="zero rows"):
+            analyze._build_scores_from_mech_analytics(
+                "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+            )
+
+    def test_empty_row_stream_allowed_when_flag_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """allow_empty=True returns an all-zero dict without raising."""
         from benchmark import analyze
 
         self._patch_iter_and_classifier(monkeypatch, [])
 
         result = analyze._build_scores_from_mech_analytics(
-            "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+            "omen",
+            _datetime(2026, 7, 1, tzinfo=_timezone.utc),
+            None,
+            allow_empty=True,
         )
         assert result["total_rows"] == 0
         assert result["overall"]["n"] == 0
-        assert result["by_tool"] == {}
-        assert result["by_platform"] == {}

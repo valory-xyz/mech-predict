@@ -217,3 +217,23 @@ class TestIterScoredRowsPaging:
                         since=datetime(2026, 7, 1, tzinfo=timezone.utc)
                     )
                 )
+
+    def test_max_pages_hit_with_cursor_pending_raises(
+        self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
+    ) -> None:
+        """Paginator raises when max_pages is hit with cursor still pending."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        always_more = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": "cur-x"},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: always_more
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="max_pages=3"):
+                list(
+                    mac.iter_scored_rows(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                        max_pages=3,
+                    )
+                )

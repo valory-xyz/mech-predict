@@ -200,6 +200,7 @@ def iter_scored_rows(
     url = f"{base}/v1/data/scored-rows"
     pages = 0
     total_rows = 0
+    cursor: str | None = None
     while pages < max_pages:
         pages += 1
         try:
@@ -233,6 +234,13 @@ def iter_scored_rows(
         # Replace since with a cursor param on the next request.
         params.pop("since", None)
         params["cursor"] = cursor
+    else:
+        if cursor:
+            raise MechAnalyticsError(
+                f"mech-analytics scored-rows paginator hit max_pages={max_pages} "
+                f"with cursor still pending; likely a cursor cycle or "
+                f"unexpectedly large window (fetched {total_rows} rows so far)"
+            )
 
     log.info(
         "mech-analytics: fetched %d rows across %d page(s) since=%s",

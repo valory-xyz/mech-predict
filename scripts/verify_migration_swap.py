@@ -230,8 +230,14 @@ def _report_final_outcome_diff(
     mp_rows: list[dict[str, Any]],
     lake_rows: list[dict[str, Any]],
     overlap: set[str],
-) -> None:
-    """Class 2: ``final_outcome`` diff on rows resolved on both sides."""
+) -> tuple[int, int]:
+    """Class 2: ``final_outcome`` diff on rows resolved on both sides.
+
+    :param mp_rows: mech-predict rows.
+    :param lake_rows: lake / mech-analytics rows.
+    :param overlap: request_id set present on both sides.
+    :return: ``(resolved_both, outcome_mismatch)`` for gate threshold checks.
+    """
     mp_by_id = {r["request_id"]: r for r in mp_rows if r.get("request_id")}
     lake_by_id = {r["request_id"]: r for r in lake_rows if r.get("request_id")}
 
@@ -277,9 +283,10 @@ def _report_final_outcome_diff(
         for s in mismatch_samples:
             print(
                 f"      request_id={s['request_id'][:16]}... "
-                f"mp={s['mp_final_outcome']} lake={s['lake_resolved_outcome']} "
+                f"mp={s['mp_final_outcome']} lake={s['lake_final_outcome']} "
                 f"market={s['market_id']}"
             )
+    return resolved_both, outcome_mismatch
 
 
 def _report_market_id_diff(
@@ -566,6 +573,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=MINIMUM_ROWS_PER_SIDE,
         help=f"min rows per side to accept comparison (default {MINIMUM_ROWS_PER_SIDE})",
     )
+    p.add_argument(
+        "--min-overlap-fraction",
+        type=float,
+        default=0.90,
+        help="min |intersection| / min(|mp|, |lake|) to accept parity (default 0.90)",
+    )
+    p.add_argument(
+        "--max-outcome-mismatch-fraction",
+        type=float,
+        default=0.02,
+        help="max outcome_mismatch / resolved_both to accept parity (default 0.02)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -592,7 +611,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run all reconciliation checks and print the report to stdout.
 
     :param argv: optional CLI argument override; defaults to ``sys.argv``.
-    :return: 0 on success, 2 if the min-row guard tripped.
+    :return: 0 on parity within thresholds; 2 on min-row guard trip;
+        3 on divergence above --min-overlap-fraction /
+        --max-outcome-mismatch-fraction.
     """
     args = _parse_args(argv)
     logging.basicConfig(
@@ -627,11 +648,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"mech-predict rows: {len(mp_rows)}   " f"lake rows: {len(lake_rows)}")
 
     intersection, _only_mp, _only_lake = _report_row_set_overlap(mp_rows, lake_rows)
-    _report_final_outcome_diff(mp_rows, lake_rows, intersection)
+    resolved_both, outcome_mismatch = _report_final_outcome_diff(
+        mp_rows, lake_rows, intersection
+    )
     _report_market_id_diff(mp_rows, lake_rows, intersection)
     _report_dedup_granularity(mp_rows, deliver_to_request_by_platform)
     _report_null_provenance(lake_rows)
     _report_per_tool_aggregate(mp_rows, lake_rows, intersection)
+
+    print()
+    _section("Divergence gate")
+    overlap_denom = min(len(mp_rows), len(lake_rows))
+    overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
+    mismatch_fraction = (
+        outcome_mismatch / resolved_both if resolved_both else 0.0
+    )
+    print(
+        f"  overlap: {len(intersection)} / {overlap_denom} = "
+        f"{overlap_fraction:.4f}  (threshold >= {args.min_overlap_fraction})"
+    )
+    print(
+        f"  outcome mismatch: {outcome_mismatch} / {resolved_both} = "
+        f"{mismatch_fraction:.4f}  (threshold <= {args.max_outcome_mismatch_fraction})"
+    )
+    failures: list[str] = []
+    if overlap_fraction < args.min_overlap_fraction:
+        failures.append(
+            f"overlap_fraction {overlap_fraction:.4f} < "
+            f"min_overlap_fraction {args.min_overlap_fraction}"
+        )
+    if mismatch_fraction > args.max_outcome_mismatch_fraction:
+        failures.append(
+            f"outcome_mismatch_fraction {mismatch_fraction:.4f} > "
+            f"max_outcome_mismatch_fraction {args.max_outcome_mismatch_fraction}"
+        )
+    if failures:
+        print()
+        print("FAIL: divergence exceeds thresholds:")
+        for reason in failures:
+            print(f"  - {reason}")
+        return 3
+    print()
+    print("PASS: divergence within thresholds")
     return 0
 
 

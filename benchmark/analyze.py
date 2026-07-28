@@ -67,6 +67,31 @@ PLATFORM_LABELS: Mapping[str, str] = MappingProxyType(
 # from one source of truth (see .github/workflows/benchmark_flywheel.yaml).
 ROLLING_WINDOW_DAYS = int(os.environ.get("BENCHMARK_ROLLING_WINDOW_DAYS", "7"))
 
+# Early in a new UTC month the mech-analytics "since start of current
+# month" window can legitimately have zero resolved rows (markets take
+# 24-72h to resolve). Suppress the fail-loud empty-window check on days
+# 1..N of the month when since was defaulted, keeping it live for the
+# rest of the month where empty means something is wrong upstream.
+_EARLY_MONTH_DAYS = 3
+
+
+def _allow_empty_main_scores(since_defaulted: bool, utc_day: int) -> bool:
+    """Whether to suppress the fail-loud empty-window check on the main scores.
+
+    The main-scores window in self-contained mode defaults to
+    ``[start of current UTC month, now)``. At the 02:30 UTC nightly on
+    the 1st of the month that's only ~2.5h of resolved rows,
+    near-certainly zero because markets take 24-72h to resolve. Return
+    ``True`` in that early-month case so the nightly doesn't crash on
+    a calendar-predictable empty window. Only applies when ``since``
+    was defaulted (an explicit ``--since`` caller owns the semantic).
+
+    :param since_defaulted: True when the caller left ``--since`` unset.
+    :param utc_day: current day of the month in UTC (1..31).
+    :return: True to pass ``allow_empty=True`` to the main-scores build.
+    """
+    return since_defaulted and utc_day <= _EARLY_MONTH_DAYS
+
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
 BSS_HARMFUL_THRESHOLD = 0.0
@@ -3080,11 +3105,15 @@ def main() -> None:
         # and rebuild each dict in-memory from mech-analytics rows.
         # Tournament stays file-based because mech-analytics has no
         # tournament partition.
+        since_defaulted = args.since is None
         since = args.since or _start_of_current_month_utc()
         until = args.until
         now = datetime.now(timezone.utc)
         window = timedelta(days=ROLLING_WINDOW_DAYS)
-        scores = _build_scores_from_mech_analytics(platform, since, until)
+        allow_empty_scores = _allow_empty_main_scores(since_defaulted, now.day)
+        scores = _build_scores_from_mech_analytics(
+            platform, since, until, allow_empty=allow_empty_scores
+        )
         # Rolling windows are allowed to be empty (recent activity gap
         # is legitimate); the main scores window is not (empty means the
         # nightly job would silently render a plausible all-N/A report).

@@ -3338,6 +3338,38 @@ def _sample_row(**overrides: Any) -> dict[str, Any]:
     return row
 
 
+class TestAllowEmptyMainScores:
+    """Early-month calendar guard on the main-scores empty check.
+
+    The mech-analytics main window defaults to ``[start of current UTC
+    month, now)``. On the 1st of the month that's a few hours of
+    resolved rows, near-certainly zero, and the fail-loud check would
+    crash the nightly. The guard opens the empty-allowance only on
+    days 1..N when ``--since`` was defaulted.
+    """
+
+    @pytest.mark.parametrize("day", [1, 2, 3])
+    def test_early_month_with_defaulted_since_allows_empty(self, day: int) -> None:
+        """Day 1..N with defaulted --since suppresses the empty-window fail."""
+        from benchmark import analyze
+
+        assert analyze._allow_empty_main_scores(since_defaulted=True, utc_day=day)
+
+    @pytest.mark.parametrize("day", [4, 5, 15, 28, 31])
+    def test_later_month_with_defaulted_since_fails_loud(self, day: int) -> None:
+        """Day 4+ keeps the fail-loud behavior even with defaulted --since."""
+        from benchmark import analyze
+
+        assert not analyze._allow_empty_main_scores(since_defaulted=True, utc_day=day)
+
+    @pytest.mark.parametrize("day", [1, 15, 31])
+    def test_explicit_since_never_suppresses(self, day: int) -> None:
+        """An explicit --since caller owns the semantic, no calendar-based override."""
+        from benchmark import analyze
+
+        assert not analyze._allow_empty_main_scores(since_defaulted=False, utc_day=day)
+
+
 class TestFleetPlusFlagExits:
     """--fleet is not supported alongside USE_MECH_ANALYTICS_ROWS."""
 

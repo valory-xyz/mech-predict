@@ -144,8 +144,14 @@ jobs:
       # --max-shard-age-days bounds the scan so legacy/unhealable shards are
       # not re-globbed and re-queried forever as logs/ grows.
       # continue-on-error: a subgraph failure must not kill the flywheel.
+      # Flag gate: with USE_MECH_ANALYTICS_ROWS=true the subgraph path
+      # is being deprecated and the backfill has nothing to repair
+      # (logs/ isn't being written). Running it anyway can flip
+      # backfill_error=true against degrading subgraphs, which cascades
+      # into the wipe step below deleting scores_history.jsonl.
       - name: Backfill null tool responses (self-healing)
         id: backfill
+        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         continue-on-error: true
         run: python -m benchmark.datasets.backfill_responses --max-shard-age-days 120
 
@@ -185,13 +191,23 @@ jobs:
       # always sets .outcome even under continue-on-error, so gating on it
       # too means a crash after partial repairs still forces the rebuild
       # rather than leaving the scores permanently desynced.
+      # Flag gate: when USE_MECH_ANALYTICS_ROWS=true, preserve
+      # scores_history.jsonl. The mech-analytics rebuild path only fetches
+      # a trailing window and cannot repopulate historical snapshots on
+      # its own; deleting history here would silently lose prior months'
+      # trend rows. The rebuild path unlinks scores.json itself when it
+      # needs a fresh accumulator, so wiping scores.json + fetch state
+      # from CI on the flag-on path is redundant but harmless. History
+      # is the only line we must not cross.
       - name: Clear cached scores (force rebuild)
         if: github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure'
         run: |
           rm -f benchmark/results/scores.json \
-                benchmark/results/scores_history.jsonl \
                 benchmark/results/scored_row_ids.json \
                 benchmark/datasets/.fetch_state.json
+          if [ "${USE_MECH_ANALYTICS_ROWS}" != "true" ]; then
+            rm -f benchmark/results/scores_history.jsonl
+          fi
 
       # Fetch writes daily log file + calls scorer.update() inline (fast path).
       # On force_rebuild, --no-score disables the inline scoring so the

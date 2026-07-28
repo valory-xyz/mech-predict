@@ -3401,6 +3401,108 @@ class TestRebuildFromMechAnalytics:
         )
         assert result["total_rows"] == 1
 
+    def test_stale_month_snapshotted_to_history_before_wipe(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A prior-month scores.json is snapshotted to history before rebuild.
+
+        Without this pre-wipe snapshot, monthly trend rows freeze at the
+        last pre-flag month once the flag is on: ``_accumulate_and_write``
+        only snapshots when resuming existing scores.json, but the
+        rebuild path unlinks that file before calling it.
+        """
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        # Seed a scores.json belonging to a month != today's. Round-trip
+        # through _accumulate_and_write to get the shape _load_scores_for_resume
+        # will accept.
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        today_month = _dt.now(_tz.utc).strftime("%Y-%m")
+        stale_month = "2025-01" if today_month != "2025-01" else "2024-12"
+        stale_scores = {
+            "current_month": stale_month,
+            "generated_at": "",
+            "overall": {
+                "n": 42, "valid_n": 42, "brier_sum": 8.4,
+                "correct_count": 30, "n_directional": 42,
+                "no_signal_count": 0, "sharpness_sum": 0.0,
+                "outcome_yes_count": 20, "log_loss_sum": 0.0,
+                "edge_sum": 0.0, "edge_n": 0, "edge_positive_count": 0,
+            },
+            "by_tool": {}, "by_platform": {}, "by_category": {},
+            "by_horizon": {}, "by_tool_platform": {}, "by_tool_category": {},
+            "by_category_platform": {}, "by_tool_category_platform": {},
+            "by_tool_version": {}, "by_tool_version_mode": {},
+            "by_config": {}, "by_difficulty": {}, "by_liquidity": {},
+            "by_platform_difficulty": {}, "by_platform_liquidity": {},
+            "monthly": [], "calibration": [],
+            "parse_status_counts": {}, "latency_reservoir_ms": [],
+            "worst_10": [], "best_10": [],
+        }
+        scores_path.write_text(json.dumps(stale_scores))
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+
+        history_lines = history_path.read_text().splitlines()
+        # Seed row + stale-month snapshot.
+        assert len(history_lines) == 2
+        snapshot = json.loads(history_lines[-1])
+        assert snapshot["month"] == stale_month
+        assert snapshot["overall"]["n"] == 42
+
+    def test_no_snapshot_when_scores_belongs_to_current_month(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No history append when the pre-wipe accumulator is already this month."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        current_month = _dt.now(_tz.utc).strftime("%Y-%m")
+        current_scores = {
+            "current_month": current_month,
+            "generated_at": "",
+            "overall": {
+                "n": 5, "valid_n": 5, "brier_sum": 1.0,
+                "correct_count": 3, "n_directional": 5,
+                "no_signal_count": 0, "sharpness_sum": 0.0,
+                "outcome_yes_count": 3, "log_loss_sum": 0.0,
+                "edge_sum": 0.0, "edge_n": 0, "edge_positive_count": 0,
+            },
+            "by_tool": {}, "by_platform": {}, "by_category": {},
+            "by_horizon": {}, "by_tool_platform": {}, "by_tool_category": {},
+            "by_category_platform": {}, "by_tool_category_platform": {},
+            "by_tool_version": {}, "by_tool_version_mode": {},
+            "by_config": {}, "by_difficulty": {}, "by_liquidity": {},
+            "by_platform_difficulty": {}, "by_platform_liquidity": {},
+            "monthly": [], "calibration": [],
+            "parse_status_counts": {}, "latency_reservoir_ms": [],
+            "worst_10": [], "best_10": [],
+        }
+        scores_path.write_text(json.dumps(current_scores))
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        # Only the seeded starter line.
+        assert len(history_path.read_text().splitlines()) == 1
+
     def test_tournament_scores_untouched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

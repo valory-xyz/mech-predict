@@ -1707,6 +1707,23 @@ def rebuild_from_mech_analytics(
     # dedup file is owned by the legacy ``--update`` incremental path
     # and is neither read nor written here.
 
+    # Month-boundary snapshot before the wipe. _accumulate_and_write
+    # only snapshots the prior month when it can *resume* an existing
+    # scores.json — but we unlink scores.json below to force a fresh
+    # accumulator per rebuild, so that branch never fires from this
+    # path. Without this explicit pre-wipe snapshot the monthly trend
+    # rows freeze at the last pre-flag month once the flag is on, and
+    # every subsequent month silently vanishes from history.
+    today_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    try:
+        stale = _load_scores_for_resume(scores_path)
+    except (KeyError, TypeError):
+        # Malformed or partial scores.json (missing fields, wrong shape).
+        # Not worth snapshotting; the wipe below handles it.
+        stale = None
+    if stale is not None and stale.get("current_month") != today_month:
+        _snapshot_month(stale, history_path)
+
     # A "rebuild" must start from _empty_scores, not silently merge into
     # an existing accumulator. _accumulate_and_write resumes when the
     # current_month matches, so unlink the aggregate files up front to

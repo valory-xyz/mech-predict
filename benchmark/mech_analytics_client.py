@@ -165,6 +165,13 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         "latency_s": latency_s,
         "requested_at": api_row.get("requested_at"),
         "delivered_at": api_row.get("delivered_at"),
+        # ``predicted_at`` alias so consumers that bucket rows by
+        # prediction time (``rebuild_from_mech_analytics`` month
+        # attribution) work against mech-analytics rows without an
+        # extra mapping layer. Delivery time matches how
+        # ``fetch_production`` stamps ``predicted_at`` on legacy log
+        # rows; fall back to ``requested_at`` when delivery is missing.
+        "predicted_at": api_row.get("delivered_at") or api_row.get("requested_at"),
         # Fields the endpoint doesn't carry today — left None so the
         # accumulator uses its own defaults ("unknown" / "production_replay").
         # See PR #11 on mech-analytics for the grouping-dimension sign-off.

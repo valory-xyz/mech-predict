@@ -1134,6 +1134,53 @@ def load_history(history_path: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def _upsert_month_snapshot(
+    scores: dict[str, Any],
+    month: str,
+    history_path: Path,
+) -> None:
+    """Replace the snapshot row for ``month`` in-place, preserving other months.
+
+    The mech-analytics-fed rebuild fetches a widened trailing window
+    each night and re-derives every month in it from the current row
+    set. ``_snapshot_month`` unconditionally appends, so a naive port
+    would either double-write months on every rebuild or need to unlink
+    ``scores_history.jsonl`` (blowing away months older than the fetch
+    window). Upserting by ``month`` keeps older months untouched.
+
+    :param scores: accumulator state for ``month`` (will be finalized).
+    :param month: ``YYYY-MM`` key to replace.
+    :param history_path: path to ``scores_history.jsonl``.
+    """
+    finalized = _finalize_scores(scores)
+    new_entry = {
+        "month": month,
+        "overall": finalized["overall"],
+        "by_tool": finalized["by_tool"],
+        "by_platform": finalized["by_platform"],
+        "calibration": finalized["calibration"],
+    }
+    kept: list[dict[str, Any]] = []
+    if history_path.exists():
+        with open(history_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("month") != month:
+                    kept.append(entry)
+    kept.append(new_entry)
+    kept.sort(key=lambda e: e.get("month") or "")
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(history_path, "w", encoding="utf-8") as f:
+        for entry in kept:
+            f.write(json.dumps(entry) + "\n")
+
+
 def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     """Load scores.json and reconstruct the raw accumulator state.
 
@@ -1700,6 +1747,31 @@ def rebuild(
 # ---------------------------------------------------------------------------
 
 
+def _resolution_lag_days() -> int:
+    """Days of extra trailing window to fetch beyond ``since``.
+
+    The endpoint filters ``since`` / ``until`` on ``requested_at`` (the
+    mech request timestamp, source: ``mech-analytics`` handler docstring
+    ``etl/api/routes/data.py``). Predictions late in month M that only
+    resolve early in month M+1 fail the ``resolved=True`` filter on M's
+    last run and fall out of window on M+1's first run. Fetching a lag
+    tail past ``since`` and re-deriving every month it covers plugs
+    that hole.
+
+    Overridable via ``MECH_ANALYTICS_RESOLUTION_LAG_DAYS`` for staging
+    smoke tests that want a shorter window. Default 90 days covers Omen
+    / Polymarket's tail resolution latency comfortably.
+
+    :return: lag window in days (positive integer; clamped to >=0).
+    """
+    raw = os.getenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 90
+    return max(value, 0)
+
+
 def rebuild_from_mech_analytics(
     since: datetime,
     until: datetime | None = None,
@@ -1720,7 +1792,20 @@ def rebuild_from_mech_analytics(
     Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer;
     default off so nothing changes until we flip.
 
-    :param since: timezone-aware datetime, inclusive lower bound.
+    **Timestamp windowing.** The endpoint applies ``since`` / ``until``
+    to ``requested_at``. Rows are bucketed into months here by the same
+    ``requested_at`` field so per-month attribution matches what the
+    endpoint served. To close the resolution-lag hole (predictions late
+    in month M that resolve early in M+1), the effective fetch window
+    is ``[since - _resolution_lag_days(), until]`` and every prior
+    month covered by that window is re-derived from the current
+    response and upserted into ``scores_history.jsonl`` on each run.
+    Only ``since``'s calendar month lands in ``scores.json`` (the live
+    accumulator). Months older than the lag window are preserved.
+
+    :param since: timezone-aware datetime for the current-month anchor.
+        The fetch reaches back beyond this by
+        ``_resolution_lag_days()`` internally.
     :param until: timezone-aware datetime, exclusive upper bound. When
         ``None``, the endpoint returns up to now.
     :param scores_path: output path for the production ``scores.json``.
@@ -1775,9 +1860,19 @@ def rebuild_from_mech_analytics(
             "from an empty history."
         )
 
+    lag_days = _resolution_lag_days()
+    effective_since = since - timedelta(days=lag_days)
+    current_month = since.strftime("%Y-%m")
+
+    # Bucket rows by ``requested_at`` month so late-resolving predictions
+    # from prior months land back in the month they were requested in,
+    # not silently in the current-month accumulator (which is what a
+    # single flat pass into ``_accumulate_and_write`` would do).
     all_rows: list[dict[str, Any]] = []
+    prior_month_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    current_month_rows: list[dict[str, Any]] = []
     for row in iter_scored_rows(
-        since=since, until=until, chain_id=chain_id, resolved=True
+        since=effective_since, until=until, chain_id=chain_id, resolved=True
     ):
         # ``category`` is derived locally from ``question_text`` — the
         # endpoint carries the title but not the classified category, and
@@ -1792,33 +1887,28 @@ def rebuild_from_mech_analytics(
         row["row_id"] = row.get("row_id") or request_id
         all_rows.append(row)
 
-    # No dedup filter on this path. ``iter_scored_rows`` returns the full
-    # ``since``..``until`` window every rebuild, so filtering against a
-    # persisted ``scored_row_ids.json`` would drop rows that legitimately
-    # appear in later runs' windows too. Combined with the
-    # ``scores_path.unlink`` below (fresh accumulator per rebuild), the
-    # earlier "read the dedup set, skip seen rows, save the union" logic
-    # collapsed the accumulator to a one-day slice from the second night
-    # onward. Full-window refetch is idempotent by construction; the
-    # dedup file is owned by the legacy ``--update`` incremental path
-    # and is neither read nor written here.
+        requested_at = row.get("requested_at") or ""
+        row_month = requested_at[:7] if requested_at else current_month
+        if row_month == current_month:
+            current_month_rows.append(row)
+        elif row_month < current_month:
+            prior_month_rows[row_month].append(row)
+        # Rows dated after the current-month anchor (clock skew or ingest
+        # of pre-scheduled markets) fold into the current bucket. Losing
+        # them would be worse than accepting a small dating drift.
+        else:
+            current_month_rows.append(row)
 
-    # Month-boundary snapshot before the wipe. _accumulate_and_write
-    # only snapshots the prior month when it can *resume* an existing
-    # scores.json — but we unlink scores.json below to force a fresh
-    # accumulator per rebuild, so that branch never fires from this
-    # path. Without this explicit pre-wipe snapshot the monthly trend
-    # rows freeze at the last pre-flag month once the flag is on, and
-    # every subsequent month silently vanishes from history.
-    today_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    try:
-        stale = _load_scores_for_resume(scores_path)
-    except (KeyError, TypeError):
-        # Malformed or partial scores.json (missing fields, wrong shape).
-        # Not worth snapshotting; the wipe below handles it.
-        stale = None
-    if stale is not None and stale.get("current_month") != today_month:
-        _snapshot_month(stale, history_path)
+    # No dedup filter on this path. ``iter_scored_rows`` returns the full
+    # window every rebuild, so filtering against a persisted
+    # ``scored_row_ids.json`` would drop rows that legitimately appear in
+    # later runs' windows too. Combined with the ``scores_path.unlink``
+    # below (fresh accumulator per rebuild), the earlier "read the dedup
+    # set, skip seen rows, save the union" logic collapsed the
+    # accumulator to a one-day slice from the second night onward.
+    # Full-window refetch is idempotent by construction; the dedup file
+    # is owned by the legacy ``--update`` incremental path and is
+    # neither read nor written here.
 
     # A "rebuild" must start from _empty_scores, not silently merge into
     # an existing accumulator. _accumulate_and_write resumes when the
@@ -1835,14 +1925,16 @@ def rebuild_from_mech_analytics(
     # and the subsequent workflow ``--update`` step would merge only
     # that run's fresh tournament rows onto the emptied file.
     prod_result = _accumulate_and_write(
-        all_rows,
+        current_month_rows,
         scores_path,
         history_path,
-        emit_history=True,
+        emit_history=False,
         source=SOURCE_MECH_ANALYTICS,
     )
 
-    for platform, plat_rows in _partition_rows_by_platform(all_rows).items():
+    for platform, plat_rows in _partition_rows_by_platform(
+        current_month_rows
+    ).items():
         _accumulate_and_write(
             plat_rows,
             _derive_platform_path(scores_path, platform),
@@ -1850,6 +1942,17 @@ def rebuild_from_mech_analytics(
             emit_history=False,
             source=SOURCE_MECH_ANALYTICS,
         )
+
+    # Re-derive every prior month covered by the widened fetch window
+    # from that month's row bucket and upsert the snapshot into
+    # scores_history.jsonl. Months older than the lag window are left
+    # untouched — the upsert only replaces rows for months present in
+    # the current response.
+    for month in sorted(prior_month_rows):
+        month_scores = _empty_scores(month)
+        for row in prior_month_rows[month]:
+            accumulate_row(month_scores, row)
+        _upsert_month_snapshot(month_scores, month, history_path)
 
     return prod_result
 

@@ -8,6 +8,20 @@ from the marketplace subgraph + IPFS pull to mech-analytics's
 run until the flag is flipped in the workflow inputs or via the repo
 variable.
 
+## Timestamp semantics
+
+The endpoint filters `since` / `until` on `requested_at`. Rows carry
+`predicted_at` derived locally from `delivered_at` (falls back to
+`requested_at`), which matches the legacy log-row semantic.
+
+The rebuild fetches `[start_of_month - MECH_ANALYTICS_RESOLUTION_LAG_DAYS,
+until]` and re-derives every prior month in the window into
+`scores_history.jsonl` via a per-month upsert. Default lag is 90 days;
+override with `MECH_ANALYTICS_RESOLUTION_LAG_DAYS`. Without the lag the
+month-to-date window plus `resolved=True` filter would drop every
+prediction requested in month M that only resolved in M+1 (excluded on
+M's last run because still unresolved, out of window from M+1's first run).
+
 ## Steps skipped when the flag is on
 
 - Backfill (`benchmark.datasets.backfill_responses`) — the flag-on path

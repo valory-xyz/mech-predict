@@ -3481,107 +3481,121 @@ class TestRebuildFromMechAnalytics:
         )
         assert result["total_rows"] == 1
 
-    def test_stale_month_snapshotted_to_history_before_wipe(
+    def test_fetch_widened_by_resolution_lag(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A prior-month scores.json is snapshotted to history before rebuild.
+        """iter_scored_rows is called with since - lag_days, not the raw anchor.
 
-        Without this pre-wipe snapshot, monthly trend rows freeze at the
-        last pre-flag month once the flag is on: ``_accumulate_and_write``
-        only snapshots when resuming existing scores.json, but the
-        rebuild path unlinks that file before calling it.
+        Predictions requested late in month M that only resolve in early
+        M+1 fail the ``resolved=True`` filter on M's last run and fall out
+        of the ``[start_of_month, now)`` window on M+1's first run. The
+        widened fetch closes that gap. Regression against a future edit
+        that passes ``since`` straight through.
         """
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
         self._write_history(history_path)
-        # Seed a scores.json belonging to a month != today's. Round-trip
-        # through _accumulate_and_write to get the shape _load_scores_for_resume
-        # will accept.
-        from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
-        today_month = _dt.now(_tz.utc).strftime("%Y-%m")
-        stale_month = "2025-01" if today_month != "2025-01" else "2024-12"
-        stale_scores = {
-            "current_month": stale_month,
-            "generated_at": "",
-            "overall": {
-                "n": 42, "valid_n": 42, "brier_sum": 8.4,
-                "correct_count": 30, "n_directional": 42,
-                "no_signal_count": 0, "sharpness_sum": 0.0,
-                "outcome_yes_count": 20, "log_loss_sum": 0.0,
-                "edge_sum": 0.0, "edge_n": 0, "edge_positive_count": 0,
-            },
-            "by_tool": {}, "by_platform": {}, "by_category": {},
-            "by_horizon": {}, "by_tool_platform": {}, "by_tool_category": {},
-            "by_category_platform": {}, "by_tool_category_platform": {},
-            "by_tool_version": {}, "by_tool_version_mode": {},
-            "by_config": {}, "by_difficulty": {}, "by_liquidity": {},
-            "by_platform_difficulty": {}, "by_platform_liquidity": {},
-            "monthly": [], "calibration": [],
-            "parse_status_counts": {}, "latency_reservoir_ms": [],
-            "worst_10": [], "best_10": [],
-        }
-        scores_path.write_text(json.dumps(stale_scores))
-        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        captured = _patch_iter_and_classifier(monkeypatch, [])
 
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
         rebuild_from_mech_analytics(
-            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            since=since,
             scores_path=scores_path,
             history_path=history_path,
         )
+        assert len(captured) == 1
+        assert captured[0]["since"] == since - timedelta(days=45)
+        assert captured[0].get("resolved") is True
 
-        history_lines = history_path.read_text().splitlines()
-        # Seed row + stale-month snapshot.
-        assert len(history_lines) == 2
-        snapshot = json.loads(history_lines[-1])
-        assert snapshot["month"] == stale_month
-        assert snapshot["overall"]["n"] == 42
-
-    def test_no_snapshot_when_scores_belongs_to_current_month(
+    def test_prior_month_rows_upserted_into_history(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """No history append when the pre-wipe accumulator is already this month."""
+        """Rows dated in prior months land in history, not the live accumulator.
+
+        Attribution key is ``requested_at[:7]``. A late-resolving M-1
+        prediction returned by the widened fetch belongs in month M-1's
+        snapshot, not in month M's live scores.json. The old flat-pass
+        design silently rolled every fetched row into the current
+        accumulator.
+        """
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
         self._write_history(history_path)
-        from datetime import datetime as _dt
-        from datetime import timezone as _tz
 
-        current_month = _dt.now(_tz.utc).strftime("%Y-%m")
-        current_scores = {
-            "current_month": current_month,
-            "generated_at": "",
-            "overall": {
-                "n": 5, "valid_n": 5, "brier_sum": 1.0,
-                "correct_count": 3, "n_directional": 5,
-                "no_signal_count": 0, "sharpness_sum": 0.0,
-                "outcome_yes_count": 3, "log_loss_sum": 0.0,
-                "edge_sum": 0.0, "edge_n": 0, "edge_positive_count": 0,
-            },
-            "by_tool": {}, "by_platform": {}, "by_category": {},
-            "by_horizon": {}, "by_tool_platform": {}, "by_tool_category": {},
-            "by_category_platform": {}, "by_tool_category_platform": {},
-            "by_tool_version": {}, "by_tool_version_mode": {},
-            "by_config": {}, "by_difficulty": {}, "by_liquidity": {},
-            "by_platform_difficulty": {}, "by_platform_liquidity": {},
-            "monthly": [], "calibration": [],
-            "parse_status_counts": {}, "latency_reservoir_ms": [],
-            "worst_10": [], "best_10": [],
-        }
-        scores_path.write_text(json.dumps(current_scores))
-        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [
+                _ma_row(request_id="cur1", requested_at="2026-07-05T00:00:00Z"),
+                _ma_row(request_id="jun1", requested_at="2026-06-28T00:00:00Z"),
+                _ma_row(request_id="jun2", requested_at="2026-06-29T00:00:00Z"),
+            ],
+        )
+
         rebuild_from_mech_analytics(
             since=datetime(2026, 7, 1, tzinfo=timezone.utc),
             scores_path=scores_path,
             history_path=history_path,
         )
-        # Only the seeded starter line.
-        assert len(history_path.read_text().splitlines()) == 1
+
+        # Live accumulator only counts the July row.
+        saved = json.loads(scores_path.read_text())
+        assert saved["overall"]["n"] == 1
+
+        # June rows became a single upserted snapshot.
+        june_entries = [
+            json.loads(line)
+            for line in history_path.read_text().splitlines()
+            if line.strip() and json.loads(line).get("month") == "2026-06"
+        ]
+        assert len(june_entries) == 1
+        assert june_entries[0]["overall"]["n"] == 2
+
+    def test_history_rows_outside_lag_window_preserved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Pre-existing history rows for months outside the fetch window survive.
+
+        The upsert only touches months present in the current response.
+        A future edit that unlinks ``scores_history.jsonl`` (as
+        ``_rebuild_single_mode`` does) would silently drop everything
+        older than ``lag_days`` on the first rebuild — this pins the
+        upsert-not-truncate semantics.
+        """
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        # Seed two months of history that will not be re-derived: the
+        # widened fetch only reaches back lag_days from July.
+        history_path.write_text(
+            '{"month": "2025-01", "overall": {"n": 500}}\n'
+            '{"month": "2025-12", "overall": {"n": 700}}\n'
+        )
+
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [_ma_row(request_id="cur", requested_at="2026-07-02T00:00:00Z")],
+        )
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+
+        months = [
+            json.loads(line)["month"]
+            for line in history_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert "2025-01" in months
+        assert "2025-12" in months
 
     def test_tournament_scores_untouched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

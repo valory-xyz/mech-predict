@@ -221,6 +221,13 @@ def _build_scores_from_mech_analytics(
     output matches the shape ``load_scores`` returns today, so every
     ``section_*()`` renderer keeps working without a change.
 
+    Timestamp windowing: the endpoint filters ``since`` / ``until`` on
+    ``requested_at``. Every rebuild fetches its own window fresh (no
+    write-once semantics), so late resolutions of in-window predictions
+    fold into the accumulator naturally on the next report run. The
+    write-once hole exists on the persistent-history side and is
+    handled by ``scorer.rebuild_from_mech_analytics``'s widened fetch.
+
     :param platform: ``"omen"`` or ``"polymarket"``. Passed to the
         endpoint's ``platform`` filter and to ``classify_category`` for
         the local category derivation.

@@ -243,7 +243,6 @@ def iter_scored_rows(
         (``MECH_ANALYTICS_URL``) is missing, or the paginator hits ``max_pages``.
     """
     base = _base_url()
-    session = requests.Session()
 
     params: dict[str, Any] = {
         "since": _to_iso_z(since),
@@ -262,50 +261,65 @@ def iter_scored_rows(
     pages = 0
     total_rows = 0
     cursor: str | None = None
-    while pages < max_pages:
-        pages += 1
-        try:
-            resp = session.get(url, params=params, timeout=timeout_s)
-            resp.raise_for_status()
-            payload = resp.json()
-        except requests.RequestException as exc:
-            raise MechAnalyticsError(
-                f"mech-analytics scored-rows fetch failed (page {pages}): {exc}"
-            ) from exc
+    # Context-managed session so a caller that abandons iteration (break
+    # / exception in the consuming loop) doesn't leak the connection
+    # pool. Retry adapter absorbs transient 5xx / connection resets so
+    # a single blip on page N out of thousands doesn't abort the pull.
+    from requests.adapters import HTTPAdapter  # pylint: disable=import-outside-toplevel
+    from urllib3.util.retry import Retry  # pylint: disable=import-outside-toplevel
 
-        if not isinstance(payload, dict):
-            raise MechAnalyticsError(
-                f"mech-analytics scored-rows page {pages}: "
-                f"payload is {type(payload).__name__}, expected dict"
-            )
-        if "rows" not in payload:
-            raise MechAnalyticsError(
-                f"mech-analytics scored-rows page {pages}: "
-                f"payload missing 'rows' key (got keys: {sorted(payload)})"
-            )
-        rows = payload["rows"]
-        if not isinstance(rows, list):
-            raise MechAnalyticsError(
-                f"mech-analytics scored-rows page {pages}: "
-                f"'rows' has unexpected type {type(rows).__name__}"
-            )
-        for api_row in rows:
-            yield _map_row(api_row)
-        total_rows += len(rows)
+    retry = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    with requests.Session() as session:
+        session.mount(base, HTTPAdapter(max_retries=retry))
+        while pages < max_pages:
+            pages += 1
+            try:
+                resp = session.get(url, params=params, timeout=timeout_s)
+                resp.raise_for_status()
+                payload = resp.json()
+            except requests.RequestException as exc:
+                raise MechAnalyticsError(
+                    f"mech-analytics scored-rows fetch failed (page {pages}): {exc}"
+                ) from exc
 
-        cursor = payload.get("next_cursor")
-        if not cursor:
-            break
-        # Replace since with a cursor param on the next request.
-        params.pop("since", None)
-        params["cursor"] = cursor
-    else:
-        if cursor:
-            raise MechAnalyticsError(
-                f"mech-analytics scored-rows paginator hit max_pages={max_pages} "
-                f"with cursor still pending; likely a cursor cycle or "
-                f"unexpectedly large window (fetched {total_rows} rows so far)"
-            )
+            if not isinstance(payload, dict):
+                raise MechAnalyticsError(
+                    f"mech-analytics scored-rows page {pages}: "
+                    f"payload is {type(payload).__name__}, expected dict"
+                )
+            if "rows" not in payload:
+                raise MechAnalyticsError(
+                    f"mech-analytics scored-rows page {pages}: "
+                    f"payload missing 'rows' key (got keys: {sorted(payload)})"
+                )
+            rows = payload["rows"]
+            if not isinstance(rows, list):
+                raise MechAnalyticsError(
+                    f"mech-analytics scored-rows page {pages}: "
+                    f"'rows' has unexpected type {type(rows).__name__}"
+                )
+            for api_row in rows:
+                yield _map_row(api_row)
+            total_rows += len(rows)
+
+            cursor = payload.get("next_cursor")
+            if not cursor:
+                break
+            # Replace since with a cursor param on the next request.
+            params.pop("since", None)
+            params["cursor"] = cursor
+        else:
+            if cursor:
+                raise MechAnalyticsError(
+                    f"mech-analytics scored-rows paginator hit max_pages={max_pages} "
+                    f"with cursor still pending; likely a cursor cycle or "
+                    f"unexpectedly large window (fetched {total_rows} rows so far)"
+                )
 
     log.info(
         "mech-analytics: fetched %d rows across %d page(s) since=%s",

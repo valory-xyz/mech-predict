@@ -133,6 +133,7 @@ def _start_of_current_month_utc() -> datetime:
     """Return first moment of the current UTC month (shared with scorer)."""
     # pylint: disable=import-outside-toplevel
     from benchmark.scoring_primitives import start_of_current_month_utc
+
     return start_of_current_month_utc()
 
 

@@ -121,7 +121,8 @@ def _pull_mech_predict_rows(
             pending_deliveries=[],
         )
         rows = [
-            r for r in rows
+            r
+            for r in rows
             if (ts := _row_ts(r, "predicted_at")) is not None and ts < until_ts
         ]
         all_rows.extend(rows)
@@ -665,9 +666,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _section("Divergence gate")
     overlap_denom = min(len(mp_rows), len(lake_rows))
     overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
-    mismatch_fraction = (
-        outcome_mismatch / resolved_both if resolved_both else 0.0
-    )
+    mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
     print(
         f"  overlap: {len(intersection)} / {overlap_denom} = "
         f"{overlap_fraction:.4f}  (threshold >= {args.min_overlap_fraction})"

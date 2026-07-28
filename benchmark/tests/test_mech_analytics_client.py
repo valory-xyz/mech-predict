@@ -380,6 +380,59 @@ class TestIterScoredRowsPaging:
             )
         assert not rows
 
+    def test_session_is_context_managed_and_closed(
+        self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
+    ) -> None:
+        """Session is entered as a context manager and closed after iteration."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        closed = {"n": 0}
+        real_session_init = mac.requests.Session.__init__
+
+        def _tracking_close(self: Any) -> None:
+            closed["n"] += 1
+
+        def _tracking_init(self: Any, *a: Any, **kw: Any) -> None:
+            real_session_init(self, *a, **kw)
+
+        monkeypatch.setattr(mac.requests.Session, "__init__", _tracking_init)
+        monkeypatch.setattr(mac.requests.Session, "close", _tracking_close)
+        monkeypatch.setattr(mac.requests.Session, "get", lambda *a, **kw: response)
+        list(mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+        assert closed["n"] >= 1
+
+    def test_retry_adapter_mounted_on_session(
+        self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
+    ) -> None:
+        """Retry adapter is mounted for 5xx / connection resets."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        mounted: list[tuple[str, Any]] = []
+        real_mount = mac.requests.Session.mount
+
+        def _tracking_mount(self: Any, prefix: str, adapter: Any) -> None:
+            mounted.append((prefix, adapter))
+            real_mount(self, prefix, adapter)
+
+        monkeypatch.setattr(mac.requests.Session, "mount", _tracking_mount)
+        monkeypatch.setattr(mac.requests.Session, "get", lambda *a, **kw: response)
+        list(mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+        # Session's __init__ mounts default HTTPAdapter for http:// and
+        # https://; skip past those to find the one iter_scored_rows adds.
+        our_mounts = [m for m in mounted if m[0].startswith("http://mech-analytics")]
+        assert our_mounts, "expected a retry-configured HTTPAdapter for the base URL"
+        retry = our_mounts[0][1].max_retries
+        assert retry.total == 3
+        assert 502 in retry.status_forcelist
+        assert 503 in retry.status_forcelist
+        assert 504 in retry.status_forcelist
+
     def test_max_pages_hit_with_cursor_pending_raises(
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:

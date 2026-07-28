@@ -2087,6 +2087,7 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
     if _use_mech_analytics_rows():
         # pylint: disable=import-outside-toplevel
         from benchmark.scoring_primitives import start_of_current_month_utc
+
         since = start_of_current_month_utc()
         print(f"Rebuilding scores from mech-analytics (since {since.isoformat()})")
         result = rebuild_from_mech_analytics(

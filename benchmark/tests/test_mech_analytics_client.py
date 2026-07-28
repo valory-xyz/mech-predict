@@ -213,12 +213,24 @@ class TestMapRowPredictionValidation:
         assert row["p_yes"] is None
         assert any("out-of-range" in r.message for r in caplog.records)
 
-    def test_out_of_range_market_prob_demotes(self, sample_api_row: dict) -> None:
-        """An out-of-range market_prob also demotes to malformed."""
+    def test_out_of_range_market_prob_nulls_field_without_demotion(
+        self, sample_api_row: dict
+    ) -> None:
+        """Bad market_prob nulls the field but keeps prediction_parse_status.
+
+        market_prob only feeds the edge-over-market metrics, which
+        already skip None via the ``market_prob is not None`` guard in
+        ``_accumulate_group``. Demoting to ``malformed`` would remove
+        the row from the headline metrics (Brier, log-loss, directional
+        accuracy, sharpness) even when p_yes/p_no are perfectly valid.
+        """
         sample_api_row["market_prob_at_prediction"] = -0.2
         row = mac._map_row(sample_api_row)
-        assert row["prediction_parse_status"] == "malformed"
+        assert row["prediction_parse_status"] == "valid"
         assert row["market_prob_at_prediction"] is None
+        # Headline fields unaffected by market_prob quality.
+        assert row["p_yes"] == 0.7
+        assert row["p_no"] == 0.3
 
     def test_already_malformed_stays_malformed(self, sample_api_row: dict) -> None:
         """Non-valid rows aren't re-graded (invariant only enforced on 'valid')."""

@@ -113,18 +113,24 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
     # a "valid" row, demote to "malformed" so accumulators skip it.
     p_yes, p_yes_ok = _validated_probability(api_row.get("p_yes"))
     p_no, p_no_ok = _validated_probability(api_row.get("p_no"))
-    market_prob, market_prob_ok = _validated_probability(
+    # Note: market_prob only feeds the edge-over-market metrics, which
+    # already skip None gracefully via a `market_prob is not None`
+    # guard in _accumulate_group. Do NOT let a bad market_prob demote
+    # prediction_parse_status — that would remove the row from valid_n /
+    # Brier / log-loss / directional accuracy / sharpness (the headline
+    # metrics), even when p_yes/p_no are fine. Just null the field and
+    # let the edge-metric guard handle it downstream.
+    market_prob, _market_prob_ok = _validated_probability(
         api_row.get("market_prob_at_prediction")
     )
     parse_status = api_row.get("prediction_parse_status")
-    if parse_status == "valid" and not (p_yes_ok and p_no_ok and market_prob_ok):
+    if parse_status == "valid" and not (p_yes_ok and p_no_ok):
         log.warning(
             "mech-analytics row %s tagged 'valid' but has out-of-range "
-            "p_yes=%r p_no=%r market_prob=%r; demoting to 'malformed'",
+            "p_yes=%r p_no=%r; demoting to 'malformed'",
             api_row.get("request_id"),
             api_row.get("p_yes"),
             api_row.get("p_no"),
-            api_row.get("market_prob_at_prediction"),
         )
         parse_status = "malformed"
 

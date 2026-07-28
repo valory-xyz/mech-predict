@@ -120,7 +120,10 @@ def _pull_mech_predict_rows(
             existing_ids=set(),
             pending_deliveries=[],
         )
-        rows = [r for r in rows if _row_ts(r, "predicted_at") < until_ts]
+        rows = [
+            r for r in rows
+            if (ts := _row_ts(r, "predicted_at")) is not None and ts < until_ts
+        ]
         all_rows.extend(rows)
 
         deliver_ids = [r["deliver_id"] for r in rows]
@@ -494,28 +497,23 @@ def _report_per_tool_aggregate(
 # --------------------------------------------------------------------------- #
 
 
-def _row_ts(row: dict[str, Any], field: str) -> int:
-    """Parse an ISO timestamp field from a row into unix seconds.
+def _row_ts(row: dict[str, Any], field: str) -> int | None:
+    """Parse an ISO timestamp field into unix seconds; None on missing/malformed.
 
-    Returns 0 on missing/malformed so the callsite's ``< until_ts``
-    filter drops the row without raising.
+    Callers must handle None explicitly — the previous sentinel of 0
+    always passed `< until_ts` comparisons and kept malformed rows.
+
+    :param row: dict row.
+    :param field: field name to parse.
+    :return: unix seconds, or None if the field is missing / unparseable.
     """
-    val = row.get(field)
-    if not val:
-        return 0
-    try:
-        return int(datetime.fromisoformat(val.replace("Z", "+00:00")).timestamp())
-    except (TypeError, ValueError):
-        return 0
+    # pylint: disable=import-outside-toplevel
+    from benchmark.mech_analytics_client import _parse_iso
 
-
-def _lake_outcome_to_bool(v: Any) -> bool | None:
-    if v is None:
+    parsed = _parse_iso(row.get(field))
+    if parsed is None:
         return None
-    try:
-        return bool(int(round(float(v))))
-    except (TypeError, ValueError):
-        return None
+    return int(parsed.timestamp())
 
 
 def _normalize_market_id(m: str) -> str:
@@ -527,13 +525,20 @@ def _normalize_market_id(m: str) -> str:
 
 
 def _mp_row_brier(row: dict[str, Any]) -> float | None:
-    """Compute Brier locally so we don't require the caller to score."""
+    """Compute Brier locally so we don't require the caller to score.
+
+    :param row: mech-predict row with p_yes + final_outcome.
+    :return: Brier score, or None when either field is missing / non-numeric.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import brier_score
+
     p_yes = row.get("p_yes")
     outcome = row.get("final_outcome")
     if p_yes is None or outcome is None:
         return None
     try:
-        return (float(p_yes) - (1.0 if outcome else 0.0)) ** 2
+        return brier_score(float(p_yes), bool(outcome))
     except (TypeError, ValueError):
         return None
 

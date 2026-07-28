@@ -1665,26 +1665,35 @@ def rebuild_from_mech_analytics(
         platform = row.get("platform")
         if question_text:
             row["category"] = classify_category(question_text, platform)
-        # Give every row a stable dedup key. ``request_id`` is unique on
-        # ``per_request_scores`` and satisfies the write-once contract the
-        # dedup set is built on.
-        if not row.get("row_id") and row.get("request_id"):
-            row["row_id"] = row["request_id"]
+        # Missing request_id would silently double-count the row on
+        # every re-run (no dedup key). Fail loud so the ingest problem
+        # shows up. Reuse the client's error type since this is data
+        # coming from that same source.
+        # pylint: disable=import-outside-toplevel
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        request_id = row.get("request_id")
+        if not request_id:
+            raise MechAnalyticsError(
+                f"mech-analytics row missing request_id: {row!r}"
+            )
+        row["row_id"] = row.get("row_id") or request_id
         all_rows.append(row)
 
     scored_ids = _load_dedup_ids(dedup_path)
     deduped_rows: list[dict[str, Any]] = []
     skipped = 0
     for row in all_rows:
-        row_id = row.get("row_id")
-        if not row_id:
-            deduped_rows.append(row)
-            continue
+        row_id = row["row_id"]  # guaranteed by the fail-loud above
         if row_id in scored_ids:
             skipped += 1
             continue
         deduped_rows.append(row)
-        scored_ids.add(row_id)
+        # Only add resolved rows to the dedup set. An unresolved row
+        # (final_outcome=None) that we skip today should come back and
+        # be re-scored once the market resolves — recording it here
+        # would permanently exclude it.
+        if row.get("final_outcome") is not None:
+            scored_ids.add(row_id)
 
     _save_dedup_ids(dedup_path, scored_ids)
     if skipped:

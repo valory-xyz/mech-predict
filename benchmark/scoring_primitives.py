@@ -47,10 +47,21 @@ _TRUTHY_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
 
 def use_mech_analytics_rows() -> bool:
     """Return True when USE_MECH_ANALYTICS_ROWS is set to a truthy value."""
-    return (
-        os.getenv(USE_MECH_ANALYTICS_ROWS_ENV, "").strip().lower()
-        in _TRUTHY_FLAG_VALUES
-    )
+    return parse_truthy_env(USE_MECH_ANALYTICS_ROWS_ENV)
+
+
+def parse_truthy_env(name: str) -> bool:
+    """Read ``name`` from env and return True on any documented truthy form.
+
+    Accepts ``1``, ``true``, ``yes``, ``on`` case-insensitively with
+    surrounding whitespace stripped. Anything else (unset, empty,
+    unknown string) reads as False. Use this over inline sets so a
+    third copy can't drift.
+
+    :param name: env var name to read.
+    :return: True when the value is a documented truthy form.
+    """
+    return os.getenv(name, "").strip().lower() in _TRUTHY_FLAG_VALUES
 
 
 def start_of_current_month_utc() -> datetime:

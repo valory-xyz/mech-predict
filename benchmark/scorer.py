@@ -1666,9 +1666,10 @@ def rebuild_from_mech_analytics(
     # gone). Truly-fresh setups opt in via
     # ``MECH_ANALYTICS_ALLOW_EMPTY_HISTORY=true`` so the guard is a
     # deliberate override, not a silent skip.
-    allow_empty_history = os.getenv(
-        "MECH_ANALYTICS_ALLOW_EMPTY_HISTORY", ""
-    ).strip().lower() in {"1", "true", "yes"}
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import parse_truthy_env
+
+    allow_empty_history = parse_truthy_env("MECH_ANALYTICS_ALLOW_EMPTY_HISTORY")
     if not history_path.exists() and not allow_empty_history:
         raise MechAnalyticsError(
             f"scores_history.jsonl missing at {history_path}; the "

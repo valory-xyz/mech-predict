@@ -218,10 +218,14 @@ class TestPromptRejectsUnformattedPlaceholder:
             _build_system_prompt(label, eligible_count=5)
 
     def test_no_unfilled_placeholder_in_rendered_prompt(self) -> None:
-        """Rendered prompt has no surviving ``{platform_label}`` after dispatch."""
+        """Rendered prompt has no surviving placeholders after dispatch."""
         for n in (0, 1, 3, 5, 10):
             prompt = _build_system_prompt("Omenstrat", eligible_count=n)
             assert "{platform_label}" not in prompt
+            # main_window_label was added when the flag-on path landed.
+            # Regression guard exists precisely to catch a future refactor
+            # that misses one of the two placeholders.
+            assert "{main_window_label}" not in prompt
 
 
 class TestEligibilityBlock:

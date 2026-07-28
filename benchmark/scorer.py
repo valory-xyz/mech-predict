@@ -1701,6 +1701,15 @@ def rebuild_from_mech_analytics(
             "mech-analytics rebuild: skipped %d already-scored rows", skipped
         )
 
+    # A "rebuild" must start from _empty_scores, not silently merge into
+    # an existing accumulator. _accumulate_and_write resumes when the
+    # current_month matches, so unlink the aggregate files up front to
+    # force the fresh path. history_path is deliberately preserved —
+    # only scores_path (this month's live accumulator) gets wiped.
+    scores_path.unlink(missing_ok=True)
+    for platform in ("omen", "polymarket"):
+        _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
+
     # Production-mode only. Rows from mech-analytics are live-delivery
     # scored rows, so there is no tournament partition — write an empty
     # tournament scores file to keep the path shape consistent with

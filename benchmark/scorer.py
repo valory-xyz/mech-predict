@@ -17,7 +17,6 @@ import argparse
 import glob as glob_mod
 import json
 import logging
-import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -1654,7 +1653,6 @@ def rebuild_from_mech_analytics(
 
     if dedup_path is None:
         dedup_path = scores_path.parent / "scored_row_ids.json"
-    tournament_scores_path = _derive_tournament_path(scores_path)
 
     all_rows: list[dict[str, Any]] = []
     for row in iter_scored_rows(since=since, until=until, chain_id=chain_id):
@@ -1710,17 +1708,13 @@ def rebuild_from_mech_analytics(
     for platform in ("omen", "polymarket"):
         _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
 
-    # Production-mode only. Rows from mech-analytics are live-delivery
-    # scored rows, so there is no tournament partition — write an empty
-    # tournament scores file to keep the path shape consistent with
-    # ``rebuild`` for any downstream that expects both.
+    # mech-analytics has no tournament partition — leave existing
+    # scores_tournament*.json files untouched. Overwriting them with
+    # empty would clobber accumulated tournament state on every rebuild,
+    # and the subsequent workflow ``--update`` step would merge only
+    # that run's fresh tournament rows onto the emptied file.
     prod_result = _accumulate_and_write(
         deduped_rows, scores_path, history_path, emit_history=True
-    )
-    empty_scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
-    tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
-    tournament_scores_path.write_text(
-        json.dumps(_finalize_scores(empty_scores), indent=2)
     )
 
     for platform, plat_rows in _partition_rows_by_platform(deduped_rows).items():
@@ -1729,11 +1723,6 @@ def rebuild_from_mech_analytics(
             _derive_platform_path(scores_path, platform),
             None,
             emit_history=False,
-        )
-        _derive_platform_path(tournament_scores_path, platform).write_text(
-            json.dumps(
-                _finalize_scores(_empty_scores(empty_scores["current_month"])), indent=2
-            )
         )
 
     return prod_result

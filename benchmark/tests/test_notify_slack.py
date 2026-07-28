@@ -167,6 +167,38 @@ class TestInferPlatformLabel:
         assert _infer_platform_label(Path("/tmp/report_gnosis.md")) is None
 
 
+class TestMainWindowLabel:
+    """Prompt label follows the flag so MTD data isn't described as All-Time."""
+
+    def test_flag_off_uses_all_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Legacy path keeps the All-Time label."""
+        from benchmark.notify_slack import _main_window_label
+
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        assert _main_window_label() == "All-Time"
+
+    def test_flag_on_uses_mtd(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Self-contained mode labels the main window as MTD."""
+        from benchmark.notify_slack import _main_window_label
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        assert _main_window_label() == "MTD"
+
+    def test_prompt_renders_provided_label(self) -> None:
+        """Whatever label is passed shows up in the prompt string."""
+        prompt = _build_system_prompt(
+            "Omenstrat", eligible_count=5, main_window_label="MTD"
+        )
+        assert "`MTD` (cumulative)" in prompt
+        assert "Δ vs MTD" in prompt
+        assert "All-Time" not in prompt
+
+    def test_prompt_defaults_to_all_time(self) -> None:
+        """The default keeps behavior identical for flag-off callers."""
+        prompt = _build_system_prompt("Omenstrat", eligible_count=5)
+        assert "All-Time" in prompt
+
+
 class TestPromptRejectsUnformattedPlaceholder:
     """Guard against a missed ``{platform_label}`` replacement."""
 

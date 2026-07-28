@@ -324,6 +324,16 @@ jobs:
         if: always() && !cancelled()
         run: python -m benchmark.analyze --platform polymarket --include-tournament
 
+      # Stale ROI outputs are restored from artifact and re-rendered
+      # by notify_slack as if live — delete on flag-on so the section
+      # degrades to "no ROI" instead of a frozen snapshot.
+      - name: Clear stale ROI outputs (flag on)
+        if: always() && !cancelled() && env.USE_MECH_ANALYTICS_ROWS == 'true'
+        run: |
+          rm -f benchmark/results/roi_results.json \
+                benchmark/results/report_roi_omen.md \
+                benchmark/results/report_roi_polymarket.md
+
       # Companion ROI simulation over the same data the benchmark job just
       # fetched/scored. continue-on-error: the companion must not fail the
       # flywheel -- when it breaks, the daily Slack posts simply go out

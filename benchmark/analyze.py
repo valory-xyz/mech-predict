@@ -109,6 +109,22 @@ def load_scores(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def _write_rolling_json(path: Path, scores: dict[str, Any]) -> None:
+    """Persist a rolling scores dict to disk in the canonical shape.
+
+    tool_improvement_triage reads ``rolling_scores_<platform>.json`` and
+    ``prev_rolling_scores_<platform>.json`` from disk on a separate cron
+    step. When self-contained mode builds these in-memory only, the
+    triage step's file gate stays false forever and the automation
+    silently stops.
+
+    :param path: file path to write.
+    :param scores: rolling scores dict to serialize.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(scores))
+
+
 def load_history(path: Path) -> list[dict[str, Any]]:
     """Load monthly snapshots from a JSONL file.
 
@@ -3123,6 +3139,14 @@ def main() -> None:
         prev_rolling = _build_scores_from_mech_analytics(
             platform, now - 2 * window, now - window, allow_empty=True
         )
+        # Persist the in-memory rolling dicts to their canonical file
+        # paths. tool_improvement_triage.py reads these on a separate
+        # cron step downstream — without this write, the triage step's
+        # hashFiles(...) gate is false forever and the automation
+        # silently stops (no issues filed, no errors). Keeps the
+        # existing consumer contract intact.
+        _write_rolling_json(rolling_path, rolling)
+        _write_rolling_json(prev_rolling_path, prev_rolling)
         scores_tournament = _maybe_load(scores_tournament_path)
         source_label = "mech-analytics"
     else:

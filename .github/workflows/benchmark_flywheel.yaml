@@ -207,6 +207,7 @@ jobs:
       # skip the rebuild). The condition must stay identical to the wipe
       # step's and the Score step's FORCE_REBUILD.
       - name: Fetch production data
+        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         env:
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
           FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
@@ -233,8 +234,12 @@ jobs:
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          if [ ! -f benchmark/results/scores.json ] || [ "$FORCE_REBUILD" = "true" ]; then
-            echo "Running full rebuild (missing scores.json or force_rebuild=true)"
+          # Flag on: the Fetch production step is skipped, so --rebuild
+          # is the only path that produces scores.json — always run it.
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ] \
+             || [ ! -f benchmark/results/scores.json ] \
+             || [ "$FORCE_REBUILD" = "true" ]; then
+            echo "Running full rebuild (mech-analytics flag on, missing scores.json, or force_rebuild=true)"
             python -m benchmark.scorer --rebuild \
               --logs-dir benchmark/datasets/logs/ \
               $TOURNAMENT_FLAG
@@ -260,6 +265,7 @@ jobs:
       # so the scorer and the Python ROLLING_WINDOW_DAYS constant stay in
       # sync from a single source.
       - name: Score current rolling window
+        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
@@ -280,6 +286,7 @@ jobs:
       # window length so Current and Prev never overlap). Feeds the
       # "Δ vs Prev Nd" columns in the three-window comparison tables.
       - name: Score previous rolling window (non-overlapping)
+        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
@@ -307,7 +314,7 @@ jobs:
       # without the ROI section (notify_slack degrades gracefully when
       # roi_results.json is missing).
       - name: Simulate trader ROI (companion)
-        if: always() && !cancelled()
+        if: always() && !cancelled() && env.USE_MECH_ANALYTICS_ROWS != 'true'
         continue-on-error: true
         run: |
           TOURNAMENT_FLAG=""

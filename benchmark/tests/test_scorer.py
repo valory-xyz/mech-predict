@@ -1629,15 +1629,13 @@ class TestUpdateDedup:
         assert "legacy1" in dedup_ids
 
     def test_update_rebuilds_after_source_flip(self, tmp_path: Path) -> None:
-        """update() must rebuild from logs when scores.json is mech-analytics.
-
-        Regression for the flag-rollback double-count. The two paths dedup on
-        disjoint namespaces (request_id vs platform:deliver_id). Without the
-        source-flip guard, the incremental merge on flag-off would resume the
-        request-id-keyed totals in scores.json and add the fetch-window rows
-        on top — the same rows that live in logs/ would then be counted a
-        second time under platform:deliver_id keys.
-        """
+        """update() must rebuild from logs when scores.json is mech-analytics."""
+        # Regression for the flag-rollback double-count. The two paths dedup on
+        # disjoint namespaces (request_id vs platform:deliver_id). Without the
+        # source-flip guard, the incremental merge on flag-off would resume
+        # the request-id-keyed totals in scores.json and add the fetch-window
+        # rows on top — the same rows that live in logs/ would then be counted
+        # a second time under platform:deliver_id keys.
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "history.jsonl"
         dedup_path = tmp_path / "dedup.json"
@@ -3484,14 +3482,12 @@ class TestRebuildFromMechAnalytics:
     def test_fetch_widened_by_resolution_lag(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """iter_scored_rows is called with since - lag_days, not the raw anchor.
-
-        Predictions requested late in month M that only resolve in early
-        M+1 fail the ``resolved=True`` filter on M's last run and fall out
-        of the ``[start_of_month, now)`` window on M+1's first run. The
-        widened fetch closes that gap. Regression against a future edit
-        that passes ``since`` straight through.
-        """
+        """iter_scored_rows is called with since - lag_days, not the raw anchor."""
+        # Predictions requested late in month M that only resolve in early
+        # M+1 fail the ``resolved=True`` filter on M's last run and fall out
+        # of the ``[start_of_month, now)`` window on M+1's first run. The
+        # widened fetch closes that gap. Regression against a future edit
+        # that passes ``since`` straight through.
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
@@ -3514,14 +3510,12 @@ class TestRebuildFromMechAnalytics:
     def test_prior_month_rows_upserted_into_history(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Rows dated in prior months land in history, not the live accumulator.
-
-        Attribution key is ``requested_at[:7]``. A late-resolving M-1
-        prediction returned by the widened fetch belongs in month M-1's
-        snapshot, not in month M's live scores.json. The old flat-pass
-        design silently rolled every fetched row into the current
-        accumulator.
-        """
+        """Rows dated in prior months land in history, not the live accumulator."""
+        # Attribution key is ``requested_at[:7]``. A late-resolving M-1
+        # prediction returned by the widened fetch belongs in month M-1's
+        # snapshot, not in month M's live scores.json. The old flat-pass
+        # design silently rolled every fetched row into the current
+        # accumulator.
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
@@ -3559,14 +3553,12 @@ class TestRebuildFromMechAnalytics:
     def test_history_rows_outside_lag_window_preserved(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Pre-existing history rows for months outside the fetch window survive.
-
-        The upsert only touches months present in the current response.
-        A future edit that unlinks ``scores_history.jsonl`` (as
-        ``_rebuild_single_mode`` does) would silently drop everything
-        older than ``lag_days`` on the first rebuild — this pins the
-        upsert-not-truncate semantics.
-        """
+        """Pre-existing history rows for months outside the fetch window survive."""
+        # The upsert only touches months present in the current response.
+        # A future edit that unlinks ``scores_history.jsonl`` (as
+        # ``_rebuild_single_mode`` does) would silently drop everything
+        # older than ``lag_days`` on the first rebuild — this pins the
+        # upsert-not-truncate semantics.
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
@@ -3600,20 +3592,17 @@ class TestRebuildFromMechAnalytics:
     def test_upsert_fails_loud_on_malformed_history_line(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A malformed history line raises instead of silently vanishing.
-
-        Guard against a future edit that catches ``json.JSONDecodeError``
-        with ``continue`` — the rewrite would then permanently drop the
-        offending line even though the on-disk file is the only place
-        the row lived.
-        """
+        """A malformed history line raises instead of silently vanishing."""
+        # Guard against a future edit that catches ``json.JSONDecodeError``
+        # with ``continue`` — the rewrite would then permanently drop the
+        # offending line even though the on-disk file is the only place
+        # the row lived.
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
         history_path.write_text(
-            '{"month": "2026-06", "overall": {"n": 100}}\n'
-            'not-json-at-all\n'
+            '{"month": "2026-06", "overall": {"n": 100}}\nnot-json-at-all\n'
         )
         monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
         _patch_iter_and_classifier(

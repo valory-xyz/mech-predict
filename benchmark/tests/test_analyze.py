@@ -3232,7 +3232,9 @@ class TestUseMechAnalyticsFlag:
         monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", value)
         assert analyze._use_mech_analytics_flag() is True
 
-    @pytest.mark.parametrize("value", ["", "0", "1", "yes", "on", "false", "no", "off", "maybe"])
+    @pytest.mark.parametrize(
+        "value", ["", "0", "1", "yes", "on", "false", "no", "off", "maybe"]
+    )
     def test_falsy_forms_return_false(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:

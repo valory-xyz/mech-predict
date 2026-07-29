@@ -92,6 +92,7 @@ def _allow_empty_main_scores(since_defaulted: bool, utc_day: int) -> bool:
     """
     return since_defaulted and utc_day <= _EARLY_MONTH_DAYS
 
+
 BRIER_RANDOM = 0.25
 BRIER_WEAK_THRESHOLD = 0.40
 BSS_HARMFUL_THRESHOLD = 0.0

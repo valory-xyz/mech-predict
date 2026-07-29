@@ -30,7 +30,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-
 from scripts import verify_migration_swap as vms
 
 
@@ -75,9 +74,13 @@ def _patch_pulls(
     deliver_to_request: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Replace both pull entry points so main() runs with synthetic data."""
-    dtr = deliver_to_request if deliver_to_request is not None else {
-        "omen": {r["deliver_id"]: r["request_id"] for r in mp_rows},
-    }
+    dtr = (
+        deliver_to_request
+        if deliver_to_request is not None
+        else {
+            "omen": {r["deliver_id"]: r["request_id"] for r in mp_rows},
+        }
+    )
 
     def _mp(_since_ts: int, _until_ts: int) -> tuple[list[dict[str, Any]], dict]:
         return mp_rows, dtr
@@ -100,9 +103,7 @@ def _base_argv() -> list[str]:
 class TestDivergenceGate:
     """Exit code contract: 0 pass, 2 thin, 3 divergent."""
 
-    def test_perfect_match_returns_zero(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_perfect_match_returns_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """100% overlap + no outcome mismatches passes the gate."""
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -118,9 +119,7 @@ class TestDivergenceGate:
         _patch_pulls(monkeypatch, rows, lake)
         assert vms.main(_base_argv()) == 2
 
-    def test_low_overlap_returns_three(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_low_overlap_returns_three(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Overlap fraction below --min-overlap-fraction returns 3."""
         rows = [_mp_row(f"mp{i}") for i in range(8)] + [
             _mp_row("shared0"),
@@ -148,12 +147,10 @@ class TestDivergenceGate:
     def test_below_threshold_but_nonzero_mismatch_still_passes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A tiny outcome-mismatch under the threshold does not fail the gate.
-
-        Guard against a future edit that flips ``>`` to ``>=`` on the
-        mismatch threshold and rejects the accepted-delta band Ojus
-        called out in the migration plan.
-        """
+        """A tiny outcome-mismatch under the threshold does not fail the gate."""
+        # Guard against a future edit that flips ``>`` to ``>=`` on the
+        # mismatch threshold and rejects the accepted-delta band Ojus
+        # called out in the migration plan.
         rows = [_mp_row(f"r{i}") for i in range(100)]
         lake = []
         for i in range(100):
@@ -166,14 +163,12 @@ class TestDivergenceGate:
     def test_overlap_denominator_is_set_size_not_row_count(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Multi-delivery-per-request rows must not inflate the denominator.
-
-        Numerator is a set size (|intersection of request_ids|). Denominator
-        must also be a set size: min(|mp_ids|, |lake_ids|). If a future edit
-        reverts to ``min(len(mp_rows), len(lake_rows))`` the fraction dips
-        below any sane threshold on multi-deliver windows and the gate
-        rejects a perfectly aligned dataset.
-        """
+        """Multi-delivery-per-request rows must not inflate the denominator."""
+        # Numerator is a set size (|intersection of request_ids|). Denominator
+        # must also be a set size: min(|mp_ids|, |lake_ids|). If a future edit
+        # reverts to ``min(len(mp_rows), len(lake_rows))`` the fraction dips
+        # below any sane threshold on multi-deliver windows and the gate
+        # rejects a perfectly aligned dataset.
         # 6 request_ids on mp with 2 deliveries each (12 rows) and 8 unique
         # request_ids on lake (8 rows). Only the 6 mp ids are shared with
         # lake, so |intersection| = 6.

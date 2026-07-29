@@ -33,6 +33,7 @@ from benchmark.notify_slack import (
     _compute_top_k,
     _count_eligible_tools,
     _infer_platform_label,
+    _main_window_label,
     post_to_slack,
 )
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
@@ -172,15 +173,11 @@ class TestMainWindowLabel:
 
     def test_flag_off_uses_all_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Legacy path keeps the All-Time label."""
-        from benchmark.notify_slack import _main_window_label
-
         monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
         assert _main_window_label() == "All-Time"
 
     def test_flag_on_uses_mtd(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Self-contained mode labels the main window as MTD."""
-        from benchmark.notify_slack import _main_window_label
-
         monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
         assert _main_window_label() == "MTD"
 

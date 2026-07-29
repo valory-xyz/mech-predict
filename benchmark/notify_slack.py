@@ -217,6 +217,9 @@ def _build_system_prompt(
     :param eligible_count: number of tools that clear the eligibility
         floor in the markdown report's Tool Historical Comparison table.
         Drives the ranking-block dispatch.
+    :param main_window_label: label the LLM uses for the cumulative
+        window (``All-Time`` on the legacy path, ``MTD`` on the
+        self-contained mech-analytics path).
     :return: fully formatted system prompt string.
     :raises ValueError: when ``platform_label`` is empty or unknown.
     """

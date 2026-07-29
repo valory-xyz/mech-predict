@@ -1937,9 +1937,7 @@ def rebuild_from_mech_analytics(
         source=SOURCE_MECH_ANALYTICS,
     )
 
-    for platform, plat_rows in _partition_rows_by_platform(
-        current_month_rows
-    ).items():
+    for platform, plat_rows in _partition_rows_by_platform(current_month_rows).items():
         _accumulate_and_write(
             plat_rows,
             _derive_platform_path(scores_path, platform),

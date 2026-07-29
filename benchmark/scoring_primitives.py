@@ -42,26 +42,28 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 USE_MECH_ANALYTICS_ROWS_ENV = "USE_MECH_ANALYTICS_ROWS"
-_TRUTHY_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def use_mech_analytics_rows() -> bool:
-    """Return True when USE_MECH_ANALYTICS_ROWS is set to a truthy value."""
+    """Return True when USE_MECH_ANALYTICS_ROWS is set to ``true``."""
     return parse_truthy_env(USE_MECH_ANALYTICS_ROWS_ENV)
 
 
 def parse_truthy_env(name: str) -> bool:
-    """Read ``name`` from env and return True on any documented truthy form.
+    """Read ``name`` from env and return True only for ``true`` (case-insensitive).
 
-    Accepts ``1``, ``true``, ``yes``, ``on`` case-insensitively with
-    surrounding whitespace stripped. Anything else (unset, empty,
-    unknown string) reads as False. Use this over inline sets so a
-    third copy can't drift.
+    The parser was previously broader (``1`` / ``yes`` / ``on``) but the
+    CI workflow gates compare the raw env var to the literal ``'true'``
+    in YAML. Any value the Python side accepted that YAML did not (e.g.
+    ``1``) would put the two sides on opposite branches: Python would
+    take the mech-analytics path while CI would still delete
+    ``scores_history.jsonl`` because the YAML gate read the flag as off.
+    Narrowing here keeps both sides in lockstep.
 
     :param name: env var name to read.
-    :return: True when the value is a documented truthy form.
+    :return: True when the value is ``true`` (case-insensitive, trimmed).
     """
-    return os.getenv(name, "").strip().lower() in _TRUTHY_FLAG_VALUES
+    return os.getenv(name, "").strip().lower() == "true"
 
 
 def start_of_current_month_utc() -> datetime:

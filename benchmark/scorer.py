@@ -1167,18 +1167,23 @@ def _upsert_month_snapshot(
                 stripped = line.strip()
                 if not stripped:
                     continue
-                try:
-                    entry = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
+                # Fail loud on malformed history — silently dropping the
+                # line here would remove it from the rewrite permanently
+                # (the only place the file's contents live is on disk).
+                entry = json.loads(stripped)
                 if entry.get("month") != month:
                     kept.append(entry)
     kept.append(new_entry)
     kept.sort(key=lambda e: e.get("month") or "")
+    # Atomic rewrite: write to a sibling tmp file and rename. os.replace is
+    # atomic on POSIX, so a crash or cancelled job mid-write leaves the
+    # original file intact rather than truncating everything to zero.
     history_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(history_path, "w", encoding="utf-8") as f:
+    tmp_path = history_path.with_suffix(history_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         for entry in kept:
             f.write(json.dumps(entry) + "\n")
+    os.replace(tmp_path, history_path)
 
 
 def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:

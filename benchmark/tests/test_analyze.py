@@ -3216,26 +3216,27 @@ class TestGenerateReportDeploymentConfigUnavailable:
 class TestUseMechAnalyticsFlag:
     """Env-var-gated feature flag helper.
 
-    The `is True` -style truthy check is deliberate: it must recognise
-    any of the documented forms and treat everything else as off. The
-    env var is the sole flip switch for the whole self-contained mode.
+    Parser accepts ``true`` (case-insensitive, trimmed) and nothing
+    else — the CI workflow gates compare the same raw env var to the
+    literal ``'true'`` in YAML, so a broader set here would put Python
+    and CI on opposite branches for values like ``1``.
     """
 
-    @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "  true  "])
+    @pytest.mark.parametrize("value", ["true", "TRUE", "True", "  true  "])
     def test_truthy_forms_return_true(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
-        """Documented truthy env-var forms flip the flag on."""
+        """Only ``true`` (case-insensitive, trimmed) flips the flag on."""
         from benchmark import analyze
 
         monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", value)
         assert analyze._use_mech_analytics_flag() is True
 
-    @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "maybe"])
+    @pytest.mark.parametrize("value", ["", "0", "1", "yes", "on", "false", "no", "off", "maybe"])
     def test_falsy_forms_return_false(
         self, monkeypatch: pytest.MonkeyPatch, value: str
     ) -> None:
-        """Anything not in the truthy set (empty, 0, unknown strings) is off."""
+        """Everything that isn't ``true`` reads as off (mirrors YAML gate)."""
         from benchmark import analyze
 
         monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", value)

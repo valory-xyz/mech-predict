@@ -3597,6 +3597,36 @@ class TestRebuildFromMechAnalytics:
         assert "2025-01" in months
         assert "2025-12" in months
 
+    def test_upsert_fails_loud_on_malformed_history_line(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A malformed history line raises instead of silently vanishing.
+
+        Guard against a future edit that catches ``json.JSONDecodeError``
+        with ``continue`` — the rewrite would then permanently drop the
+        offending line even though the on-disk file is the only place
+        the row lived.
+        """
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        history_path.write_text(
+            '{"month": "2026-06", "overall": {"n": 100}}\n'
+            'not-json-at-all\n'
+        )
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [_ma_row(request_id="jun1", requested_at="2026-06-05T00:00:00Z")],
+        )
+        with pytest.raises(json.JSONDecodeError):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
     def test_tournament_scores_untouched(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

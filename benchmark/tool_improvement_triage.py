@@ -31,7 +31,8 @@ cascade:
    Omen-only regression while the jury is in the loop). The triage
    iterates each enabled platform separately and files one issue per
    (tool, platform) regression.
-2. Trigger (either is sufficient):
+2. Trigger (either is sufficient), evaluated on the first window
+   source in the assessment ladder that meets the sample floor:
    - Regression: ``Brier_cur - Brier_prev > 0.040`` AND
      ``sign(delta Brier) == sign(delta log_loss)``. Calibrated
      2026-05-29 against 26 days of CI data: 0.040 alone yields ~1
@@ -41,15 +42,24 @@ cascade:
      reference (``BSS = 1 - brier / base_rate_brier``, computed per
      group by ``scorer.py``). This is *market-relative*: unlike an
      absolute Brier floor, it does not keep flagging a tool that is at
-     the ceiling of an efficient, hard-to-beat market (where the
-     market's own Brier is high, so an absolute floor sits below the
-     achievable frontier and fires forever, unfixable by any prompt).
-     Falls back to the legacy absolute floor (``Brier_cur > 0.25``)
-     only when the skill score is missing (pre-BSS score files).
-3. ``valid_n / 7 >= 15`` on both windows (so ``valid_n >= 105``).
-4. ``reliability >= 0.80`` (collapses route to a WARNING log instead
-   of opening a tool-improvement issue; an operator watching the
-   workflow output is the safety net).
+     the ceiling of an efficient, hard-to-beat market. Falls back to
+     the legacy absolute floor (``Brier_cur > 0.25``) only when the
+     skill score is missing or non-finite.
+3. Assessment ladder (anti-stall; a thin week no longer means silence):
+   a. calendar 7d windows (``W-1``) when ``valid_n >= 105`` on both;
+   b. else production count windows (last ``COUNT_WINDOW_N`` valid rows
+      vs the preceding ``COUNT_WINDOW_N``, ``C-1``, 45d age cap);
+   c. else tournament count windows (``T-1``, rows from
+      ``results/tournament_scored.jsonl`` -- shadow data, labeled as
+      such in the issue and never blended with production);
+   d. else ``insufficient_data`` -> a ``deployment-review`` widen-sample
+      note (add to tournament / route traffic / retire, with roster
+      status), guarded by a ``COUNT_RAMP_DAYS`` ramp for newly-deployed
+      tools and a ``DR_RECENT_CLOSE_DAYS`` cooldown after a manual
+      close.
+4. ``reliability >= 0.80``, checked only on a floor-sized calendar
+   sample (on a thin slice the number is noise and must not preempt
+   the count/tournament fallback); collapses route to a WARNING log.
 
 Duplicate-issue suppression: once a tool has an open ``tool-improvement``
 issue on GitHub, the triage stays silent for that tool. ``prior_open``

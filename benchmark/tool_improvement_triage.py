@@ -129,6 +129,38 @@ ROLLING_WINDOW_DAYS = 7
 # fires at Brier ~= 0.22 * 1.10 ~= 0.24. NB the referent is the base-rate
 # Brier, NOT the yes-rate itself.
 BSS_LEVEL_FLOOR = -0.10
+# --- Count-window fallback (anti-stall) ---------------------------------
+# A tool whose calendar windows are below VALID_N_PER_WINDOW_FLOOR is not
+# assessable on the 7d cadence, and under calendar-only gates it stays
+# silent FOREVER once its traffic thins -- the loop stalls exactly on the
+# newest (least-requested) tools. The fallback re-evaluates such a tool on
+# its last COUNT_WINDOW_N valid rows vs the preceding COUNT_WINDOW_N (same
+# regression / level triggers, same downstream gates), so a starved tool is
+# judged whenever it has accumulated enough rows, however long that took.
+COUNT_WINDOW_N = VALID_N_PER_WINDOW_FLOOR
+# Age cap for count-window rows: a window stitched from months-old rows
+# describes a tool that no longer exists (prompt/model drift), so rows
+# older than this never enter a count window. Tools whose recent rows
+# cannot fill even one window surface as ``insufficient_data`` and are
+# routed to a human deployment-review note instead of silence.
+COUNT_WINDOW_MAX_AGE_DAYS = 45
+# A tool younger than this (first valid row within the ramp period) is
+# accruing data normally, not starved: filing a widen-sample note on a
+# variant deployed three days ago would page a human about a non-problem.
+# Below-count-floor tools inside the ramp stay silent (reason="ramping").
+COUNT_RAMP_DAYS = 7
+# Cooldown for deployment-review notes after a manual close: without it the
+# insufficient_data condition re-fires deterministically every daily run
+# and re-files the note the day after a human closed it.
+DR_RECENT_CLOSE_DAYS = 7
+# Row-level tournament results (written by the flywheel's tournament arm).
+# Tournament rows shadow-score the SAME daily questions without serving
+# on-chain traffic, so they are the riskless data source for tools whose
+# production traffic is too thin to assess. They are a SEPARATE slice from
+# production (different execution contract) -- never blended into one
+# metric, always labeled T-1/T-2 when they drive a fire.
+TOURNAMENT_SCORED_NAME = "tournament_scored.jsonl"
+TOURNAMENT_TOOLS_PATH = Path(__file__).resolve().parent / "tournament_tools.json"
 
 DEFAULT_REPO = "valory-xyz/mech-predict"
 DEFAULT_LABEL = "tool-improvement"
@@ -137,8 +169,11 @@ DEFAULT_LABEL = "tool-improvement"
 # same ancestor without promoting the result is the churn this routing
 # stops. Such a fire is routed to a visible promotion-review note under this
 # separate label so the coding agent (label-routed on ``tool-improvement``)
-# is NOT invoked.
-PROMOTION_LABEL = "tool-promotion-review"
+# is NOT invoked. The same label also carries the widen-sample notes for
+# tools below the count floor: it is the single human-decision funnel for
+# anything that needs a deployment action (promote / route traffic /
+# retire) rather than a code fix.
+PROMOTION_LABEL = "deployment-review"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LINEAGE_PATH = Path(__file__).resolve().parent.parent / "tool_lineage.json"
 
@@ -156,16 +191,23 @@ def _load_json(path: Path) -> Dict[str, Any]:
 # Parses ``[tool-improvement] `<tool>`: <metric> on <platform> W-1`` where
 # <metric> is "Brier regression", "Brier above level", or "BSS below floor".
 # Backticks around the tool are required; the platform is captured from the
-# trailing ``on <platform> W-1`` segment so suppression can key on the
-# (tool, platform) pair regardless of the metric wording. A manually-filed
-# issue that omits either segment logs a warning and is skipped.
-_TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+W-1\b")
-# Promotion-review notes use their own label + title so they dedup
-# independently of the fix issues and never match the coding agent's
-# ``tool-improvement`` title parser. Anchored to end-of-title (the platform is
-# the last token); the generated-title <-> regex contract is pinned by
-# TestPromoTitleRoundTrip.
-_PROMO_TITLE_RE = re.compile(r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\s*$")
+# trailing ``on <platform> W-1`` (calendar windows) or ``on <platform> C-1``
+# (count-window fallback) segment so suppression can key on the
+# (tool, platform) pair regardless of the metric wording or window kind. A
+# manually-filed issue that omits either segment logs a warning and is skipped.
+_TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+[WCT]-1\b")
+# Deployment-review notes (promotion + widen-sample) use their own label +
+# title so they dedup independently of the fix issues and never match the
+# coding agent's ``tool-improvement`` title parser. Anchored to end-of-title
+# (the platform is the last token); the generated-title <-> regex contract is
+# pinned by TestPromoTitleRoundTrip.
+_PROMO_TITLE_RE = re.compile(r"\[deployment-review\]\s+`([^`]+)`.*\bon\s+(\S+)\s*$")
+# Migration shim (see main()): open notes filed before the label rename still
+# carry the legacy label + title prefix and must keep suppressing duplicates.
+_LEGACY_PROMOTION_LABEL = "tool-promotion-review"
+_LEGACY_PROMO_TITLE_RE = re.compile(
+    r"\[tool-promotion-review\]\s+`([^`]+)`.*\bon\s+(\S+)\s*$"
+)
 
 
 def _load_lineage_children(path: Path = LINEAGE_PATH) -> Dict[str, List[str]]:
@@ -302,7 +344,9 @@ def _open_issue_tools(
 
 
 def _closed_issue_pairs(
-    repo: str, label: str
+    repo: str,
+    label: str,
+    title_re: "re.Pattern[str]" = _TITLE_RE,
 ) -> Optional[List[Tuple[str, str, datetime]]]:
     """Return `(tool, platform, closed_at)` triples for closed tool-improvement issues.
 
@@ -315,6 +359,8 @@ def _closed_issue_pairs(
 
     :param repo: GitHub ``owner/repo`` slug.
     :param label: issue label to filter on (e.g. ``"tool-improvement"``).
+    :param title_re: title regex whose two capture groups yield
+        ``(tool, platform)``; defaults to the tool-improvement format.
     :return: list of ``(tool, platform, closed_at)`` triples, or ``None`` on
         gh error. ``closed_at`` is a timezone-aware UTC ``datetime``.
     """
@@ -361,7 +407,7 @@ def _closed_issue_pairs(
     triples: List[Tuple[str, str, datetime]] = []
     for row in rows:
         title = row.get("title") or ""
-        m = _TITLE_RE.search(title)
+        m = title_re.search(title)
         if not m:
             log.warning(
                 "closed tool-improvement issue title did not match the expected "
@@ -461,6 +507,233 @@ def _log_cooldown_status(
         )
 
 
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse an ISO timestamp into a UTC-aware datetime (``None`` if invalid)."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _load_count_rows(
+    logs_dir: Path, platform: str, now: datetime
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-tool valid rows for ``platform`` from the daily JSONLs, oldest first.
+
+    Rows are deduped by ``row_id`` (the daily files are cumulative
+    snapshots), filtered by the scorer's validity predicate
+    (``prediction_parse_status == "valid"``, resolved outcome, non-null
+    ``p_yes``) plus the ``COUNT_WINDOW_MAX_AGE_DAYS`` age cap, and sorted
+    by ``predicted_at`` -- the exact predicate the issue body documents so
+    the coding agent's Step-1 reproduction sees the same slice.
+
+    :param logs_dir: directory containing the daily production-log JSONLs.
+    :param platform: platform to filter rows to (e.g. ``"polymarket"``).
+    :param now: reference "now" for the age cap.
+    :return: per-tool lists of valid rows, sorted oldest-first.
+    """
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for path in sorted(logs_dir.glob("production_log_*.jsonl")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            row_id = row.get("row_id")
+            if row_id:
+                dedup[row_id] = row
+    cutoff = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS)
+    by_tool: Dict[str, List[Dict[str, Any]]] = {}
+    for row in dedup.values():
+        if row.get("platform") != platform:
+            continue
+        # The calendar by_tool the fallback substitutes for is the scorer's
+        # PRODUCTION-mode partition; tournament rows must not leak into
+        # count windows or the two paths diverge on mixed logs.
+        if "tournament" in (row.get("mode") or ""):
+            continue
+        if row.get("prediction_parse_status") != "valid":
+            continue
+        if row.get("final_outcome") is None or row.get("p_yes") is None:
+            continue
+        predicted_at = _parse_ts(row.get("predicted_at"))
+        if predicted_at is None or predicted_at < cutoff:
+            continue
+        tool_name = row.get("tool_name")
+        if tool_name:
+            by_tool.setdefault(tool_name, []).append(row)
+    for rows in by_tool.values():
+        rows.sort(key=lambda r: r.get("predicted_at") or "")
+    return by_tool
+
+
+def _load_tournament_count_rows(
+    scored_path: Path, platform: str, now: datetime
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-tool valid TOURNAMENT rows for ``platform``, oldest first.
+
+    Same validity predicate and age cap as :func:`_load_count_rows`, but
+    sourced from the flywheel's row-level tournament output and keeping
+    ONLY tournament-mode rows. Missing file -> ``{}`` (no tournament arm).
+
+    :param scored_path: path to ``tournament_scored.jsonl``.
+    :param platform: platform to filter rows to.
+    :param now: reference "now" for the age cap.
+    :return: per-tool lists of valid tournament rows, sorted oldest-first.
+    """
+    if not scored_path.is_file():
+        return {}
+    dedup: Dict[str, Dict[str, Any]] = {}
+    try:
+        text = scored_path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        row_id = row.get("row_id") or row.get("deliver_id")
+        if row_id:
+            dedup[row_id] = row
+    cutoff = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS)
+    by_tool: Dict[str, List[Dict[str, Any]]] = {}
+    for row in dedup.values():
+        if row.get("platform") != platform:
+            continue
+        if "tournament" not in (row.get("mode") or "tournament"):
+            continue
+        if row.get("prediction_parse_status") != "valid":
+            continue
+        if row.get("final_outcome") is None or row.get("p_yes") is None:
+            continue
+        predicted_at = _parse_ts(row.get("predicted_at"))
+        if predicted_at is None or predicted_at < cutoff:
+            continue
+        tool_name = row.get("tool_name")
+        if tool_name:
+            by_tool.setdefault(tool_name, []).append(row)
+    for rows in by_tool.values():
+        rows.sort(key=lambda r: r.get("predicted_at") or "")
+    return by_tool
+
+
+def _tournament_roster(path: Path = TOURNAMENT_TOOLS_PATH) -> set:
+    """Tool names currently in the tournament (dash/underscore-insensitive).
+
+    :param path: path to ``tournament_tools.json``.
+    :return: set of normalized (dashes as underscores) tool names.
+    """
+    data = _load_json(path)
+    return {str(k).replace("-", "_") for k in data} if isinstance(data, dict) else set()
+
+
+def _in_roster(tool: str, roster: set) -> bool:
+    """True when ``tool`` is in the tournament roster (naming-insensitive).
+
+    :param tool: tool name (dash or underscore spelling).
+    :param roster: output of :func:`_tournament_roster`.
+    :return: membership flag.
+    """
+    return tool.replace("-", "_") in roster
+
+
+def _window_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Scorer-compatible metrics for a count window of validity-gated rows.
+
+    Emits the same keys the scorer's ``by_tool`` entries carry (``brier``,
+    ``log_loss``, ``brier_skill_score``, ``valid_n``) so the trigger cascade
+    in :func:`triage` consumes calendar and count windows interchangeably.
+    ``brier_skill_score`` uses the window's own base-rate Brier
+    (``yes_rate * (1 - yes_rate)``) as reference, matching the scorer's
+    group-level BSS; an all-one-outcome window yields NaN, which
+    :func:`_below_level` already treats as "fall back to the absolute floor".
+
+    :param rows: validity-gated rows of one count window (non-empty).
+    :return: metrics dict keyed like a scorer ``by_tool`` entry, plus the
+        window's ``span_start`` / ``span_end`` dates.
+    """
+    n = len(rows)
+    eps = 1e-15
+    brier_sum = 0.0
+    log_loss_sum = 0.0
+    yes = 0
+    for row in rows:
+        outcome = 1.0 if row["final_outcome"] else 0.0
+        p_yes = float(row["p_yes"])
+        brier_sum += (p_yes - outcome) ** 2
+        clipped = min(max(p_yes, eps), 1 - eps)
+        log_loss_sum += -(
+            outcome * math.log(clipped) + (1 - outcome) * math.log(1 - clipped)
+        )
+        yes += int(outcome)
+    brier = brier_sum / n
+    yes_rate = yes / n
+    base_rate_brier = yes_rate * (1 - yes_rate)
+    bss = 1 - brier / base_rate_brier if base_rate_brier > 0 else float("nan")
+    return {
+        "brier": round(brier, 4),
+        "log_loss": round(log_loss_sum / n, 4),
+        "brier_skill_score": round(bss, 4) if math.isfinite(bss) else bss,
+        "valid_n": n,
+        "span_start": (rows[0].get("predicted_at") or "")[:10],
+        "span_end": (rows[-1].get("predicted_at") or "")[:10],
+    }
+
+
+def _count_window_stats(
+    tool_rows: List[Dict[str, Any]], n: int = COUNT_WINDOW_N
+) -> Dict[str, Any]:
+    """Count-window stats: C-1 = last ``n`` rows, C-2 = the preceding ``n``.
+
+    ``{"insufficient": True, "total": k}`` when the tool cannot fill even
+    one window (k < n) -- routed by main() to a deployment-review
+    widen-sample note. When only C-1 fills (n <= total < 2n), ``prev`` is
+    ``None`` and the trigger cascade runs level-only (no regression check
+    without a disjoint baseline).
+
+    :param tool_rows: one tool's valid rows, sorted oldest-first.
+    :param n: rows per count window.
+    :return: stats dict (``insufficient``/``total``/``cur``/``prev``/
+        ``spans``/``first_predicted_at``).
+    """
+    total = len(tool_rows)
+    first_predicted_at = tool_rows[0].get("predicted_at") if tool_rows else None
+    if total < n:
+        return {
+            "insufficient": True,
+            "total": total,
+            "first_predicted_at": first_predicted_at,
+        }
+    cur = _window_metrics(tool_rows[-n:])
+    prev = _window_metrics(tool_rows[-2 * n : -n]) if total >= 2 * n else None
+    spans = {"cur": f"{cur['span_start']} - {cur['span_end']}"}
+    if prev:
+        spans["prev"] = f"{prev['span_start']} - {prev['span_end']}"
+    return {
+        "insufficient": False,
+        "total": total,
+        "cur": cur,
+        "prev": prev,
+        "spans": spans,
+    }
+
+
 def triage(
     cur: Dict[str, Any],
     prev: Dict[str, Any],
@@ -470,9 +743,16 @@ def triage(
     closed_issues: Optional[List[Tuple[str, str, datetime]]] = None,
     now: Optional[datetime] = None,
     lineage_children: Optional[Dict[str, List[str]]] = None,
+    count_windows: Optional[Dict[str, Dict[str, Any]]] = None,
+    tournament_windows: Optional[Dict[str, Dict[str, Any]]] = None,
+    tournament_roster: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
-    # pylint: disable=too-many-locals
+    # ``count_windows`` (per-tool output of ``_count_window_stats``) feeds
+    # the anti-stall fallback: a tool below the calendar sample floor is
+    # re-evaluated on its count windows instead of going silent. ``None`` /
+    # missing tool preserves the legacy calendar-only behavior.
+    # pylint: disable=too-many-locals,too-many-statements
     # ``lineage_children`` maps a tool to its merged fix variants (from
     # tool_lineage.json); a tool that fires but already has a variant is
     # routed to ``descendant_exists`` (a visible promotion note) instead of
@@ -524,8 +804,17 @@ def triage(
         most_recent_close, cur_tools, platform, now_dt, RECENT_CLOSE_DAYS
     )
     decisions: List[Dict[str, Any]] = []
-    for tool in sorted((cur.get("by_tool") or {}).keys()):
-        c = cur["by_tool"][tool]
+    # Union with count-window tools: a fully-starved tool (ZERO rows in the
+    # current rolling window) never appears in cur.by_tool at all, so
+    # calendar-only iteration silenced exactly the worst starvation case.
+    # A tool known only from the raw-log count windows enters with empty
+    # calendar stats (n_cur=0) and flows into the count fallback /
+    # widen-sample routing below.
+    cur_by_tool = cur.get("by_tool") or {}
+    for tool in sorted(
+        set(cur_by_tool) | set(count_windows or {}) | set(tournament_windows or {})
+    ):
+        c = cur_by_tool.get(tool) or {}
         p = (prev.get("by_tool") or {}).get(tool, {})
         d: Dict[str, Any] = {
             "tool": tool,
@@ -538,7 +827,17 @@ def triage(
             "issue_open": False,
         }
         rel = c.get("reliability")
-        if rel is not None and rel < RELIABILITY_FLOOR:
+        if (
+            rel is not None
+            and rel < RELIABILITY_FLOOR
+            and d["n_cur"] >= VALID_N_PER_WINDOW_FLOOR
+        ):
+            # Reliability is only meaningful on a floor-sized sample: on a
+            # thin calendar slice (n=3, one parse error -> 0.67) the old
+            # ordering declared reliability_collapse and made the count
+            # fallback unreachable for exactly the starved tools it exists
+            # for. Sub-floor tools fall through to the count path, whose
+            # windows are validity-gated anyway.
             d.update(decision="reliability_collapse", reason="reliability_collapse")
             decisions.append(d)
             continue
@@ -546,16 +845,83 @@ def triage(
             d["n_cur"] < VALID_N_PER_WINDOW_FLOOR
             or d["n_prev"] < VALID_N_PER_WINDOW_FLOOR
         ):
-            d.update(decision="silent", reason="sample_floor")
-            decisions.append(d)
-            continue
+            # Count-window fallback (anti-stall). Rebinding ``c``/``p`` to
+            # the count windows lets the whole trigger cascade below run
+            # unchanged -- _window_metrics emits the same keys the scorer
+            # does. Three sub-cases:
+            #   * no count data for this tool -> legacy silent sample_floor;
+            #   * below the count floor even cumulatively -> the tool cannot
+            #     be assessed at all: surface as ``insufficient_data`` so
+            #     main() posts a deployment-review widen-sample note
+            #     (silence here is exactly how starved tools stall the loop);
+            #   * count windows available -> evaluate the same triggers on
+            #     them, tagged ``window_kind: count`` for title/body.
+            cw = (count_windows or {}).get(tool)
+            tw = (tournament_windows or {}).get(tool)
+            d["in_tournament"] = _in_roster(tool, tournament_roster or set())
+            d["tournament_total"] = (tw or {}).get("total", 0)
+            if not cw and not tw:
+                d.update(decision="silent", reason="sample_floor")
+                decisions.append(d)
+                continue
+            # Source preference: production count windows first (the real
+            # contract); tournament count windows as the riskless fallback
+            # for tools production barely requests. Never blended.
+            picked: Optional[Dict[str, Any]] = None
+            picked_kind = ""
+            if cw and not cw.get("insufficient"):
+                picked, picked_kind = cw, "count"
+            elif tw and not tw.get("insufficient"):
+                picked, picked_kind = tw, "tournament"
+            if picked is None:
+                first_seen = _parse_ts((cw or tw or {}).get("first_predicted_at"))
+                if (
+                    first_seen is not None
+                    and (now_dt - first_seen).days < COUNT_RAMP_DAYS
+                ):
+                    # A newly-deployed variant accruing its first rows is
+                    # ramping, not starved -- no human page.
+                    d.update(
+                        decision="silent",
+                        reason="ramping",
+                        cw_total=(cw or {}).get("total", 0),
+                    )
+                    decisions.append(d)
+                    continue
+                d.update(
+                    decision="insufficient_data",
+                    reason="widen_sample",
+                    window_kind="count",
+                    cw_total=(cw or {}).get("total", 0),
+                )
+                decisions.append(d)
+                continue
+            d["calendar_n_cur"] = d["n_cur"]
+            c, p = picked["cur"], picked.get("prev") or {}
+            d.update(
+                window_kind=picked_kind,
+                brier_cur=c.get("brier"),
+                brier_prev=p.get("brier"),
+                n_cur=c.get("valid_n") or 0,
+                n_prev=p.get("valid_n") or 0,
+                cw_spans=picked.get("spans"),
+                cw_total=picked.get("total"),
+            )
         bc, bp = c.get("brier"), p.get("brier")
-        if bc is None or bp is None:
+        if bc is None or (
+            bp is None and d.get("window_kind") not in ("count", "tournament")
+        ):
             d.update(decision="silent", reason="missing_brier")
             decisions.append(d)
             continue
-        delta_brier = bc - bp
-        d["delta_brier"] = delta_brier
+        if bp is None:
+            # Count-window with only C-1 filled: no disjoint baseline, so
+            # the regression trigger cannot run -- the level trigger below
+            # still can. delta 0.0 keeps the regression branch inert.
+            delta_brier = 0.0
+        else:
+            delta_brier = bc - bp
+            d["delta_brier"] = delta_brier
         # Two triggers express the self-improvement loop:
         # - regression: today's Brier worsened by more than the threshold
         #   AND log_loss agrees on the worsening direction. Sign
@@ -708,19 +1074,23 @@ def build_issue_title(
     platform: str = "polymarket",
     reason: str = "regression",
     bss_cur: Optional[float] = None,
+    window_kind: str = "calendar",
 ) -> str:
     """Issue title format for ``tool`` that the agent's Step 1 parser expects."""
     # The agent reads the trigger reason from the body's ``- Trigger:`` line and
-    # only the platform from the title's ``on <platform> W-1`` anchor, so the
-    # metric wording here is free to match the body: name BSS when the level
-    # trigger fired on the skill score, keep the legacy "Brier above level" for
-    # the absolute-Brier fallback path. ``_TITLE_RE`` still keys on
-    # ``on <platform> W-1``, so (tool, platform) dedup is unaffected.
+    # only the platform from the title's ``on <platform> W-1``/``C-1`` anchor,
+    # so the metric wording here is free to match the body: name BSS when the
+    # level trigger fired on the skill score, keep the legacy "Brier above
+    # level" for the absolute-Brier fallback path. ``_TITLE_RE`` keys on
+    # ``on <platform> [WC]-1``, so (tool, platform) dedup is unaffected by the
+    # window kind: a calendar fire suppresses a later count fire and vice
+    # versa.
+    tag = {"count": "C-1", "tournament": "T-1"}.get(window_kind, "W-1")
     if reason == "level_floor":
         if bss_cur is not None and math.isfinite(bss_cur):
-            return f"[tool-improvement] `{tool}`: BSS below floor on {platform} W-1"
-        return f"[tool-improvement] `{tool}`: Brier above level on {platform} W-1"
-    return f"[tool-improvement] `{tool}`: Brier regression on {platform} W-1"
+            return f"[tool-improvement] `{tool}`: BSS below floor on {platform} {tag}"
+        return f"[tool-improvement] `{tool}`: Brier above level on {platform} {tag}"
+    return f"[tool-improvement] `{tool}`: Brier regression on {platform} {tag}"
 
 
 def build_issue_body(
@@ -749,7 +1119,7 @@ def build_issue_body(
         skill_clause = (
             f"a Brier Skill Score of {bss_cur:+.4f} (below the {BSS_LEVEL_FLOOR:+.2f} "
             "floor -- materially worse than its base-rate reference)"
-            if bss_cur is not None
+            if bss_cur is not None and math.isfinite(bss_cur)
             else f"a Brier persistently above {BRIER_LEVEL_THRESHOLD:.2f}"
         )
         headline = (
@@ -765,6 +1135,82 @@ def build_issue_body(
             "recent 7-day window."
         )
         signal = "regression signal"
+    if decision.get("window_kind") in ("count", "tournament"):
+        is_tournament = decision.get("window_kind") == "tournament"
+        if reason == "level_floor":
+            headline = headline.replace(
+                "in the most recent 7-day window",
+                "on the count-window check (calendar windows are below the "
+                "sample floor for this tool, so the fallback count-window "
+                "rule applies)",
+            )
+        else:
+            headline = (
+                f"`{tool}` on {platform} shows a Brier regression on the "
+                "count-window check (calendar windows are below the sample "
+                "floor for this tool, so the fallback count-window rule "
+                "applies)."
+            )
+        spans = decision.get("cw_spans") or {}
+        n_prev = decision.get("n_prev") or 0
+        brier_prev = decision.get("brier_prev")
+        body = _COUNT_BODY_TEMPLATE.format(
+            headline=headline,
+            tool=tool,
+            brier_cur=decision["brier_cur"],
+            bss_clause=(
+                f", BSS vs base rate: **{decision['bss_cur']:+.4f}**"
+                if decision.get("bss_cur") is not None
+                and math.isfinite(decision["bss_cur"])
+                else ""
+            ),
+            prev_clause=(
+                f"**{brier_prev:.4f}** (n={n_prev})"
+                if brier_prev is not None
+                else "not available (fewer than 2x the window size accrued)"
+            ),
+            delta_clause=(
+                f"\n- Delta (C-1 - C-2): **{decision['delta_brier']:+.4f}**"
+                if decision.get("delta_brier") is not None
+                else ""
+            ),
+            n_cur=decision["n_cur"],
+            n_prev=n_prev,
+            span_cur=spans.get("cur", "n/a"),
+            span_prev=spans.get("prev", "n/a"),
+            brier_prev_s=f"{brier_prev:.4f}" if brier_prev is not None else "n/a",
+            reason=reason,
+            signal=signal,
+            platforms=sorted(monitored),
+            platform=platform,
+            cross_ref=cross_ref,
+            calendar_n=decision.get("calendar_n_cur", 0),
+            floor=VALID_N_PER_WINDOW_FLOOR,
+            max_age=COUNT_WINDOW_MAX_AGE_DAYS,
+            window_days=ROLLING_WINDOW_DAYS,
+            pm=pm,
+            artifact_url=artifact_url,
+        )
+        if is_tournament:
+            # Same structure, tournament-sourced: retag the windows and
+            # prepend the source caveat so no reader mistakes the slice
+            # for production data.
+            body = body.replace("C-1", "T-1").replace("C-2", "T-2")
+            body = body.replace(
+                "## Windows (count-based",
+                "**Source: tournament arm** -- shadow-scores the same daily "
+                "questions with no on-chain traffic; separate execution "
+                "contract from production, so validate any fix against the "
+                "production payload before shipping. Production rows in the "
+                "same period were below the sample floor.\n\n"
+                "## Windows (tournament count-based",
+            )
+            body = body.replace(
+                "deduped by `row_id`",
+                "sourced from `results/tournament_scored.jsonl`, "
+                "deduped by `row_id`",
+            )
+        return body
     return _BODY_TEMPLATE.format(
         headline=headline,
         brier_cur=decision["brier_cur"],
@@ -821,6 +1267,92 @@ Download with `gh run download <run-id> --name benchmark-data`. The artifact con
 
 If your investigation concludes that a code change is warranted, **before editing anything** read the [Tool-improvement housekeeping rules](../blob/main/CLAUDE.md#tool-improvement-housekeeping-rules) section of `CLAUDE.md` at the repo root. It is the canonical reference for: in-place edit vs new-version spawn decision, naming convention, the `tool_lineage.json` ledger, and the side-effect file list.
 """
+
+
+_COUNT_BODY_TEMPLATE = """## Summary
+
+{headline}
+
+- Current count-window (**C-1**, last {n_cur} valid rows) Brier: **{brier_cur:.4f}**{bss_clause}
+- Previous count-window (**C-2**, preceding {n_prev} valid rows) Brier: {prev_clause}{delta_clause}
+- Trigger: **{reason}** (count-window fallback)
+- Platforms monitored: {platforms}; this issue is scoped to **{platform}**.{cross_ref}
+
+This issue records the {signal}, not a diagnosis. The cause has not been identified.
+
+@valory-coding-agent
+
+## Windows (count-based -- reproduce by row count, not calendar)
+
+Predicate: rows with `tool_name == {tool} AND platform == {platform} AND prediction_parse_status == "valid" AND final_outcome != null AND p_yes != null AND predicted_at >= now - {max_age}d`, deduped by `row_id`, sorted by `predicted_at` ascending.
+
+| Window | Definition | predicted_at span | n | Brier |
+|---|---|---|---|---|
+| **C-1** (current) | last {n_cur} rows of the sorted slice | {span_cur} | {n_cur} | {brier_cur:.4f} |
+| **C-2** (previous) | preceding {n_prev} rows | {span_prev} | {n_prev} | {brier_prev_s} |
+
+Calendar context: the {window_days}d calendar windows do not both meet the {floor}-row sample floor for this tool (current-window valid n: {calendar_n}), which is why the calendar triage is silent and the count-window fallback fired.
+
+## Baseline stats (machine-readable)
+
+```baseline-stats-{platform}
+{pm}
+```
+
+## Investigation
+
+Artifact: {artifact_url}
+
+Download with `gh run download <run-id> --name benchmark-data`. The artifact contains the daily JSONL logs and `results/scores_{platform}.json`. Reproduce the headline number from the raw rows (predicate above) before forming any hypothesis.
+
+If your investigation concludes that a code change is warranted, **before editing anything** read the [Tool-improvement housekeeping rules](../blob/main/CLAUDE.md#tool-improvement-housekeeping-rules) section of `CLAUDE.md` at the repo root. It is the canonical reference for: in-place edit vs new-version spawn decision, naming convention, the `tool_lineage.json` ledger, and the side-effect file list.
+"""
+
+
+def build_widen_sample_title(tool: str, platform: str = "polymarket") -> str:
+    """Title for the deployment-review widen-sample note (own dedup key + label)."""
+    return (
+        f"[deployment-review] `{tool}`: below count floor - widen sample on {platform}"
+    )
+
+
+_WIDEN_SAMPLE_BODY_TEMPLATE = """## Not enough data to judge this tool -- pick one option
+
+`{tool}` on {platform}: **{total} scored predictions in {max_age} days** (need {n}).
+Tournament arm: {tournament_line}
+
+1. **Add it to the tournament** -- shadow-scores daily questions, no production risk, assessable in ~1 week.{tournament_done}
+2. **Route production traffic** to it.
+3. **Retire it.**
+
+No code change requested; the coding agent is not invoked. This note will not repost while open, and stays quiet {dr_days}d after a close.
+"""
+
+
+def build_widen_sample_body(
+    decision: Dict[str, Any], platform: str = "polymarket"
+) -> str:
+    """Render the deployment-review widen-sample note for a below-count-floor tool."""
+    in_tournament = decision.get("in_tournament")
+    t_total = decision.get("tournament_total") or 0
+    if in_tournament and t_total:
+        tournament_line = f"IN tournament, {t_total} rows accrued so far."
+    elif in_tournament:
+        tournament_line = "IN tournament (no scored rows yet)."
+    else:
+        tournament_line = "NOT in tournament."
+    return _WIDEN_SAMPLE_BODY_TEMPLATE.format(
+        tool=decision["tool"],
+        platform=platform,
+        total=decision.get("cw_total", 0),
+        max_age=COUNT_WINDOW_MAX_AGE_DAYS,
+        n=COUNT_WINDOW_N,
+        tournament_line=tournament_line,
+        tournament_done=(
+            " (already done -- data is accruing)" if in_tournament else ""
+        ),
+        dr_days=DR_RECENT_CLOSE_DAYS,
+    )
 
 
 def _open_issue(repo: str, label: str, title: str, body: str, dry_run: bool) -> int:
@@ -880,31 +1412,58 @@ def _log_decision(d: Dict[str, Any]) -> None:
 
 def build_promotion_title(tool: str, platform: str = "polymarket") -> str:
     """Title for the visible promotion-review note (its own dedup key + label)."""
-    return f"[tool-promotion-review] `{tool}`: merged fix variant exists on {platform}"
+    return f"[deployment-review] `{tool}`: merged fix variant exists on {platform}"
 
 
-_PROMOTION_BODY_TEMPLATE = """## Promotion review -- not a new fix request
+_PROMOTION_BODY_TEMPLATE = """## A fix already exists -- decide on deployment, not more code
 
-`{tool}` on {platform} fired a Brier **{trigger}** signal again (W-1 Brier {brier_cur}, BSS {bss_cur}), but it **already has merged fix variant(s)** recorded in `tool_lineage.json`:
+`{tool}` on {platform} fired **{trigger}** again (current-window Brier {brier_cur}, BSS {bss_cur}), but merged fix variant(s) already exist:
 
 {descendant_list}
 
-Re-fixing the same ancestor is what produced the successive-variant churn, so **no new tool variant should be generated here** -- this note is deliberately NOT labelled `tool-improvement` and does not tag the coding agent.
+Do NOT request another fix (this note deliberately does not tag the coding agent). Decide:
 
-**Decide instead:**
+1. **Deploy the variant to production** if it beats the market (judge on BSS-vs-market / edge, not raw Brier) -- and once production data reaches ~{n} predictions, **remove it from the tournament** to free the slot.
+2. **Retire / mute the lineage** if no variant beats the market (it is at its ceiling).
 
-1. **Promote** one of the existing variants above to production if it is a real improvement -- evaluate on **BSS-vs-market**, not raw Brier: a lower-Brier variant that still loses to the market gives no ROI and should not ship; or
-2. if none of them beats the market, the lineage is at its **market ceiling** -- accept it and mute / retire the tool rather than iterating further.
-
-Baseline stats for the current window are in the matching `[tool-improvement]` issue (if open) and the `benchmark-data` artifact.
+Baseline stats: see the matching `[tool-improvement]` issue (if open) and the `benchmark-data` artifact.
 """
 
 
-def build_promotion_body(decision: Dict[str, Any], platform: str = "polymarket") -> str:
-    """Render the visible promotion-review note for a tool that already has a fix variant."""
+def build_promotion_body(
+    decision: Dict[str, Any],
+    platform: str = "polymarket",
+    tournament_roster: Optional[set] = None,
+    tournament_by_tool: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Render the visible promotion-review note for a tool that already has a fix variant.
+
+    :param decision: the triage decision dict (``descendants`` et al.).
+    :param platform: platform the note is scoped to.
+    :param tournament_roster: normalized tournament roster names.
+    :param tournament_by_tool: ``by_tool`` dict of the tournament scores file.
+    :return: markdown body.
+    """
     descendants = decision.get("descendants", [])
-    dlist = "\n".join(f"- `{v}`" for v in descendants) or "- (see tool_lineage.json)"
+    roster = tournament_roster or set()
+    t_by = tournament_by_tool or {}
+
+    def _dline(v: str) -> str:
+        stats = t_by.get(v) or t_by.get(v.replace("-", "_")) or {}
+        if _in_roster(v, roster):
+            n = stats.get("valid_n")
+            brier = stats.get("brier")
+            if n:
+                return (
+                    f"- `{v}` -- in tournament: n={n}, Brier {brier} "
+                    "(shadow data, accruing daily)"
+                )
+            return f"- `{v}` -- in tournament (no scored rows yet)"
+        return f"- `{v}` -- NOT in tournament (add it to accrue riskless data)"
+
+    dlist = "\n".join(_dline(v) for v in descendants) or "- (see tool_lineage.json)"
     return _PROMOTION_BODY_TEMPLATE.format(
+        n=COUNT_WINDOW_N,
         tool=decision["tool"],
         platform=platform,
         trigger=decision.get("trigger", "level_floor"),
@@ -1028,6 +1587,36 @@ def main() -> int:
     lineage_children = _load_lineage_children()
     log.info("triage lineage: %d tools have >=1 fix variant", len(lineage_children))
     promo_open = _open_issue_tools(args.repo, PROMOTION_LABEL, _PROMO_TITLE_RE)
+    # Migration shim for the tool-promotion-review -> deployment-review label
+    # rename: notes opened under the OLD label would otherwise be invisible
+    # to the dedup and get re-posted daily under the new one. Query both and
+    # union; a gh error on EITHER makes the combined result None (fail-closed,
+    # same rule as below). Remove once no open legacy-labelled notes remain.
+    legacy_open = _open_issue_tools(
+        args.repo, _LEGACY_PROMOTION_LABEL, _LEGACY_PROMO_TITLE_RE
+    )
+    if promo_open is None or legacy_open is None:
+        promo_open = None
+    else:
+        promo_open = list(promo_open) + list(legacy_open)
+    # Recently-closed deployment-review notes: a manual close must silence
+    # the same (tool, platform) note for DR_RECENT_CLOSE_DAYS -- without
+    # this the insufficient_data condition re-fires deterministically and
+    # re-files the note the day after a human closed it. Fail-closed on gh
+    # error (treated like an open note: skip filing).
+    dr_closed = _closed_issue_pairs(args.repo, PROMOTION_LABEL, _PROMO_TITLE_RE)
+    dr_closed_legacy = _closed_issue_pairs(
+        args.repo, _LEGACY_PROMOTION_LABEL, _LEGACY_PROMO_TITLE_RE
+    )
+    if dr_closed is None or dr_closed_legacy is None:
+        dr_recent_close: Optional[set] = None
+    else:
+        dr_cutoff = now - timedelta(days=DR_RECENT_CLOSE_DAYS)
+        dr_recent_close = {
+            (t, p_)
+            for t, p_, closed_at in list(dr_closed) + list(dr_closed_legacy)
+            if closed_at >= dr_cutoff
+        }
     # ``promo_open`` is a None/[]/[...] tristate. ``promo_open_set`` collapses
     # None -> empty, so it is NOT sufficient on its own: the dispatch branch
     # below MUST keep its explicit ``if promo_open is None`` guard (skip on gh
@@ -1035,11 +1624,47 @@ def main() -> int:
     promo_open_set = {tuple(x) for x in (promo_open or [])}
 
     all_decisions: List[Dict[str, Any]] = []
-    n_opened = n_failed = n_collapse = n_silent = n_promo = 0
+    n_opened = n_failed = n_collapse = n_silent = n_promo = n_widen = 0
     for platform in platforms:
         cur = _load_json(RESULTS_DIR / f"rolling_scores_{platform}.json")
         prev = _load_json(RESULTS_DIR / f"prev_rolling_scores_{platform}.json")
         platform_scores = _load_json(RESULTS_DIR / f"scores_{platform}.json")
+        # Count-window fallback input (anti-stall): per-tool last-N /
+        # previous-N stats from the raw daily logs. The logs dir is derived
+        # from RESULTS_DIR (its sibling) so test monkeypatching of
+        # RESULTS_DIR isolates this path too; missing logs (unit tests,
+        # partial checkouts) degrade to the legacy calendar-only behavior
+        # inside triage().
+        logs_dir = RESULTS_DIR.parent / "datasets" / "logs"
+        count_windows: Dict[str, Dict[str, Any]] = {}
+        if logs_dir.is_dir():
+            count_rows = _load_count_rows(logs_dir, platform, now)
+            count_windows = {
+                tool: _count_window_stats(rows) for tool, rows in count_rows.items()
+            }
+            log.info(
+                "count-window fallback: %d tools with row data on %s",
+                len(count_windows),
+                platform,
+            )
+        # Tournament fallback inputs: row-level shadow results + roster.
+        tournament_rows = _load_tournament_count_rows(
+            RESULTS_DIR / TOURNAMENT_SCORED_NAME, platform, now
+        )
+        tournament_windows = {
+            tool: _count_window_stats(rows) for tool, rows in tournament_rows.items()
+        }
+        if tournament_windows:
+            log.info(
+                "tournament fallback: %d tools with tournament rows on %s",
+                len(tournament_windows),
+                platform,
+            )
+        roster = _tournament_roster()
+        tournament_scores = _load_json(
+            RESULTS_DIR / f"scores_tournament_{platform}.json"
+        )
+        tournament_by_tool = tournament_scores.get("by_tool") or {}
         decisions = triage(
             cur,
             prev,
@@ -1049,6 +1674,9 @@ def main() -> int:
             closed_issues=closed_issues,
             now=now,
             lineage_children=lineage_children,
+            count_windows=count_windows,
+            tournament_windows=tournament_windows,
+            tournament_roster=roster,
         )
         all_decisions.extend(decisions)
 
@@ -1068,6 +1696,7 @@ def main() -> int:
                     platform,
                     d.get("reason", "regression"),
                     d.get("bss_cur"),
+                    window_kind=d.get("window_kind", "calendar"),
                 )
                 rc = _open_issue(args.repo, args.label, title, body, args.dry_run)
                 if rc == 0:
@@ -1138,7 +1767,12 @@ def main() -> int:
                         args.repo,
                         PROMOTION_LABEL,
                         build_promotion_title(tool, platform),
-                        build_promotion_body(d, platform),
+                        build_promotion_body(
+                            d,
+                            platform,
+                            tournament_roster=roster,
+                            tournament_by_tool=tournament_by_tool,
+                        ),
                         args.dry_run,
                     )
                     if rc == 0:
@@ -1150,14 +1784,82 @@ def main() -> int:
                         # write_state does not persist a look-alike success.
                         d["reason"] = "promotion_note_failed"
                         d["dispatch_failed"] = True
+            elif d["decision"] == "insufficient_data":
+                # Below the count floor even cumulatively: the tool cannot
+                # be assessed at all. Route to a deployment-review
+                # widen-sample note (human decides: route traffic or
+                # retire). Shares the promo-note label + open-set so at most
+                # one deployment-review note per (tool, platform) is open at
+                # a time; same fail-closed rule on a gh listing error.
+                key = (d["tool"], platform)
+                if dr_recent_close is None:
+                    log.warning(
+                        "insufficient_data on %s/%s: closed deployment-review "
+                        "list unavailable (gh error); skipping to avoid "
+                        "re-filing over a fresh manual close.",
+                        d["tool"],
+                        platform,
+                    )
+                    n_silent += 1
+                elif key in dr_recent_close:
+                    log.info(
+                        "insufficient_data on %s/%s: deployment-review note "
+                        "closed within %dd; cooldown active, skipping.",
+                        d["tool"],
+                        platform,
+                        DR_RECENT_CLOSE_DAYS,
+                    )
+                    n_silent += 1
+                elif promo_open is None:
+                    log.warning(
+                        "insufficient_data on %s/%s: deployment-review note "
+                        "list unavailable (gh error); skipping to avoid a "
+                        "duplicate note.",
+                        d["tool"],
+                        platform,
+                    )
+                    n_silent += 1
+                elif key in promo_open_set:
+                    log.info(
+                        "insufficient_data on %s/%s: deployment-review note "
+                        "already open; skipping.",
+                        d["tool"],
+                        platform,
+                    )
+                    n_silent += 1
+                else:
+                    log.info(
+                        "insufficient_data on %s/%s (total=%s < %d): opening "
+                        "deployment-review widen-sample note.",
+                        d["tool"],
+                        platform,
+                        d.get("cw_total"),
+                        COUNT_WINDOW_N,
+                    )
+                    _ensure_label(args.repo, PROMOTION_LABEL, args.dry_run)
+                    rc = _open_issue(
+                        args.repo,
+                        PROMOTION_LABEL,
+                        build_widen_sample_title(d["tool"], platform),
+                        build_widen_sample_body(d, platform),
+                        args.dry_run,
+                    )
+                    if rc == 0:
+                        n_widen += 1
+                        promo_open_set.add(key)
+                    else:
+                        n_failed += 1
+                        d["reason"] = "widen_sample_note_failed"
+                        d["dispatch_failed"] = True
             else:
                 n_silent += 1
 
     log.info(
-        "triage summary: %d opened, %d promotion-note, %d failed, "
-        "%d reliability_collapse, %d silent",
+        "triage summary: %d opened, %d promotion-note, %d widen-sample, "
+        "%d failed, %d reliability_collapse, %d silent",
         n_opened,
         n_promo,
+        n_widen,
         n_failed,
         n_collapse,
         n_silent,

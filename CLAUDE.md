@@ -298,7 +298,7 @@ Add exactly ONE entry per new variant. Do not modify or remove existing entries.
 | `packages/{author}/customs/<base>_v<n+1>/__init__.py` | NEW — copy from previous tool's `__init__.py` |
 | `packages/packages.json` | CID added by `autonomy packages lock` |
 | `benchmark/tools.py:TOOL_REGISTRY` | ADD entry mapping `<base>-v<n+1>` → new module path |
-| `benchmark/tournament_tools.json` | ADD entry `<base>-v<n+1>` → new CID. Previous entry left in place. |
+| `benchmark/tournament_tools.json` | ADD entry `<base>-v<n+1>` → new CID **AND REMOVE the parent's entry** (roster swap: one candidate per family — the tournament arm costs real LLM calls per daily question, and the parent's shadow data is superseded by its successor's). The variant then accrues riskless tournament data from the next flywheel run; it leaves the tournament when a human deploys it to production and its production data reaches the count floor (the deployment-review note tracks this). |
 | `tool_lineage.json` | ADD one entry to `tools` (schema above) |
 
 #### Adding a new tool from scratch (not an update)

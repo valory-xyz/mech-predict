@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +39,8 @@ from benchmark.tool_improvement_triage import (
     BRIER_LEVEL_THRESHOLD,
     BRIER_REGRESSION_THRESHOLD,
     BSS_LEVEL_FLOOR,
+    COUNT_WINDOW_MAX_AGE_DAYS,
+    COUNT_WINDOW_N,
     PROMOTION_LABEL,
     RECENT_CLOSE_DAYS,
     RELIABILITY_FLOOR,
@@ -46,17 +49,25 @@ from benchmark.tool_improvement_triage import (
     _TITLE_RE,
     _below_level,
     _closed_issue_pairs,
+    _count_window_stats,
     _descendants,
     _ensure_label,
+    _in_roster,
+    _load_count_rows,
     _load_json,
     _load_lineage_children,
+    _load_tournament_count_rows,
     _open_issue,
     _open_issue_tools,
+    _tournament_roster,
     _window_iso,
+    _window_metrics,
     build_issue_body,
     build_issue_title,
     build_promotion_body,
     build_promotion_title,
+    build_widen_sample_body,
+    build_widen_sample_title,
     main,
     triage,
     write_state,
@@ -1586,7 +1597,7 @@ class TestPromotionNote:
     def test_title_and_body(self) -> None:
         """The note names the descendants, cites BSS-vs-market, and never tags the agent."""
         title = build_promotion_title("superforcaster-polymarket-v1", "polymarket")
-        assert title.startswith("[tool-promotion-review]")
+        assert title.startswith("[deployment-review]")
         assert "`superforcaster-polymarket-v1`" in title
         assert "on polymarket" in title
         body = build_promotion_body(
@@ -1599,12 +1610,12 @@ class TestPromotionNote:
             },
             "polymarket",
         )
-        assert "not a new fix request" in body.lower()
+        assert "do not request another fix" in body.lower()
         assert "`superforcaster-polymarket-v4`" in body
         assert "BSS-vs-market" in body
         # Must NOT invoke the coding agent.
         assert "@valory-coding-agent" not in body
-        assert PROMOTION_LABEL == "tool-promotion-review"
+        assert PROMOTION_LABEL == "deployment-review"
 
 
 class TestBssBoundary:
@@ -1753,9 +1764,9 @@ class TestEnsureLabel:
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run", fake_run
         )
-        _ensure_label("r/r", "tool-promotion-review", dry_run=False)
+        _ensure_label("r/r", "deployment-review", dry_run=False)
         assert calls["cmd"][:3] == ["gh", "label", "create"]
-        assert "tool-promotion-review" in calls["cmd"]
+        assert "deployment-review" in calls["cmd"]
 
     def test_dry_run_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """dry_run never shells out."""
@@ -1864,7 +1875,7 @@ class TestMainPromotionDispatch:
         rc = self._run(monkeypatch, tmp_path, fake_run)
         assert rc == 0
         assert len(creates) == 1
-        assert "tool-promotion-review" in creates[0]
+        assert "deployment-review" in creates[0]
         assert "tool-improvement" not in creates[0]  # NOT a fix issue
 
     def test_deduped_when_note_already_open(
@@ -1872,10 +1883,10 @@ class TestMainPromotionDispatch:
     ) -> None:
         """An already-open promotion note suppresses a second one."""
         creates = []
-        title = "[tool-promotion-review] `a`: merged fix variant exists on polymarket"
+        title = "[deployment-review] `a`: merged fix variant exists on polymarket"
 
         def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
-            if "list" in cmd and "tool-promotion-review" in cmd:
+            if "list" in cmd and "deployment-review" in cmd:
                 return SimpleNamespace(
                     returncode=0, stdout=json.dumps([{"title": title}]), stderr=""
                 )
@@ -1896,7 +1907,7 @@ class TestMainPromotionDispatch:
         creates = []
 
         def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
-            if "list" in cmd and "tool-promotion-review" in cmd:
+            if "list" in cmd and "deployment-review" in cmd:
                 return SimpleNamespace(returncode=1, stdout="", stderr="rate limited")
             if "list" in cmd:
                 return SimpleNamespace(returncode=0, stdout="[]", stderr="")
@@ -1926,3 +1937,608 @@ class TestMainPromotionDispatch:
         assert state["by_tool"]["a"]["reason"] == "promotion_note_failed"
         # decision-independent flag for state-file consumers.
         assert state["by_tool"]["a"]["dispatch_failed"] is True
+
+
+def _cw_row(
+    predicted_at: str,
+    p_yes: float,
+    outcome: bool,
+    *,
+    row_id: str | None = None,
+    tool: str = "a",
+    platform: str = "polymarket",
+) -> Dict[str, Any]:
+    """Minimal valid daily-log row for the count-window loader/metrics."""
+    return {
+        "row_id": row_id or f"{tool}-{predicted_at}-{p_yes}",
+        "tool_name": tool,
+        "platform": platform,
+        "prediction_parse_status": "valid",
+        "final_outcome": outcome,
+        "p_yes": p_yes,
+        "predicted_at": predicted_at,
+    }
+
+
+def _cw(
+    *,
+    cur_brier: float = 0.30,
+    prev_brier: float | None = 0.20,
+    cur_bss: float | None = None,
+    cur_log_loss: float = 0.80,
+    prev_log_loss: float = 0.60,
+    n: int = COUNT_WINDOW_N,
+) -> Dict[str, Any]:
+    """Synthetic _count_window_stats output for triage() unit tests."""
+    cur: Dict[str, Any] = {
+        "brier": cur_brier,
+        "log_loss": cur_log_loss,
+        "valid_n": n,
+        "span_start": "2026-07-01",
+        "span_end": "2026-07-20",
+    }
+    if cur_bss is not None:
+        cur["brier_skill_score"] = cur_bss
+    prev = (
+        {
+            "brier": prev_brier,
+            "log_loss": prev_log_loss,
+            "valid_n": n,
+            "span_start": "2026-06-10",
+            "span_end": "2026-07-01",
+        }
+        if prev_brier is not None
+        else None
+    )
+    spans = {"cur": "2026-07-01 - 2026-07-20"}
+    if prev:
+        spans["prev"] = "2026-06-10 - 2026-07-01"
+    return {
+        "insufficient": False,
+        "total": n * (2 if prev else 1),
+        "cur": cur,
+        "prev": prev,
+        "spans": spans,
+    }
+
+
+class TestCountWindowFallback:
+    """Anti-stall: below-calendar-floor tools re-evaluate on count windows."""
+
+    def test_no_count_data_stays_sample_floor(self) -> None:
+        """Without count windows the legacy sample_floor silence holds."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "sample_floor"
+
+    def test_count_level_fire(self) -> None:
+        """A below-floor tool with a bad count-window BSS opens an issue."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+        assert d[0]["window_kind"] == "count"
+        assert d[0]["n_cur"] == COUNT_WINDOW_N
+        # calendar n preserved for the issue body's context line
+        assert d[0]["calendar_n_cur"] == 40
+
+    def test_count_regression_fire(self) -> None:
+        """A count-window Brier jump with log-loss agreement fires regression."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={
+                "a": _cw(
+                    cur_brier=0.30,
+                    prev_brier=0.20,
+                    cur_log_loss=0.90,
+                    prev_log_loss=0.60,
+                )
+            },
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "regression"
+        assert d[0]["window_kind"] == "count"
+        assert d[0]["delta_brier"] == pytest.approx(0.10)
+
+    def test_count_healthy_stays_silent(self) -> None:
+        """Healthy count windows keep the below-floor tool silent."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.20, prev_brier=0.21, cur_bss=0.10)},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_insufficient_data_routes_to_widen_sample(self) -> None:
+        """Below the count floor even cumulatively -> insufficient_data."""
+        d = triage(
+            _scores(a=_stats(n=15, valid_n=15, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            count_windows={"a": {"insufficient": True, "total": 56}},
+        )
+        assert d[0]["decision"] == "insufficient_data"
+        assert d[0]["reason"] == "widen_sample"
+        assert d[0]["cw_total"] == 56
+
+    def test_cur_only_level_fires_without_prev(self) -> None:
+        """Level trigger runs when n <= total < 2n; regression cannot."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=None, cur_bss=-0.30)},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["reason"] == "level_floor"
+        assert d[0].get("delta_brier") is None
+
+    def test_cur_only_healthy_silent(self) -> None:
+        """No prev window and a healthy C-1 stays silent (not missing_brier)."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.20, prev_brier=None, cur_bss=0.10)},
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "no_regression"
+
+    def test_calendar_path_untouched_when_floors_met(self) -> None:
+        """A tool above the calendar floor never consults count windows."""
+        d = triage(
+            _scores(a=_stats(brier=0.30, log_loss=0.80)),
+            _scores(a=_stats(brier=0.20, log_loss=0.60)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.10, prev_brier=0.10, cur_bss=0.50)},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert "window_kind" not in d[0]
+
+
+class TestCountWindowMetrics:
+    """_window_metrics / _count_window_stats numeric + slicing contract."""
+
+    def test_window_metrics_hand_computed(self) -> None:
+        """Brier / BSS / valid_n match a hand-computed two-row case."""
+        rows = [
+            _cw_row("2026-07-01T00:00:00Z", 0.8, True),
+            _cw_row("2026-07-02T00:00:00Z", 0.6, False),
+        ]
+        m = _window_metrics(rows)
+        # brier = ((0.8-1)^2 + (0.6-0)^2) / 2 = (0.04 + 0.36) / 2 = 0.2
+        assert m["brier"] == pytest.approx(0.2)
+        assert m["valid_n"] == 2
+        # yes_rate 0.5 -> base 0.25 -> bss = 1 - 0.2/0.25 = 0.2
+        assert m["brier_skill_score"] == pytest.approx(0.2)
+        assert m["span_start"] == "2026-07-01"
+        assert m["span_end"] == "2026-07-02"
+
+    def test_window_metrics_one_sided_outcomes_nan_bss(self) -> None:
+        """All-one-outcome window yields NaN BSS (absolute-floor fallback)."""
+        rows = [
+            _cw_row("2026-07-01T00:00:00Z", 0.8, True),
+            _cw_row("2026-07-02T00:00:00Z", 0.9, True),
+        ]
+        m = _window_metrics(rows)
+        assert math.isnan(m["brier_skill_score"])
+
+    def test_count_window_stats_slicing(self) -> None:
+        """C-1 is the LAST n rows; C-2 the preceding n; insufficient below n."""
+        rows = [
+            _cw_row(f"2026-07-{d:02d}T00:00:00Z", 0.1, False, row_id=str(d))
+            for d in range(1, 11)
+        ]
+        s = _count_window_stats(rows, n=4)
+        assert s["insufficient"] is False
+        assert s["total"] == 10
+        assert s["cur"]["span_start"] == "2026-07-07"
+        assert s["cur"]["span_end"] == "2026-07-10"
+        assert s["prev"]["span_start"] == "2026-07-03"
+        assert s["prev"]["span_end"] == "2026-07-06"
+        assert _count_window_stats(rows[:3], n=4) == {
+            "insufficient": True,
+            "total": 3,
+            "first_predicted_at": "2026-07-01T00:00:00Z",
+        }
+        cur_only = _count_window_stats(rows[:6], n=4)
+        assert cur_only["prev"] is None
+
+    def test_load_count_rows_dedup_validity_age(self, tmp_path: Path) -> None:
+        """Loader dedups by row_id, applies validity + age cap, sorts."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        old = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS + 1)
+        rows = [
+            _cw_row("2026-07-02T00:00:00Z", 0.6, False, row_id="dup"),
+            _cw_row("2026-07-01T00:00:00Z", 0.8, True),
+            # duplicate row_id: later file wins, no double count
+            _cw_row("2026-07-02T00:00:00Z", 0.6, False, row_id="dup"),
+            # excluded for invalid parse status
+            {
+                **_cw_row("2026-07-03T00:00:00Z", 0.5, True, row_id="x1"),
+                "prediction_parse_status": "malformed",
+            },
+            # excluded because unresolved
+            {
+                **_cw_row("2026-07-04T00:00:00Z", 0.5, True, row_id="x2"),
+                "final_outcome": None,
+            },
+            # excluded for age
+            _cw_row(old.strftime("%Y-%m-%dT%H:%M:%SZ"), 0.5, True, row_id="x3"),
+            # excluded for platform mismatch
+            _cw_row("2026-07-05T00:00:00Z", 0.5, True, row_id="x4", platform="omen"),
+        ]
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "production_log_2026_07_10.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows)
+        )
+        by_tool = _load_count_rows(logs, "polymarket", now)
+        assert sorted(r["row_id"] for r in by_tool["a"]) == sorted(
+            ["dup", "a-2026-07-01T00:00:00Z-0.8"]
+        )
+        # sorted ascending by predicted_at
+        assert [r["predicted_at"][:10] for r in by_tool["a"]] == [
+            "2026-07-01",
+            "2026-07-02",
+        ]
+
+
+class TestCountWindowTitleBody:
+    """Title/body contracts for count-window issues + widen-sample notes."""
+
+    def test_count_title_round_trips_dedup_regex(self) -> None:
+        """C-1 titles parse under _TITLE_RE with the same (tool, platform)."""
+        title = build_issue_title(
+            "a-v2", "polymarket", "level_floor", -0.26, window_kind="count"
+        )
+        assert "C-1" in title
+        m = _TITLE_RE.search(title)
+        assert m is not None
+        assert m.group(1) == "a-v2"
+        assert m.group(2) == "polymarket"
+
+    def test_widen_title_matches_promo_regex(self) -> None:
+        """Widen-sample titles dedup under the deployment-review regex."""
+        title = build_widen_sample_title("a-v4", "polymarket")
+        m = _PROMO_TITLE_RE.search(title)
+        assert m is not None
+        assert m.group(1) == "a-v4"
+        assert m.group(2) == "polymarket"
+
+    def test_count_body_renders_predicate_and_context(self) -> None:
+        """Count body carries the reproduction predicate + calendar context."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)},
+        )[0]
+        body = build_issue_body(d, {"brier": 0.3}, "<url>", _window_iso_now())
+        assert "count-window fallback" in body
+        assert "sorted by `predicted_at` ascending" in body
+        assert "current-window valid n: 40" in body
+        assert "C-1" in body and "C-2" in body
+        assert "@valory-coding-agent" in body
+
+    def test_count_body_without_prev_window(self) -> None:
+        """Cur-only count body renders n/a for the missing C-2."""
+        d = triage(
+            _scores(a=_stats(n=40, valid_n=40, brier=0.30)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=None, cur_bss=-0.30)},
+        )[0]
+        body = build_issue_body(d, {}, "<url>", _window_iso_now())
+        assert "not available" in body
+
+    def test_widen_sample_body_plain_language(self) -> None:
+        """Widen-sample note: count, the three options, tournament status, no jargon."""
+        body = build_widen_sample_body({"tool": "a-v4", "cw_total": 56}, "polymarket")
+        assert "56 scored predictions" in body
+        assert "Add it to the tournament" in body
+        assert "Route production traffic" in body
+        assert "Retire it" in body
+        assert "NOT in tournament." in body
+        assert "coding agent is not invoked" in body
+
+    def test_widen_sample_body_in_tournament(self) -> None:
+        """Tournament membership + accrued rows are surfaced to the human."""
+        body = build_widen_sample_body(
+            {
+                "tool": "a-v4",
+                "cw_total": 56,
+                "in_tournament": True,
+                "tournament_total": 87,
+            },
+            "polymarket",
+        )
+        assert "IN tournament, 87 rows accrued" in body
+        assert "already done -- data is accruing" in body
+
+
+def _window_iso_now() -> Dict[str, str]:
+    """window_iso dict for body-rendering tests (values are placeholders)."""
+    return {
+        "w1_start": "2026-07-21T00:00:00Z",
+        "w1_end": "2026-07-28T00:00:00Z",
+        "w2_start": "2026-07-14T00:00:00Z",
+        "w2_end": "2026-07-21T00:00:00Z",
+    }
+
+
+class TestZeroTrafficTools:
+    """A tool absent from cur.by_tool entirely still reaches the fallback."""
+
+    def test_zero_traffic_tool_fires_count_level(self) -> None:
+        """Zero calendar rows + bad count windows -> open_issue via count."""
+        d = triage(
+            _scores(other=_stats()),
+            _scores(other=_stats()),
+            {},
+            count_windows={
+                "ghost": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)
+            },
+        )
+        ghost = [x for x in d if x["tool"] == "ghost"]
+        assert len(ghost) == 1
+        assert ghost[0]["decision"] == "open_issue"
+        assert ghost[0]["window_kind"] == "count"
+        assert ghost[0]["calendar_n_cur"] == 0
+
+    def test_zero_traffic_tool_routes_to_widen_sample(self) -> None:
+        """Zero calendar rows + below count floor -> insufficient_data."""
+        d = triage(
+            _scores(other=_stats()),
+            _scores(other=_stats()),
+            {},
+            count_windows={"ghost": {"insufficient": True, "total": 12}},
+        )
+        ghost = [x for x in d if x["tool"] == "ghost"]
+        assert len(ghost) == 1
+        assert ghost[0]["decision"] == "insufficient_data"
+        assert ghost[0]["cw_total"] == 12
+
+
+class TestRampGuardAndReliabilityOrdering:
+    """Round-2 review fixes: ramp guard + reliability gate ordering."""
+
+    def test_ramping_new_tool_stays_silent(self) -> None:
+        """A below-count-floor tool first seen 3d ago is ramping, not starved."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            now=now,
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 12,
+                    "first_predicted_at": "2026-07-25T00:00:00Z",
+                }
+            },
+        )
+        assert d[0]["decision"] == "silent"
+        assert d[0]["reason"] == "ramping"
+
+    def test_ramp_elapsed_routes_to_widen_sample(self) -> None:
+        """First row older than the ramp period -> insufficient_data fires."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            now=now,
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 56,
+                    "first_predicted_at": "2026-06-20T00:00:00Z",
+                }
+            },
+        )
+        assert d[0]["decision"] == "insufficient_data"
+
+    def test_subfloor_reliability_does_not_block_fallback(self) -> None:
+        """Low reliability on a thin calendar sample must not preempt count."""
+        d = triage(
+            _scores(a=_stats(n=3, valid_n=3, brier=0.30, reliability=0.5)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["window_kind"] == "count"
+
+    def test_floor_met_reliability_collapse_unchanged(self) -> None:
+        """Legacy behavior: floor-sized sample with low reliability collapses."""
+        d = triage(
+            _scores(a=_stats(brier=0.30, reliability=0.5)),
+            _scores(a=_stats(brier=0.20)),
+            {},
+        )
+        assert d[0]["decision"] == "reliability_collapse"
+
+    def test_count_rows_mode_filter(self, tmp_path: Path) -> None:
+        """Tournament-mode rows never enter count windows."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        rows = [
+            _cw_row("2026-07-02T00:00:00Z", 0.6, False, row_id="p1"),
+            {
+                **_cw_row("2026-07-03T00:00:00Z", 0.5, True, row_id="t1"),
+                "mode": "tournament",
+            },
+            {
+                **_cw_row("2026-07-04T00:00:00Z", 0.5, True, row_id="p2"),
+                "mode": "production_replay",
+            },
+        ]
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "production_log_2026_07_10.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows)
+        )
+        by_tool = _load_count_rows(logs, "polymarket", now)
+        assert sorted(r["row_id"] for r in by_tool["a"]) == ["p1", "p2"]
+
+
+class TestTournamentFallback:
+    """Prod-count first, tournament count (T-1) as riskless fallback."""
+
+    def test_tournament_fires_when_production_starved(self) -> None:
+        """No prod count data + bad tournament windows -> T-1 open_issue."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.30)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            tournament_windows={
+                "a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)
+            },
+            tournament_roster={"a"},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["window_kind"] == "tournament"
+        title = build_issue_title(
+            "a", "polymarket", "level_floor", -0.26, window_kind="tournament"
+        )
+        assert "T-1" in title
+        assert _TITLE_RE.search(title) is not None
+
+    def test_production_count_preferred_over_tournament(self) -> None:
+        """When both sources fill, production count windows win."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.30)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            count_windows={"a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)},
+            tournament_windows={"a": _cw(cur_brier=0.10, prev_brier=0.10, cur_bss=0.5)},
+        )
+        assert d[0]["decision"] == "open_issue"
+        assert d[0]["window_kind"] == "count"
+
+    def test_both_insufficient_routes_widen_with_tournament_status(self) -> None:
+        """Both sources below floor -> widen-sample, tournament status on d."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.30)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 56,
+                    "first_predicted_at": "2026-06-01T00:00:00Z",
+                }
+            },
+            tournament_windows={"a": {"insufficient": True, "total": 40}},
+            tournament_roster={"a"},
+            now=datetime(2026, 7, 28, tzinfo=timezone.utc),
+        )
+        assert d[0]["decision"] == "insufficient_data"
+        assert d[0]["in_tournament"] is True
+        assert d[0]["tournament_total"] == 40
+
+    def test_tournament_body_carries_source_caveat(self) -> None:
+        """T-1 body is retagged and names the tournament source + caveat."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.30)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            tournament_windows={
+                "a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)
+            },
+        )[0]
+        body = build_issue_body(d, {}, "<url>", _window_iso_now())
+        assert "T-1" in body and "T-2" in body
+        assert "C-1" not in body
+        assert "Source: tournament arm" in body
+        assert "tournament_scored.jsonl" in body
+
+    def test_tournament_only_tool_enters_iteration(self) -> None:
+        """A tool present ONLY in tournament windows is still triaged."""
+        d = triage(
+            _scores(other=_stats()),
+            _scores(other=_stats()),
+            {},
+            tournament_windows={
+                "ghost": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)
+            },
+        )
+        ghost = [x for x in d if x["tool"] == "ghost"]
+        assert len(ghost) == 1
+        assert ghost[0]["decision"] == "open_issue"
+        assert ghost[0]["window_kind"] == "tournament"
+
+
+class TestTournamentRoster:
+    """tournament_tools.json membership, naming-insensitive."""
+
+    def test_roster_normalizes_naming(self, tmp_path: Path) -> None:
+        """Dash and underscore spellings both match."""
+        f = tmp_path / "tournament_tools.json"
+        f.write_text(json.dumps({"superforcaster-polymarket-v5": "bafybeicid"}))
+        roster = _tournament_roster(f)
+        assert _in_roster("superforcaster-polymarket-v5", roster)
+        assert _in_roster("superforcaster_polymarket_v5", roster)
+        assert not _in_roster("other-tool", roster)
+
+    def test_missing_roster_file_is_empty(self, tmp_path: Path) -> None:
+        """Absent tournament_tools.json -> nothing is in the roster."""
+        assert _tournament_roster(tmp_path / "nope.json") == set()
+
+    def test_promotion_body_tournament_status(self) -> None:
+        """Promotion note tells the human the variant's tournament state."""
+        body = build_promotion_body(
+            {
+                "tool": "a-v1",
+                "trigger": "level_floor",
+                "brier_cur": 0.34,
+                "bss_cur": -0.3,
+                "descendants": ["a-v4", "a-v5"],
+            },
+            "polymarket",
+            tournament_roster={"a_v5"},
+            tournament_by_tool={"a-v5": {"valid_n": 120, "brier": 0.21}},
+        )
+        assert "`a-v5` -- in tournament: n=120, Brier 0.21" in body
+        assert "`a-v4` -- NOT in tournament" in body
+        assert "remove it from the tournament" in body
+        assert "@valory-coding-agent" not in body
+
+
+class TestTournamentLoader:
+    """_load_tournament_count_rows: file-missing, dedup, validity."""
+
+    def test_missing_file_empty(self, tmp_path: Path) -> None:
+        """No tournament_scored.jsonl -> no tournament windows."""
+        assert not _load_tournament_count_rows(
+            tmp_path / "tournament_scored.jsonl",
+            "polymarket",
+            datetime(2026, 7, 28, tzinfo=timezone.utc),
+        )
+
+    def test_loads_valid_rows_sorted(self, tmp_path: Path) -> None:
+        """Valid rows load, dedup by row_id, sorted oldest-first."""
+        rows = [
+            _cw_row("2026-07-05T00:00:00Z", 0.7, True, row_id="t2"),
+            _cw_row("2026-07-04T00:00:00Z", 0.6, False, row_id="t1"),
+            _cw_row("2026-07-05T00:00:00Z", 0.7, True, row_id="t2"),
+        ]
+        f = tmp_path / "tournament_scored.jsonl"
+        f.write_text("\n".join(json.dumps(r) for r in rows))
+        by_tool = _load_tournament_count_rows(
+            f, "polymarket", datetime(2026, 7, 28, tzinfo=timezone.utc)
+        )
+        assert [r["row_id"] for r in by_tool["a"]] == ["t1", "t2"]

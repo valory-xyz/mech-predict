@@ -105,6 +105,16 @@ jobs:
           if_no_artifact_found: warn
         continue-on-error: true
 
+      # The previous-run artifact now carries tournament_scored.jsonl (it
+      # ships in benchmark-data for the coding agent). The TRIAGE, however,
+      # must only ever see the FRESH copy from today's tournament job: if
+      # that download fails (it is continue-on-error), a stale restored
+      # copy would make T-1 windows score yesterday's shadow rows as if
+      # current (fail-stale). Purge it here; the fresh download below
+      # re-creates it, and its absence correctly disables the T-1 tier.
+      - name: Drop stale tournament rows from the restored artifact
+        run: rm -f benchmark/results/tournament_scored.jsonl
+
       # Self-healing backfill: delivery rows are occasionally written to
       # the daily shards before their response is available upstream
       # (indexer lag or transient subgraph failures), landing with
@@ -391,8 +401,10 @@ jobs:
       # decisions (merged-variant promotion, widen-sample for starved
       # tools) open deployment-review issues instead and are never
       # agent-routed. Fix-issue duplicate suppression is live-gh-list
-      # based with the state file as fallback; deployment-review dedup
-      # is gh-list only (fail-closed). The hashFiles() gate is defensive: if
+      # based; the state-file fallback is one run STALE by construction
+      # (benchmark-data uploads above, before this step runs, so the
+      # artifact always carries the previous run's state). Deployment-
+      # review dedup is gh-list only (fail-closed). The hashFiles() gate is defensive: if
       # either rolling file is missing (because the scorer step failed)
       # we skip triage rather than open a noisy issue against half-data.
       # Triage runs by default. The `run_triage` workflow_dispatch input

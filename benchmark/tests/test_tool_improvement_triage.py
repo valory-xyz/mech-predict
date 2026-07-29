@@ -2185,7 +2185,7 @@ class TestCountWindowMetrics:
         (logs / "production_log_2026_07_10.jsonl").write_text(
             "\n".join(json.dumps(r) for r in rows)
         )
-        by_tool = _load_count_rows(logs, "polymarket", now)
+        by_tool, _first_seen = _load_count_rows(logs, "polymarket", now)
         assert sorted(r["row_id"] for r in by_tool["a"]) == sorted(
             ["dup", "a-2026-07-01T00:00:00Z-0.8"]
         )
@@ -2246,7 +2246,10 @@ class TestCountWindowTitleBody:
 
     def test_widen_sample_body_plain_language(self) -> None:
         """Widen-sample note: count, the three options, tournament status, no jargon."""
-        body = build_widen_sample_body({"tool": "a-v4", "cw_total": 56}, "polymarket")
+        body = build_widen_sample_body(
+            {"tool": "a-v4", "cw_total": 56, "in_tournament": False},
+            "polymarket",
+        )
         assert "56 scored predictions" in body
         assert "Add it to the tournament" in body
         assert "Route production traffic" in body
@@ -2391,7 +2394,7 @@ class TestRampGuardAndReliabilityOrdering:
         (logs / "production_log_2026_07_10.jsonl").write_text(
             "\n".join(json.dumps(r) for r in rows)
         )
-        by_tool = _load_count_rows(logs, "polymarket", now)
+        by_tool, _first_seen = _load_count_rows(logs, "polymarket", now)
         assert sorted(r["row_id"] for r in by_tool["a"]) == ["p1", "p2"]
 
 
@@ -2523,11 +2526,13 @@ class TestTournamentLoader:
 
     def test_missing_file_empty(self, tmp_path: Path) -> None:
         """No tournament_scored.jsonl -> no tournament windows."""
-        assert not _load_tournament_count_rows(
+        by_tool, first_seen = _load_tournament_count_rows(
             tmp_path / "tournament_scored.jsonl",
             "polymarket",
             datetime(2026, 7, 28, tzinfo=timezone.utc),
         )
+        assert not by_tool
+        assert not first_seen
 
     def test_loads_valid_rows_sorted(self, tmp_path: Path) -> None:
         """Valid rows load, dedup by row_id, sorted oldest-first."""
@@ -2538,7 +2543,255 @@ class TestTournamentLoader:
         ]
         f = tmp_path / "tournament_scored.jsonl"
         f.write_text("\n".join(json.dumps(r) for r in rows))
-        by_tool = _load_tournament_count_rows(
+        by_tool, _first_seen = _load_tournament_count_rows(
             f, "polymarket", datetime(2026, 7, 28, tzinfo=timezone.utc)
         )
         assert [r["row_id"] for r in by_tool["a"]] == ["t1", "t2"]
+
+
+class TestReviewRound2Fixes:
+    """Coverage for the review findings (ramp, roster, collapse, widen)."""
+
+    def test_ramp_uses_true_first_seen_not_capped_rows(self) -> None:
+        """A starved veteran resuming after a gap must NOT read as ramping."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            now=now,
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 9,
+                    # true first-seen: a year ago (pre-age-cap), injected
+                    # by main() from the loader's first_seen map
+                    "first_predicted_at": "2025-07-01T00:00:00Z",
+                }
+            },
+        )
+        assert d[0]["decision"] == "insufficient_data"
+
+    def test_loader_first_seen_is_pre_age_cap(self, tmp_path: Path) -> None:
+        """first_seen reflects rows OLDER than the 45d cap."""
+        now = datetime(2026, 7, 28, tzinfo=timezone.utc)
+        old = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS + 300)
+        rows = [
+            _cw_row(old.strftime("%Y-%m-%dT%H:%M:%SZ"), 0.5, True, row_id="old"),
+            _cw_row("2026-07-25T00:00:00Z", 0.6, False, row_id="new"),
+        ]
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        (logs / "production_log_2026_07_26.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows)
+        )
+        by_tool, first_seen = _load_count_rows(logs, "polymarket", now)
+        assert [r["row_id"] for r in by_tool["a"]] == ["new"]
+        assert first_seen["a"].year == old.year
+
+    def test_corrupt_roster_reports_unknown(self, tmp_path: Path) -> None:
+        """Corrupt tournament_tools.json -> None -> UNKNOWN in the note."""
+        f = tmp_path / "tournament_tools.json"
+        f.write_text("{not json")
+        assert _tournament_roster(f) is None
+        assert _in_roster("a", None) is None
+        body = build_widen_sample_body(
+            {"tool": "a", "cw_total": 10, "in_tournament": None}, "polymarket"
+        )
+        assert "UNKNOWN" in body
+        assert "NOT in tournament." not in body
+
+    def test_missing_roster_is_empty_not_unknown(self, tmp_path: Path) -> None:
+        """Missing roster file -> empty set (no tournament configured)."""
+        assert _tournament_roster(tmp_path / "nope.json") == set()
+
+    def test_parse_collapse_tool_not_silent(self) -> None:
+        """A tool with traffic but zero valid rows anywhere -> collapse."""
+        d = triage(
+            _scores(a=_stats(n=50, valid_n=0, brier=0.30, reliability=0.0)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+        )
+        assert d[0]["decision"] == "reliability_collapse"
+
+    def test_widen_note_names_merged_descendants(self) -> None:
+        """insufficient_data on a tool with a merged variant names it."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            now=datetime(2026, 7, 28, tzinfo=timezone.utc),
+            lineage_children={"a": ["a-v4"]},
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 56,
+                    "first_predicted_at": "2026-06-01T00:00:00Z",
+                }
+            },
+        )
+        assert d[0]["decision"] == "insufficient_data"
+        assert d[0]["descendants"] == ["a-v4"]
+        body = build_widen_sample_body({**d[0], "in_tournament": False}, "polymarket")
+        assert "merged fix variant already exists" in body
+        assert "`a-v4`" in body
+
+    def test_t1_body_prose_fully_retagged(self) -> None:
+        """T-1 body carries no 'count-window fallback' prose remnants."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.30)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            tournament_windows={
+                "a": _cw(cur_brier=0.31, prev_brier=0.30, cur_bss=-0.26)
+            },
+        )[0]
+        body = build_issue_body(d, {}, "<url>", _window_iso_now())
+        assert "(tournament count-window fallback)" in body
+        assert "(count-window fallback)" not in body.replace(
+            "(tournament count-window fallback)", ""
+        )
+        assert "TOURNAMENT count-window check" in body
+
+
+class TestMainWidenSampleDispatch:
+    """End-to-end main(): widen path, DR cooldown, legacy-label shim."""
+
+    @staticmethod
+    def _write_thin_scores(results_dir: Path, logs_dir: Path) -> None:
+        """Fixture: tool 'a' thin on calendar, 12 old valid rows in logs."""
+        results_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        cur = {"by_tool": {"a": _stats(n=5, valid_n=5, brier=0.27)}}
+        prev = {"by_tool": {"a": _stats(valid_n=0)}}
+        (results_dir / "rolling_scores_polymarket.json").write_text(json.dumps(cur))
+        (results_dir / "prev_rolling_scores_polymarket.json").write_text(
+            json.dumps(prev)
+        )
+        (results_dir / "scores_polymarket.json").write_text(json.dumps(cur))
+        rows = [
+            _cw_row(f"2026-06-{d:02d}T00:00:00Z", 0.5, True, row_id=f"r{d}")
+            for d in range(20, 28)
+        ]
+        (logs_dir / "production_log_2026_06_28.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows)
+        )
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        fake_run: Any,
+    ) -> int:
+        results_dir = tmp_path / "results"
+        self._write_thin_scores(results_dir, tmp_path / "datasets" / "logs")
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",
+            tmp_path / "tournament_tools.json",
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage._load_lineage_children",
+            lambda *a, **k: {},
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["triage", "--state", str(tmp_path / "s.json"), "--repo", "r/r"],
+        )
+        return main()
+
+    @staticmethod
+    def _gh_stub(
+        creates: list,
+        open_lists: Any = "[]",
+        closed_payload: str = "[]",
+    ) -> Any:
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                creates.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            if "list" in cmd and "--state" in cmd:
+                state = cmd[cmd.index("--state") + 1]
+                if state == "closed":
+                    return SimpleNamespace(
+                        returncode=0, stdout=closed_payload, stderr=""
+                    )
+                return SimpleNamespace(returncode=0, stdout=open_lists, stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        return fake_run
+
+    def test_widen_note_created_with_deployment_review_label(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Thin tool + old rows -> one gh issue create under the DR label."""
+        creates: list = []
+        rc = self._run(monkeypatch, tmp_path, self._gh_stub(creates))
+        assert rc == 0
+        widen = [c for c in creates if any("widen sample" in str(x) for x in c)]
+        assert len(widen) == 1
+        assert PROMOTION_LABEL in widen[0]
+        title = widen[0][widen[0].index("--title") + 1]
+        assert _PROMO_TITLE_RE.search(title) is not None
+
+    def test_recent_dr_close_suppresses_refile(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A DR note closed yesterday must not re-file today."""
+        closed = json.dumps(
+            [
+                {
+                    "title": "[deployment-review] `a`: below count floor - "
+                    "widen sample on polymarket",
+                    "closedAt": (
+                        datetime.now(timezone.utc) - timedelta(days=1)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            ]
+        )
+        creates: list = []
+        rc = self._run(
+            monkeypatch, tmp_path, self._gh_stub(creates, closed_payload=closed)
+        )
+        assert rc == 0
+        assert not [c for c in creates if any("widen" in str(x) for x in c)]
+
+    def test_open_legacy_label_note_suppresses_widen(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An OPEN note under the legacy label still dedups (migration shim)."""
+        legacy_open = json.dumps(
+            [
+                {
+                    "title": "[tool-promotion-review] `a`: merged fix variant "
+                    "exists on polymarket"
+                }
+            ]
+        )
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                fake_run.creates.append(cmd)  # type: ignore[attr-defined]
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            if "list" in cmd and "--state" in cmd:
+                state = cmd[cmd.index("--state") + 1]
+                label = cmd[cmd.index("--label") + 1]
+                if state == "open" and label == "tool-promotion-review":
+                    return SimpleNamespace(returncode=0, stdout=legacy_open, stderr="")
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        fake_run.creates = []  # type: ignore[attr-defined]
+        rc = self._run(monkeypatch, tmp_path, fake_run)
+        assert rc == 0
+        widen = [
+            c
+            for c in fake_run.creates  # type: ignore[attr-defined]
+            if any("widen" in str(x) for x in c)
+        ]
+        assert not widen

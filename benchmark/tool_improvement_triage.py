@@ -532,28 +532,75 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return parsed
 
 
-def _load_count_rows(
-    logs_dir: Path, platform: str, now: datetime
-) -> Dict[str, List[Dict[str, Any]]]:
-    """Per-tool valid rows for ``platform`` from the daily JSONLs, oldest first.
+def _filter_count_rows(
+    dedup: Dict[str, Dict[str, Any]],
+    platform: str,
+    now: datetime,
+    tournament: bool,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Optional[datetime]]]:
+    """Shared validity/age filter for count-window rows (both sources).
 
-    Rows are deduped by ``row_id`` (the daily files are cumulative
-    snapshots), filtered by the scorer's validity predicate
-    (``prediction_parse_status == "valid"``, resolved outcome, non-null
-    ``p_yes``) plus the ``COUNT_WINDOW_MAX_AGE_DAYS`` age cap, and sorted
-    by ``predicted_at`` -- the exact predicate the issue body documents so
-    the coding agent's Step-1 reproduction sees the same slice.
-
-    :param logs_dir: directory containing the daily production-log JSONLs.
-    :param platform: platform to filter rows to (e.g. ``"polymarket"``).
+    :param dedup: rows deduped by id.
+    :param platform: platform to keep.
     :param now: reference "now" for the age cap.
-    :return: per-tool lists of valid rows, sorted oldest-first.
+    :param tournament: keep tournament-mode rows (True) or exclude them.
+    :return: ``(by_tool, first_seen)`` -- capped, sorted rows per tool, and
+        each tool's TRUE earliest valid ``predicted_at`` (computed BEFORE
+        the age cap, so the ramp guard sees deployment age, not the oldest
+        row that survived the cap).
+    """
+    cutoff = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS)
+    by_tool: Dict[str, List[Dict[str, Any]]] = {}
+    first_seen: Dict[str, Optional[datetime]] = {}
+    for row in dedup.values():
+        if row.get("platform") != platform:
+            continue
+        is_tournament_row = "tournament" in (
+            row.get("mode") or ("tournament" if tournament else "")
+        )
+        if is_tournament_row != tournament:
+            continue
+        if row.get("prediction_parse_status") != "valid":
+            continue
+        if row.get("final_outcome") is None or row.get("p_yes") is None:
+            continue
+        tool_name = row.get("tool_name")
+        predicted_at = _parse_ts(row.get("predicted_at"))
+        if not tool_name or predicted_at is None:
+            continue
+        prev_first = first_seen.get(tool_name)
+        if prev_first is None or predicted_at < prev_first:
+            first_seen[tool_name] = predicted_at
+        if predicted_at < cutoff:
+            continue
+        by_tool.setdefault(tool_name, []).append(row)
+    for rows in by_tool.values():
+        rows.sort(key=lambda r: r.get("predicted_at") or "")
+    return by_tool, first_seen
+
+
+def _read_jsonl_rows(
+    paths: List[Path], id_keys: Tuple[str, ...], source_label: str
+) -> Dict[str, Dict[str, Any]]:
+    """Dedup JSONL rows across ``paths``; WARN on unreadable/corrupt input.
+
+    Silent drops here would silently disable the anti-stall fallback (the
+    same reasoning ``_load_lineage_children`` documents for the lineage
+    ledger), so skipped files/lines are counted and logged.
+
+    :param paths: files to read, in order (later files win the dedup).
+    :param id_keys: candidate row-id fields, first non-empty wins.
+    :param source_label: label for the warning message.
+    :return: rows deduped by id.
     """
     dedup: Dict[str, Dict[str, Any]] = {}
-    for path in sorted(logs_dir.glob("production_log_*.jsonl")):
+    skipped_files = 0
+    skipped_lines = 0
+    for path in paths:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
+            skipped_files += 1
             continue
         for line in text.splitlines():
             line = line.strip()
@@ -562,106 +609,116 @@ def _load_count_rows(
             try:
                 row = json.loads(line)
             except ValueError:
+                skipped_lines += 1
                 continue
-            row_id = row.get("row_id")
+            row_id = next((row.get(k) for k in id_keys if row.get(k)), None)
             if row_id:
                 dedup[row_id] = row
-    cutoff = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS)
-    by_tool: Dict[str, List[Dict[str, Any]]] = {}
-    for row in dedup.values():
-        if row.get("platform") != platform:
-            continue
-        # The calendar by_tool the fallback substitutes for is the scorer's
-        # PRODUCTION-mode partition; tournament rows must not leak into
-        # count windows or the two paths diverge on mixed logs.
-        if "tournament" in (row.get("mode") or ""):
-            continue
-        if row.get("prediction_parse_status") != "valid":
-            continue
-        if row.get("final_outcome") is None or row.get("p_yes") is None:
-            continue
-        predicted_at = _parse_ts(row.get("predicted_at"))
-        if predicted_at is None or predicted_at < cutoff:
-            continue
-        tool_name = row.get("tool_name")
-        if tool_name:
-            by_tool.setdefault(tool_name, []).append(row)
-    for rows in by_tool.values():
-        rows.sort(key=lambda r: r.get("predicted_at") or "")
-    return by_tool
+    if skipped_files or skipped_lines:
+        log.warning(
+            "%s: skipped %d unreadable file(s) and %d unparseable line(s); "
+            "count/tournament windows are computed on the remainder.",
+            source_label,
+            skipped_files,
+            skipped_lines,
+        )
+    return dedup
+
+
+def _load_count_rows(
+    logs_dir: Path, platform: str, now: datetime
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Optional[datetime]]]:
+    """Per-tool valid PRODUCTION rows for ``platform``, oldest first.
+
+    Rows are deduped by ``row_id`` (the daily files are cumulative
+    snapshots), filtered by the scorer's validity predicate
+    (``prediction_parse_status == "valid"``, resolved outcome, non-null
+    ``p_yes``) plus the ``COUNT_WINDOW_MAX_AGE_DAYS`` age cap, and sorted
+    by ``predicted_at`` -- the exact predicate the issue body documents so
+    the coding agent's Step-1 reproduction sees the same slice. Tournament
+    rows are excluded (the calendar ``by_tool`` this substitutes for is the
+    scorer's production partition).
+
+    :param logs_dir: directory containing the daily production-log JSONLs.
+    :param platform: platform to filter rows to (e.g. ``"polymarket"``).
+    :param now: reference "now" for the age cap.
+    :return: ``(by_tool, first_seen)`` per :func:`_filter_count_rows`.
+    """
+    dedup = _read_jsonl_rows(
+        sorted(logs_dir.glob("production_log_*.jsonl")),
+        ("row_id",),
+        "count-window loader (production logs)",
+    )
+    return _filter_count_rows(dedup, platform, now, tournament=False)
 
 
 def _load_tournament_count_rows(
     scored_path: Path, platform: str, now: datetime
-) -> Dict[str, List[Dict[str, Any]]]:
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, Optional[datetime]]]:
     """Per-tool valid TOURNAMENT rows for ``platform``, oldest first.
 
     Same validity predicate and age cap as :func:`_load_count_rows`, but
     sourced from the flywheel's row-level tournament output and keeping
-    ONLY tournament-mode rows. Missing file -> ``{}`` (no tournament arm).
+    ONLY tournament-mode rows (rows without a ``mode`` field are assumed
+    tournament, since the file is tournament output). Missing file ->
+    empty (no tournament arm).
 
     :param scored_path: path to ``tournament_scored.jsonl``.
     :param platform: platform to filter rows to.
     :param now: reference "now" for the age cap.
-    :return: per-tool lists of valid tournament rows, sorted oldest-first.
+    :return: ``(by_tool, first_seen)`` per :func:`_filter_count_rows`.
     """
     if not scored_path.is_file():
-        return {}
-    dedup: Dict[str, Dict[str, Any]] = {}
-    try:
-        text = scored_path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        row_id = row.get("row_id") or row.get("deliver_id")
-        if row_id:
-            dedup[row_id] = row
-    cutoff = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS)
-    by_tool: Dict[str, List[Dict[str, Any]]] = {}
-    for row in dedup.values():
-        if row.get("platform") != platform:
-            continue
-        if "tournament" not in (row.get("mode") or "tournament"):
-            continue
-        if row.get("prediction_parse_status") != "valid":
-            continue
-        if row.get("final_outcome") is None or row.get("p_yes") is None:
-            continue
-        predicted_at = _parse_ts(row.get("predicted_at"))
-        if predicted_at is None or predicted_at < cutoff:
-            continue
-        tool_name = row.get("tool_name")
-        if tool_name:
-            by_tool.setdefault(tool_name, []).append(row)
-    for rows in by_tool.values():
-        rows.sort(key=lambda r: r.get("predicted_at") or "")
-    return by_tool
+        return {}, {}
+    dedup = _read_jsonl_rows(
+        [scored_path],
+        ("row_id", "deliver_id"),
+        "tournament-window loader (tournament_scored.jsonl)",
+    )
+    return _filter_count_rows(dedup, platform, now, tournament=True)
 
 
-def _tournament_roster(path: Path = TOURNAMENT_TOOLS_PATH) -> set:
+def _tournament_roster(path: Path = TOURNAMENT_TOOLS_PATH) -> Optional[set]:
     """Tool names currently in the tournament (dash/underscore-insensitive).
 
+    Distinguishes the three states a consumer must not conflate: a dict ->
+    the roster; a MISSING file -> empty roster (no tournament configured);
+    an unreadable/corrupt file -> ``None`` ("unknown"), logged -- because
+    reporting a tool as "NOT in tournament" off a corrupt roster would
+    actively mislead the deployment-review reader into re-adding it.
+
     :param path: path to ``tournament_tools.json``.
-    :return: set of normalized (dashes as underscores) tool names.
+    :return: normalized names, or ``None`` when the roster is unreadable.
     """
-    data = _load_json(path)
-    return {str(k).replace("-", "_") for k in data} if isinstance(data, dict) else set()
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning(
+            "tournament roster %s is unreadable/corrupt; tournament "
+            "membership reported as UNKNOWN in deployment-review notes.",
+            path,
+        )
+        return None
+    if not isinstance(data, dict):
+        log.warning(
+            "tournament roster %s is not a JSON object; membership UNKNOWN.",
+            path,
+        )
+        return None
+    return {str(k).replace("-", "_") for k in data}
 
 
-def _in_roster(tool: str, roster: set) -> bool:
-    """True when ``tool`` is in the tournament roster (naming-insensitive).
+def _in_roster(tool: str, roster: Optional[set]) -> Optional[bool]:
+    """Roster membership (naming-insensitive); ``None`` when unknown.
 
     :param tool: tool name (dash or underscore spelling).
-    :param roster: output of :func:`_tournament_roster`.
-    :return: membership flag.
+    :param roster: output of :func:`_tournament_roster` (``None`` = unknown).
+    :return: membership flag, or ``None`` when the roster was unreadable.
     """
+    if roster is None:
+        return None
     return tool.replace("-", "_") in roster
 
 
@@ -873,6 +930,18 @@ def triage(
             d["in_tournament"] = _in_roster(tool, tournament_roster or set())
             d["tournament_total"] = (tw or {}).get("total", 0)
             if not cw and not tw:
+                raw_n = c.get("n") or 0
+                if raw_n > 0 and rel is not None and rel < RELIABILITY_FLOOR:
+                    # All (or nearly all) requests failed to parse: the tool
+                    # has traffic but zero valid rows anywhere, so no window
+                    # can ever form. That is a parse collapse, not a sample
+                    # question -- surface it instead of silent sample_floor.
+                    d.update(
+                        decision="reliability_collapse",
+                        reason="reliability_collapse",
+                    )
+                    decisions.append(d)
+                    continue
                 d.update(decision="silent", reason="sample_floor")
                 decisions.append(d)
                 continue
@@ -905,6 +974,10 @@ def triage(
                     reason="widen_sample",
                     window_kind="count",
                     cw_total=(cw or {}).get("total", 0),
+                    # A merged fix variant changes the human's best option
+                    # from "widen this tool's sample" to "promote the
+                    # variant" -- the note must say so (roster-swap rule).
+                    descendants=sorted(_descendants(tool, children)),
                 )
                 decisions.append(d)
                 continue
@@ -1209,6 +1282,17 @@ def build_issue_body(
             # for production data.
             body = body.replace("C-1", "T-1").replace("C-2", "T-2")
             body = body.replace(
+                "(count-window fallback)", "(tournament count-window fallback)"
+            )
+            body = body.replace(
+                "on the count-window check (calendar windows are below the "
+                "sample floor for this tool, so the fallback count-window "
+                "rule applies)",
+                "on the TOURNAMENT count-window check (production windows "
+                "are below the sample floor for this tool, so the shadow-"
+                "data fallback applies)",
+            )
+            body = body.replace(
                 "## Windows (count-based",
                 "**Source: tournament arm** -- shadow-scores the same daily "
                 "questions with no on-chain traffic; separate execution "
@@ -1332,7 +1416,7 @@ _WIDEN_SAMPLE_BODY_TEMPLATE = """## Not enough data to judge this tool -- pick o
 
 `{tool}` on {platform}: **{total} scored predictions in {max_age} days** (need {n}).
 Tournament arm: {tournament_line}
-
+{descendant_line}
 1. **Add it to the tournament** -- shadow-scores daily questions, no production risk, assessable in ~1 week.{tournament_done}
 2. **Route production traffic** to it.
 3. **Retire it.**
@@ -1347,12 +1431,25 @@ def build_widen_sample_body(
     """Render the deployment-review widen-sample note for a below-count-floor tool."""
     in_tournament = decision.get("in_tournament")
     t_total = decision.get("tournament_total") or 0
-    if in_tournament and t_total:
+    if in_tournament is None:
+        tournament_line = (
+            "UNKNOWN -- the tournament roster file was unreadable this run; "
+            "do not act on membership until it is fixed."
+        )
+    elif in_tournament and t_total:
         tournament_line = f"IN tournament, {t_total} rows accrued so far."
     elif in_tournament:
         tournament_line = "IN tournament (no scored rows yet)."
     else:
         tournament_line = "NOT in tournament."
+    descendants = decision.get("descendants") or []
+    descendant_line = (
+        "\n**A merged fix variant already exists: "
+        + ", ".join(f"`{v}`" for v in descendants)
+        + "** -- promoting it likely supersedes options 1-3 below.\n"
+        if descendants
+        else ""
+    )
     return _WIDEN_SAMPLE_BODY_TEMPLATE.format(
         tool=decision["tool"],
         platform=platform,
@@ -1360,6 +1457,7 @@ def build_widen_sample_body(
         max_age=COUNT_WINDOW_MAX_AGE_DAYS,
         n=COUNT_WINDOW_N,
         tournament_line=tournament_line,
+        descendant_line=descendant_line,
         tournament_done=(
             " (already done -- data is accruing)" if in_tournament else ""
         ),
@@ -1462,7 +1560,10 @@ def build_promotion_body(
 
     def _dline(v: str) -> str:
         stats = t_by.get(v) or t_by.get(v.replace("-", "_")) or {}
-        if _in_roster(v, roster):
+        membership = _in_roster(v, roster)
+        if membership is None:
+            return f"- `{v}` -- tournament status UNKNOWN (roster unreadable)"
+        if membership:
             n = stats.get("valid_n")
             brier = stats.get("brier")
             if n:
@@ -1650,22 +1751,39 @@ def main() -> int:
         logs_dir = RESULTS_DIR.parent / "datasets" / "logs"
         count_windows: Dict[str, Dict[str, Any]] = {}
         if logs_dir.is_dir():
-            count_rows = _load_count_rows(logs_dir, platform, now)
+            count_rows, count_first_seen = _load_count_rows(logs_dir, platform, now)
             count_windows = {
                 tool: _count_window_stats(rows) for tool, rows in count_rows.items()
             }
+            for tool, stats in count_windows.items():
+                first = count_first_seen.get(tool)
+                if first is not None:
+                    # Ramp guard input: the tool's TRUE first valid row
+                    # (pre-age-cap), so a starved veteran resuming after a
+                    # long gap is not mistaken for a new deployment.
+                    stats["first_predicted_at"] = first.strftime("%Y-%m-%dT%H:%M:%SZ")
             log.info(
                 "count-window fallback: %d tools with row data on %s",
                 len(count_windows),
                 platform,
             )
+        else:
+            log.warning(
+                "count-window fallback DISABLED: %s is not a directory -- "
+                "ladder tier (b) will not run this pass.",
+                logs_dir,
+            )
         # Tournament fallback inputs: row-level shadow results + roster.
-        tournament_rows = _load_tournament_count_rows(
+        tournament_rows, tournament_first_seen = _load_tournament_count_rows(
             RESULTS_DIR / TOURNAMENT_SCORED_NAME, platform, now
         )
         tournament_windows = {
             tool: _count_window_stats(rows) for tool, rows in tournament_rows.items()
         }
+        for tool, stats in tournament_windows.items():
+            first = tournament_first_seen.get(tool)
+            if first is not None:
+                stats["first_predicted_at"] = first.strftime("%Y-%m-%dT%H:%M:%SZ")
         if tournament_windows:
             log.info(
                 "tournament fallback: %d tools with tournament rows on %s",

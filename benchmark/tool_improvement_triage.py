@@ -599,7 +599,8 @@ def _read_jsonl_rows(
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as exc:
+            log.warning("%s: cannot read %s: %s", source_label, path, exc)
             skipped_files += 1
             continue
         for line in text.splitlines():
@@ -927,7 +928,10 @@ def triage(
             #     them, tagged ``window_kind: count`` for title/body.
             cw = (count_windows or {}).get(tool)
             tw = (tournament_windows or {}).get(tool)
-            d["in_tournament"] = _in_roster(tool, tournament_roster or set())
+            # Pass the roster through verbatim: ``None`` is the UNKNOWN
+            # sentinel (corrupt roster) and must reach the note builders --
+            # ``or set()`` would collapse it into "NOT in tournament".
+            d["in_tournament"] = _in_roster(tool, tournament_roster)
             d["tournament_total"] = (tw or {}).get("total", 0)
             if not cw and not tw:
                 raw_n = c.get("n") or 0
@@ -1414,7 +1418,7 @@ def build_widen_sample_title(tool: str, platform: str = "polymarket") -> str:
 
 _WIDEN_SAMPLE_BODY_TEMPLATE = """## Not enough data to judge this tool -- pick one option
 
-`{tool}` on {platform}: **{total} scored predictions in {max_age} days** (need {n}).
+`{tool}` on {platform}: **{total} production predictions scored in the last {max_age} days** (need {n}).
 Tournament arm: {tournament_line}
 {descendant_line}
 1. **Add it to the tournament** -- shadow-scores daily questions, no production risk, assessable in ~1 week.{tournament_done}
@@ -1555,7 +1559,7 @@ def build_promotion_body(
     :return: markdown body.
     """
     descendants = decision.get("descendants", [])
-    roster = tournament_roster or set()
+    roster = tournament_roster  # None = UNKNOWN sentinel; _dline handles it
     t_by = tournament_by_tool or {}
 
     def _dline(v: str) -> str:

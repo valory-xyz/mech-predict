@@ -2250,7 +2250,7 @@ class TestCountWindowTitleBody:
             {"tool": "a-v4", "cw_total": 56, "in_tournament": False},
             "polymarket",
         )
-        assert "56 scored predictions" in body
+        assert "56 production predictions scored" in body
         assert "Add it to the tournament" in body
         assert "Route production traffic" in body
         assert "Retire it" in body
@@ -2797,3 +2797,135 @@ class TestMainWidenSampleDispatch:
             if any("widen" in str(x) for x in c)
         ]
         assert not widen
+
+
+class TestRosterSentinelEndToEnd:
+    """The UNKNOWN sentinel must survive triage() -> note builders."""
+
+    def test_corrupt_roster_reaches_widen_note_via_triage(self) -> None:
+        """tournament_roster=None flows to in_tournament=None -> UNKNOWN."""
+        d = triage(
+            _scores(a=_stats(n=5, valid_n=5, brier=0.27)),
+            _scores(a=_stats(valid_n=0)),
+            {},
+            now=datetime(2026, 7, 28, tzinfo=timezone.utc),
+            count_windows={
+                "a": {
+                    "insufficient": True,
+                    "total": 56,
+                    "first_predicted_at": "2026-06-01T00:00:00Z",
+                }
+            },
+            tournament_roster=None,
+        )[0]
+        assert d["in_tournament"] is None
+        body = build_widen_sample_body(d, "polymarket")
+        assert "UNKNOWN" in body
+        assert "NOT in tournament." not in body
+
+    def test_corrupt_roster_reaches_promotion_note(self) -> None:
+        """build_promotion_body with roster=None labels descendants UNKNOWN."""
+        body = build_promotion_body(
+            {
+                "tool": "a-v1",
+                "trigger": "level_floor",
+                "brier_cur": 0.34,
+                "bss_cur": -0.3,
+                "descendants": ["a-v4"],
+            },
+            "polymarket",
+            tournament_roster=None,
+        )
+        assert "tournament status UNKNOWN" in body
+        assert "NOT in tournament" not in body
+
+
+class TestWidenDispatchFailClosedGuards:
+    """Fail-closed gh-error guards on the insufficient_data dispatch."""
+
+    @staticmethod
+    def _run_with(monkeypatch, tmp_path, fake_run):  # type: ignore[no-untyped-def]
+        """Reuse the widen fixture harness with a custom gh stub."""
+        harness = TestMainWidenSampleDispatch()
+        return harness._run(  # pylint: disable=protected-access
+            monkeypatch, tmp_path, fake_run
+        )
+
+    def test_dr_closed_list_error_skips_filing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A gh error on the CLOSED deployment-review list fails closed."""
+        creates: list = []
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                creates.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            if "list" in cmd and "--state" in cmd:
+                state = cmd[cmd.index("--state") + 1]
+                label = cmd[cmd.index("--label") + 1]
+                if state == "closed" and label == PROMOTION_LABEL:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        rc = self._run_with(monkeypatch, tmp_path, fake_run)
+        assert rc == 0
+        assert not [c for c in creates if any("widen" in str(x) for x in c)]
+
+    def test_open_dr_list_error_skips_filing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A gh error on the OPEN deployment-review list fails closed."""
+        creates: list = []
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                creates.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            if "list" in cmd and "--state" in cmd:
+                state = cmd[cmd.index("--state") + 1]
+                label = cmd[cmd.index("--label") + 1]
+                if state == "open" and label == PROMOTION_LABEL:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        rc = self._run_with(monkeypatch, tmp_path, fake_run)
+        assert rc == 0
+        assert not [c for c in creates if any("widen" in str(x) for x in c)]
+
+    def test_closed_legacy_label_note_in_cooldown_suppresses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A [tool-promotion-review] note closed yesterday suppresses widen."""
+        closed_legacy = json.dumps(
+            [
+                {
+                    "title": "[tool-promotion-review] `a`: merged fix variant "
+                    "exists on polymarket",
+                    "closedAt": (
+                        datetime.now(timezone.utc) - timedelta(days=1)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            ]
+        )
+        creates: list = []
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                creates.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            if "list" in cmd and "--state" in cmd:
+                state = cmd[cmd.index("--state") + 1]
+                label = cmd[cmd.index("--label") + 1]
+                if state == "closed" and label == "tool-promotion-review":
+                    return SimpleNamespace(
+                        returncode=0, stdout=closed_legacy, stderr=""
+                    )
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        rc = self._run_with(monkeypatch, tmp_path, fake_run)
+        assert rc == 0
+        assert not [c for c in creates if any("widen" in str(x) for x in c)]

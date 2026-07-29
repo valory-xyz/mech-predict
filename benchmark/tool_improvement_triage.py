@@ -1243,9 +1243,15 @@ def build_issue_body(
         spans = decision.get("cw_spans") or {}
         n_prev = decision.get("n_prev") or 0
         brier_prev = decision.get("brier_prev")
+        fallback_kind = (
+            "tournament count-window fallback"
+            if is_tournament
+            else "count-window fallback"
+        )
         body = _COUNT_BODY_TEMPLATE.format(
             headline=headline,
             tool=tool,
+            fallback_kind=fallback_kind,
             brier_cur=decision["brier_cur"],
             bss_clause=(
                 f", BSS vs base rate: **{decision['bss_cur']:+.4f}**"
@@ -1285,9 +1291,6 @@ def build_issue_body(
             # prepend the source caveat so no reader mistakes the slice
             # for production data.
             body = body.replace("C-1", "T-1").replace("C-2", "T-2")
-            body = body.replace(
-                "(count-window fallback)", "(tournament count-window fallback)"
-            )
             body = body.replace(
                 "on the count-window check (calendar windows are below the "
                 "sample floor for this tool, so the fallback count-window "
@@ -1375,7 +1378,7 @@ _COUNT_BODY_TEMPLATE = """## Summary
 
 - Current count-window (**C-1**, last {n_cur} valid rows) Brier: **{brier_cur:.4f}**{bss_clause}
 - Previous count-window (**C-2**, preceding {n_prev} valid rows) Brier: {prev_clause}{delta_clause}
-- Trigger: **{reason}** (count-window fallback)
+- Trigger: **{reason}** ({fallback_kind})
 - Platforms monitored: {platforms}; this issue is scoped to **{platform}**.{cross_ref}
 
 This issue records the {signal}, not a diagnosis. The cause has not been identified.
@@ -1391,7 +1394,7 @@ Predicate: rows with `tool_name == {tool} AND platform == {platform} AND predict
 | **C-1** (current) | last {n_cur} rows of the sorted slice | {span_cur} | {n_cur} | {brier_cur:.4f} |
 | **C-2** (previous) | preceding {n_prev} rows | {span_prev} | {n_prev} | {brier_prev_s} |
 
-Calendar context: the {window_days}d calendar windows do not both meet the {floor}-row sample floor for this tool (current-window valid n: {calendar_n}), which is why the calendar triage is silent and the count-window fallback fired.
+Calendar context: the {window_days}d calendar windows do not both meet the {floor}-row sample floor for this tool (current-window valid n: {calendar_n}), which is why the calendar triage is silent and the {fallback_kind} fired.
 
 ## Baseline stats (machine-readable)
 

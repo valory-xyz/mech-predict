@@ -2653,6 +2653,9 @@ class TestReviewRound2Fixes:
         assert "(count-window fallback)" not in body.replace(
             "(tournament count-window fallback)", ""
         )
+        # Catch the bare (unparenthesized) form in the Calendar context line
+        stripped = body.replace("tournament count-window fallback", "")
+        assert "count-window fallback" not in stripped
         assert "TOURNAMENT count-window check" in body
 
 

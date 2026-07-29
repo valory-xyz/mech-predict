@@ -45,9 +45,11 @@ from benchmark.tool_improvement_triage import (
     _PROMO_TITLE_RE,
     _TITLE_RE,
     _below_level,
+    _bss_is_valid,
     _closed_issue_pairs,
     _descendants,
     _ensure_label,
+    _fix_descendants,
     _load_json,
     _load_lineage_children,
     _open_issue,
@@ -386,6 +388,34 @@ class TestIssueBodyContract:
         )
         assert "Brier Skill Score of -0.2500" in body
         assert "below the -0.10 floor" in body
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_body_and_title_agree_on_non_finite_bss(self, bad: float) -> None:
+        """A non-finite BSS falls back to absolute-Brier wording in BOTH title and body."""
+        decision = {
+            "tool": "foo",
+            "platform": "polymarket",
+            "brier_cur": 0.30,
+            "brier_prev": 0.30,
+            "delta_brier": 0.0,
+            "bss_cur": bad,
+            "n_cur": 187,
+            "n_prev": 212,
+            "decision": "open_issue",
+            "reason": "level_floor",
+            "issue_open": True,
+        }
+        title = build_issue_title("foo", "polymarket", "level_floor", bad)
+        body = build_issue_body(
+            decision,
+            polymarket_stats={},
+            artifact_url="https://example.test/x",
+            window_iso=_window_iso(datetime(2026, 5, 28, 3, 45, tzinfo=timezone.utc)),
+        )
+        assert "Brier above level" in title
+        assert "Brier persistently above" in body  # body fell back too
+        assert "Skill Score" not in body  # no "+nan"/"+inf" contradiction
+        assert f"{bad:+.4f}" not in body  # no non-finite value leaked into body
 
     def test_body_contains_headline_and_artifact(self) -> None:
         """Issue body carries the headline numbers and the artifact URL."""
@@ -1559,14 +1589,16 @@ class TestLineageLoader:
         }
         p = tmp_path / "tool_lineage.json"
         p.write_text(json.dumps(lineage), encoding="utf-8")
-        children = _load_lineage_children(p)
+        children, fix_variants = _load_lineage_children(p)
         assert sorted(children["v1"]) == ["v2", "v4"]
         assert children["other"] == ["orphan"]
         assert "v2" not in children  # leaf, no children
+        assert {"v2", "v4", "orphan"} <= fix_variants  # all default to fix
 
     def test_missing_file_is_empty(self, tmp_path: Path) -> None:
         """A missing lineage file yields an empty children map (no crash)."""
-        assert not _load_lineage_children(tmp_path / "nope.json")
+        children, fix_variants = _load_lineage_children(tmp_path / "nope.json")
+        assert not children and not fix_variants
 
     def test_descendants_walks_the_full_chain(self) -> None:
         """_descendants returns transitive tips, not just direct children."""
@@ -1578,6 +1610,64 @@ class TestLineageLoader:
         # Multi-child + cycle guard (should not hang or duplicate).
         forked = {"a": ["b", "c"], "b": ["a"]}
         assert _descendants("a", forked) == ["b", "c"]
+
+    def test_maintenance_child_is_not_a_fix_variant(self, tmp_path: Path) -> None:
+        """A maintenance bump doesn't count as a fix, but its edge stays traversable."""
+        lineage = {
+            "tools": {
+                "base": {"parent": None},
+                "base-bump": {"parent": "base", "kind": "maintenance"},
+                "real": {"parent": None},
+                "real-v1": {"parent": "real"},  # no kind -> defaults to fix
+                # Fix descending THROUGH a maintenance node: the edge must be
+                # traversed so the fix still exempts the top-of-chain ancestor.
+                "chain": {"parent": None},
+                "chain-v1": {"parent": "chain", "kind": "maintenance"},
+                "chain-v2": {"parent": "chain-v1"},  # a real fix, two hops down
+            }
+        }
+        p = tmp_path / "tool_lineage.json"
+        p.write_text(json.dumps(lineage), encoding="utf-8")
+        children, fix_variants = _load_lineage_children(p)
+        # Maintenance edges are KEPT in the graph (traversable)...
+        assert children["base"] == ["base-bump"]
+        assert "base-bump" not in fix_variants  # ...but do not count as a fix.
+        # A bare maintenance bump does not exempt its ancestor:
+        assert _fix_descendants("base", children, fix_variants) == []
+        # A real fix does:
+        assert _fix_descendants("real", children, fix_variants) == ["real-v1"]
+        # A fix reachable THROUGH a maintenance node still exempts the ancestor:
+        assert _fix_descendants("chain", children, fix_variants) == ["chain-v2"]
+
+    def test_malformed_entry_skips_not_crashes(self, tmp_path: Path) -> None:
+        """A wrong-shape ledger skips-and-warns instead of crashing the run."""
+        p = tmp_path / "tool_lineage.json"
+        # entry value is a string; 'tools' shape checked separately below.
+        p.write_text(json.dumps({"tools": {"x": "oops", "y": {"parent": "z"}}}))
+        children, _fv = _load_lineage_children(p)
+        assert children == {"z": ["y"]}
+        # whole 'tools' is a list -> empty, no crash.
+        p.write_text(json.dumps({"tools": ["nope"]}))
+        children, _fv = _load_lineage_children(p)
+        assert not children
+        # top-level is a list (json.loads succeeds) -> empty, no AttributeError.
+        p.write_text(json.dumps(["nope"]))
+        children, _fv = _load_lineage_children(p)
+        assert not children
+        # unhashable / non-str parent -> skip-and-warn, not TypeError.
+        p.write_text(json.dumps({"tools": {"y": {"parent": ["a", "b"]}}}))
+        children, _fv = _load_lineage_children(p)
+        assert not children
+
+    def test_unrecognized_kind_treated_as_fix(self, tmp_path: Path) -> None:
+        """A typo'd kind counts as a fix variant (not silently a maintenance skip)."""
+        p = tmp_path / "tool_lineage.json"
+        p.write_text(
+            json.dumps({"tools": {"v1": {"parent": "b", "kind": "maintenence"}}})
+        )
+        children, fix_variants = _load_lineage_children(p)
+        assert children == {"b": ["v1"]}
+        assert "v1" in fix_variants  # typo -> treated as fix, exempts nothing silently
 
 
 class TestPromotionNote:
@@ -1627,6 +1717,13 @@ class TestBssBoundary:
 
 class TestNanBss:
     """A non-finite BSS falls back to the absolute floor (does not silently disable)."""
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("-inf"), float("inf")])
+    def test_bss_is_valid_rejects_non_finite(self, bad: float) -> None:
+        """The shared predicate treats missing/NaN/inf alike (present AND finite)."""
+        assert _bss_is_valid(bad) is False
+        assert _bss_is_valid(None) is False
+        assert _bss_is_valid(-0.10) is True
 
     @pytest.mark.parametrize("bad", [float("nan"), float("-inf"), float("inf")])
     def test_non_finite_bss_falls_back_to_absolute_floor(self, bad: float) -> None:
@@ -1691,8 +1788,8 @@ class TestCorruptLineage:
         p = tmp_path / "tool_lineage.json"
         p.write_text("{not json", encoding="utf-8")
         with caplog.at_level(logging.WARNING):
-            children = _load_lineage_children(p)
-        assert not children
+            children, fix_variants = _load_lineage_children(p)
+        assert not children and not fix_variants
         assert any("failed to parse" in r.message for r in caplog.records)
 
 
@@ -1837,7 +1934,7 @@ class TestMainPromotionDispatch:
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage._load_lineage_children",
-            lambda *a, **k: {"a": ["a-v4"]},
+            lambda *a, **k: ({"a": ["a-v4"]}, {"a-v4"}),
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.subprocess.run", fake_run

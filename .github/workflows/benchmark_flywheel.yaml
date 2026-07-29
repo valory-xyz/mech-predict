@@ -312,6 +312,11 @@ jobs:
       # silently dropped every run and the scorer compounds double-counts.
       # Per-platform scores files each carry their own incremental-resume
       # state; dropping any of them resets that platform's accumulator.
+      # tournament_scored.jsonl ships here so the coding agent's T-1
+      # reproduction reads the same rows the triage scored. A stale copy
+      # restored by 'Download previous benchmark data' is harmless: the
+      # fresh tournament-predictions download overwrites it earlier in
+      # this job, and consumers dedup by row_id under a 45d age cap.
       - name: Upload benchmark data
         uses: actions/upload-artifact@v4
         with:
@@ -334,6 +339,7 @@ jobs:
             benchmark/results/report_roi_omen.md
             benchmark/results/report_roi_polymarket.md
             benchmark/results/tool_improvement_triage_state.json
+            benchmark/results/tournament_scored.jsonl
           retention-days: 90
 
       - name: Resolve report artifact URL
@@ -375,14 +381,18 @@ jobs:
             --report benchmark/results/report_polymarket.md \
             --platform-label Polystrat
 
-      # Tool-improvement triage: read the per-platform rolling-window
-      # scores produced above, apply the deterministic gate cascade, and
-      # open a GitHub issue (label: tool-improvement) for each tool that
-      # passes every gate. The label routes the issue to the
-      # tool-improvement-agent in the agent-skills monorepo. Tools that
-      # already have an open issue stay silent (duplicate suppression
-      # via tool_improvement_triage_state.json carried in the
-      # benchmark-data artifact). The hashFiles() gate is defensive: if
+      # Tool-improvement triage: assess every tool on the W-1 -> C-1 -> T-1
+      # ladder (calendar rolling scores produced above; production count
+      # windows from datasets/logs; tournament count windows from
+      # results/tournament_scored.jsonl) and open a GitHub issue
+      # (label: tool-improvement, title anchored 'on <platform> W-1|C-1|T-1')
+      # for each fix-worthy fire -- the label routes it to the
+      # tool-improvement-agent in the agent-skills monorepo. Deployment
+      # decisions (merged-variant promotion, widen-sample for starved
+      # tools) open deployment-review issues instead and are never
+      # agent-routed. Fix-issue duplicate suppression is live-gh-list
+      # based with the state file as fallback; deployment-review dedup
+      # is gh-list only (fail-closed). The hashFiles() gate is defensive: if
       # either rolling file is missing (because the scorer step failed)
       # we skip triage rather than open a noisy issue against half-data.
       # Triage runs by default. The `run_triage` workflow_dispatch input

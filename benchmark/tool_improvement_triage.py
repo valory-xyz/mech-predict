@@ -81,8 +81,10 @@ fix variant in ``tool_lineage.json`` (i.e. it is some other tool's
 ``parent``) is NOT a new fix request -- repeated re-fixing of the same
 ancestor without promoting the result is the churn this stops. Such a
 fire is routed to ``descendant_exists`` and emitted as a *visible*
-promotion-review note under the ``tool-promotion-review`` label (its own
-dedup, posted once per ``(tool, platform)``). That label is deliberately
+promotion-review note under the ``deployment-review`` label (its own
+dedup, posted once per ``(tool, platform)``; notes filed before the
+label rename carried ``tool-promotion-review`` and a migration shim
+keeps them suppressing duplicates). That label is deliberately
 NOT ``tool-improvement``, so the label-routed coding agent is not
 invoked; the note asks a human to promote an existing variant (judged on
 BSS-vs-market, not raw Brier) or accept the lineage is at its ceiling and
@@ -201,8 +203,8 @@ def _load_json(path: Path) -> Dict[str, Any]:
 # Parses ``[tool-improvement] `<tool>`: <metric> on <platform> W-1`` where
 # <metric> is "Brier regression", "Brier above level", or "BSS below floor".
 # Backticks around the tool are required; the platform is captured from the
-# trailing ``on <platform> W-1`` (calendar windows) or ``on <platform> C-1``
-# (count-window fallback) segment so suppression can key on the
+# trailing ``on <platform> W-1`` (calendar), ``C-1`` (count-window), or ``T-1``
+# (tournament-window fallback) segment so suppression can key on the
 # (tool, platform) pair regardless of the metric wording or window kind. A
 # manually-filed issue that omits either segment logs a warning and is skipped.
 _TITLE_RE = re.compile(r"\[tool-improvement\]\s+`([^`]+)`.*\bon\s+(\S+)\s+[WCT]-1\b")

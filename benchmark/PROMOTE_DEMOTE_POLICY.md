@@ -5,7 +5,7 @@ Touches: `benchmark/analyze.py`, `tool_lineage.json`, replay + tournament config
 
 ## Goal
 
-Per platform, two **advisory** calls reach a human (who still opens the deploy PR) — surfaced in the PR `/benchmark` and the daily-report rosters:
+Per platform, two **advisory** calls reach a human (who still opens the deploy PR) — surfaced in the PR `/benchmark`, the daily-report rosters, and the daily triage's `deployment-review` issues (the single funnel for deployment actions: promote an unpromoted merged variant, widen a starved tool's sample, route traffic, or retire):
 
 - **Promote** — a candidate is good enough to deploy.
 - **Demote** — a deployed tool should be retired.

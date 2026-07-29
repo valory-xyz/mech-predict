@@ -118,7 +118,7 @@ version of a tool:
 1. Edit the tool source under `packages/{author}/customs/{tool}/`.
 2. `autonomy packages lock` to compute the new CID.
 3. `autonomy push-all` to publish the bytes to IPFS.
-4. Bump the entry in `benchmark/tournament_tools.json` to the new CID and merge.
+4. Update `benchmark/tournament_tools.json` and merge. Two cases (see the "Tool-improvement housekeeping rules" in the repo `CLAUDE.md`): an **in-place fix** bumps the existing entry's CID (key unchanged); a **new version** (`<base>-v<n+1>`) adds its own entry **and removes the parent's** (roster swap -- one tournament candidate per family).
 
 The next daily flywheel run reads `tournament_tools.json` from `main`, IPFS-fetches each
 CID into `~/.cache/mech-predict/tournament-tools/`, and runs predictions. No `autonomy

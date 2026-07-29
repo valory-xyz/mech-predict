@@ -1302,11 +1302,17 @@ def _accumulate_and_write(
     :param scores_path: output path for the accumulator dict.
     :param history_path: optional history file for monthly snapshots.
     :param emit_history: when False, skip the snapshot step entirely.
-    :param source: data-source marker stamped into the finalized file.
+    :param source: fallback data-source marker. Used only when the file
+        does not yet exist or predates the marker; otherwise the
+        existing marker is preserved so a downstream ``update()`` call
+        (tournament merge, etc.) cannot disarm the flag-rollback
+        detection by silently rewriting a ``mech_analytics`` file with
+        the ``legacy_logs`` default.
     :return: finalized scores dict (also written to disk).
     """
     today_month = datetime.now(timezone.utc).strftime("%Y-%m")
 
+    existing_source = _read_scores_source(scores_path)
     existing = _load_scores_for_resume(scores_path)
     if existing is not None:
         scores = existing
@@ -1359,7 +1365,7 @@ def _accumulate_and_write(
             }
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
-    output["source"] = source
+    output["source"] = existing_source if existing_source is not None else source
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -1394,11 +1400,18 @@ def _maybe_rebuild_after_source_flip(
 ) -> None:
     """Detect a rollback from a non-legacy source and rebuild from logs.
 
-    Reads the ``source`` marker on ``scores_path``. If it names anything
-    other than ``SOURCE_LEGACY_LOGS`` (typically
-    ``SOURCE_MECH_ANALYTICS`` after a ``USE_MECH_ANALYTICS_ROWS``
-    flag-off), wipes ``scores.json``, its per-platform siblings, and
-    ``scored_row_ids.json``, then invokes :func:`rebuild` to
+    Reads the ``source`` marker on ``scores_path``. Rebuilds only when
+    the marker is non-legacy AND the current run is flag-off — that is
+    the actual rollback shape. On a flag-on night the marker is
+    ``SOURCE_MECH_ANALYTICS`` by design (the ``Score`` step just
+    stamped it) and the tournament-merge step's downstream
+    ``scorer --update`` call would otherwise read the same marker as a
+    rollback, wipe the just-built MTD accumulator, rebuild from a
+    frozen ``logs/``, and stamp ``SOURCE_LEGACY_LOGS`` on disk —
+    silently disarming the safety net for a real future rollback.
+
+    When triggered, wipes ``scores.json``, its per-platform siblings,
+    and ``scored_row_ids.json``, then invokes :func:`rebuild` to
     repopulate all-time state from ``logs/``. Downstream ``update()``
     then merges the incoming ``new_rows`` on top of a matching dedup
     namespace and cannot double-count.
@@ -1410,6 +1423,8 @@ def _maybe_rebuild_after_source_flip(
     """
     source = _read_scores_source(scores_path)
     if source is None or source == SOURCE_LEGACY_LOGS:
+        return
+    if _use_mech_analytics_rows():
         return
 
     log = logging.getLogger(__name__)
@@ -1866,7 +1881,17 @@ def rebuild_from_mech_analytics(
         )
 
     lag_days = _resolution_lag_days()
-    effective_since = since - timedelta(days=lag_days)
+    # Snap the widened lower bound to the 1st of its calendar month so the
+    # oldest month bucket is fully covered. Without this,
+    # ``since - lag_days`` lands mid-month and the oldest bucket only
+    # holds day-N-through-31 rows; the subsequent upsert would then
+    # replace the previously-complete history snapshot for that month
+    # with a truncated re-derivation, and every month permanently loses
+    # its first ~0-30 days the moment it slides to the trailing edge of
+    # the lag window. Snapping costs at most 30 extra days of fetch;
+    # ``since`` is already a tz-aware month start so replace(day=1)
+    # keeps the 00:00 UTC anchor.
+    effective_since = (since - timedelta(days=lag_days)).replace(day=1)
     current_month = since.strftime("%Y-%m")
 
     # Bucket rows by ``requested_at`` month so late-resolving predictions

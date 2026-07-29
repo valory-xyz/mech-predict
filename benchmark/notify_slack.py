@@ -34,15 +34,15 @@ from benchmark.analyze import (
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
 from benchmark.roi_slack import build_roi_section
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
 _PROMPT_HEADER = f"""\
-Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `All-Time` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix numbers across windows; if you cite a value, state which window it came from. Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
+Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `{{main_window_label}}` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix numbers across windows; if you cite a value, state which window it came from. Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
 
-*Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Lead with the Current-{ROLLING_WINDOW_DAYS}d platform Brier (from the "Platform Snapshot" section). Then name the direction of change: "Δ vs All-Time" from the "Platform Historical Comparison" row for Brier, and "Δ vs Prev {ROLLING_WINDOW_DAYS}d" from the same row. If either delta shows `insufficient data`, say so plainly instead of guessing.
+*Summary:* 2-3 sentence high-level takeaway for {{platform_label}}. Lead with the Current-{ROLLING_WINDOW_DAYS}d platform Brier (from the "Platform Snapshot" section). Then name the direction of change: "Δ vs {{main_window_label}}" from the "Platform Historical Comparison" row for Brier, and "Δ vs Prev {ROLLING_WINDOW_DAYS}d" from the same row. If either delta shows `insufficient data`, say so plainly instead of guessing.
 
 *Eligibility for the tool ranking section below:* a row is eligible only if its Current {ROLLING_WINDOW_DAYS}d n is at least {MIN_SAMPLE_SIZE} AND the row carries no ⚠ low sample / ⚠ all malformed flag."""
 
@@ -54,7 +54,7 @@ _PROMPT_RANKING_NONE = f"""\
 
 _PROMPT_RANKING_ALL = f"""\
 *Tool performance:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
+• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs {{main_window_label}} `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
 (list ALL eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)"""
 
 
@@ -69,11 +69,11 @@ def _prompt_ranking_split(top_k: int) -> str:
     """
     return f"""\
 *Top tools:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
+• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs {{main_window_label}} `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
 (list top {top_k} eligible rows from the "Tool Historical Comparison" table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier ascending. Use the exact delta strings from that table; if a delta is `insufficient data` or `no prev window`, write those words verbatim — never invent a number.)
 
 *Worst tools:*
-• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
+• `tool-name` — Current {ROLLING_WINDOW_DAYS}d Brier `X.XXXX` (n=X), Δ vs {{main_window_label}} `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`
 (list bottom {top_k} eligible rows from the same table, sorted by Current {ROLLING_WINDOW_DAYS}d Brier descending.)"""
 
 
@@ -108,14 +108,14 @@ Examples (copy this style exactly):
 • candidate: `factual_research` `untagged@bafybeib` — Brier `0.0896` (n=34), BSS vs mkt `+0.285` — no prod data
 
 *Diagnostics:*
-If the report has a "Diagnostics Historical Comparison" section, for each tool that carries at least one row with a signed delta (not `insufficient data`, not `no prev window`), summarize up to two metrics with the largest movement. Use format: • `tool` — `metric` Current {ROLLING_WINDOW_DAYS}d `X.XXXX` (n=X), Δ vs All-Time `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`. Skip the section if no tool has a signed delta.
+If the report has a "Diagnostics Historical Comparison" section, for each tool that carries at least one row with a signed delta (not `insufficient data`, not `no prev window`), summarize up to two metrics with the largest movement. Use format: • `tool` — `metric` Current {ROLLING_WINDOW_DAYS}d `X.XXXX` (n=X), Δ vs {{main_window_label}} `±X.XXXX direction`, Δ vs Prev {ROLLING_WINDOW_DAYS}d `±X.XXXX direction`. Skip the section if no tool has a signed delta.
 
-*Reliability:* from the "Reliability & Parse Quality" comparison table, list every tool whose Current {ROLLING_WINDOW_DAYS}d Reliability or Valid % has a non-`insufficient data` delta vs All-Time and the delta is negative (regression). Use format: • `tool` — Reliability X% (n=X) vs All-Time X% (Δ -X.XXXX worse). If no tool regressed, skip this section.
+*Reliability:* from the "Reliability & Parse Quality" comparison table, list every tool whose Current {ROLLING_WINDOW_DAYS}d Reliability or Valid % has a non-`insufficient data` delta vs {{main_window_label}} and the delta is negative (regression). Use format: • `tool` — Reliability X% (n=X) vs {{main_window_label}} X% (Δ -X.XXXX worse). If no tool regressed, skip this section.
 
 *Recommended actions:* 2-3 concrete next steps for {{platform_label}} based on the Current {ROLLING_WINDOW_DAYS}d data. Anchor each action to a specific row in the comparison tables. If the Current {ROLLING_WINDOW_DAYS}d → Prev {ROLLING_WINDOW_DAYS}d delta shows a regression, call it out explicitly.
 
 Rules:
-- Never mix windows in a single claim. Every cited number must be paired with its window label (Current {ROLLING_WINDOW_DAYS}d, All-Time, or Prev {ROLLING_WINDOW_DAYS}d).
+- Never mix windows in a single claim. Every cited number must be paired with its window label (Current {ROLLING_WINDOW_DAYS}d, {{main_window_label}}, or Prev {ROLLING_WINDOW_DAYS}d).
 - Deltas never stand alone — always cite both sides' n (or state the delta was `insufficient data` / `no prev window` verbatim from the table).
 - Do not make claims from cells flagged ⚠ low sample or all malformed.
 - Tool names with hyphens vs underscores are DIFFERENT tools — use exact names.
@@ -186,7 +186,22 @@ def _compute_top_k(eligible_count: int) -> int:
     return min(3, (eligible_count - 1) // 2)
 
 
-def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
+def _main_window_label() -> str:
+    """Prompt label for the main scores window.
+
+    Flag on: main scores dict is month-to-date (from start of current
+    UTC month). Flag off: cumulative all-time from the on-disk
+    accumulator. LLM prompt must reflect the correct semantic so it
+    doesn't call MTD numbers "All-Time".
+
+    :return: "MTD" when the mech-analytics flag is on, else "All-Time".
+    """
+    return "MTD" if use_mech_analytics_rows() else "All-Time"
+
+
+def _build_system_prompt(
+    platform_label: str, eligible_count: int, main_window_label: str = "All-Time"
+) -> str:
     """Assemble the system prompt with the right tool-ranking block.
 
     The ranking block dispatches on ``eligible_count`` so the LLM
@@ -202,6 +217,9 @@ def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
     :param eligible_count: number of tools that clear the eligibility
         floor in the markdown report's Tool Historical Comparison table.
         Drives the ranking-block dispatch.
+    :param main_window_label: label the LLM uses for the cumulative
+        window (``All-Time`` on the legacy path, ``MTD`` on the
+        self-contained mech-analytics path).
     :return: fully formatted system prompt string.
     :raises ValueError: when ``platform_label`` is empty or unknown.
     """
@@ -222,7 +240,9 @@ def _build_system_prompt(platform_label: str, eligible_count: int) -> str:
         ranking_block = _prompt_ranking_split(top_k)
 
     template = "\n\n".join([_PROMPT_HEADER, ranking_block, _PROMPT_FOOTER])
-    return template.format(platform_label=platform_label)
+    return template.format(
+        platform_label=platform_label, main_window_label=main_window_label
+    )
 
 
 MODEL = "gpt-4.1-mini"
@@ -273,7 +293,11 @@ def summarize_report(report_text: str, api_key: str, platform_label: str) -> str
             "messages": [
                 {
                     "role": "system",
-                    "content": _build_system_prompt(platform_label, eligible_count),
+                    "content": _build_system_prompt(
+                        platform_label,
+                        eligible_count,
+                        main_window_label=_main_window_label(),
+                    ),
                 },
                 {"role": "user", "content": user_content},
             ],

@@ -2587,7 +2587,9 @@ class TestReviewRound2Fixes:
         )
         by_tool, first_seen = _load_count_rows(logs, "polymarket", now)
         assert [r["row_id"] for r in by_tool["a"]] == ["new"]
-        assert first_seen["a"].year == old.year
+        first = first_seen["a"]
+        assert first is not None
+        assert first.year == old.year
 
     def test_corrupt_roster_reports_unknown(self, tmp_path: Path) -> None:
         """Corrupt tournament_tools.json -> None -> UNKNOWN in the note."""

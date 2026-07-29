@@ -422,8 +422,9 @@ def _closed_issue_pairs(
         m = title_re.search(title)
         if not m:
             log.warning(
-                "closed tool-improvement issue title did not match the expected "
+                "closed %s issue title did not match the expected "
                 "format; skipping (no suppression): %r",
+                label,
                 title[:120],
             )
             continue
@@ -432,8 +433,8 @@ def _closed_issue_pairs(
             closed_at = datetime.fromisoformat(closed_at_raw.replace("Z", "+00:00"))
         except ValueError:
             log.warning(
-                "closed tool-improvement issue has unparseable closedAt=%r; "
-                "skipping",
+                "closed %s issue has unparseable closedAt=%r; skipping",
+                label,
                 closed_at_raw,
             )
             continue
@@ -555,6 +556,9 @@ def _filter_count_rows(
     for row in dedup.values():
         if row.get("platform") != platform:
             continue
+        # Substring (not equality) on purpose: future mode variants like
+        # "tournament_replay" must classify as tournament rows without a
+        # code change; no production mode string contains "tournament".
         is_tournament_row = "tournament" in (
             row.get("mode") or ("tournament" if tournament else "")
         )
@@ -1226,19 +1230,20 @@ def build_issue_body(
         signal = "regression signal"
     if decision.get("window_kind") in ("count", "tournament"):
         is_tournament = decision.get("window_kind") == "tournament"
+        check_phrase = (
+            "on the TOURNAMENT count-window check (production windows are "
+            "below the sample floor for this tool, so the shadow-data "
+            "fallback applies)"
+            if is_tournament
+            else "on the count-window check (calendar windows are below the "
+            "sample floor for this tool, so the fallback count-window "
+            "rule applies)"
+        )
         if reason == "level_floor":
-            headline = headline.replace(
-                "in the most recent 7-day window",
-                "on the count-window check (calendar windows are below the "
-                "sample floor for this tool, so the fallback count-window "
-                "rule applies)",
-            )
+            headline = headline.replace("in the most recent 7-day window", check_phrase)
         else:
             headline = (
-                f"`{tool}` on {platform} shows a Brier regression on the "
-                "count-window check (calendar windows are below the sample "
-                "floor for this tool, so the fallback count-window rule "
-                "applies)."
+                f"`{tool}` on {platform} shows a Brier regression " f"{check_phrase}."
             )
         spans = decision.get("cw_spans") or {}
         n_prev = decision.get("n_prev") or 0
@@ -1248,10 +1253,28 @@ def build_issue_body(
             if is_tournament
             else "count-window fallback"
         )
+        wtag = "T" if is_tournament else "C"
+        source_note = (
+            "**Source: tournament arm** -- shadow-scores the same daily "
+            "questions with no on-chain traffic; separate execution "
+            "contract from production, so validate any fix against the "
+            "production payload before shipping. Production rows in the "
+            "same period were below the sample floor.\n\n"
+            if is_tournament
+            else ""
+        )
         body = _COUNT_BODY_TEMPLATE.format(
             headline=headline,
             tool=tool,
             fallback_kind=fallback_kind,
+            wtag=wtag,
+            windows_kind="tournament count-based" if is_tournament else "count-based",
+            source_note=source_note,
+            predicate_source=(
+                "sourced from `results/tournament_scored.jsonl`, deduped by `row_id`"
+                if is_tournament
+                else "deduped by `row_id`"
+            ),
             brier_cur=decision["brier_cur"],
             bss_clause=(
                 f", BSS vs base rate: **{decision['bss_cur']:+.4f}**"
@@ -1265,7 +1288,8 @@ def build_issue_body(
                 else "not available (fewer than 2x the window size accrued)"
             ),
             delta_clause=(
-                f"\n- Delta (C-1 - C-2): **{decision['delta_brier']:+.4f}**"
+                f"\n- Delta ({wtag}-1 - {wtag}-2): "
+                f"**{decision['delta_brier']:+.4f}**"
                 if decision.get("delta_brier") is not None
                 else ""
             ),
@@ -1286,33 +1310,6 @@ def build_issue_body(
             pm=pm,
             artifact_url=artifact_url,
         )
-        if is_tournament:
-            # Same structure, tournament-sourced: retag the windows and
-            # prepend the source caveat so no reader mistakes the slice
-            # for production data.
-            body = body.replace("C-1", "T-1").replace("C-2", "T-2")
-            body = body.replace(
-                "on the count-window check (calendar windows are below the "
-                "sample floor for this tool, so the fallback count-window "
-                "rule applies)",
-                "on the TOURNAMENT count-window check (production windows "
-                "are below the sample floor for this tool, so the shadow-"
-                "data fallback applies)",
-            )
-            body = body.replace(
-                "## Windows (count-based",
-                "**Source: tournament arm** -- shadow-scores the same daily "
-                "questions with no on-chain traffic; separate execution "
-                "contract from production, so validate any fix against the "
-                "production payload before shipping. Production rows in the "
-                "same period were below the sample floor.\n\n"
-                "## Windows (tournament count-based",
-            )
-            body = body.replace(
-                "deduped by `row_id`",
-                "sourced from `results/tournament_scored.jsonl`, "
-                "deduped by `row_id`",
-            )
         return body
     return _BODY_TEMPLATE.format(
         headline=headline,
@@ -1376,8 +1373,8 @@ _COUNT_BODY_TEMPLATE = """## Summary
 
 {headline}
 
-- Current count-window (**C-1**, last {n_cur} valid rows) Brier: **{brier_cur:.4f}**{bss_clause}
-- Previous count-window (**C-2**, preceding {n_prev} valid rows) Brier: {prev_clause}{delta_clause}
+- Current count-window (**{wtag}-1**, last {n_cur} valid rows) Brier: **{brier_cur:.4f}**{bss_clause}
+- Previous count-window (**{wtag}-2**, preceding {n_prev} valid rows) Brier: {prev_clause}{delta_clause}
 - Trigger: **{reason}** ({fallback_kind})
 - Platforms monitored: {platforms}; this issue is scoped to **{platform}**.{cross_ref}
 
@@ -1385,14 +1382,14 @@ This issue records the {signal}, not a diagnosis. The cause has not been identif
 
 @valory-coding-agent
 
-## Windows (count-based -- reproduce by row count, not calendar)
+{source_note}## Windows ({windows_kind} -- reproduce by row count, not calendar)
 
-Predicate: rows with `tool_name == {tool} AND platform == {platform} AND prediction_parse_status == "valid" AND final_outcome != null AND p_yes != null AND predicted_at >= now - {max_age}d`, deduped by `row_id`, sorted by `predicted_at` ascending.
+Predicate: rows with `tool_name == {tool} AND platform == {platform} AND prediction_parse_status == "valid" AND final_outcome != null AND p_yes != null AND predicted_at >= now - {max_age}d`, {predicate_source}, sorted by `predicted_at` ascending.
 
 | Window | Definition | predicted_at span | n | Brier |
 |---|---|---|---|---|
-| **C-1** (current) | last {n_cur} rows of the sorted slice | {span_cur} | {n_cur} | {brier_cur:.4f} |
-| **C-2** (previous) | preceding {n_prev} rows | {span_prev} | {n_prev} | {brier_prev_s} |
+| **{wtag}-1** (current) | last {n_cur} rows of the sorted slice | {span_cur} | {n_cur} | {brier_cur:.4f} |
+| **{wtag}-2** (previous) | preceding {n_prev} rows | {span_prev} | {n_prev} | {brier_prev_s} |
 
 Calendar context: the {window_days}d calendar windows do not both meet the {floor}-row sample floor for this tool (current-window valid n: {calendar_n}), which is why the calendar triage is silent and the {fallback_kind} fired.
 

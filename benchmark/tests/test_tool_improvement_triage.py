@@ -2731,6 +2731,68 @@ class TestMainWidenSampleDispatch:
 
         return fake_run
 
+    def test_starved_veteran_widen_via_main_glue(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Starved veteran fires widen only via main()'s first-seen glue."""
+        results_dir = tmp_path / "results"
+        logs_dir = tmp_path / "datasets" / "logs"
+        results_dir.mkdir(parents=True)
+        logs_dir.mkdir(parents=True)
+        cur = {"by_tool": {"a": _stats(n=5, valid_n=5, brier=0.27)}}
+        prev = {"by_tool": {"a": _stats(valid_n=0)}}
+        (results_dir / "rolling_scores_polymarket.json").write_text(json.dumps(cur))
+        (results_dir / "prev_rolling_scores_polymarket.json").write_text(
+            json.dumps(prev)
+        )
+        (results_dir / "scores_polymarket.json").write_text(json.dumps(cur))
+        now = datetime.now(timezone.utc)
+        ancient = now - timedelta(days=COUNT_WINDOW_MAX_AGE_DAYS + 200)
+        recent = now - timedelta(days=3)
+        rows = [
+            _cw_row(ancient.strftime("%Y-%m-%dT%H:%M:%SZ"), 0.5, True, row_id="old")
+        ] + [
+            _cw_row(
+                (recent + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                0.5,
+                True,
+                row_id=f"r{h}",
+            )
+            for h in range(9)
+        ]
+        (logs_dir / "production_log_recent.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows)
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",
+            tmp_path / "tournament_tools.json",
+        )
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage._load_lineage_children",
+            lambda *a, **k: {},
+        )
+        creates: list = []
+
+        def fake_run(cmd: list, **_k: Any) -> SimpleNamespace:
+            if "create" in cmd:
+                creates.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="url", stderr="")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.subprocess.run", fake_run
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            ["triage", "--state", str(tmp_path / "s.json"), "--repo", "r/r"],
+        )
+        assert main() == 0
+        widen = [c for c in creates if any("widen" in str(x) for x in c)]
+        assert len(widen) == 1
+
     def test_widen_note_created_with_deployment_review_label(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -2932,3 +2994,29 @@ class TestWidenDispatchFailClosedGuards:
         rc = self._run_with(monkeypatch, tmp_path, fake_run)
         assert rc == 0
         assert not [c for c in creates if any("widen" in str(x) for x in c)]
+
+
+class TestLoaderSkipCounters:
+    """Corrupt input is counted and warned, never silently dropped."""
+
+    def test_corrupt_line_and_unreadable_file_warn(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """One good line + one corrupt line + one unreadable path -> warning."""
+        logs = tmp_path / "logs"
+        logs.mkdir()
+        good = _cw_row("2026-07-25T00:00:00Z", 0.6, False, row_id="ok")
+        (logs / "production_log_2026_07_25.jsonl").write_text(
+            json.dumps(good) + "\n{not json\n"
+        )
+        # a directory matching the glob raises IsADirectoryError (an OSError)
+        (logs / "production_log_2026_07_26.jsonl").mkdir()
+        with caplog.at_level(logging.WARNING):
+            by_tool, _first_seen = _load_count_rows(
+                logs, "polymarket", datetime(2026, 7, 28, tzinfo=timezone.utc)
+            )
+        assert [r["row_id"] for r in by_tool["a"]] == ["ok"]
+        joined = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "1 unparseable line" in joined
+        assert "1 unreadable file" in joined
+        assert "production_log_2026_07_26.jsonl" in joined

@@ -20,3 +20,5 @@
 - **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off, not by the agent.
 - **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
 - **Benchmark 2026-07-30:** SHA `b506836fb5dd0b5cc1524a419f580020a447dad3`, seed workflow-default, n=100, dev, baseline=superforcaster-polymarket-v2, platform=polymarket -- posted (comment #5127634652).
+- **Benchmark result 2026-07-30 (dev, n=100, seed 42):** Brier 0.3233->0.3277 (+0.0044, +1.4%), DA 54%->56% (+3.7%), overconf-wrong 23->24 (+1), parse 100% vs 96.7% prod. **Verdict: inconclusive** -- delta (0.0044) well within noise (SE approx +/-0.03-0.04 at n=100); fingerprint (+1 overconf-wrong) within noise. E1 action: grow sample.
+- **Benchmark 2026-07-30 (dev, n=300, grow-sample):** SHA `262878e296db63b19227abb9cdb4ab03def78bc8`, seed workflow-default, n=300, dev, baseline=superforcaster-polymarket-v2, platform=polymarket -- posted (comment #5127938655). Note: 262878e is a memory-only commit; tool code unchanged from b506836. Awaiting result.

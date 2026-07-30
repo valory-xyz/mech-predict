@@ -195,8 +195,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     # requests qwen-14b-fine-tuned (raw) instead of qwen-14b-fine-tuned-calibrated.
     "predict-fine-tuned-calibrated-v1": ToolSpec(
         module=(
-            "packages.valory.customs.finetuned_prediction_v1"
-            ".finetuned_prediction_v1"
+            "packages.valory.customs.finetuned_prediction_v1" ".finetuned_prediction_v1"
         ),
         backend="vllm",
         family="default",

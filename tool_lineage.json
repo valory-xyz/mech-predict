@@ -197,6 +197,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster-polymarket-v5": {
+      "parent": "superforcaster-polymarket-v2",
+      "reason": "Fix Issue #412: OUTPUT_FORMAT 'output ONLY JSON' suppressed the 7-step chain-of-thought in v2 (model skipped step 6 resolution-criterion analysis); max_tokens=500 truncated any CoT attempt. v5 requires full CoT before JSON and raises max_tokens to 2000."
     }
   }
 }

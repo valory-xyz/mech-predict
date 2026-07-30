@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from benchmark import served_tools
+from benchmark.tool_improvement_triage import triage
 
 
 class TestRepoTools:
@@ -123,3 +124,59 @@ class TestTournamentRoster:
             served_tools, "TOURNAMENT_TOOLS_PATH", tmp_path / "nope.json"
         )
         assert served_tools.tournament_tools() == set()
+
+
+class TestTriageActionableFilter:
+    """triage() honours the actionable set."""
+
+    def test_non_actionable_tool_is_silent(self) -> None:
+        """A tool outside the actionable set never reaches the triggers."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"tournament-only-tool": stats}},
+            {"by_tool": {"tournament-only-tool": {**stats, "brier": 0.20}}},
+            {},
+            actionable={"some-other-tool"},
+        )
+        assert decisions[0]["decision"] == "silent"
+        assert decisions[0]["reason"] == "not_actionable"
+
+    def test_actionable_tool_is_assessed(self) -> None:
+        """A tool inside the set is evaluated normally (fires here)."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"served-tool": stats}},
+            {"by_tool": {"served-tool": {**stats, "brier": 0.20, "log_loss": 0.6}}},
+            {},
+            actionable={"served-tool"},
+        )
+        assert decisions[0]["decision"] == "open_issue"
+
+    def test_none_means_assess_everything(self) -> None:
+        """actionable=None (discovery failed) preserves the legacy behaviour."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"anything": stats}},
+            {"by_tool": {"anything": {**stats, "brier": 0.20, "log_loss": 0.6}}},
+            {},
+            actionable=None,
+        )
+        assert decisions[0]["decision"] == "open_issue"

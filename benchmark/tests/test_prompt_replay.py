@@ -1174,3 +1174,121 @@ class TestStructuredSchemaResolution:
         schema = captured.get("response_format")
         assert schema is not None, "_call_openai_structured was not invoked"
         assert schema.__module__.endswith("superforcaster_polymarket_v4")
+
+
+class TestTournamentFallback:
+    """enrich() falls back to the tournament arm for tournament-only tools."""
+
+    @staticmethod
+    def _write(path, rows):  # type: ignore[no-untyped-def]
+        """Write JSONL rows to path."""
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def test_joins_scored_outcomes_with_captured_evidence(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Rows come from scored (outcome) joined to predictions (evidence)."""
+        from benchmark.prompt_replay import _load_tournament_rows
+
+        scored = tmp_path / "tournament_scored.jsonl"
+        preds = tmp_path / "tournament_predictions.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q1?",
+                    "p_yes": 0.7,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "r2",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q2?",
+                    "p_yes": 0.2,
+                    "final_outcome": None,  # unresolved -> excluded
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "r1", "source_content": "evidence one"},
+                {"row_id": "r2", "source_content": "evidence two"},
+            ],
+        )
+        rows = _load_tournament_rows("t", "polymarket", scored, preds)
+        assert len(rows) == 1
+        assert rows[0]["extracted_user_prompt"] == "Q1?"
+        assert rows[0]["extracted_additional_information"] == "evidence one"
+
+    def test_rows_without_evidence_are_dropped(self, tmp_path):  # type: ignore[no-untyped-def]
+        """A scored row whose prediction captured no evidence is unusable."""
+        from benchmark.prompt_replay import _load_tournament_rows
+
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.7,
+                    "final_outcome": True,
+                }
+            ],
+        )
+        self._write(preds, [{"row_id": "r1", "source_content": None}])
+        assert _load_tournament_rows("t", "polymarket", scored, preds) == []
+
+    def test_platform_and_tool_filters(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Only the requested tool and platform are kept."""
+        from benchmark.prompt_replay import _load_tournament_rows
+
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "a",
+                    "tool": "t",
+                    "platform": "omen",
+                    "question_text": "Q?",
+                    "p_yes": 0.5,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "b",
+                    "tool": "other",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.5,
+                    "final_outcome": True,
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "a", "source_content": "x"},
+                {"row_id": "b", "source_content": "y"},
+            ],
+        )
+        assert _load_tournament_rows("t", "polymarket", scored, preds) == []
+        assert len(_load_tournament_rows("t", "omen", scored, preds)) == 1
+
+    def test_missing_files_return_empty(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Absent tournament files degrade to empty, not an exception."""
+        from benchmark.prompt_replay import _load_tournament_rows
+
+        assert (
+            _load_tournament_rows(
+                "t", "polymarket", tmp_path / "no.jsonl", tmp_path / "no2.jsonl"
+            )
+            == []
+        )

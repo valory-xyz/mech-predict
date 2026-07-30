@@ -115,6 +115,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from benchmark.served_tools import actionable_tools
+
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
 BRIER_LEVEL_THRESHOLD = 0.25
@@ -820,6 +822,7 @@ def triage(
     count_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_roster: Optional[set] = None,
+    actionable: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     # ``count_windows`` (per-tool output of ``_count_window_stats``) feeds
@@ -890,6 +893,20 @@ def triage(
     ):
         c = cur_by_tool.get(tool) or {}
         p = (prev.get("by_tool") or {}).get(tool, {})
+        if actionable is not None and tool not in actionable:
+            # Not selectable on this platform's mechs, or not shipped by this
+            # repo: a fix issue would have no validation path and no
+            # deployment consequence (mech-predict#416). Stay silent.
+            decisions.append(
+                {
+                    "tool": tool,
+                    "platform": platform,
+                    "decision": "silent",
+                    "reason": "not_actionable",
+                    "issue_open": False,
+                }
+            )
+            continue
         d: Dict[str, Any] = {
             "tool": tool,
             "platform": platform,
@@ -1794,6 +1811,33 @@ def main() -> int:
                 len(tournament_windows),
                 platform,
             )
+        # Restrict fix issues to tools that are BOTH selectable on this
+        # platform's mechs and shipped by this repo. Fail-OPEN: if discovery
+        # cannot resolve (subgraph/GitHub/IPFS outage), assess everything
+        # rather than silently stalling the whole triage -- the pre-existing
+        # behavior, logged loudly.
+        actionable: Optional[set] = None
+        try:
+            actionable = actionable_tools(platform)
+            if actionable:
+                log.info(
+                    "actionable on %s (selectable AND shipped here): %s",
+                    platform,
+                    sorted(actionable),
+                )
+            else:
+                log.warning(
+                    "actionable set for %s resolved EMPTY; assessing all tools "
+                    "this pass (discovery may be degraded).",
+                    platform,
+                )
+                actionable = None
+        except Exception as exc:  # noqa: BLE001 - never block triage on discovery
+            log.warning(
+                "served-tool discovery failed for %s (%s); assessing all tools.",
+                platform,
+                exc,
+            )
         roster = _tournament_roster()
         tournament_scores = _load_json(
             RESULTS_DIR / f"scores_tournament_{platform}.json"
@@ -1811,6 +1855,7 @@ def main() -> int:
             count_windows=count_windows,
             tournament_windows=tournament_windows,
             tournament_roster=roster,
+            actionable=actionable,
         )
         all_decisions.extend(decisions)
 

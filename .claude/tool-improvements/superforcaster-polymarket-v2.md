@@ -19,3 +19,4 @@
 - **Mechanism disrupted:** Require the model to emit the full 7-step chain-of-thought (including step 6 resolution-criterion analysis) BEFORE the JSON output, enabled by raising `max_tokens` from 500 to 2000; in superforcaster-polymarket-v5, `OUTPUT_FORMAT` says to append the JSON after the analysis chain, forcing criterion-check execution before p_yes is formed.
 - **Pre-PR sanity (Step 6.5):** import OK, `autonomy packages lock --check` green. **W-2 is the only scored gate** -- recorded by PR-CI on the PR after hand-off, not by the agent.
 - **Status:** opened draft PR; PR-CI cached-replay pending on W-2.
+- **Benchmark 2026-07-30:** SHA `b506836fb5dd0b5cc1524a419f580020a447dad3`, seed workflow-default, n=100, dev, baseline=superforcaster-polymarket-v2, platform=polymarket -- posted (comment #5127634652).

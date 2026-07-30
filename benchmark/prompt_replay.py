@@ -605,8 +605,8 @@ DEFAULT_TOURNAMENT_PREDICTIONS = (
 def _load_tournament_rows(
     tool_filter: str,
     platform_filter: Optional[str],
-    scored_path: Path = DEFAULT_TOURNAMENT_SCORED,
-    predictions_path: Path = DEFAULT_TOURNAMENT_PREDICTIONS,
+    scored_path: Optional[Path] = None,
+    predictions_path: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
     """Build replay-ready rows for a tool from the tournament arm.
 
@@ -622,10 +622,18 @@ def _load_tournament_rows(
 
     :param tool_filter: tool name to keep.
     :param platform_filter: platform to keep, or ``None`` for all.
-    :param scored_path: path to ``tournament_scored.jsonl``.
-    :param predictions_path: path to ``tournament_predictions.jsonl``.
+    :param scored_path: path to ``tournament_scored.jsonl``; the module
+        default is read at CALL time (not bound at import) so a caller --
+        or the workflow, pointing at the downloaded artifact -- can
+        override it.
+    :param predictions_path: path to ``tournament_predictions.jsonl``,
+        same resolution rule.
     :return: enriched rows (empty when either file is missing or nothing matches).
     """
+    scored_path = DEFAULT_TOURNAMENT_SCORED if scored_path is None else scored_path
+    predictions_path = (
+        DEFAULT_TOURNAMENT_PREDICTIONS if predictions_path is None else predictions_path
+    )
     if not scored_path.is_file() or not predictions_path.is_file():
         log.warning(
             "tournament fallback unavailable: %s / %s",
@@ -664,7 +672,14 @@ def _load_tournament_rows(
                 continue
             if platform_filter and row.get("platform") != platform_filter:
                 continue
-            if row.get("final_outcome") is None or row.get("p_yes") is None:
+            # p_no as well as p_yes: replay's baseline arm copies both
+            # verbatim, so a row missing either KeyErrors mid-run -- after
+            # the earlier rows have already been paid for.
+            if (
+                row.get("final_outcome") is None
+                or row.get("p_yes") is None
+                or row.get("p_no") is None
+            ):
                 continue
             row_id = row.get("row_id")
             if not row_id or row_id in seen:
@@ -676,6 +691,12 @@ def _load_tournament_rows(
             rows.append(
                 {
                     **row,
+                    # replay() and the scorers key on ``tool_name``; tournament
+                    # rows written before that spelling settled use ``tool``.
+                    # Normalize here so the fallback's output honours the same
+                    # contract as the production path -- an un-normalized row
+                    # KeyErrors in replay() at ``sampled[0]["tool_name"]``.
+                    "tool_name": row.get("tool_name") or row.get("tool"),
                     "extracted_user_prompt": row.get("question_text", ""),
                     "extracted_additional_information": content,
                 }
@@ -698,6 +719,8 @@ def enrich(
     sample_per_platform: Optional[int] = None,
     seed: int = 42,
     platform_filter: Optional[Literal["omen", "polymarket"]] = None,
+    tournament_scored: Optional[Path] = None,
+    tournament_predictions: Optional[Path] = None,
 ) -> None:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -711,6 +734,10 @@ def enrich(
     :param sample_per_platform: stratified sample N per platform before IPFS fetch.
     :param seed: random seed for sampling.
     :param platform_filter: only include rows from this platform (default: all).
+    :param tournament_scored: override for ``tournament_scored.jsonl`` (the
+        tournament fallback source).
+    :param tournament_predictions: override for
+        ``tournament_predictions.jsonl`` (carries the captured evidence).
     :raises SystemExit: when neither production nor the tournament arm yields
         any replayable row for ``tool_filter``.
     """
@@ -742,40 +769,75 @@ def enrich(
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     stats_path.write_text(
         json.dumps(
-            {"accepted": len(rows), "rejected": rejected, "no_row_id": no_row_id},
+            {
+                "source": "production",
+                "accepted": len(rows),
+                "rejected": rejected,
+                "no_row_id": no_row_id,
+            },
             indent=2,
         ),
         encoding="utf-8",
     )
     log.info("Wrote filter stats: %s", stats_path)
 
-    if not rows:
-        # No production deliveries for this tool: it may be tournament-only.
-        # The tournament arm carries the same question + captured evidence,
-        # so replay from there rather than failing (mech-predict#416).
-        scope = f" [platform={platform_filter}]" if platform_filter else ""
-        log.warning(
-            "0 production rows for %r%s; trying the tournament arm",
-            tool_filter,
-            scope,
+    scope = f" [platform={platform_filter}]" if platform_filter else ""
+
+    def _tournament_fallback(why: str) -> bool:
+        """Write tournament-sourced rows to ``output``; True when it produced any.
+
+        :param why: what made the production path unusable (for the log).
+        :return: whether replayable rows were written.
+        """
+        log.warning("%s for %r%s; trying the tournament arm", why, tool_filter, scope)
+        fallback_rows = _load_tournament_rows(
+            tool_filter, platform_filter, tournament_scored, tournament_predictions
         )
-        tournament_rows = _load_tournament_rows(tool_filter, platform_filter)
-        if not tournament_rows:
-            raise SystemExit(
-                f"0 rows for baseline {tool_filter!r}{scope} in production or "
-                "the tournament arm"
-            )
+        if not fallback_rows:
+            return False
         if sample_per_platform is not None:
-            tournament_rows = stratified_sample(
-                tournament_rows, sample_per_platform, seed
-            )
-        _log_platform_breakdown(tournament_rows)
+            fallback_rows = stratified_sample(fallback_rows, sample_per_platform, seed)
+        _log_platform_breakdown(fallback_rows)
         output.parent.mkdir(parents=True, exist_ok=True)
         with open(output, "w", encoding="utf-8") as handle:
-            for row in tournament_rows:
+            for row in fallback_rows:
                 handle.write(json.dumps(row) + "\n")
-        log.info("Written %d tournament rows to %s", len(tournament_rows), output)
-        return
+        # Rewrite the sidecar: it was written from the PRODUCTION pool above,
+        # but the dataset now holds tournament rows. Leaving it would caption
+        # the human-facing verdict with rejection counts for a population that
+        # was not benchmarked. The production counts are kept under
+        # `production_attempt` so the reason for the fallback stays diagnosable.
+        stats_path.write_text(
+            json.dumps(
+                {
+                    "source": "tournament",
+                    "accepted": len(fallback_rows),
+                    "rejected": {},
+                    "no_row_id": 0,
+                    "production_attempt": {
+                        "accepted": len(rows),
+                        "rejected": rejected,
+                        "no_row_id": no_row_id,
+                    },
+                    "fallback_reason": why,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        log.info("Written %d tournament rows to %s", len(fallback_rows), output)
+        return True
+
+    if not rows:
+        # No production deliveries for this tool: it may be tournament-only
+        # (mech-predict#416). The tournament arm carries the same question
+        # and captured evidence, so replay from there.
+        if _tournament_fallback("0 production rows"):
+            return
+        raise SystemExit(
+            f"0 rows for baseline {tool_filter!r}{scope} in production or "
+            "the tournament arm"
+        )
 
     # Stratified sample BEFORE IPFS fetch to avoid unnecessary downloads.
     if sample_per_platform is not None:
@@ -811,6 +873,20 @@ def enrich(
     log.info("%d/%d deliveries have IPFS hashes", has_hash, len(ipfs_hashes))
 
     enriched = _fetch_and_extract_prompts(rows, ipfs_hashes, tool_name=tool_filter)
+    if not enriched:
+        # Production rows existed but none survived IPFS enrichment (no
+        # delivery hash, unfetchable prompt, unparseable components). Writing
+        # an empty file here would hand the replay stage a silently zero-row
+        # benchmark -- worse than #416's loud failure. Try the tournament arm.
+        if _tournament_fallback(
+            f"{len(rows)} production rows but 0 survived IPFS enrichment"
+        ):
+            return
+        raise SystemExit(
+            f"0 replayable rows for baseline {tool_filter!r}{scope}: "
+            f"{len(rows)} production rows yielded no usable prompt and the "
+            "tournament arm has none either"
+        )
     _log_platform_breakdown(enriched)
 
     # Write
@@ -1326,6 +1402,17 @@ def _log_replay_summary(
     log.info("    Parse delta: %+.1f%% — %s", parse_delta_pct, parse_verdict)
 
     if filter_stats is not None:
+        if filter_stats.get("source") == "tournament":
+            # Say so loudly: these rows are tournament predictions replayed
+            # from captured evidence, not production deliveries. A reader who
+            # assumes production would over-read the verdict.
+            attempt = filter_stats.get("production_attempt") or {}
+            log.info("  Row source: TOURNAMENT ARM (no replayable production rows)")
+            log.info(
+                "    Reason: %s   (production pool accepted %d)",
+                filter_stats.get("fallback_reason", "unknown"),
+                attempt.get("accepted", 0),
+            )
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
         # Scoping buckets + not_valid_parse make up the full rejected total;

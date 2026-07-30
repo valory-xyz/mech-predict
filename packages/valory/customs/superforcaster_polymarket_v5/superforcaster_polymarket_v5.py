@@ -161,7 +161,15 @@ class OpenAIClient:
     ) -> Optional[OpenAIResponse]:
         """Generate a completion from the specified LLM provider.
 
-        Uses the given model and messages.
+        :param model: the model identifier to use for the completion.
+        :param messages: the list of message dicts to send to the chat endpoint.
+        :param timeout: request timeout in seconds (unused; hardcoded to 150).
+        :param temperature: sampling temperature (0 = deterministic).
+        :param top_p: nucleus sampling probability (unused; not forwarded).
+        :param n: number of completions to generate (unused; hardcoded to 1).
+        :param stop: stop sequence(s) (unused; hardcoded to None).
+        :param max_tokens: maximum number of tokens to generate in the completion.
+        :return: an OpenAIResponse with the completion content and token usage.
         """
         response_provider = self.client.chat.completions.create(
             model=model,

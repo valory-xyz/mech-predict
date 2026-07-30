@@ -32,10 +32,20 @@ the IPFS manifest's ``tools``. That chain answers "what can the live
 trader select?", which is the question that matters, and it needs no
 service ids, registry addresses or mech lists stored here.
 
-This module adds the second half: intersect that set with the tools this
-repository can build (``benchmark/tools.py``). Only the intersection is
-actionable for the improvement loop -- a tool we cannot build cannot be
+This module adds the second half: intersect that set with the tool
+packages this repository actually ships (``packages/packages.json``,
+the ledger ``autonomy packages lock`` maintains and deployment consumes
+-- not ``benchmark/tools.py``, which is a benchmark-harness convenience
+list that drifts from what is shipped). Only the intersection is
+actionable for the improvement loop -- a tool we do not ship cannot be
 fixed here, and a tool nobody serves has nowhere for a fix to land.
+
+Mech manifests advertise tool NAMES only (no CIDs), so matching is by
+name with underscores and dashes treated as interchangeable
+(``superforcaster_full_search`` the package == ``superforcaster-full-search``
+the served tool). Version suffixes are NOT stripped: ``-v1`` and ``-v3``
+are different tools and only the ones actually advertised count as
+served.
 
 Read-only: GitHub API, subgraph and IPFS gateway GETs.
 """
@@ -58,22 +68,36 @@ from benchmark.tool_usage import (
 
 log = logging.getLogger(__name__)
 
-TOOLS_REGISTRY_PATH = Path(__file__).resolve().parent / "tools.py"
+PACKAGES_JSON_PATH = (
+    Path(__file__).resolve().parent.parent / "packages" / "packages.json"
+)
 TOURNAMENT_TOOLS_PATH = Path(__file__).resolve().parent / "tournament_tools.json"
 
-_TOOL_SPEC_RE = re.compile(r'^\s*"([a-z0-9_.-]+)":\s*ToolSpec\(', re.M)
+# packages.json keys look like ``custom/<author>/<package_name>/<version>``.
+_CUSTOM_KEY_RE = re.compile(r"^custom/[^/]+/([^/]+)/")
 
 
 def repo_tools() -> Set[str]:
-    """Tool names this repository can build, from ``benchmark/tools.py``.
+    """Tool packages this repository ships, from ``packages/packages.json``.
 
-    Parsed textually so the registry (and every tool module's imports) does
-    not have to be importable just to answer this.
+    The package ledger is the shipping source of truth (maintained by
+    ``autonomy packages lock``, consumed by deployment), unlike
+    ``benchmark/tools.py`` which only lists what the harness can run.
 
-    :return: registered tool names.
+    :return: package names of every ``custom/`` entry, in package spelling.
     """
-    text = TOOLS_REGISTRY_PATH.read_text(encoding="utf-8")
-    return set(_TOOL_SPEC_RE.findall(text))
+    try:
+        data = json.loads(PACKAGES_JSON_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("packages.json unreadable at %s", PACKAGES_JSON_PATH)
+        return set()
+    names: Set[str] = set()
+    for section in ("dev", "third_party"):
+        for key in data.get(section) or {}:
+            match = _CUSTOM_KEY_RE.match(key)
+            if match:
+                names.add(match.group(1))
+    return names
 
 
 def tournament_tools() -> Set[str]:
@@ -181,18 +205,18 @@ def main() -> int:
         print(f"  {deployment} [{platform}]")
         for tool in sorted(tools):
             known = normalize_tool_name(tool) in repo_normalized
-            print(f"      - {tool}{'' if known else '   (not in this repo)'}")
+            print(f"      - {tool}{'' if known else '   (not shipped by this repo)'}")
 
-    print("\nACTIONABLE (selectable AND buildable here)")
+    print("\nACTIONABLE (selectable AND shipped by this repo)")
     for tool in sorted(actionable):
         print(f"  * {tool}{'   [also in tournament]' if tool in roster else ''}")
 
     print("\nNOT ACTIONABLE")
     for tool in sorted(repo - actionable):
-        where = "tournament only" if tool in roster else "repo only"
+        where = "tournament only" if tool in roster else "shipped only"
         print(f"  - {tool}   ({where}, not selectable in production)")
-    for tool in sorted(served - repo_normalized):
-        print(f"  - {tool}   (selectable but not buildable from this repo)")
+    for name in sorted(served - repo_normalized):
+        print(f"  - {name}   (selectable but not shipped by this repo)")
 
     return 0 if resolved else 1
 

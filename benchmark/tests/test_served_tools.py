@@ -26,14 +26,26 @@ from benchmark import served_tools
 
 
 class TestRepoTools:
-    """The registry parse."""
+    """The packages.json parse (the shipping source of truth)."""
 
-    def test_finds_known_tools(self) -> None:
-        """Parsing tools.py yields the registered tool names."""
+    def test_finds_shipped_packages(self) -> None:
+        """Parsing packages.json yields custom/ package names."""
         tools = served_tools.repo_tools()
-        assert "superforcaster-polymarket-v1" in tools
+        assert "superforcaster_polymarket_v1" in tools
         assert "factual_research" in tools
         assert all(tool == tool.strip() for tool in tools)
+
+    def test_ignores_non_custom_entries(self) -> None:
+        """Only custom/ packages count (not agents, skills, protocols)."""
+        tools = served_tools.repo_tools()
+        assert not any("/" in tool for tool in tools)
+
+    def test_unreadable_packages_json_is_empty(
+        self, monkeypatch: Any, tmp_path: Any
+    ) -> None:
+        """A missing ledger yields an empty set rather than an exception."""
+        monkeypatch.setattr(served_tools, "PACKAGES_JSON_PATH", tmp_path / "nope.json")
+        assert served_tools.repo_tools() == set()
 
 
 class TestServedAndActionable:
@@ -43,7 +55,7 @@ class TestServedAndActionable:
         "omenstrat Pearl": ["factual_research", "superforcaster"],
         "polystrat Pearl": [
             "superforcaster-polymarket-v1",
-            "superforcaster_full_search",
+            "resolve-market-reasoning-gpt-4.1",
         ],
     }
 
@@ -66,17 +78,23 @@ class TestServedAndActionable:
     def test_name_convention_is_normalized(self) -> None:
         """Underscore/dash spellings of one tool match."""
         served = served_tools.served_tools(valid=self.VALID)
-        assert "superforcaster-full-search" in served
+        assert "factual-research" in served
 
     def test_actionable_is_the_intersection(self) -> None:
-        """Actionable = selectable AND buildable here; both exclusions hold."""
+        """Actionable = selectable AND shipped here; both exclusions hold."""
         actionable = served_tools.actionable_tools(valid=self.VALID)
-        # selectable and in this repo
-        assert "superforcaster-polymarket-v1" in actionable
-        # selectable but built elsewhere
-        assert "superforcaster_full_search" not in actionable
-        # in this repo but not selectable anywhere
-        assert "superforcaster-polymarket-v3" not in actionable
+        # selectable and shipped here (package spelling is returned)
+        assert "superforcaster_polymarket_v1" in actionable
+        # selectable but shipped by another repo
+        assert "resolve-market-reasoning-gpt-4.1" not in actionable
+        # shipped here but not selectable anywhere
+        assert "superforcaster_polymarket_v3" not in actionable
+
+    def test_versions_are_distinct_not_collapsed(self) -> None:
+        """A served -v1 must NOT make sibling -v3 look actionable."""
+        actionable = served_tools.actionable_tools(valid=self.VALID)
+        assert "factual_research_v1" not in actionable
+        assert "factual_research_v3" not in actionable
 
     def test_failed_deployment_contributes_nothing(self) -> None:
         """A None (fetch failed) deployment is skipped, not treated as empty."""

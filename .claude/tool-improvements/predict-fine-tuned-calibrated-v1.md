@@ -50,4 +50,5 @@ Distribution-shift check: W-2 Brier was 0.1870. The p_yes squashing is a structu
 ### Benchmark ledger
 
 - **Benchmark 2026-07-30:** SHA `73f62a4a21a67fc931fbd09a7fd5c74dc0511340`, seed auto (workflow-assigned), n=100, dev, baseline=`predict-fine-tuned-calibrated`, platform=`polymarket` -- posted (errored at Enrich dataset step; benchmark-incomplete)
-- **Benchmark 2026-07-30:** SHA `de1c1c0e459a9ee5ccf39c8898f59fcf7db5508f`, seed auto (workflow-assigned), n=100, dev, baseline=`predict-fine-tuned-calibrated`, platform=`polymarket` — posted (re-trigger after CI green on new SHA)
+- **Benchmark 2026-07-30:** SHA `de1c1c0e459a9ee5ccf39c8898f59fcf7db5508f`, seed auto (workflow-assigned), n=100, dev, baseline=`predict-fine-tuned-calibrated`, platform=`polymarket` — posted (re-trigger after CI green on new SHA) (errored at Enrich dataset step; benchmark-incomplete)
+- **Benchmark 2026-07-30:** SHA `2ff69c3931bd7c610691a52f924fc6692b88d076`, seed auto (workflow-assigned), n=100, dev, baseline=`predict-fine-tuned-calibrated`, platform=`polymarket` -- posted (re-trigger after two Enrich-dataset infra failures; CI green on current SHA at 07:18Z)

@@ -111,11 +111,12 @@ def tournament_tools() -> Optional[Set[str]]:
     """Tool names on the tournament roster, normalized; ``None`` if unknown.
 
     Thin delegate to :func:`benchmark.tournament_tools.roster_names` so this
-    module is not a fourth, subtly-different parse of the same file. In
-    particular the names come back in the UNDERSCORE namespace, which is what
-    makes membership tests against package names correct -- comparing raw
-    roster keys (dash spelling) to package names (underscore spelling) can
-    never match for a versioned tool.
+    module is not a fourth, subtly-different parse of the same file. The names
+    come back in the DASH namespace -- that is the direction
+    ``normalize_tool_name`` folds -- which makes membership tests correct as
+    long as BOTH sides are folded the same way. Comparing raw roster keys to
+    raw package names can never match for a versioned tool
+    (``factual_research-v2`` vs ``factual_research_v2``).
 
     :return: roster names folded into this module's single comparison
         namespace (``normalize_tool_name``), or ``None`` when unknown.
@@ -285,13 +286,19 @@ def main() -> int:
             print(f"  * {tool}{tag}")
 
     print("\nNOT ACTIONABLE")
-    if repo is None:
-        # Every line in this section is a claim about what this repo ships, so
-        # with an unreadable ledger they would all be confident negatives read
-        # off a file we could not open -- "ships no package here" for tools
-        # that plainly do. That is the same misreading the roster's UNKNOWN
-        # state exists to prevent, one layer up.
-        print("  UNKNOWN -- packages.json unreadable; shipped set is unknown")
+    if repo is None or served is None:
+        # Every line in this section is a claim about what this repo ships or
+        # what production serves. With EITHER side unknown they are confident
+        # negatives read off data we could not obtain -- with discovery down
+        # this section asserted that every shipped tool is un-selectable, two
+        # lines after correctly printing UNKNOWN. The ledger side got this
+        # guard first; the discovery side is the same bug mirrored.
+        reason = (
+            "packages.json unreadable; shipped set is unknown"
+            if repo is None
+            else "discovery did not resolve; selectable set is unknown"
+        )
+        print(f"  UNKNOWN -- {reason}")
         return 0 if resolved else 1
     for tool in sorted(repo - (actionable or set())):
         in_roster = _roster_has(tool)

@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from benchmark import served_tools
+from benchmark import tool_improvement_triage as tit
+from benchmark.tool_improvement_triage import triage
 
 
 class TestRepoTools:
@@ -494,6 +496,34 @@ class TestMainCli:
         assert "UNKNOWN -- packages.json unreadable" in out
         assert code == 1
 
+    def test_unknown_discovery_never_asserts_selectable_negatives(
+        self, monkeypatch: Any, capsys: Any, tmp_path: Any
+    ) -> None:
+        """Discovery down + healthy ledger must not claim tools are unserved.
+
+        The mirror of the unreadable-ledger case: with `served` unknown,
+        `repo - (actionable or set())` is the WHOLE ledger, so the section
+        asserted every shipped tool is un-selectable -- two lines after
+        correctly printing UNKNOWN, and false for every tool that is served.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        code, out = self._run(
+            monkeypatch,
+            capsys,
+            tmp_path,
+            [],
+            {"omenstrat Pearl": None, "polystrat Pearl": None},
+            ledger={"dev": {"custom/valory/superforcaster/0.1.0": "bafy"}},
+        )
+        assert (
+            "not selectable in production" not in out
+        ), "asserted a selectable-negative off an unresolved discovery"
+        assert "UNKNOWN -- discovery did not resolve; selectable set" in out
+        assert code == 1
+
     def test_exit_code_covers_an_unknown_ledger(
         self, monkeypatch: Any, capsys: Any, tmp_path: Any
     ) -> None:
@@ -594,3 +624,49 @@ class TestTriageActionableFilter:
             actionable=None,
         )
         assert decisions[0]["decision"] == "open_issue"
+
+    def test_main_passes_an_empty_actionable_through_unchanged(
+        self, monkeypatch: Any
+    ) -> None:
+        """A resolved-but-EMPTY actionable set must reach triage() as-is.
+
+        This pins the behavioural half of the tri-state migration. The old
+        code did `if actionable: ... else: actionable = None`, converting a
+        genuine "nothing here is actionable" into "assess everything" -- the
+        opposite decision. Asserting on triage() alone cannot catch that: the
+        conversion happens in main(), so this captures what main() actually
+        hands over.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: Dict[str, Any] = {}
+
+        def fake_triage(*args: Any, **kwargs: Any) -> list:
+            """Capture the actionable argument and stop the pass.
+
+            :param args: positional args from main().
+            :param kwargs: keyword args from main().
+            :return: no decisions.
+            """
+            captured["actionable"] = kwargs.get("actionable")
+            return []
+
+        monkeypatch.setattr(tit, "actionable_tools", lambda platform: set())
+        monkeypatch.setattr(tit, "triage", fake_triage)
+        monkeypatch.setattr(tit, "_load_json", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_open_issue_tools", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_closed_issue_pairs", lambda *a, **k: [])
+        monkeypatch.setattr(tit, "_load_count_rows", lambda *a, **k: ({}, {}))
+        monkeypatch.setattr(
+            tit, "_load_tournament_count_rows", lambda *a, **k: ({}, {})
+        )
+        monkeypatch.setattr(sys, "argv", ["triage", "--dry-run"])
+        try:
+            tit.main()
+        except SystemExit:
+            pass
+        assert "actionable" in captured, "main() never reached triage()"
+        assert captured["actionable"] == set(), (
+            f"an empty actionable set was converted to {captured['actionable']!r} "
+            "-- that turns 'nothing is actionable' into 'assess everything'"
+        )

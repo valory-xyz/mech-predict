@@ -1819,19 +1819,28 @@ def main() -> int:
         actionable: Optional[set] = None
         try:
             actionable = actionable_tools(platform)
-            if actionable:
+            if actionable is None:
+                # UNKNOWN, not empty. `actionable_tools` now says which it is,
+                # so the old `if actionable:` emptiness test is obsolete -- it
+                # collapsed a genuine "nothing here is actionable" into
+                # "assess everything", which is the opposite decision.
+                log.warning(
+                    "actionable set for %s is UNKNOWN (discovery or ledger "
+                    "unavailable); assessing all tools this pass.",
+                    platform,
+                )
+            elif not actionable:
+                log.warning(
+                    "actionable set for %s resolved EMPTY: nothing selectable "
+                    "here is shipped by this repo, so every tool stays silent.",
+                    platform,
+                )
+            else:
                 log.info(
                     "actionable on %s (selectable AND shipped here): %s",
                     platform,
                     sorted(actionable),
                 )
-            else:
-                log.warning(
-                    "actionable set for %s resolved EMPTY; assessing all tools "
-                    "this pass (discovery may be degraded).",
-                    platform,
-                )
-                actionable = None
         except Exception as exc:  # noqa: BLE001 - never block triage on discovery
             log.warning(
                 "served-tool discovery failed for %s (%s); assessing all tools.",

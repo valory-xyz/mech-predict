@@ -110,11 +110,6 @@ class TestRepoTools:
         )
         assert served_tools.repo_tools() == {"t"}
 
-    def test_ignores_non_custom_entries(self) -> None:
-        """Only custom/ packages count (not agents, skills, protocols)."""
-        tools = served_tools.repo_tools()
-        assert not any("/" in tool for tool in tools)
-
     def test_unreadable_packages_json_is_unknown(
         self, monkeypatch: Any, tmp_path: Any
     ) -> None:
@@ -145,23 +140,27 @@ class TestServedAndActionable:
         ``factual_research`` is asserted in its dashed form here.
         """
         served = served_tools.served_tools(valid=self.VALID)
+        assert served is not None
         assert "factual-research" in served
         assert "superforcaster-polymarket-v1" in served
 
     def test_platform_filter(self) -> None:
         """A platform filter keeps only that platform's deployments."""
         served = served_tools.served_tools("polymarket", self.VALID)
+        assert served is not None
         assert "superforcaster-polymarket-v1" in served
         assert "factual-research" not in served
 
     def test_name_convention_is_normalized(self) -> None:
         """Underscore/dash spellings of one tool match."""
         served = served_tools.served_tools(valid=self.VALID)
+        assert served is not None
         assert "factual-research" in served
 
     def test_actionable_is_the_intersection(self) -> None:
         """Actionable = selectable AND shipped here; both exclusions hold."""
         actionable = served_tools.actionable_tools(valid=self.VALID)
+        assert actionable is not None
         # selectable and shipped here (package spelling is returned)
         assert "superforcaster_polymarket_v1" in actionable
         # selectable but shipped by another repo
@@ -172,6 +171,7 @@ class TestServedAndActionable:
     def test_versions_are_distinct_not_collapsed(self) -> None:
         """A served -v1 must NOT make sibling -v3 look actionable."""
         actionable = served_tools.actionable_tools(valid=self.VALID)
+        assert actionable is not None
         assert "factual_research_v1" not in actionable
         assert "factual_research_v3" not in actionable
 

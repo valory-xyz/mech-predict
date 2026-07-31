@@ -197,7 +197,14 @@ def main() -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__ or "")
     parser.add_argument(
-        "--platform", default=None, help="restrict to omen / polymarket"
+        "--platform",
+        default=None,
+        # Without `choices`, an unrecognized value resolves to no deployments,
+        # which is indistinguishable from a total discovery outage: `--platform
+        # Omen` would print UNKNOWN and exit 1 with both mechs healthy. Let
+        # argparse reject it and name the valid set instead.
+        choices=sorted(set(DEPLOYMENT_TO_PLATFORM.values())),
+        help="restrict to omen / polymarket",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args()
@@ -212,8 +219,12 @@ def main() -> int:
     # Scope the exit code to what was ASKED for: fetch_valid_tools() always
     # resolves both deployments, so judging success over the unfiltered map
     # let `--platform omen` exit 0 on a total omen failure just because
-    # polymarket happened to work.
-    resolved = served is not None
+    # polymarket happened to work. `repo` counts too -- the actionable set is
+    # unresolvable without the ledger, and a caller gating on "trust today's
+    # --json only if it exited 0" would otherwise consume `null` as an answer.
+    # A `None` roster is deliberately NOT fatal: it annotates, it does not
+    # change the actionable set.
+    resolved = served is not None and repo is not None
 
     def _roster_has(tool: str) -> Optional[bool]:
         """Roster membership across the dash/underscore namespaces.
@@ -254,8 +265,12 @@ def main() -> int:
             continue
         print(f"  {deployment} [{platform}]")
         for tool in sorted(tools):
-            known = normalize_tool_name(tool) in repo_normalized
-            print(f"      - {tool}{'' if known else '   (not shipped by this repo)'}")
+            if repo is None:
+                note = "   (shipped-here: UNKNOWN)"
+            else:
+                known = normalize_tool_name(tool) in repo_normalized
+                note = "" if known else "   (not shipped by this repo)"
+            print(f"      - {tool}{note}")
 
     print("\nACTIONABLE (selectable AND shipped by this repo)")
     if actionable is None:
@@ -270,7 +285,15 @@ def main() -> int:
             print(f"  * {tool}{tag}")
 
     print("\nNOT ACTIONABLE")
-    for tool in sorted((repo or set()) - (actionable or set())):
+    if repo is None:
+        # Every line in this section is a claim about what this repo ships, so
+        # with an unreadable ledger they would all be confident negatives read
+        # off a file we could not open -- "ships no package here" for tools
+        # that plainly do. That is the same misreading the roster's UNKNOWN
+        # state exists to prevent, one layer up.
+        print("  UNKNOWN -- packages.json unreadable; shipped set is unknown")
+        return 0 if resolved else 1
+    for tool in sorted(repo - (actionable or set())):
         in_roster = _roster_has(tool)
         where = {
             True: "tournament only",

@@ -24,6 +24,7 @@ import json
 import sys
 from typing import Any, Dict, List, Optional
 
+import pytest
 from benchmark import served_tools
 
 
@@ -455,3 +456,85 @@ class TestMainCli:
         )
         assert json.loads(out)["actionable"] is None
         assert code == 1
+
+    def test_unknown_ledger_never_asserts_shipped_negatives(
+        self, monkeypatch: Any, capsys: Any, tmp_path: Any
+    ) -> None:
+        """An unreadable ledger must render UNKNOWN, not confident negatives.
+
+        Every line of NOT ACTIONABLE is a claim about what this repo ships.
+        Read off a file we could not open, they become "ships no package
+        here" for tools that plainly do -- the same misreading the roster's
+        UNKNOWN state exists to prevent, one layer up.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        monkeypatch.setattr(
+            served_tools,
+            "fetch_valid_tools",
+            lambda: {
+                "polystrat Pearl": ["superforcaster-polymarket-v4"],
+            },
+        )
+        monkeypatch.setattr(served_tools, "PACKAGES_JSON_PATH", tmp_path / "gone.json")
+        ros = tmp_path / "tournament_tools.json"
+        ros.write_text(
+            json.dumps({"superforcaster-polymarket-v4": "b"}), encoding="utf-8"
+        )
+        monkeypatch.setattr(served_tools, "TOURNAMENT_TOOLS_PATH", ros)
+        monkeypatch.setattr(sys, "argv", ["served_tools"])
+        code = served_tools.main()
+        out = capsys.readouterr().out
+        assert (
+            "ships no package here" not in out
+        ), "asserted a shipped-negative off an unreadable ledger"
+        assert "not shipped by this repo" not in out
+        assert "UNKNOWN -- packages.json unreadable" in out
+        assert code == 1
+
+    def test_exit_code_covers_an_unknown_ledger(
+        self, monkeypatch: Any, capsys: Any, tmp_path: Any
+    ) -> None:
+        """Healthy discovery + unreadable ledger must still exit 1.
+
+        `--json` emits `"actionable": null` in that state; a caller gating on
+        "trust today's output only if it exited 0" would otherwise consume it
+        as a trustworthy answer.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        monkeypatch.setattr(
+            served_tools,
+            "fetch_valid_tools",
+            lambda: {
+                "polystrat Pearl": ["superforcaster-polymarket-v4"],
+            },
+        )
+        monkeypatch.setattr(served_tools, "PACKAGES_JSON_PATH", tmp_path / "gone.json")
+        monkeypatch.setattr(sys, "argv", ["served_tools", "--json"])
+        code = served_tools.main()
+        assert json.loads(capsys.readouterr().out)["actionable"] is None
+        assert code == 1
+
+    def test_unknown_platform_is_rejected_not_reported_as_an_outage(
+        self, monkeypatch: Any, capsys: Any
+    ) -> None:
+        """A typo'd --platform must error, not fabricate a discovery outage.
+
+        `deployments_for_platform()` returns () for an unrecognized value,
+        which flows into the total-outage path -- so `--platform Omen` would
+        print UNKNOWN and exit 1 with both mechs healthy, indistinguishable
+        from the subgraph being down.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        monkeypatch.setattr(sys, "argv", ["served_tools", "--platform", "Omen"])
+        with pytest.raises(SystemExit) as exc:
+            served_tools.main()
+        assert exc.value.code == 2, "argparse should reject the value itself"
+        assert "invalid choice" in capsys.readouterr().err

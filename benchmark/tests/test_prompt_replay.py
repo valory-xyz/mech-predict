@@ -15,6 +15,7 @@ import pytest
 from benchmark import prompt_replay as pr
 from benchmark.prompt_replay import (
     DEFAULT_REPLAY_SYSTEM_PROMPT,
+    _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
     _extract_factual_research_prompt_components,
@@ -1593,6 +1594,118 @@ class TestTournamentFallback:
         assert (
             len(written) == 10
         ), f"sample budget ignored on the fallback path: wrote {len(written)}/50"
+
+    def test_evidence_is_rendered_as_the_tool_rendered_it(self, tmp_path):  # type: ignore[no-untyped-def]
+        """The fallback must reproduce `format_sources_data`, byte for byte.
+
+        The tournament arm stores `used_params["source_content"]`, which every
+        capturing tool writes as `{"mode":..., "serper_response": <raw Serper
+        JSON>}` -- the payload BEFORE formatting. The production path stores
+        the already-rendered `<background>` text. Passing the dict through put
+        a Python dict repr in the prompt while the baseline p_yes came from
+        clean sources, so the Brier delta measured evidence-format drift.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        tool = "superforcaster-polymarket-v4"
+        mod = importlib.import_module(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        )
+        serper: dict = {
+            "organic": [
+                {
+                    "title": f"T{i}",
+                    "link": f"http://s{i}",
+                    "snippet": f"S{i}",
+                    "position": i,
+                }
+                for i in range(1, 8)
+            ],
+            "peopleAlsoAsk": [{"question": "q?", "snippet": "paa"}],
+            "credits": 1,
+        }
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool_name": tool,
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                    "predicted_at": "2026-06-01T12:00:00Z",
+                }
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {
+                    "row_id": "r1",
+                    "source_content": {"mode": "cleaned", "serper_response": serper},
+                }
+            ],
+        )
+        rows = _load_tournament_rows(tool, "polymarket", scored, preds)
+        assert len(rows) == 1
+        info = rows[0]["extracted_additional_information"]
+        assert isinstance(info, str), "a dict reached the prompt"
+        expected = mod.format_sources_data(
+            serper["organic"][: mod.MAX_SOURCES], serper["peopleAlsoAsk"]
+        )
+        assert info == expected, "evidence differs from what the tool rendered"
+        assert "credits" not in info, "raw Serper noise leaked into the prompt"
+        assert (
+            rows[0]["extracted_today"] == "2026-06-01"
+        ), "empty date -- the superforcaster template renders `Today's date: `"
+
+    def test_unrenderable_evidence_is_dropped_not_replayed(self, tmp_path):  # type: ignore[no-untyped-def]
+        """A row we cannot render faithfully must not be replayed as-is.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        tool = "superforcaster-polymarket-v4"
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "bad",
+                    "tool_name": tool,
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                    "predicted_at": "2026-06-01T00:00:00Z",
+                }
+            ],
+        )
+        # A shape with no serper_response -- nothing to render from.
+        self._write(preds, [{"row_id": "bad", "source_content": {"mode": "cleaned"}}])
+        assert not _load_tournament_rows(tool, "polymarket", scored, preds)
+
+    def test_prompt_needing_unsupplied_fields_fails_before_the_loop(self):  # type: ignore[no-untyped-def]
+        """A template replay cannot fill must raise up front, not mid-run."""
+        with pytest.raises(ValueError) as exc:
+            _assert_prompt_is_replayable(
+                "Q: {question} on {today} given {briefing} under {resolution_rules}",
+                {"question", "today", "briefing"},
+                "factual_research-v2",
+            )
+        assert "resolution_rules" in str(exc.value)
+        # and a template we CAN fill must not raise
+        _assert_prompt_is_replayable(
+            "Q: {question} on {today} given {briefing}",
+            {"question", "today", "briefing"},
+            "factual_research-v2",
+        )
 
     def test_missing_files_return_empty(self, tmp_path):  # type: ignore[no-untyped-def]
         """Absent tournament files degrade to empty, not an exception."""

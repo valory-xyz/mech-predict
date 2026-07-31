@@ -670,3 +670,75 @@ class TestTriageActionableFilter:
             f"an empty actionable set was converted to {captured['actionable']!r} "
             "-- that turns 'nothing is actionable' into 'assess everything'"
         )
+
+    def test_dash_spelled_production_tool_is_not_silenced(self) -> None:
+        """The two sides of the gate live in different namespaces.
+
+        `actionable_tools()` returns packages.json PACKAGE names (underscores);
+        the scored data is keyed on the on-chain advertised name (dashes). A
+        raw membership test matches only tools whose spellings coincide -- on
+        polymarket exactly one -- so the gate silenced the entire production
+        superforcaster line while stopping nothing it was meant to stop.
+        """
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        prev = {**stats, "brier": 0.20, "log_loss": 0.6}
+        decisions = triage(
+            {"by_tool": {"superforcaster-polymarket-v4": stats}},
+            {"by_tool": {"superforcaster-polymarket-v4": prev}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert decisions[0]["decision"] == "open_issue", (
+            "a served, shipped production tool was silenced by a spelling "
+            "mismatch between packages.json and the scored data"
+        )
+
+    def test_genuinely_unserved_tool_is_still_gated(self) -> None:
+        """Normalizing must not weaken the gate itself."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        prev = {**stats, "brier": 0.20, "log_loss": 0.6}
+        decisions = triage(
+            {"by_tool": {"predict-fine-tuned-calibrated": stats}},
+            {"by_tool": {"predict-fine-tuned-calibrated": prev}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert decisions[0]["decision"] == "silent"
+        assert decisions[0]["reason"] == "not_actionable"
+
+    def test_gate_does_not_suppress_non_fix_decisions(self) -> None:
+        """Only the agent-routed fix issue is gated.
+
+        As a top-of-loop `continue` the gate also silenced widen-sample and
+        deployment-review notes, which carry PROMOTION_LABEL, never tag the
+        coding agent, and exist precisely to ask a human about starved or
+        tournament-only tools -- the population the gate identifies.
+        """
+        thin = {
+            "n": 3,
+            "valid_n": 3,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"unserved-thin": thin}},
+            {"by_tool": {"unserved-thin": thin}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert (
+            decisions[0]["reason"] != "not_actionable"
+        ), "a non-fix decision was overwritten by the actionable gate"

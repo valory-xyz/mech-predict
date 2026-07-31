@@ -173,10 +173,23 @@ def _fmt_metric_row(
     return f"| {name} | {b_str} | {c_str} | {delta} |"
 
 
-def _metrics_table(baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
-    """Build a markdown comparison table from two metric dicts."""
+def _metrics_table(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    source: str = "production",
+) -> str:
+    """Build a markdown comparison table from two metric dicts.
+
+    :param baseline: baseline metrics.
+    :param candidate: candidate metrics.
+    :param source: which arm the rows came from; a tournament-sourced run
+        must not be captioned "prod" -- the baseline p_yes then comes from
+        the tournament model, not a production delivery.
+    :return: the rendered table.
+    """
+    baseline_label = "Baseline (prod)" if source == "production" else "Baseline (tourn)"
     lines = [
-        "| Metric | Baseline (prod) | Candidate (PR) | Delta |",
+        f"| Metric | {baseline_label} | Candidate (PR) | Delta |",
         "|--------|-----------------|----------------|-------|",
         _fmt_metric_row(
             "Brier score",
@@ -265,7 +278,21 @@ def _format_reliability_block(
         breakdown_str = ", ".join(f"{k}={bd[k]}" for k in PARSE_STATUS_BUCKETS)
         lines.append(f"  - Breakdown: {breakdown_str}")
 
-    if filter_stats is not None:
+    if filter_stats is not None and filter_stats.get("source") == "tournament":
+        # The rows did not come from production at all, so a "production
+        # parse rate" computed from them is meaningless. Say where they came
+        # from instead -- a reviewer reading a parse rate assumes deliveries.
+        attempt = filter_stats.get("production_attempt") or {}
+        lines.append(
+            "- ⚠️ Rows replayed from the **tournament arm** "
+            f"({filter_stats.get('fallback_reason', 'no production rows')}); "
+            f"the production pool yielded {attempt.get('accepted', 0)}."
+        )
+        lines.append(
+            "  Baseline p_yes is the tournament model's prediction, not a "
+            "production delivery."
+        )
+    elif filter_stats is not None:
         r = filter_stats.get("rejected", {}) or {}
         accepted = filter_stats.get("accepted", 0)
         not_valid = r.get("not_valid_parse", 0)
@@ -330,11 +357,16 @@ def format_report(
     :param failure_rows: optional parse-failure rows loaded from
         candidate_failures.jsonl. When non-empty, bodies are inlined in a
         collapsed <details> block.
-    :param filter_stats: optional ``{accepted, rejected}`` dict from
-        filter_stats.json sidecar. When present, a Production parse rate line
-        is rendered showing how many in-scope production deliveries parsed.
+    :param filter_stats: optional ``{source, accepted, rejected}`` dict from
+        the filter_stats.json sidecar. ``source`` decides the captions: a
+        tournament-sourced run must not be labelled "prod" nor given a
+        production parse rate computed from tournament rows.
     :return: markdown string.
     """
+    # Which arm the replayed rows came from. The sidecar records it; the
+    # caption must follow it, or a tournament-sourced run renders as
+    # production data in the one artifact a reviewer acts on.
+    _src = (filter_stats or {}).get("source", "production")
     tool = meta.get("tool", "unknown")
 
     # Platforms present in the scored data. A run scoped to one platform
@@ -351,7 +383,7 @@ def format_report(
         f"<!-- benchmark-result:{tool} -->",
         f"## Benchmark: {tool} — {platform_label}",
         "",
-        _metrics_table(baseline, candidate),
+        _metrics_table(baseline, candidate, _src),
         "",
     ]
     parts.extend(_format_reliability_block(candidate, failure_rows or [], filter_stats))
@@ -383,14 +415,17 @@ def format_report(
             )
             detail_lines.append(f"### {plat.title()} (n={b_plat['n']})")
             detail_lines.append("")
-            detail_lines.append(_metrics_table(b_plat, c_plat))
+            detail_lines.append(_metrics_table(b_plat, c_plat, _src))
             detail_lines.append("")
         detail_lines.append("</details>")
         parts.extend(detail_lines)
         parts.append("")
 
     # Footer
-    footer_parts = [f"{baseline['n']} deliveries"]
+    footer_parts = [
+        f"{baseline['n']} "
+        + ("deliveries" if _src == "production" else "tournament rows")
+    ]
     if meta.get("seed"):
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):

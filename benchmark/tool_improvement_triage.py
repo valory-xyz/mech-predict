@@ -116,6 +116,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from benchmark.served_tools import actionable_tools
+from benchmark.tool_usage import normalize_tool_name
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
@@ -888,25 +889,22 @@ def triage(
     # calendar stats (n_cur=0) and flows into the count fallback /
     # widen-sample routing below.
     cur_by_tool = cur.get("by_tool") or {}
+    # The two sides of the actionable test live in DIFFERENT namespaces:
+    # `actionable` holds packages.json package names (underscores,
+    # `superforcaster_polymarket_v4`) while the scored data is keyed on the
+    # on-chain advertised tool name (dashes, `superforcaster-polymarket-v4`).
+    # Comparing them raw matches only tools whose two spellings coincide --
+    # which on polymarket is exactly one, so the gate silenced the entire
+    # production superforcaster line while letting nothing through it was
+    # meant to stop. Fold once, here.
+    actionable_norm = (
+        None if actionable is None else {normalize_tool_name(a) for a in actionable}
+    )
     for tool in sorted(
         set(cur_by_tool) | set(count_windows or {}) | set(tournament_windows or {})
     ):
         c = cur_by_tool.get(tool) or {}
         p = (prev.get("by_tool") or {}).get(tool, {})
-        if actionable is not None and tool not in actionable:
-            # Not selectable on this platform's mechs, or not shipped by this
-            # repo: a fix issue would have no validation path and no
-            # deployment consequence (mech-predict#416). Stay silent.
-            decisions.append(
-                {
-                    "tool": tool,
-                    "platform": platform,
-                    "decision": "silent",
-                    "reason": "not_actionable",
-                    "issue_open": False,
-                }
-            )
-            continue
         d: Dict[str, Any] = {
             "tool": tool,
             "platform": platform,
@@ -1129,6 +1127,24 @@ def triage(
                 issue_open=True,
             )
         decisions.append(d)
+    # Gate ONLY the agent-routed fix issue. The rationale -- a fix issue on a
+    # tool nobody serves has no validation path and no deployment consequence
+    # (mech-predict#416) -- covers `open_issue` and nothing else. As a
+    # top-of-loop `continue` it also suppressed `insufficient_data` /
+    # widen_sample and `descendant_exists` / deployment-review notes, which
+    # carry PROMOTION_LABEL, never tag the coding agent, and exist precisely
+    # to ask a human about starved or tournament-only tools -- the population
+    # the gate identifies. Silencing those was the opposite of the intent.
+    if actionable_norm is not None:
+        for decision in decisions:
+            if decision.get("decision") != "open_issue":
+                continue
+            if normalize_tool_name(decision["tool"]) in actionable_norm:
+                continue
+            decision["decision"] = "silent"
+            decision["reason"] = "not_actionable"
+            decision["issue_open"] = False
+
     return decisions
 
 

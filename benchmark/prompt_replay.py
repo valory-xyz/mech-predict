@@ -38,6 +38,7 @@ import logging
 import os
 import random
 import re
+import string
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -602,6 +603,66 @@ DEFAULT_TOURNAMENT_PREDICTIONS = (
 )
 
 
+def _tournament_today(row: dict[str, Any]) -> str:
+    """The date the tournament row was predicted on, as the tool would say it.
+
+    :param row: a tournament scored row.
+    :return: ISO date string, or empty when the timestamp is unusable.
+    """
+    stamp = row.get("predicted_at") or ""
+    return stamp[:10] if len(stamp) >= 10 else ""
+
+
+def _render_tournament_evidence(tool_name: str, source_content: Any) -> Optional[str]:
+    """Render a tournament row's captured evidence as the TOOL rendered it.
+
+    The tournament arm stores ``used_params["source_content"]``, which every
+    capturing tool writes as ``{"mode": ..., "serper_response": <raw Serper
+    JSON>}`` -- the payload BEFORE formatting. The production path stores the
+    already-rendered ``<background>`` text, i.e. the output of the tool's own
+    ``format_sources_data(organic[:MAX_SOURCES], peopleAlsoAsk)``.
+
+    Passing the dict through would put a Python dict repr into the prompt --
+    valid Python, unusable evidence -- while the baseline's ``p_yes`` came
+    from clean formatted sources. The head-to-head Brier delta would then
+    measure evidence-format drift rather than the change under test, with no
+    error anywhere.
+
+    :param tool_name: baseline tool whose module owns the formatter.
+    :param source_content: the captured value from the tournament row.
+    :return: rendered evidence, or ``None`` when it cannot be rendered
+        faithfully (the row must then be dropped, never replayed as-is).
+    """
+    if isinstance(source_content, str):
+        return source_content or None  # already rendered
+    if not isinstance(source_content, dict):
+        return None
+    serper = source_content.get("serper_response")
+    if not isinstance(serper, dict):
+        return None
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    try:
+        module = importlib.import_module(spec.module)
+        formatter = module.format_sources_data
+        max_sources = getattr(module, "MAX_SOURCES", 5)
+    except (ImportError, AttributeError):
+        # No formatter to reproduce the tool's own rendering: dropping the row
+        # is the only honest option -- replaying it would silently benchmark
+        # the candidate on different evidence than the baseline saw.
+        log.warning(
+            "no format_sources_data for %r; tournament rows cannot be "
+            "rendered faithfully and will be dropped",
+            tool_name,
+        )
+        return None
+    rendered = formatter(
+        serper.get("organic", [])[:max_sources], serper.get("peopleAlsoAsk", [])
+    )
+    return rendered or None
+
+
 def _load_tournament_rows(
     tool_filter: str,
     platform_filter: Optional[str],
@@ -659,6 +720,7 @@ def _load_tournament_rows(
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    unrenderable = 0
     with open(scored_path, encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -684,9 +746,16 @@ def _load_tournament_rows(
             row_id = row.get("row_id")
             if not row_id or row_id in seen:
                 continue
-            content = evidence.get(row_id)
-            if not content:
+            raw_content = evidence.get(row_id)
+            if not raw_content:
                 continue  # no captured evidence -> nothing to replay against
+            content = _render_tournament_evidence(tool_filter, raw_content)
+            if not content:
+                # Unrenderable evidence is dropped rather than replayed: a
+                # dict repr in the prompt would score, silently, as if it
+                # were the sources the baseline saw.
+                unrenderable += 1
+                continue
             seen.add(row_id)
             rows.append(
                 {
@@ -699,8 +768,20 @@ def _load_tournament_rows(
                     "tool_name": row.get("tool_name") or row.get("tool"),
                     "extracted_user_prompt": row.get("question_text", ""),
                     "extracted_additional_information": content,
+                    # The superforcaster template has a literal `Today's
+                    # date: {today}`; without this it renders empty while the
+                    # tournament baseline had a real date. Prediction markets
+                    # are time-sensitive, so an empty date is not cosmetic.
+                    "extracted_today": _tournament_today(row),
                 }
             )
+    if unrenderable:
+        log.warning(
+            "Tournament fallback: dropped %d row(s) whose captured evidence "
+            "could not be rendered the way %s renders it",
+            unrenderable,
+            tool_filter,
+        )
     log.info(
         "Tournament fallback: %d replay rows for %s (evidence available for "
         "%d predictions)",
@@ -1716,6 +1797,35 @@ def _parse_vllm_candidate(
     }
 
 
+def _assert_prompt_is_replayable(
+    template: str, supplied: set[str], tool_name: str
+) -> None:
+    """Fail before the loop if the template needs data replay cannot supply.
+
+    Replay fills a fixed set of placeholders per family. A template that
+    asks for anything else raises ``KeyError`` inside the per-row loop --
+    after the earlier rows have already been paid for, with a message that
+    names only the missing key. ``factual_research_v2``'s ``ESTIMATE_USER``
+    wants ``resolution_rules``, which comes from market metadata the enriched
+    row does not carry, so it cannot be reconstructed at replay time at all.
+
+    :param template: the prompt template about to be replayed.
+    :param supplied: placeholder names replay will provide.
+    :param tool_name: candidate tool, for the message.
+    :raises ValueError: when the template needs an unsupplied placeholder.
+    """
+    required = {name for _, name, _, _ in string.Formatter().parse(template) if name}
+    missing = required - supplied
+    if missing:
+        raise ValueError(
+            f"cannot replay {tool_name!r}: its prompt template needs "
+            f"{sorted(missing)}, which the enriched rows do not carry "
+            f"(replay supplies {sorted(supplied)}). Thread the field through "
+            f"enrich before benchmarking this tool, rather than replaying it "
+            f"against a partial prompt."
+        )
+
+
 def replay(  # pylint: disable=too-many-statements,too-many-locals
     dataset: Path,
     output_dir: Path,
@@ -1835,6 +1945,9 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         # use cached evidence. ESTIMATE_USER takes (question, today, briefing).
         PREDICTION_PROMPT = candidate_module.ESTIMATE_USER
         system_prompt = candidate_module.ESTIMATE_SYSTEM
+        _assert_prompt_is_replayable(
+            PREDICTION_PROMPT, {"question", "today", "briefing"}, candidate_tool_name
+        )
     else:
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         system_prompt = _default_family_system_prompt(candidate_module)

@@ -11,6 +11,7 @@ from benchmark.ci_replay import (
     _compute_parse_reliability,
     _format_reliability_block,
     _load_filter_stats,
+    _metrics_table,
     compute_metrics,
     format_report,
 )
@@ -71,6 +72,7 @@ class TestParseReliability:
 
 def _stats(
     *,
+    source: str = "production",
     accepted: int = 100,
     not_valid_parse: int = 0,
     duplicate: int = 0,
@@ -81,6 +83,7 @@ def _stats(
     older_than_cutoff: int = 0,
 ) -> dict:
     return {
+        "source": source,
         "accepted": accepted,
         "rejected": {
             "duplicate": duplicate,
@@ -436,3 +439,47 @@ class TestFormatReportFooter:
         footer = report.splitlines()[-1]
         assert footer.index("deliveries") < footer.index("seed 1337")
         assert footer.index("seed 1337") < footer.index("LOCKhart07")
+
+
+class TestTournamentSourcedComment:
+    """The PR comment must not present tournament rows as production data.
+
+    The sidecar already records which arm the rows came from; before this,
+    ci_replay never read it, so a fallback run rendered "Baseline (prod)" and
+    a "Production parse rate" computed entirely from tournament rows -- the
+    one artifact a reviewer actually acts on.
+    """
+
+    def _metrics(self, rows: list[dict]) -> dict:
+        """Metrics for a row list.
+
+        :param rows: replay rows.
+        :return: computed metrics.
+        """
+        return compute_metrics(rows)
+
+    def test_tournament_run_is_labelled_not_prod(self) -> None:
+        """The metrics table header must say tournament, not prod."""
+        m = self._metrics([_row("valid")] * 5)
+        assert "Baseline (prod)" in _metrics_table(m, m, "production")
+        assert "Baseline (tourn)" in _metrics_table(m, m, "tournament")
+
+    def test_tournament_run_reports_no_production_parse_rate(self) -> None:
+        """A production parse rate off tournament rows is meaningless."""
+        candidate = self._metrics([_row("valid")] * 5)
+        stats = _stats(source="tournament", accepted=5)
+        stats["production_attempt"] = {"accepted": 0, "rejected": {}}
+        stats["fallback_reason"] = "0 production rows"
+        text = "\n".join(_format_reliability_block(candidate, [], stats))
+        assert (
+            "Production parse rate" not in text
+        ), "captioned tournament rows as a production parse rate"
+        assert "tournament arm" in text
+        assert "not a production delivery" in text
+
+    def test_production_run_is_unchanged(self) -> None:
+        """The production path must keep its existing rendering."""
+        candidate = self._metrics([_row("valid")] * 5)
+        text = "\n".join(_format_reliability_block(candidate, [], _stats(accepted=5)))
+        assert "Production parse rate: 5/5 (100.0%)" in text
+        assert "tournament arm" not in text

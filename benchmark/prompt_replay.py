@@ -1066,7 +1066,6 @@ def stratified_sample(
             for key in non_empty:
                 allocations[key] = min(allocations[key], len(non_empty[key]))
 
-            # Ensure total matches budget (distribute remainder largest-first)
             allocated = sum(allocations.values())
             deficit = budget - allocated
             if deficit > 0:
@@ -1078,6 +1077,26 @@ def stratified_sample(
                     deficit -= add
                     if deficit == 0:
                         break
+
+        # Ensure total matches budget. The round() above can push the total
+        # OVER, which is why `--sample 300` returned 301 and `--sample 10`
+        # returned 12; only the deficit direction was corrected.
+        allocated = sum(allocations.values())
+        surplus = allocated - budget
+        if surplus > 0:
+            # Trim largest-first, NEVER below one row per stratum. When there
+            # are more non-empty strata than budget the floor is allowed to
+            # win -- covering every (outcome, brier-bucket) stratum matters
+            # more than the exact count there, because dropping strata biases
+            # the sample. That is the only case permitted to exceed N;
+            # rounding is not.
+            for key in sorted(non_empty, key=lambda k: allocations[k], reverse=True):
+                if surplus <= 0:
+                    break
+                take = min(surplus, allocations[key] - 1)
+                if take > 0:
+                    allocations[key] -= take
+                    surplus -= take
 
         # Sample from each stratum
         platform_sampled = 0

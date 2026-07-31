@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -286,6 +287,57 @@ class TestEnrichZeroRows:
         assert "platform=polymarket" in str(exc.value)
         assert not output.exists()
         assert (tmp_path / "out" / "dataset.jsonl.filter_stats.json").exists()
+
+
+class TestStratifiedSampleBudget:
+    """`--sample N` must return exactly N rows."""
+
+    @staticmethod
+    def _pool(n: int) -> list:
+        """A pool spanning every (outcome, brier-bucket) stratum.
+
+        :param n: how many rows.
+        :return: rows.
+        """
+        rng = random.Random(1)
+        return [
+            {
+                "platform": "polymarket",
+                "final_outcome": rng.random() < 0.5,
+                "p_yes": round(rng.random(), 3),
+                "row_id": f"r{i}",
+            }
+            for i in range(n)
+        ]
+
+    @pytest.mark.parametrize("budget", [10, 50, 100, 300, 500])
+    def test_returns_exactly_the_budget(self, budget: int) -> None:
+        """Neither the per-stratum floor nor round() may overshoot.
+
+        Both could: the floor gives every non-empty stratum a row (so a budget
+        below the stratum count overshot), and the proportional pass rounds.
+        Only the deficit direction was corrected, so `--sample 300` returned
+        301 and `--sample 10` returned 12. Budgets BELOW the stratum count are
+        excluded here: that overshoot is deliberate and pinned separately.
+
+        :param budget: requested sample size.
+        """
+        assert len(stratified_sample(self._pool(2000), budget, seed=42)) == budget
+
+    def test_budget_above_pool_returns_the_pool(self) -> None:
+        """Asking for more than exists yields everything, not an error."""
+        assert len(stratified_sample(self._pool(120), 500, seed=42)) == 120
+
+    def test_budget_below_stratum_count_keeps_every_stratum(self) -> None:
+        """Fewer budget than strata is the ONE case allowed to exceed N.
+
+        Covering every (outcome, brier-bucket) stratum matters more than the
+        exact count there -- dropping strata biases the sample. Pinned by
+        ``TestStratifiedSampleSinglePlatform.test_per_stratum_floor_can_exceed_budget``;
+        this test exists so the budget fix is not later mistaken for licence
+        to break that trade.
+        """
+        assert len(stratified_sample(self._pool(600), 5, seed=42)) > 5
 
 
 class TestStratifiedSampleSinglePlatform:

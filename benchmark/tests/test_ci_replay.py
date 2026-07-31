@@ -108,8 +108,8 @@ class TestReliabilityBlock:
         candidate = self._metrics([_row("valid")] * 5)
         lines = _format_reliability_block(candidate, [], _stats(accepted=5))
         text = "\n".join(lines)
-        assert "Candidate parse rate: 5/5 (100.0%) ✅" in text
-        assert "Production parse rate: 5/5 (100.0%)" in text
+        assert "Candidate returned no usable prediction on 0 of 5 markets ✅" in text
+        assert "Drawn from 5 usable production deliveries." in text
         # Breakdown is hidden when candidate is at 100%.
         assert "Breakdown:" not in text
         # Scoping rejections are expected noise and never reported.
@@ -122,7 +122,7 @@ class TestReliabilityBlock:
         candidate = self._metrics([_row("valid")] * 7 + [_row("malformed", None)] * 3)
         lines = _format_reliability_block(candidate, [], _stats(accepted=10))
         text = "\n".join(lines)
-        assert "Candidate parse rate: 7/10 (70.0%) ⚠️" in text
+        assert "Candidate returned no usable prediction on 3 of 10 markets ⚠️" in text
         assert "malformed=3" in text
 
     def test_not_valid_parse_is_not_a_warning(self) -> None:
@@ -140,7 +140,7 @@ class TestReliabilityBlock:
         text = "\n".join(lines)
         assert "⚠️" not in text
         # 5 / (5 + 2) = 71.4%
-        assert "Production parse rate: 5/7 (71.4%)" in text
+        assert "2 of 7 production deliveries were left out" in text
 
     def test_scoping_rejections_are_not_reported(self) -> None:
         """Scoping buckets (wrong_tool etc.) are rows for other tools — pure noise."""
@@ -168,7 +168,7 @@ class TestReliabilityBlock:
             assert bucket not in text
         assert "⚠️" not in text
         # Scoping rejections do not affect the production parse rate either.
-        assert "Production parse rate: 5/5 (100.0%)" in text
+        assert "Drawn from 5 usable production deliveries." in text
 
     def test_production_parse_rate_rendered_with_rejections(self) -> None:
         """Render ``accepted/(accepted+not_valid_parse)`` as a percentage.
@@ -182,7 +182,7 @@ class TestReliabilityBlock:
             candidate, [], _stats(accepted=100, not_valid_parse=35)
         )
         text = "\n".join(lines)
-        assert "Production parse rate: 100/135 (74.1%)" in text
+        assert "35 of 135 production deliveries were left out" in text
 
     def test_production_parse_rate_at_100_when_no_parse_rejections(self) -> None:
         """Zero not_valid_parse rejections: rate is 100%, but still rendered.
@@ -197,20 +197,20 @@ class TestReliabilityBlock:
             _stats(accepted=50, wrong_tool=3, no_outcome=1),
         )
         text = "\n".join(lines)
-        assert "Production parse rate: 50/50 (100.0%)" in text
+        assert "Drawn from 50 usable production deliveries." in text
 
     def test_production_parse_rate_omitted_when_no_sidecar(self) -> None:
         """Older pipelines (no filter_stats) don't render the production rate line."""
         candidate = self._metrics([_row("valid")] * 5)
         text = "\n".join(_format_reliability_block(candidate, [], None))
-        assert "Production parse rate" not in text
+        assert "**Sample**" not in text
 
     def test_prefilter_omitted_when_stats_none(self) -> None:
         """Older pipelines (no sidecar) render without the production parse line."""
         candidate = self._metrics([_row("valid")] * 3)
         text = "\n".join(_format_reliability_block(candidate, [], None))
-        assert "Production parse rate" not in text
-        assert "Candidate parse rate" in text
+        assert "**Sample**" not in text
+        assert "Candidate returned no usable prediction" in text
 
     def test_failure_bodies_rendered_in_collapsed_details(self) -> None:
         """Failure bodies inline under a <details> so the PR comment stays tidy."""
@@ -276,16 +276,16 @@ class TestFormatReportEndToEnd:
         baseline = compute_metrics([_row("valid")] * 3)
         candidate = compute_metrics([_row("valid")] * 3)
         report = format_report(baseline, candidate, {"tool": "superforcaster"})
-        assert "**Reliability**" in report
+        assert "**Candidate health**" in report
         assert "| Metric |" in report
-        assert report.index("| Metric |") < report.index("**Reliability**")
+        assert report.index("| Metric |") < report.index("**Candidate health**")
 
     def test_report_renders_without_failures_or_filter_stats(self) -> None:
         """format_report works on its minimal arg set (older pipelines)."""
         baseline = compute_metrics([_row("valid")] * 3)
         candidate = compute_metrics([_row("valid")] * 3)
         report = format_report(baseline, candidate, {"tool": "superforcaster"})
-        assert "Candidate parse rate: 3/3 (100.0%) ✅" in report
+        assert "Candidate returned no usable prediction on 0 of 3 markets ✅" in report
         assert "Pre-filter" not in report
         assert "<details><summary>Candidate parse failures" not in report
 
@@ -321,7 +321,7 @@ class TestFormatReportEndToEnd:
             filter_stats=_stats(accepted=3, wrong_tool=10, no_outcome=2),
         )
         # Scoping rejections don't enter the ratio or raise a warning.
-        assert "Production parse rate: 3/3 (100.0%)" in report
+        assert "Drawn from 3 usable production deliveries." in report
         assert "⚠️" not in report
 
     def test_not_valid_parse_lowers_rate_without_warning_in_full_report(self) -> None:
@@ -334,7 +334,7 @@ class TestFormatReportEndToEnd:
             {"tool": "superforcaster"},
             filter_stats=_stats(accepted=3, not_valid_parse=1),
         )
-        assert "Production parse rate: 3/4 (75.0%)" in report
+        assert "1 of 4 production deliveries were left out" in report
         assert "⚠️" not in report
 
 
@@ -437,7 +437,7 @@ class TestFormatReportFooter:
             trigger_comment_url="https://example.com/c",
         )
         footer = report.splitlines()[-1]
-        assert footer.index("deliveries") < footer.index("seed 1337")
+        assert footer.index("scored") < footer.index("seed 1337")
         assert footer.index("seed 1337") < footer.index("LOCKhart07")
 
 
@@ -481,5 +481,5 @@ class TestTournamentSourcedComment:
         """The production path must keep its existing rendering."""
         candidate = self._metrics([_row("valid")] * 5)
         text = "\n".join(_format_reliability_block(candidate, [], _stats(accepted=5)))
-        assert "Production parse rate: 5/5 (100.0%)" in text
+        assert "Drawn from 5 usable production deliveries." in text
         assert "tournament arm" not in text

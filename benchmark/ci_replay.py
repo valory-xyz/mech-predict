@@ -261,14 +261,15 @@ def _format_reliability_block(
     c_rel = candidate["parse_reliability"]
     c_total = c_rel["total"]
     c_valid = c_rel["valid"]
-    c_rate = c_rel["parse_rate"] or 0.0
     c_marker = "✅" if c_valid == c_total else "⚠️"
 
+    c_bad = c_total - c_valid
     lines: list[str] = [
-        "**Reliability**",
+        "**Candidate health**",
         "",
-        f"- Candidate parse rate: {c_valid}/{c_total} "
-        f"({c_rate * 100:.1f}%) {c_marker}",
+        f"- Candidate returned no usable prediction on {c_bad} of {c_total} "
+        f"markets {c_marker}"
+        + (" (excluded from the metrics above)." if c_bad else "."),
     ]
 
     # Breakdown only surfaces when candidate drifted — keeps the happy-path
@@ -304,10 +305,24 @@ def _format_reliability_block(
         # no reliability signal, so they are not reported.
         denom = accepted + not_valid
         if denom > 0:
-            lines.append(
-                f"- Production parse rate: {accepted}/{denom} "
-                f"({accepted / denom * 100:.1f}%)"
-            )
+            # Provenance, NOT a tool metric: this is how much of the pool was
+            # discarded, and it is measured in production (real mech, on-chain
+            # delivery) while the candidate figure above comes from a direct
+            # API call in CI. Printing the two as rates side by side invited
+            # exactly one false reading -- "candidate 100% vs production 96.7%
+            # proves the fix works" -- when the discarded rows are precisely
+            # the ones the candidate is never given.
+            lines.append("")
+            lines.append("**Sample**")
+            lines.append("")
+            lines.append(f"- Drawn from {accepted} usable production deliveries.")
+            if not_valid:
+                lines.append(
+                    f"- {not_valid} of {denom} production deliveries were left "
+                    "out of the pool: the production run itself returned no "
+                    "usable number, so there is nothing for a candidate to be "
+                    "scored against on those markets."
+                )
         # no_row_id is a kept-row diagnostic (always 0 in healthy production);
         # surface it only when nonzero so a flywheel row_id regression is loud.
         no_row_id = filter_stats.get("no_row_id", 0)
@@ -385,6 +400,9 @@ def format_report(
         "",
         _metrics_table(baseline, candidate, _src),
         "",
+        f"*Computed on {candidate.get('n', 0)} markets where both arms "
+        "produced a usable prediction.*",
+        "",
     ]
     parts.extend(_format_reliability_block(candidate, failure_rows or [], filter_stats))
 
@@ -422,10 +440,11 @@ def format_report(
         parts.append("")
 
     # Footer
-    footer_parts = [
-        f"{baseline['n']} "
-        + ("deliveries" if _src == "production" else "tournament rows")
-    ]
+    # "N deliveries" was the sampled count -- exactly what made "301
+    # deliveries" for `--sample 300` confusing. Report what was SCORED: the
+    # denominator the metrics above actually use.
+    _unit = "scored" if _src == "production" else "tournament rows scored"
+    footer_parts = [f"{candidate['n']} {_unit}"]
     if meta.get("seed"):
         footer_parts.append(f"seed {meta['seed']}")
     if meta.get("phase"):

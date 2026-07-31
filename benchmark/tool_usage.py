@@ -130,7 +130,7 @@ _MECHES_QUERY = (
 )
 
 
-def _normalize_tool_name(name: str) -> str:
+def normalize_tool_name(name: str) -> str:
     """Return a canonical form for cross-convention tool-name matching.
 
     Mech metadata and the benchmark logs sometimes spell the same tool

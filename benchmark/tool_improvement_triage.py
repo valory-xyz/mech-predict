@@ -113,7 +113,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from benchmark.served_tools import actionable_tools
 from benchmark.tool_usage import normalize_tool_name
@@ -823,7 +823,7 @@ def triage(
     count_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_roster: Optional[set] = None,
-    actionable: Optional[set] = None,
+    actionable: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     # ``count_windows`` (per-tool output of ``_count_window_stats``) feeds
@@ -1832,7 +1832,7 @@ def main() -> int:
         # cannot resolve (subgraph/GitHub/IPFS outage), assess everything
         # rather than silently stalling the whole triage -- the pre-existing
         # behavior, logged loudly.
-        actionable: Optional[set] = None
+        actionable: Optional[Set[str]] = None
         try:
             actionable = actionable_tools(platform)
             if actionable is None:
@@ -1862,6 +1862,9 @@ def main() -> int:
                 "served-tool discovery failed for %s (%s); assessing all tools.",
                 platform,
                 exc,
+                # A transient subgraph/IPFS outage and a bug in the caller look
+                # identical without the traceback.
+                exc_info=True,
             )
         roster = _tournament_roster()
         tournament_scores = _load_json(

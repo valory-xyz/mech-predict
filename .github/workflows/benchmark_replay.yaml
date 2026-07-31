@@ -226,7 +226,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: benchmark/results/ci_enriched/
-          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.platform }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
+          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.platform }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}-${{ hashFiles('benchmark/results/tournament_scored.jsonl') }}
 
       - name: Enrich dataset
         if: steps.cache.outputs.cache-hit != 'true'

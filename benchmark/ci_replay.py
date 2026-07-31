@@ -243,15 +243,23 @@ def _format_reliability_block(
     failure_rows: list[dict[str, Any]],
     filter_stats: Optional[dict[str, Any]] = None,
 ) -> list[str]:
-    """Render the Reliability section: candidate parse rate + production parse rate.
-
-    The two observations here are one-sided:
+    """Render the Reliability section. Two shapes, chosen by the row source.
 
     - candidate parse rate: did the PR's code produce parseable responses?
-    - production parse rate: of the in-scope production deliveries, how many
-      parsed before enrich dropped the rest. Tells reviewers how noisy
-      production was. The scored baseline is 100% valid by construction (enrich
-      drops the non-parseable rows), so only that pre-drop ratio is informative.
+      Always rendered.
+    - ``source == "production"``: plus the production parse rate -- of the
+      in-scope deliveries, how many parsed before enrich dropped the rest --
+      and the rejection breakdown. The scored baseline is 100% valid by
+      construction (enrich drops the non-parseable rows), so only that
+      pre-drop ratio is informative.
+    - ``source == "tournament"``: NEITHER of those. The rows did not come
+      from production, so a production parse rate computed from them means
+      nothing; a provenance note is rendered instead.
+
+    An unrecognised ``source`` falls to the production branch here while
+    :func:`_metrics_table` treats it as tournament -- a ``Literal
+    ["production", "tournament"]`` on the sidecar would make the two agree by
+    construction.
 
     :param candidate: metrics dict including ``parse_reliability``.
     :param failure_rows: rows from ``candidate_failures.jsonl`` (may be empty).

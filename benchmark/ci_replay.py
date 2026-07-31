@@ -301,6 +301,17 @@ def _format_reliability_block(
             "  Baseline p_yes is the tournament model's prediction, not a "
             "production delivery."
         )
+        # The tournament loader counts why it dropped rows; surface them here
+        # or the counters exist without a reader, and a pool that lost most of
+        # its rows still reads as clean.
+        t_rejected = {
+            k: v for k, v in (filter_stats.get("rejected") or {}).items() if v
+        }
+        if t_rejected:
+            lines.append(
+                "- Tournament rows discarded: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(t_rejected.items()))
+            )
     elif filter_stats is not None:
         r = filter_stats.get("rejected", {}) or {}
         accepted = filter_stats.get("accepted", 0)

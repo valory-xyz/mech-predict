@@ -62,9 +62,11 @@ from typing import Dict, List, Optional, Set
 
 from benchmark.tool_usage import (
     DEPLOYMENT_TO_PLATFORM,
+    deployments_for_platform,
     fetch_valid_tools,
     normalize_tool_name,
 )
+from benchmark.tournament_tools import roster_names
 
 log = logging.getLogger(__name__)
 
@@ -77,20 +79,25 @@ TOURNAMENT_TOOLS_PATH = Path(__file__).resolve().parent / "tournament_tools.json
 _CUSTOM_KEY_RE = re.compile(r"^custom/[^/]+/([^/]+)/")
 
 
-def repo_tools() -> Set[str]:
-    """Tool packages this repository ships, from ``packages/packages.json``.
+def repo_tools() -> Optional[Set[str]]:
+    """Tool packages this repository ships, or ``None`` when unknowable.
 
     The package ledger is the shipping source of truth (maintained by
     ``autonomy packages lock``, consumed by deployment), unlike
     ``benchmark/tools.py`` which only lists what the harness can run.
 
-    :return: package names of every ``custom/`` entry, in package spelling.
+    Returns ``None`` rather than an empty set when the ledger cannot be read
+    (truncated mid-``lock``, permissions, CI disk hiccup): "we ship nothing"
+    and "we could not find out" must not be the same answer, because a
+    consumer that treats them alike silently concludes nothing is actionable.
+
+    :return: package names of every ``custom/`` entry, or ``None`` on failure.
     """
     try:
         data = json.loads(PACKAGES_JSON_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         log.warning("packages.json unreadable at %s", PACKAGES_JSON_PATH)
-        return set()
+        return None
     names: Set[str] = set()
     for section in ("dev", "third_party"):
         for key in data.get(section) or {}:
@@ -100,70 +107,104 @@ def repo_tools() -> Set[str]:
     return names
 
 
-def tournament_tools() -> Set[str]:
-    """Tool names currently on the tournament roster.
+def tournament_tools() -> Optional[Set[str]]:
+    """Tool names on the tournament roster, normalized; ``None`` if unknown.
 
-    :return: roster names; empty when the file is missing or unreadable.
+    Thin delegate to :func:`benchmark.tournament_tools.roster_names` so this
+    module is not a fourth, subtly-different parse of the same file. In
+    particular the names come back in the UNDERSCORE namespace, which is what
+    makes membership tests against package names correct -- comparing raw
+    roster keys (dash spelling) to package names (underscore spelling) can
+    never match for a versioned tool.
+
+    :return: roster names folded into this module's single comparison
+        namespace (``normalize_tool_name``), or ``None`` when unknown.
     """
-    try:
-        data = json.loads(TOURNAMENT_TOOLS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        log.warning("tournament roster unreadable at %s", TOURNAMENT_TOOLS_PATH)
-        return set()
-    return set(data) if isinstance(data, dict) else set()
+    raw = roster_names(TOURNAMENT_TOOLS_PATH)
+    return None if raw is None else {normalize_tool_name(n) for n in raw}
 
 
 def served_tools(
     platform: Optional[str] = None,
     valid: Optional[Dict[str, Optional[List[str]]]] = None,
-) -> Set[str]:
+) -> Optional[Set[str]]:
     """Tools selectable by the live trader, normalized for naming drift.
+
+    Returns ``None`` when every deployment IN SCOPE failed to resolve, so a
+    total discovery outage is distinguishable from "this platform genuinely
+    serves nothing". :func:`fetch_valid_tools` never raises -- a single
+    failure at the trader-release lookup nulls every deployment at once -- so
+    without this distinction a rate-limited morning is indistinguishable from
+    a quiet one, and the improvement loop would silently assess nothing.
 
     :param platform: restrict to deployments of this platform (``"omen"`` /
         ``"polymarket"``); all deployments when omitted.
     :param valid: pre-fetched :func:`benchmark.tool_usage.fetch_valid_tools`
         result; fetched when omitted.
-    :return: served tool names (dash-normalized). A deployment whose
-        resolution failed contributes nothing and is logged.
+    :return: served tool names (dash-normalized), or ``None`` when nothing in
+        scope could be resolved.
     """
     valid = fetch_valid_tools() if valid is None else valid
+    in_scope = set(deployments_for_platform(platform)) if platform else set(valid)
     out: Set[str] = set()
+    resolved_any = False
     for deployment, tools in valid.items():
-        if platform and DEPLOYMENT_TO_PLATFORM.get(deployment) != platform:
+        if deployment not in in_scope:
             continue
         if tools is None:
             log.warning("%s: selectable tools unavailable (fetch failed)", deployment)
             continue
+        resolved_any = True
         out.update(normalize_tool_name(tool) for tool in tools)
+    if not resolved_any:
+        log.warning(
+            "no deployment resolved%s; selectable set is UNKNOWN, not empty.",
+            f" for platform {platform}" if platform else "",
+        )
+        return None
     return out
 
 
 def actionable_tools(
     platform: Optional[str] = None,
     valid: Optional[Dict[str, Optional[List[str]]]] = None,
-) -> Set[str]:
+) -> Optional[Set[str]]:
     """Tools BOTH selectable in production AND buildable from this repo.
 
     This is the set the improvement loop may open fix issues for: anything
     outside it either cannot be edited here or would have no deployment
     consequence.
 
+    ``None`` propagates from either input (discovery outage, unreadable
+    ledger) and means "unknown" -- the caller must then assess everything
+    rather than silence every tool. An empty SET is a real answer.
+
     :param platform: restrict to one platform.
     :param valid: pre-fetched selectable-tools map.
-    :return: actionable tool names, spelled as this repo spells them.
+    :return: actionable tool names as this repo spells them, or ``None``.
     """
     served = served_tools(platform, valid)
-    return {tool for tool in repo_tools() if normalize_tool_name(tool) in served}
+    repo = repo_tools()
+    if served is None or repo is None:
+        return None
+    return {tool for tool in repo if normalize_tool_name(tool) in served}
 
 
 def main() -> int:
     """CLI: print the selectable set, this repo's set, and their intersection.
 
-    :return: exit code (1 when no deployment could be resolved).
+    :return: exit code (1 when nothing IN SCOPE could be resolved).
     """
     parser = argparse.ArgumentParser(description=__doc__ or "")
     parser.add_argument(
-        "--platform", default=None, help="restrict to omen / polymarket"
+        "--platform",
+        default=None,
+        # Without `choices`, an unrecognized value resolves to no deployments,
+        # which is indistinguishable from a total discovery outage: `--platform
+        # Omen` would print UNKNOWN and exit 1 with both mechs healthy. Let
+        # argparse reject it and name the valid set instead.
+        choices=sorted(set(DEPLOYMENT_TO_PLATFORM.values())),
+        help="restrict to omen / polymarket",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args()
@@ -171,11 +212,29 @@ def main() -> int:
 
     valid = fetch_valid_tools()
     repo = repo_tools()
-    repo_normalized = {normalize_tool_name(tool) for tool in repo}
+    repo_normalized = {normalize_tool_name(t) for t in repo} if repo else set()
     roster = tournament_tools()
     served = served_tools(args.platform, valid)
     actionable = actionable_tools(args.platform, valid)
-    resolved = any(tools is not None for tools in valid.values())
+    # Scope the exit code to what was ASKED for: fetch_valid_tools() always
+    # resolves both deployments, so judging success over the unfiltered map
+    # let `--platform omen` exit 0 on a total omen failure just because
+    # polymarket happened to work. `repo` counts too -- the actionable set is
+    # unresolvable without the ledger, and a caller gating on "trust today's
+    # --json only if it exited 0" would otherwise consume `null` as an answer.
+    # A `None` roster is deliberately NOT fatal: it annotates, it does not
+    # change the actionable set.
+    resolved = served is not None and repo is not None
+
+    def _roster_has(tool: str) -> Optional[bool]:
+        """Roster membership across the dash/underscore namespaces.
+
+        :param tool: tool name in either spelling.
+        :return: membership, or ``None`` when the roster is unknown.
+        """
+        if roster is None:
+            return None
+        return normalize_tool_name(tool) in roster
 
     if args.json:
         print(
@@ -185,9 +244,11 @@ def main() -> int:
                         deployment: (sorted(tools) if tools is not None else None)
                         for deployment, tools in valid.items()
                     },
-                    "repo_tools": sorted(repo),
-                    "tournament_roster": sorted(roster),
-                    "actionable": sorted(actionable),
+                    "repo_tools": sorted(repo) if repo is not None else None,
+                    "tournament_roster": sorted(roster) if roster is not None else None,
+                    "actionable": (
+                        sorted(actionable) if actionable is not None else None
+                    ),
                 },
                 indent=2,
             )
@@ -204,19 +265,51 @@ def main() -> int:
             continue
         print(f"  {deployment} [{platform}]")
         for tool in sorted(tools):
-            known = normalize_tool_name(tool) in repo_normalized
-            print(f"      - {tool}{'' if known else '   (not shipped by this repo)'}")
+            if repo is None:
+                note = "   (shipped-here: UNKNOWN)"
+            else:
+                known = normalize_tool_name(tool) in repo_normalized
+                note = "" if known else "   (not shipped by this repo)"
+            print(f"      - {tool}{note}")
 
     print("\nACTIONABLE (selectable AND shipped by this repo)")
-    for tool in sorted(actionable):
-        print(f"  * {tool}{'   [also in tournament]' if tool in roster else ''}")
+    if actionable is None:
+        print("  UNKNOWN -- discovery did not resolve; assess all tools")
+    else:
+        for tool in sorted(actionable):
+            in_roster = _roster_has(tool)
+            tag = {
+                True: "   [also in tournament]",
+                None: "   [tournament UNKNOWN]",
+            }.get(in_roster, "")
+            print(f"  * {tool}{tag}")
 
     print("\nNOT ACTIONABLE")
-    for tool in sorted(repo - actionable):
-        where = "tournament only" if tool in roster else "shipped only"
+    if repo is None:
+        # Every line in this section is a claim about what this repo ships, so
+        # with an unreadable ledger they would all be confident negatives read
+        # off a file we could not open -- "ships no package here" for tools
+        # that plainly do. That is the same misreading the roster's UNKNOWN
+        # state exists to prevent, one layer up.
+        print("  UNKNOWN -- packages.json unreadable; shipped set is unknown")
+        return 0 if resolved else 1
+    for tool in sorted(repo - (actionable or set())):
+        in_roster = _roster_has(tool)
+        where = {
+            True: "tournament only",
+            None: "tournament membership unknown",
+        }.get(in_roster, "shipped only")
         print(f"  - {tool}   ({where}, not selectable in production)")
-    for name in sorted(served - repo_normalized):
-        print(f"  - {name}   (selectable but not shipped by this repo)")
+    for name in sorted(served or set()):
+        if name not in repo_normalized:
+            print(f"  - {name}   (selectable but not shipped by this repo)")
+    # Roster-only tools ship no package and are served by nobody, so they fall
+    # outside both sets above -- yet they are the #416 class this whole change
+    # exists for (predict-fine-tuned-calibrated among them). Omitting them from
+    # the text report while listing them in --json hides the motivating case
+    # from the only output a human reads.
+    for name in sorted((roster or set()) - repo_normalized - (served or set())):
+        print(f"  - {name}   (tournament only, ships no package here)")
 
     return 0 if resolved else 1
 

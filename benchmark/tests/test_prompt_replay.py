@@ -1221,7 +1221,7 @@ class TestTournamentFallback:
                 {"row_id": "r2", "source_content": "evidence two"},
             ],
         )
-        rows = _load_tournament_rows("t", "polymarket", scored, preds)
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
         assert len(rows) == 1
         assert rows[0]["extracted_user_prompt"] == "Q1?"
         assert rows[0]["extracted_additional_information"] == "evidence one"
@@ -1245,7 +1245,7 @@ class TestTournamentFallback:
             ],
         )
         self._write(preds, [{"row_id": "r1", "source_content": None}])
-        assert not _load_tournament_rows("t", "polymarket", scored, preds)
+        assert not _load_tournament_rows("t", "polymarket", scored, preds)[0]
 
     def test_platform_and_tool_filters(self, tmp_path):  # type: ignore[no-untyped-def]
         """Only the requested tool and platform are kept."""
@@ -1281,8 +1281,8 @@ class TestTournamentFallback:
                 {"row_id": "b", "source_content": "y"},
             ],
         )
-        assert not _load_tournament_rows("t", "polymarket", scored, preds)
-        assert len(_load_tournament_rows("t", "omen", scored, preds)) == 1
+        assert not _load_tournament_rows("t", "polymarket", scored, preds)[0]
+        assert len(_load_tournament_rows("t", "omen", scored, preds)[0]) == 1
 
     def test_emitted_rows_always_carry_tool_name(self, tmp_path):  # type: ignore[no-untyped-def]
         """Legacy ``tool``-keyed rows are normalized to ``tool_name``.
@@ -1326,7 +1326,7 @@ class TestTournamentFallback:
                 {"row_id": "current", "source_content": "e2"},
             ],
         )
-        rows = _load_tournament_rows("t", "polymarket", scored, preds)
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
         assert len(rows) == 2
         assert all(row["tool_name"] == "t" for row in rows)
 
@@ -1370,7 +1370,7 @@ class TestTournamentFallback:
                 {"row_id": "no_p_no", "source_content": "e2"},
             ],
         )
-        rows = _load_tournament_rows("t", "polymarket", scored, preds)
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
         assert [row["row_id"] for row in rows] == ["ok"]
 
     def test_enrich_falls_back_when_production_rows_yield_nothing(  # type: ignore[no-untyped-def]
@@ -1651,7 +1651,7 @@ class TestTournamentFallback:
                 }
             ],
         )
-        rows = _load_tournament_rows(tool, "polymarket", scored, preds)
+        rows, _dropped = _load_tournament_rows(tool, "polymarket", scored, preds)
         assert len(rows) == 1
         info = rows[0]["extracted_additional_information"]
         assert isinstance(info, str), "a dict reached the prompt"
@@ -1689,7 +1689,7 @@ class TestTournamentFallback:
         )
         # A shape with no serper_response -- nothing to render from.
         self._write(preds, [{"row_id": "bad", "source_content": {"mode": "cleaned"}}])
-        assert not _load_tournament_rows(tool, "polymarket", scored, preds)
+        assert not _load_tournament_rows(tool, "polymarket", scored, preds)[0]
 
     def test_prompt_needing_unsupplied_fields_fails_before_the_loop(self):  # type: ignore[no-untyped-def]
         """A template replay cannot fill must raise up front, not mid-run."""
@@ -1711,4 +1711,4 @@ class TestTournamentFallback:
         """Absent tournament files degrade to empty, not an exception."""
         assert not _load_tournament_rows(
             "t", "polymarket", tmp_path / "no.jsonl", tmp_path / "no2.jsonl"
-        )
+        )[0]

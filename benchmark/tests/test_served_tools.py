@@ -742,3 +742,55 @@ class TestTriageActionableFilter:
         assert (
             decisions[0]["reason"] != "not_actionable"
         ), "a non-fix decision was overwritten by the actionable gate"
+
+    def test_discovery_raising_falls_back_to_assess_everything(
+        self, monkeypatch: Any
+    ) -> None:
+        """A raise inside discovery must hand triage None, not a stale value.
+
+        Every existing double returns None directly, so the `except` whose job
+        is to PRODUCE None was never entered -- only its downstream consumer
+        was pinned. This is the one path where a regression silently
+        reintroduces the stall #406 fixed: if a future edit left `actionable`
+        holding a partial value here, nothing would fail.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: Dict[str, Any] = {}
+
+        def fake_triage(*args: Any, **kwargs: Any) -> list:
+            """Capture what main() hands over.
+
+            :param args: positional args.
+            :param kwargs: keyword args.
+            :return: no decisions.
+            """
+            captured["actionable"] = kwargs.get("actionable")
+            return []
+
+        def boom(platform: str) -> set:
+            """Simulate a subgraph/IPFS outage.
+
+            :param platform: platform being resolved.
+            :raises RuntimeError: always.
+            """
+            raise RuntimeError("subgraph unreachable")
+
+        monkeypatch.setattr(tit, "actionable_tools", boom)
+        monkeypatch.setattr(tit, "triage", fake_triage)
+        monkeypatch.setattr(tit, "_load_json", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_open_issue_tools", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_closed_issue_pairs", lambda *a, **k: [])
+        monkeypatch.setattr(tit, "_load_count_rows", lambda *a, **k: ({}, {}))
+        monkeypatch.setattr(
+            tit, "_load_tournament_count_rows", lambda *a, **k: ({}, {})
+        )
+        monkeypatch.setattr(sys, "argv", ["triage", "--dry-run"])
+        try:
+            tit.main()
+        except SystemExit:
+            pass
+        assert "actionable" in captured, "main() never reached triage()"
+        assert (
+            captured["actionable"] is None
+        ), "a discovery outage must assess everything, not silence tools"

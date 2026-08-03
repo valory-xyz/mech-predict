@@ -663,6 +663,7 @@ def _render_tournament_evidence(tool_name: str, source_content: Any) -> Optional
             "cannot render tournament evidence for %r the way the tool does; "
             "row dropped",
             tool_name,
+            exc_info=True,
         )
         return None
     return rendered or None
@@ -683,6 +684,29 @@ def _write_replay_rows(output: Path, rows: list[dict[str, Any]]) -> None:
     with open(output, "w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
+
+
+def _drop_reason_detail(dropped: dict[str, int]) -> str:
+    """Explain a tournament shortfall from its per-reason drop counts.
+
+    The failure message is the only artifact a human sees when both arms come
+    up empty, and "the tournament arm has none either" gives them nowhere to
+    start: a roster/name mismatch (every row ``wrong_tool``) and a genuinely
+    absent tool (no rows at all) read identically. Naming the dominant reasons
+    turns that into a next step.
+
+    :param dropped: per-reason drop counts from :func:`_load_tournament_rows`.
+    :return: a parenthesised detail clause, or "" when nothing was dropped
+        (i.e. the arm held no candidate rows at all, which the caller's own
+        wording already covers).
+    """
+    hit = sorted(
+        ((k, v) for k, v in dropped.items() if v), key=lambda kv: (-kv[1], kv[0])
+    )
+    if not hit:
+        return ""
+    shown = ", ".join(f"{k}={v}" for k, v in hit[:3])
+    return f" ({sum(v for _, v in hit)} tournament row(s) dropped: {shown})"
 
 
 def _load_tournament_rows(
@@ -923,6 +947,9 @@ def enrich(
     log.info("Wrote filter stats: %s", stats_path)
 
     scope = f" [platform={platform_filter}]" if platform_filter else ""
+    # Captured out of the closure so the failure paths below can say WHY the
+    # tournament arm produced nothing, rather than only that it did.
+    fallback_dropped: dict[str, int] = {}
 
     def _tournament_fallback(why: str) -> bool:
         """Write tournament-sourced rows to ``output``; True when it produced any.
@@ -930,6 +957,7 @@ def enrich(
         :param why: what made the production path unusable (for the log).
         :return: whether replayable rows were written.
         """
+        nonlocal fallback_dropped
         log.warning("%s for %r%s; trying the tournament arm", why, tool_filter, scope)
         fallback_rows, fallback_dropped = _load_tournament_rows(
             tool_filter, platform_filter, tournament_scored, tournament_predictions
@@ -951,7 +979,16 @@ def enrich(
                     "source": "tournament",
                     "accepted": len(fallback_rows),
                     "rejected": {k: v for k, v in fallback_dropped.items() if v},
-                    "no_row_id": fallback_dropped.get("no_row_id", 0),
+                    # Top-level `no_row_id` means "rows we KEPT that lacked a
+                    # row_id" (production semantics — they bypass dedup, so
+                    # they are a warning about kept data). The tournament arm
+                    # DROPS such rows instead, so its count is a drop reason
+                    # and already sits in `rejected` above; this diagnostic is
+                    # 0 by construction. Echoing the drop count here made one
+                    # set of rows readable as both kept-and-suspect and
+                    # dropped, and double-counted them for anything summing
+                    # the two.
+                    "no_row_id": 0,
                     "production_attempt": {
                         "accepted": production_accepted,
                         "rejected": rejected,
@@ -974,7 +1011,7 @@ def enrich(
             return
         raise SystemExit(
             f"0 rows for baseline {tool_filter!r}{scope} in production or "
-            "the tournament arm"
+            f"the tournament arm{_drop_reason_detail(fallback_dropped)}"
         )
 
     # Stratified sample BEFORE IPFS fetch to avoid unnecessary downloads.
@@ -1016,23 +1053,25 @@ def enrich(
         # delivery hash, unfetchable prompt, unparseable components). Writing
         # an empty file here would hand the replay stage a silently zero-row
         # benchmark -- worse than #416's loud failure. Try the tournament arm.
+        # `len(rows)`, not `production_accepted`: the sample above already
+        # narrowed the pool, so only these rows were ever handed to IPFS.
+        # Reporting the pre-sample count read as "500 rows all failed" when 50
+        # were attempted -- and this string is surfaced verbatim in the PR
+        # comment via the sidecar's `fallback_reason`. The pre-sample total
+        # stays available under `production_attempt.accepted`.
         if _tournament_fallback(
-            f"{production_accepted} production rows but 0 survived IPFS " "enrichment"
+            f"{len(rows)} production rows but 0 survived IPFS enrichment"
         ):
             return
         raise SystemExit(
             f"0 replayable rows for baseline {tool_filter!r}{scope}: "
             f"{len(rows)} production rows yielded no usable prompt and the "
-            "tournament arm has none either"
+            f"tournament arm has none either{_drop_reason_detail(fallback_dropped)}"
         )
     _log_platform_breakdown(enriched)
 
     # Write
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        for row in enriched:
-            f.write(json.dumps(row) + "\n")
-
+    _write_replay_rows(output, enriched)
     log.info("Written to %s", output)
 
 
@@ -1572,16 +1611,26 @@ def _log_replay_summary(
             )
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
-        # Scoping buckets + not_valid_parse make up the full rejected total;
-        # iterate SCOPING_BUCKETS so this can't drift out of sync.
-        breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+        if filter_stats.get("source") == "tournament":
+            # The tournament arm drops rows for its OWN reasons (bad_json,
+            # no_question, no_evidence, unrenderable, ...), none of which are
+            # scoping buckets. Enumerating SCOPING_BUCKETS here printed six
+            # production buckets at zero beside a non-zero total -- a line
+            # that contradicted itself. Render the counts actually recorded.
+            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(r.items()) if v)
+        else:
+            # Production: scoping buckets + not_valid_parse account for the
+            # whole total, so enumerate them even at zero (a bucket that stops
+            # appearing is itself the signal) rather than printing only what
+            # happens to be non-zero.
+            breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+            breakdown += f", not_valid_parse={r.get('not_valid_parse', 0)}"
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (%s, not_valid_parse=%d)  no_row_id=%d",
+            "    Accepted: %d   Rejected: %d (%s)  no_row_id=%d",
             filter_stats.get("accepted", 0),
             total_rej,
-            breakdown,
-            r.get("not_valid_parse", 0),
+            breakdown or "none",
             filter_stats.get("no_row_id", 0),
         )
 
@@ -1925,6 +1974,15 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         W-2 rows. The candidate must share the baseline's prompt-attribute
         schema (PREDICTION_PROMPT / ESTIMATE_USER / etc.) and be registered in
         benchmark.tools.TOOL_REGISTRY.
+    :raises ValueError: when the pairing cannot be replayed — the baseline
+        tool named by the enriched rows is not in
+        ``benchmark.tools.TOOL_REGISTRY``; ``--candidate-tool`` names a tool
+        that is not either; a vLLM candidate is paired with a non-superforcaster
+        baseline (it renders its prompt from that family's extracted sources);
+        or the candidate is a two-stage reasoning tool while the rows carry no
+        ``extracted_reasoning`` (tournament-sourced rows never do). Raised
+        rather than returned so a mis-specified benchmark fails the job instead
+        of publishing a verdict computed from nothing.
     """
     # Load enriched dataset first to detect tool
     sampled: list[dict[str, Any]] = load_jsonl(dataset)

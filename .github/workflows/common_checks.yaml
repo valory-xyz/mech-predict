@@ -88,6 +88,16 @@ jobs:
       - name: Install dependencies
         run: pip install 'tomte[tox,cli] @ git+https://github.com/valory-xyz/tomte.git@v0.7.0' tox-uv
       - name: Security checks
+        env:
+          # nltk 3.10.1 (pulled in transitively by `safety`) installs an import
+          # hook that refuses any nltk-initiated import resolving INSIDE the
+          # current working directory. tox puts its venvs in `.tox/` at the
+          # repo root, so `regex` -- a normal site-packages dependency -- counts
+          # as "in the CWD" and `safety` dies on import before it can check
+          # anything. The hook's own suggestion (PYTHONSAFEPATH) does not help:
+          # it blocks on the module's resolved ORIGIN, not on sys.path. Moving
+          # the venvs out of the repo is what actually satisfies it.
+          TOX_WORK_DIR: ${{ runner.temp }}/tox
         run: tomte tox -p -e safety -e bandit
       - name: Check packages
         run: tomte tox -e check-packages

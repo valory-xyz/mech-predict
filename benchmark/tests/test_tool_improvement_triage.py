@@ -1412,6 +1412,12 @@ class TestMainExitCode:
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
         )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
+        )
 
         # gh issue list succeeds with no open issues; gh issue create fails.
         call_count = {"n": 0}
@@ -1454,6 +1460,12 @@ class TestMainExitCode:
         (results_dir / "scores_polymarket.json").write_text(json.dumps(empty))
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         # Pre-existing state should NOT be overwritten.
         state_path = tmp_path / "state.json"
@@ -1845,6 +1857,12 @@ class TestMainPromotionDispatch:
         self._write_firing_scores(results_dir)
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage._load_lineage_children",
@@ -2693,6 +2711,12 @@ class TestMainWidenSampleDispatch:
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
         )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
+        )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",
             tmp_path / "tournament_tools.json",
@@ -2765,6 +2789,12 @@ class TestMainWidenSampleDispatch:
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",

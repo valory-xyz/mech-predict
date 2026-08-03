@@ -12,13 +12,16 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
+from benchmark import prompt_replay as pr
 from benchmark.prompt_replay import (
     DEFAULT_REPLAY_SYSTEM_PROMPT,
+    _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
     _extract_factual_research_prompt_components,
     _get_structured_output_schema,
     _load_and_filter_rows,
+    _load_tournament_rows,
     _log_replay_summary,
     _parse_vllm_candidate,
     _prepare_output_dir,
@@ -1174,3 +1177,538 @@ class TestStructuredSchemaResolution:
         schema = captured.get("response_format")
         assert schema is not None, "_call_openai_structured was not invoked"
         assert schema.__module__.endswith("superforcaster_polymarket_v4")
+
+
+class TestTournamentFallback:
+    """enrich() falls back to the tournament arm for tournament-only tools."""
+
+    @staticmethod
+    def _write(path, rows):  # type: ignore[no-untyped-def]
+        """Write JSONL rows to path."""
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def test_joins_scored_outcomes_with_captured_evidence(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Rows come from scored (outcome) joined to predictions (evidence)."""
+        scored = tmp_path / "tournament_scored.jsonl"
+        preds = tmp_path / "tournament_predictions.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q1?",
+                    "p_yes": 0.7,
+                    "p_no": 0.3,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "r2",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q2?",
+                    "p_yes": 0.2,
+                    "p_no": 0.8,
+                    "final_outcome": None,  # unresolved -> excluded
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "r1", "source_content": "evidence one"},
+                {"row_id": "r2", "source_content": "evidence two"},
+            ],
+        )
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
+        assert len(rows) == 1
+        assert rows[0]["extracted_user_prompt"] == "Q1?"
+        assert rows[0]["extracted_additional_information"] == "evidence one"
+
+    def test_rows_without_evidence_are_dropped(self, tmp_path):  # type: ignore[no-untyped-def]
+        """A scored row whose prediction captured no evidence is unusable."""
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.7,
+                    "p_no": 0.3,
+                    "final_outcome": True,
+                }
+            ],
+        )
+        self._write(preds, [{"row_id": "r1", "source_content": None}])
+        assert not _load_tournament_rows("t", "polymarket", scored, preds)[0]
+
+    def test_platform_and_tool_filters(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Only the requested tool and platform are kept."""
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "a",
+                    "tool": "t",
+                    "platform": "omen",
+                    "question_text": "Q?",
+                    "p_yes": 0.5,
+                    "p_no": 0.5,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "b",
+                    "tool": "other",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.5,
+                    "p_no": 0.5,
+                    "final_outcome": True,
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "a", "source_content": "x"},
+                {"row_id": "b", "source_content": "y"},
+            ],
+        )
+        assert not _load_tournament_rows("t", "polymarket", scored, preds)[0]
+        assert len(_load_tournament_rows("t", "omen", scored, preds)[0]) == 1
+
+    def test_emitted_rows_always_carry_tool_name(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Legacy ``tool``-keyed rows are normalized to ``tool_name``.
+
+        The loader accepts either spelling on input, but ``replay`` reads
+        ``sampled[0]["tool_name"]`` and copies ``row["tool_name"]`` per row --
+        an un-normalized row KeyErrors there, so the fallback would emit a
+        dataset that cannot be replayed.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "legacy",
+                    "tool": "t",  # legacy spelling
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "current",
+                    "tool_name": "t",  # current spelling
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": False,
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "legacy", "source_content": "e1"},
+                {"row_id": "current", "source_content": "e2"},
+            ],
+        )
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
+        assert len(rows) == 2
+        assert all(row["tool_name"] == "t" for row in rows)
+
+    def test_rows_missing_p_no_are_dropped(self, tmp_path):  # type: ignore[no-untyped-def]
+        """A row without ``p_no`` is unusable: replay's baseline arm needs it.
+
+        ``replay`` copies ``row["p_no"]`` verbatim into the baseline arm, so a
+        row missing it raises KeyError partway through the run -- after the
+        earlier rows have already been paid for.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "ok",
+                    "tool_name": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                },
+                {
+                    "row_id": "no_p_no",
+                    "tool_name": "t",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "final_outcome": True,
+                },
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {"row_id": "ok", "source_content": "e1"},
+                {"row_id": "no_p_no", "source_content": "e2"},
+            ],
+        )
+        rows, _dropped = _load_tournament_rows("t", "polymarket", scored, preds)
+        assert [row["row_id"] for row in rows] == ["ok"]
+
+    def test_enrich_falls_back_when_production_rows_yield_nothing(  # type: ignore[no-untyped-def]
+        self, tmp_path, monkeypatch
+    ):
+        """Production rows that all fail enrichment must not write an empty file.
+
+        The fallback used to be gated on "zero production rows", so a tool with
+        a handful of production deliveries that yield no usable prompt (no
+        delivery hash, unfetchable, unparseable) produced an EMPTY enriched
+        file and exited 0 -- handing the replay stage a silently zero-row
+        benchmark. It must fall back to the tournament arm instead.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(), _row(), _row()])
+
+        scored = tmp_path / "tournament_scored.jsonl"
+        preds = tmp_path / "tournament_predictions.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "t1",
+                    "tool_name": "superforcaster",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                }
+            ],
+        )
+        self._write(preds, [{"row_id": "t1", "source_content": "captured evidence"}])
+
+        # Every production row fails enrichment (no reachable delivery).
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(
+            log_path,
+            "superforcaster",
+            output,
+            tournament_scored=scored,
+            tournament_predictions=preds,
+        )
+        written = [
+            json.loads(line)
+            for line in output.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert len(written) == 1
+        assert written[0]["extracted_additional_information"] == "captured evidence"
+        assert written[0]["tool_name"] == "superforcaster"
+
+    def test_enrich_exits_when_neither_arm_has_rows(self, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+        """Nothing in production AND nothing in the tournament -> loud exit.
+
+        Guards the other side of the widened fallback: it must not turn a
+        genuinely empty run into a silent success.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(), _row()])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        with pytest.raises(SystemExit) as exc:
+            pr.enrich(
+                log_path,
+                "superforcaster",
+                output,
+                tournament_scored=tmp_path / "absent.jsonl",
+                tournament_predictions=tmp_path / "absent2.jsonl",
+            )
+        assert "superforcaster" in str(exc.value)
+        assert not output.exists()
+
+    def test_fallback_rewrites_the_filter_stats_sidecar(self, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+        """After a fallback the sidecar must describe the TOURNAMENT rows.
+
+        The sidecar is written from the production pool before the fallback
+        runs, and replay feeds it into the human-facing verdict summary. Left
+        as-is it would caption the report with rejection counts for a
+        population that was never benchmarked.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(), _row(), _row()])
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "t1",
+                    "tool_name": "superforcaster",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                }
+            ],
+        )
+        self._write(preds, [{"row_id": "t1", "source_content": "evidence"}])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(
+            log_path,
+            "superforcaster",
+            output,
+            tournament_scored=scored,
+            tournament_predictions=preds,
+        )
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["source"] == "tournament"
+        assert stats["accepted"] == 1, "sidecar must count the rows actually written"
+        assert (
+            stats["production_attempt"]["accepted"] == 3
+        ), "the production attempt must stay diagnosable"
+        assert "fallback_reason" in stats
+
+    def test_production_sidecar_is_tagged_as_production(self, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+        """The normal path must label its sidecar too, or 'source' means nothing.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row()])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["source"] == "production"
+
+    def test_fallback_respects_the_sample_budget(self, tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+        """``--sample N`` must bound the tournament arm too, not just production.
+
+        Otherwise a fallback silently replays the entire tournament history for
+        that tool -- an unbounded LLM bill on a path that exists precisely
+        because the operator asked for a small sample.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        # Production sampling runs before the fallback, and stratified_sample
+        # needs p_yes/platform -- real production rows always carry both.
+        _write_jsonl(
+            log_path,
+            [{**_row(platform="polymarket", row_id="prod-1"), "p_yes": 0.5}],
+        )
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": f"t{i}",
+                    "tool_name": "superforcaster",
+                    "platform": "polymarket",
+                    "question_text": f"Q{i}?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": bool(i % 2),
+                }
+                for i in range(50)
+            ],
+        )
+        self._write(
+            preds,
+            [{"row_id": f"t{i}", "source_content": "evidence"} for i in range(50)],
+        )
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(
+            log_path,
+            "superforcaster",
+            output,
+            sample_per_platform=10,
+            tournament_scored=scored,
+            tournament_predictions=preds,
+        )
+        written = [
+            line for line in output.read_text(encoding="utf-8").splitlines() if line
+        ]
+        assert (
+            len(written) == 10
+        ), f"sample budget ignored on the fallback path: wrote {len(written)}/50"
+
+    def test_evidence_is_rendered_as_the_tool_rendered_it(self, tmp_path):  # type: ignore[no-untyped-def]
+        """The fallback must reproduce `format_sources_data`, byte for byte.
+
+        The tournament arm stores `used_params["source_content"]`, which every
+        capturing tool writes as `{"mode":..., "serper_response": <raw Serper
+        JSON>}` -- the payload BEFORE formatting. The production path stores
+        the already-rendered `<background>` text. Passing the dict through put
+        a Python dict repr in the prompt while the baseline p_yes came from
+        clean sources, so the Brier delta measured evidence-format drift.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        tool = "superforcaster-polymarket-v4"
+        mod = importlib.import_module(
+            "packages.valory.customs.superforcaster_polymarket_v4"
+            ".superforcaster_polymarket_v4"
+        )
+        serper: dict = {
+            "organic": [
+                {
+                    "title": f"T{i}",
+                    "link": f"http://s{i}",
+                    "snippet": f"S{i}",
+                    "position": i,
+                }
+                for i in range(1, 8)
+            ],
+            "peopleAlsoAsk": [{"question": "q?", "snippet": "paa"}],
+            "credits": 1,
+        }
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "r1",
+                    "tool_name": tool,
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                    "predicted_at": "2026-06-01T12:00:00Z",
+                }
+            ],
+        )
+        self._write(
+            preds,
+            [
+                {
+                    "row_id": "r1",
+                    "source_content": {"mode": "cleaned", "serper_response": serper},
+                }
+            ],
+        )
+        rows, _dropped = _load_tournament_rows(tool, "polymarket", scored, preds)
+        assert len(rows) == 1
+        info = rows[0]["extracted_additional_information"]
+        assert isinstance(info, str), "a dict reached the prompt"
+        expected = mod.format_sources_data(
+            serper["organic"][: mod.MAX_SOURCES], serper["peopleAlsoAsk"]
+        )
+        assert info == expected, "evidence differs from what the tool rendered"
+        assert "credits" not in info, "raw Serper noise leaked into the prompt"
+        assert (
+            rows[0]["extracted_today"] == "2026-06-01"
+        ), "empty date -- the superforcaster template renders `Today's date: `"
+
+    def test_unrenderable_evidence_is_dropped_not_replayed(self, tmp_path):  # type: ignore[no-untyped-def]
+        """A row we cannot render faithfully must not be replayed as-is.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        tool = "superforcaster-polymarket-v4"
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": "bad",
+                    "tool_name": tool,
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                    "predicted_at": "2026-06-01T00:00:00Z",
+                }
+            ],
+        )
+        # A shape with no serper_response -- nothing to render from.
+        self._write(preds, [{"row_id": "bad", "source_content": {"mode": "cleaned"}}])
+        assert not _load_tournament_rows(tool, "polymarket", scored, preds)[0]
+
+    def test_prompt_needing_unsupplied_fields_fails_before_the_loop(self):  # type: ignore[no-untyped-def]
+        """A template replay cannot fill must raise up front, not mid-run."""
+        with pytest.raises(ValueError) as exc:
+            _assert_prompt_is_replayable(
+                "Q: {question} on {today} given {briefing} under {resolution_rules}",
+                {"question", "today", "briefing"},
+                "factual_research-v2",
+            )
+        assert "resolution_rules" in str(exc.value)
+        # and a template we CAN fill must not raise
+        _assert_prompt_is_replayable(
+            "Q: {question} on {today} given {briefing}",
+            {"question", "today", "briefing"},
+            "factual_research-v2",
+        )
+
+    def test_missing_files_return_empty(self, tmp_path):  # type: ignore[no-untyped-def]
+        """Absent tournament files degrade to empty, not an exception."""
+        assert not _load_tournament_rows(
+            "t", "polymarket", tmp_path / "no.jsonl", tmp_path / "no2.jsonl"
+        )[0]

@@ -113,7 +113,10 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from benchmark.served_tools import actionable_tools
+from benchmark.tool_usage import normalize_tool_name
 
 ENABLED_PLATFORMS = ["polymarket"]
 BRIER_REGRESSION_THRESHOLD = 0.040
@@ -820,6 +823,7 @@ def triage(
     count_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_windows: Optional[Dict[str, Dict[str, Any]]] = None,
     tournament_roster: Optional[set] = None,
+    actionable: Optional[Set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Apply the gate cascade to ``cur`` vs ``prev`` and return one decision dict per tool."""
     # ``count_windows`` (per-tool output of ``_count_window_stats``) feeds
@@ -885,6 +889,17 @@ def triage(
     # calendar stats (n_cur=0) and flows into the count fallback /
     # widen-sample routing below.
     cur_by_tool = cur.get("by_tool") or {}
+    # The two sides of the actionable test live in DIFFERENT namespaces:
+    # `actionable` holds packages.json package names (underscores,
+    # `superforcaster_polymarket_v4`) while the scored data is keyed on the
+    # on-chain advertised tool name (dashes, `superforcaster-polymarket-v4`).
+    # Comparing them raw matches only tools whose two spellings coincide --
+    # which on polymarket is exactly one, so the gate silenced the entire
+    # production superforcaster line while letting nothing through it was
+    # meant to stop. Fold once, here.
+    actionable_norm = (
+        None if actionable is None else {normalize_tool_name(a) for a in actionable}
+    )
     for tool in sorted(
         set(cur_by_tool) | set(count_windows or {}) | set(tournament_windows or {})
     ):
@@ -1112,6 +1127,24 @@ def triage(
                 issue_open=True,
             )
         decisions.append(d)
+    # Gate ONLY the agent-routed fix issue. The rationale -- a fix issue on a
+    # tool nobody serves has no validation path and no deployment consequence
+    # (mech-predict#416) -- covers `open_issue` and nothing else. As a
+    # top-of-loop `continue` it also suppressed `insufficient_data` /
+    # widen_sample and `descendant_exists` / deployment-review notes, which
+    # carry PROMOTION_LABEL, never tag the coding agent, and exist precisely
+    # to ask a human about starved or tournament-only tools -- the population
+    # the gate identifies. Silencing those was the opposite of the intent.
+    if actionable_norm is not None:
+        for decision in decisions:
+            if decision.get("decision") != "open_issue":
+                continue
+            if normalize_tool_name(decision["tool"]) in actionable_norm:
+                continue
+            decision["decision"] = "silent"
+            decision["reason"] = "not_actionable"
+            decision["issue_open"] = False
+
     return decisions
 
 
@@ -1794,6 +1827,45 @@ def main() -> int:
                 len(tournament_windows),
                 platform,
             )
+        # Restrict fix issues to tools that are BOTH selectable on this
+        # platform's mechs and shipped by this repo. Fail-OPEN: if discovery
+        # cannot resolve (subgraph/GitHub/IPFS outage), assess everything
+        # rather than silently stalling the whole triage -- the pre-existing
+        # behavior, logged loudly.
+        actionable: Optional[Set[str]] = None
+        try:
+            actionable = actionable_tools(platform)
+            if actionable is None:
+                # UNKNOWN, not empty. `actionable_tools` now says which it is,
+                # so the old `if actionable:` emptiness test is obsolete -- it
+                # collapsed a genuine "nothing here is actionable" into
+                # "assess everything", which is the opposite decision.
+                log.warning(
+                    "actionable set for %s is UNKNOWN (discovery or ledger "
+                    "unavailable); assessing all tools this pass.",
+                    platform,
+                )
+            elif not actionable:
+                log.warning(
+                    "actionable set for %s resolved EMPTY: nothing selectable "
+                    "here is shipped by this repo, so every tool stays silent.",
+                    platform,
+                )
+            else:
+                log.info(
+                    "actionable on %s (selectable AND shipped here): %s",
+                    platform,
+                    sorted(actionable),
+                )
+        except Exception as exc:  # noqa: BLE001 - never block triage on discovery
+            log.warning(
+                "served-tool discovery failed for %s (%s); assessing all tools.",
+                platform,
+                exc,
+                # A transient subgraph/IPFS outage and a bug in the caller look
+                # identical without the traceback.
+                exc_info=True,
+            )
         roster = _tournament_roster()
         tournament_scores = _load_json(
             RESULTS_DIR / f"scores_tournament_{platform}.json"
@@ -1811,6 +1883,7 @@ def main() -> int:
             count_windows=count_windows,
             tournament_windows=tournament_windows,
             tournament_roster=roster,
+            actionable=actionable,
         )
         all_decisions.extend(decisions)
 

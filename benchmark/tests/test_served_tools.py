@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 from benchmark import served_tools
+from benchmark import tool_improvement_triage as tit
+from benchmark.tool_improvement_triage import triage
 
 
 class TestRepoTools:
@@ -494,6 +496,34 @@ class TestMainCli:
         assert "UNKNOWN -- packages.json unreadable" in out
         assert code == 1
 
+    def test_unknown_discovery_never_asserts_selectable_negatives(
+        self, monkeypatch: Any, capsys: Any, tmp_path: Any
+    ) -> None:
+        """Discovery down + healthy ledger must not claim tools are unserved.
+
+        The mirror of the unreadable-ledger case: with `served` unknown,
+        `repo - (actionable or set())` is the WHOLE ledger, so the section
+        asserted every shipped tool is un-selectable -- two lines after
+        correctly printing UNKNOWN, and false for every tool that is served.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        code, out = self._run(
+            monkeypatch,
+            capsys,
+            tmp_path,
+            [],
+            {"omenstrat Pearl": None, "polystrat Pearl": None},
+            ledger={"dev": {"custom/valory/superforcaster/0.1.0": "bafy"}},
+        )
+        assert (
+            "not selectable in production" not in out
+        ), "asserted a selectable-negative off an unresolved discovery"
+        assert "UNKNOWN -- discovery did not resolve; selectable set" in out
+        assert code == 1
+
     def test_exit_code_covers_an_unknown_ledger(
         self, monkeypatch: Any, capsys: Any, tmp_path: Any
     ) -> None:
@@ -538,3 +568,229 @@ class TestMainCli:
             served_tools.main()
         assert exc.value.code == 2, "argparse should reject the value itself"
         assert "invalid choice" in capsys.readouterr().err
+
+
+class TestTriageActionableFilter:
+    """triage() honours the actionable set."""
+
+    def test_non_actionable_tool_is_silent(self) -> None:
+        """A tool outside the actionable set never reaches the triggers."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"tournament-only-tool": stats}},
+            {"by_tool": {"tournament-only-tool": {**stats, "brier": 0.20}}},
+            {},
+            actionable={"some-other-tool"},
+        )
+        assert decisions[0]["decision"] == "silent"
+        assert decisions[0]["reason"] == "not_actionable"
+
+    def test_actionable_tool_is_assessed(self) -> None:
+        """A tool inside the set is evaluated normally (fires here)."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"served-tool": stats}},
+            {"by_tool": {"served-tool": {**stats, "brier": 0.20, "log_loss": 0.6}}},
+            {},
+            actionable={"served-tool"},
+        )
+        assert decisions[0]["decision"] == "open_issue"
+
+    def test_none_means_assess_everything(self) -> None:
+        """actionable=None (discovery failed) preserves the legacy behaviour."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.40,
+            "log_loss": 1.2,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"anything": stats}},
+            {"by_tool": {"anything": {**stats, "brier": 0.20, "log_loss": 0.6}}},
+            {},
+            actionable=None,
+        )
+        assert decisions[0]["decision"] == "open_issue"
+
+    def test_main_passes_an_empty_actionable_through_unchanged(
+        self, monkeypatch: Any
+    ) -> None:
+        """A resolved-but-EMPTY actionable set must reach triage() as-is.
+
+        This pins the behavioural half of the tri-state migration. The old
+        code did `if actionable: ... else: actionable = None`, converting a
+        genuine "nothing here is actionable" into "assess everything" -- the
+        opposite decision. Asserting on triage() alone cannot catch that: the
+        conversion happens in main(), so this captures what main() actually
+        hands over.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: Dict[str, Any] = {}
+
+        def fake_triage(*args: Any, **kwargs: Any) -> list:
+            """Capture the actionable argument and stop the pass.
+
+            :param args: positional args from main().
+            :param kwargs: keyword args from main().
+            :return: no decisions.
+            """
+            captured["actionable"] = kwargs.get("actionable")
+            return []
+
+        monkeypatch.setattr(tit, "actionable_tools", lambda platform: set())
+        monkeypatch.setattr(tit, "triage", fake_triage)
+        monkeypatch.setattr(tit, "_load_json", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_open_issue_tools", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_closed_issue_pairs", lambda *a, **k: [])
+        monkeypatch.setattr(tit, "_load_count_rows", lambda *a, **k: ({}, {}))
+        monkeypatch.setattr(
+            tit, "_load_tournament_count_rows", lambda *a, **k: ({}, {})
+        )
+        monkeypatch.setattr(sys, "argv", ["triage", "--dry-run"])
+        try:
+            tit.main()
+        except SystemExit:
+            pass
+        assert "actionable" in captured, "main() never reached triage()"
+        assert captured["actionable"] == set(), (
+            f"an empty actionable set was converted to {captured['actionable']!r} "
+            "-- that turns 'nothing is actionable' into 'assess everything'"
+        )
+
+    def test_dash_spelled_production_tool_is_not_silenced(self) -> None:
+        """The two sides of the gate live in different namespaces.
+
+        `actionable_tools()` returns packages.json PACKAGE names (underscores);
+        the scored data is keyed on the on-chain advertised name (dashes). A
+        raw membership test matches only tools whose spellings coincide -- on
+        polymarket exactly one -- so the gate silenced the entire production
+        superforcaster line while stopping nothing it was meant to stop.
+        """
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        prev = {**stats, "brier": 0.20, "log_loss": 0.6}
+        decisions = triage(
+            {"by_tool": {"superforcaster-polymarket-v4": stats}},
+            {"by_tool": {"superforcaster-polymarket-v4": prev}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert decisions[0]["decision"] == "open_issue", (
+            "a served, shipped production tool was silenced by a spelling "
+            "mismatch between packages.json and the scored data"
+        )
+
+    def test_genuinely_unserved_tool_is_still_gated(self) -> None:
+        """Normalizing must not weaken the gate itself."""
+        stats = {
+            "n": 200,
+            "valid_n": 200,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        prev = {**stats, "brier": 0.20, "log_loss": 0.6}
+        decisions = triage(
+            {"by_tool": {"predict-fine-tuned-calibrated": stats}},
+            {"by_tool": {"predict-fine-tuned-calibrated": prev}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert decisions[0]["decision"] == "silent"
+        assert decisions[0]["reason"] == "not_actionable"
+
+    def test_gate_does_not_suppress_non_fix_decisions(self) -> None:
+        """Only the agent-routed fix issue is gated.
+
+        As a top-of-loop `continue` the gate also silenced widen-sample and
+        deployment-review notes, which carry PROMOTION_LABEL, never tag the
+        coding agent, and exist precisely to ask a human about starved or
+        tournament-only tools -- the population the gate identifies.
+        """
+        thin = {
+            "n": 3,
+            "valid_n": 3,
+            "brier": 0.42,
+            "log_loss": 1.3,
+            "reliability": 0.98,
+        }
+        decisions = triage(
+            {"by_tool": {"unserved-thin": thin}},
+            {"by_tool": {"unserved-thin": thin}},
+            {},
+            actionable={"superforcaster_polymarket_v4"},
+        )
+        assert (
+            decisions[0]["reason"] != "not_actionable"
+        ), "a non-fix decision was overwritten by the actionable gate"
+
+    def test_discovery_raising_falls_back_to_assess_everything(
+        self, monkeypatch: Any
+    ) -> None:
+        """A raise inside discovery must hand triage None, not a stale value.
+
+        Every existing double returns None directly, so the `except` whose job
+        is to PRODUCE None was never entered -- only its downstream consumer
+        was pinned. This is the one path where a regression silently
+        reintroduces the stall #406 fixed: if a future edit left `actionable`
+        holding a partial value here, nothing would fail.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: Dict[str, Any] = {}
+
+        def fake_triage(*args: Any, **kwargs: Any) -> list:
+            """Capture what main() hands over.
+
+            :param args: positional args.
+            :param kwargs: keyword args.
+            :return: no decisions.
+            """
+            captured["actionable"] = kwargs.get("actionable")
+            return []
+
+        def boom(platform: str) -> set:
+            """Simulate a subgraph/IPFS outage.
+
+            :param platform: platform being resolved.
+            :raises RuntimeError: always.
+            """
+            raise RuntimeError("subgraph unreachable")
+
+        monkeypatch.setattr(tit, "actionable_tools", boom)
+        monkeypatch.setattr(tit, "triage", fake_triage)
+        monkeypatch.setattr(tit, "_load_json", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_open_issue_tools", lambda *a, **k: {})
+        monkeypatch.setattr(tit, "_closed_issue_pairs", lambda *a, **k: [])
+        monkeypatch.setattr(tit, "_load_count_rows", lambda *a, **k: ({}, {}))
+        monkeypatch.setattr(
+            tit, "_load_tournament_count_rows", lambda *a, **k: ({}, {})
+        )
+        monkeypatch.setattr(sys, "argv", ["triage", "--dry-run"])
+        try:
+            tit.main()
+        except SystemExit:
+            pass
+        assert "actionable" in captured, "main() never reached triage()"
+        assert (
+            captured["actionable"] is None
+        ), "a discovery outage must assess everything, not silence tools"

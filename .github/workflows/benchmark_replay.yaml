@@ -172,6 +172,21 @@ jobs:
           workflow: benchmark_flywheel.yaml
           if_no_artifact_found: fail
 
+      # The tournament arm is enrich's fallback source when a tool has no
+      # replayable production deliveries (the mech-predict#416 case: a
+      # tournament-only tool can never be validated from production rows).
+      # benchmark/results/ is gitignored, so without this download the
+      # fallback finds nothing and the feature is inert in CI.
+      # NOT fatal if absent: a tool with production rows must still benchmark.
+      - name: Download tournament arm (enrich fallback source)
+        uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
+        continue-on-error: true
+        with:
+          name: tournament-predictions
+          path: benchmark/results/
+          workflow: benchmark_flywheel.yaml
+          if_no_artifact_found: warn
+
       # Combine the full pool of daily log shards into one file. Enrich
       # stratified-samples before the IPFS fetch, so a large pool costs nothing
       # extra; it just gives sparse baselines (e.g. superforcaster-polymarket-v1)
@@ -211,7 +226,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: benchmark/results/ci_enriched/
-          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.platform }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}
+          key: benchmark-enriched-${{ steps.parse.outputs.tool }}-${{ steps.parse.outputs.platform }}-${{ steps.parse.outputs.sample }}-${{ steps.parse.outputs.seed }}-${{ hashFiles(steps.log.outputs.path) }}-${{ hashFiles('benchmark/results/tournament_scored.jsonl') }}
 
       - name: Enrich dataset
         if: steps.cache.outputs.cache-hit != 'true'

@@ -3259,7 +3259,7 @@ class TestStartOfCurrentMonthUtc:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Anchors to the 1st of the current UTC month at 00:00:00."""
-        from benchmark import analyze
+        from benchmark import analyze, scoring_primitives
 
         # Wrap ``datetime`` in a small shim so the helper sees a fixed
         # ``now()`` while other datetime ops go through the real class.
@@ -3274,7 +3274,13 @@ class TestStartOfCurrentMonthUtc:
                 """Return the fixed test datetime for any tz."""
                 return fixed_now if tz is None else fixed_now.astimezone(tz)
 
-        monkeypatch.setattr(analyze, "datetime", _DatetimeShim)
+        # Patch ``scoring_primitives``, not ``analyze``: the helper is a thin
+        # delegate to ``scoring_primitives.start_of_current_month_utc``, so the
+        # name it reads at call time lives in THAT module. Patching `analyze`
+        # left the real clock in play and the assertion below passed only while
+        # the wall clock happened to be in the hardcoded month -- it began
+        # failing on the 1st of the next one.
+        monkeypatch.setattr(scoring_primitives, "datetime", _DatetimeShim)
         result = analyze._start_of_current_month_utc()
         assert result == _datetime(2026, 7, 1, 0, 0, 0, tzinfo=_timezone.utc)
 

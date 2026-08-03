@@ -19,6 +19,7 @@ from benchmark.prompt_replay import (
     _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
+    _drop_reason_detail,
     _extract_factual_research_prompt_components,
     _get_structured_output_schema,
     _load_and_filter_rows,
@@ -295,13 +296,17 @@ class TestStratifiedSampleBudget:
     """`--sample N` must return exactly N rows."""
 
     @staticmethod
-    def _pool(n: int) -> list:
+    def _pool(n: int, pool_seed: int = 1) -> list:
         """A pool spanning every (outcome, brier-bucket) stratum.
 
         :param n: how many rows.
+        :param pool_seed: seed for the pool SHAPE (stratum sizes), which is
+            what decides whether the proportional pass rounds up. Varying it
+            is what makes the budget assertion bite above the smallest
+            budgets -- one fixed shape only overshoots at budget=10.
         :return: rows.
         """
-        rng = random.Random(1)
+        rng = random.Random(pool_seed)
         return [
             {
                 "platform": "polymarket",
@@ -313,7 +318,8 @@ class TestStratifiedSampleBudget:
         ]
 
     @pytest.mark.parametrize("budget", [10, 50, 100, 300, 500])
-    def test_returns_exactly_the_budget(self, budget: int) -> None:
+    @pytest.mark.parametrize("pool_seed", range(8))
+    def test_returns_exactly_the_budget(self, budget: int, pool_seed: int) -> None:
         """Neither the per-stratum floor nor round() may overshoot.
 
         Both could: the floor gives every non-empty stratum a row (so a budget
@@ -322,9 +328,17 @@ class TestStratifiedSampleBudget:
         301 and `--sample 10` returned 12. Budgets BELOW the stratum count are
         excluded here: that overshoot is deliberate and pinned separately.
 
+        The pool SHAPE, not the budget, decides whether rounding overshoots --
+        against a single fixed pool only `budget=10` regressed, so the other
+        four budgets passed with the fix removed and the parametrisation
+        promised coverage it did not deliver. Varying the pool seed pins the
+        fix at every budget.
+
         :param budget: requested sample size.
+        :param pool_seed: seed for the pool shape.
         """
-        assert len(stratified_sample(self._pool(2000), budget, seed=42)) == budget
+        pool = self._pool(2000, pool_seed)
+        assert len(stratified_sample(pool, budget, seed=42)) == budget
 
     def test_budget_above_pool_returns_the_pool(self) -> None:
         """Asking for more than exists yields everything, not an error."""
@@ -2105,3 +2119,100 @@ class TestPrefilterBreakdownVocabulary:
         assert "duplicate=0" in text
         assert "wrong_tool=7" in text
         assert "not_valid_parse=2" in text
+
+
+class TestEnrichmentLossRecorded:
+    """Rows lost to IPFS enrichment must be attributable, not silent."""
+
+    def test_sidecar_records_the_enrichment_shortfall(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """Rows dropped between the sample and the write land in the sidecar.
+
+        They leave on bare ``continue``s with no bucket, so without this the
+        pool size and the scored count cannot be reconciled by a reader.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(deliver_id=f"0x{i}") for i in range(5)])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        # 5 rows in, only 2 survive enrichment.
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows[:2]
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["enrichment_failed"] == 3
+        assert stats["accepted"] == 5, "the pool count must stay as-is"
+
+    def test_no_key_when_nothing_was_lost(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A clean enrichment writes no shortfall key.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(deliver_id=f"0x{i}") for i in range(3)])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "enrichment_failed" not in stats
+
+
+class TestDropReasonDetail:
+    """The failure clause must be arithmetically self-consistent."""
+
+    def test_all_drop_reasons_listed(self) -> None:
+        """Every reason is shown, so the total always sums to the visible list.
+
+        Showing only the top 3 beside a total summed over ALL reasons reads as
+        an arithmetic error to anyone who adds them up.
+        """
+        detail = _drop_reason_detail(
+            {"no_evidence": 10, "bad_json": 5, "wrong_tool": 1, "duplicate": 1}
+        )
+        assert detail.startswith(" (17 tournament row(s) dropped: ")
+        for reason in ("no_evidence=10", "bad_json=5", "wrong_tool=1", "duplicate=1"):
+            assert reason in detail, f"{reason} missing"
+        # The listed counts must reconcile to the stated total.
+        shown = detail.split(": ", 1)[1].rstrip(")")
+        assert sum(int(p.split("=")[1]) for p in shown.split(", ")) == 17
+
+    def test_empty_when_files_were_absent(self) -> None:
+        """An empty dict means the tournament files were absent."""
+        assert _drop_reason_detail({}) == ""

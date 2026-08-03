@@ -67,6 +67,48 @@ def _compute_parse_reliability(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def pair_arms(
+    baseline_rows: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Restrict both arms to the markets where BOTH produced a usable prediction.
+
+    The baseline arm is valid by construction -- ``replay()`` copies the
+    production p_yes and stamps ``prediction_parse_status: "valid"`` before the
+    candidate LLM is even called -- while the candidate can fail to parse.
+    Scoring each file independently therefore compares an average over every
+    sampled market against an average over whichever subset the candidate
+    managed to answer, and a candidate that fails on the markets the baseline
+    handled worst improves its own score by dropping them.
+
+    Pairing is positional: ``replay()`` writes exactly one baseline and one
+    candidate row per sampled market, in a single loop, with no path that emits
+    one without the other. ``row_id`` looks like the natural join key but
+    cannot be used -- it is salted with the arm name AND with each arm's own
+    ``model`` (production's for the baseline, the replay model for the
+    candidate), so the two arms never share one.
+
+    :param baseline_rows: rows from ``baseline.jsonl``.
+    :param candidate_rows: rows from ``candidate.jsonl``.
+    :return: ``(baseline subset, candidate subset)``, index-aligned and
+        restricted to markets scored by both.
+    :raises SystemExit: when the two arms disagree on the market at some
+        position. Comparing metrics computed over different markets is a worse
+        failure than not reporting, so this refuses rather than degrades.
+    """
+    paired: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for base, cand in zip(baseline_rows, candidate_rows):
+        if base.get("question_text") != cand.get("question_text"):
+            raise SystemExit(
+                "baseline and candidate rows are misaligned: position holds "
+                f"{base.get('question_text')!r} vs {cand.get('question_text')!r}. "
+                "Refusing to compare metrics computed over different markets."
+            )
+        if base.get("p_yes") is not None and cand.get("p_yes") is not None:
+            paired.append((base, cand))
+    return [b for b, _ in paired], [c for _, c in paired]
+
+
 def compute_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute Brier score, accuracy, and overconfident-wrong count.
 
@@ -305,7 +347,7 @@ def _format_reliability_block(
         # or the counters exist without a reader, and a pool that lost most of
         # its rows still reads as clean.
         t_rejected = {
-            k: v for k, v in (filter_stats.get("rejected") or {}).items() if v
+            k: v for k, v in (filter_stats.get("rejected", {}) or {}).items() if v
         }
         if t_rejected:
             lines.append(
@@ -316,25 +358,29 @@ def _format_reliability_block(
         r = filter_stats.get("rejected", {}) or {}
         accepted = filter_stats.get("accepted", 0)
         not_valid = r.get("not_valid_parse", 0)
-        # Production parse rate: of the in-scope production deliveries, how many
-        # parsed. enrich drops the non-parseable ones (that is what keeps the
-        # scored baseline 100% valid), so they are the only rejections that
-        # belong in this ratio. The scoping rejections (wrong_tool,
-        # wrong_platform, ...) are just rows for other tools/platforms and carry
-        # no reliability signal, so they are not reported.
+        # Only not_valid_parse counts toward the sample count: enrich drops
+        # non-parseable rows (that is what keeps the scored baseline 100%
+        # valid). The scoping rejections (wrong_tool, wrong_platform, ...) are
+        # rows for other tools/platforms and carry no reliability signal.
         denom = accepted + not_valid
         if denom > 0:
-            # Provenance, NOT a tool metric: this is how much of the pool was
-            # discarded, and it is measured in production (real mech, on-chain
-            # delivery) while the candidate figure above comes from a direct
-            # API call in CI. Printing the two as rates side by side invited
-            # exactly one false reading -- "candidate 100% vs production 96.7%
-            # proves the fix works" -- when the discarded rows are precisely
-            # the ones the candidate is never given.
+            # Provenance, not a tool metric: the production figure is measured
+            # in production (real mech, on-chain delivery) and is not
+            # comparable to the candidate figure above, which comes from a
+            # direct API call in CI.
             lines.append("")
             lines.append("**Sample**")
             lines.append("")
             lines.append(f"- Drawn from {accepted} usable production deliveries.")
+            # Written by enrich only when the IPFS fetch lost rows. Without it
+            # the pool size and the scored count cannot be reconciled, and the
+            # gap has no other bucket to attribute it to.
+            lost = filter_stats.get("enrichment_failed", 0)
+            if lost:
+                lines.append(
+                    f"- {lost} sampled row(s) dropped during IPFS enrichment "
+                    "(no delivery hash, or the prompt could not be fetched)."
+                )
             if not_valid:
                 lines.append(
                     f"- {not_valid} of {denom} production deliveries were left "
@@ -419,7 +465,7 @@ def format_report(
         "",
         _metrics_table(baseline, candidate, _src),
         "",
-        f"*Computed on {candidate.get('n', 0)} markets where both arms "
+        f"*Computed on {candidate['n']} markets where both arms "
         "produced a usable prediction.*",
         "",
     ]
@@ -567,6 +613,15 @@ def main() -> None:
         print("ERROR: No baseline rows found", file=sys.stderr)
         sys.exit(1)
 
+    # An empty candidate file is reachable: the replay step can die after
+    # opening candidate.jsonl but before flushing a row, while baseline.jsonl
+    # is already complete. Without this it renders a clean green verdict --
+    # "no usable prediction on 0 of 0 markets" with a tick -- which reads as a
+    # healthy candidate when in fact nothing was measured.
+    if not candidate_rows:
+        print("ERROR: No candidate rows found", file=sys.stderr)
+        sys.exit(1)
+
     # prompt_replay writes candidate_failures.jsonl next to candidate.jsonl
     # whenever any candidate failed to parse. Missing file = zero failures.
     failures_path = args.candidate.parent / "candidate_failures.jsonl"
@@ -576,8 +631,18 @@ def main() -> None:
     # was present at enrich time. Missing file = no stats (older pipelines).
     filter_stats = _load_filter_stats(args.candidate)
 
-    baseline_metrics = compute_metrics(baseline_rows)
-    candidate_metrics = compute_metrics(candidate_rows)
+    # Score both arms over the SAME markets, or the headline delta rewards the
+    # candidate for failing: see :func:`pair_arms`.
+    paired_baseline, paired_candidate = pair_arms(baseline_rows, candidate_rows)
+    baseline_metrics = compute_metrics(paired_baseline)
+    candidate_metrics = compute_metrics(paired_candidate)
+    # Parse reliability describes the WHOLE candidate arm -- it is the count of
+    # markets the candidate could not answer, which is exactly what pairing
+    # removes. Computed on the paired subset it would report "0 of N" forever,
+    # deleting the signal the health block exists to carry.
+    candidate_metrics["parse_reliability"] = compute_metrics(candidate_rows)[
+        "parse_reliability"
+    ]
 
     # Infer tool from data
     tool = baseline_rows[0].get("tool_name", "unknown")

@@ -696,16 +696,21 @@ def _drop_reason_detail(dropped: dict[str, int]) -> str:
     turns that into a next step.
 
     :param dropped: per-reason drop counts from :func:`_load_tournament_rows`.
-    :return: a parenthesised detail clause, or "" when nothing was dropped
-        (i.e. the arm held no candidate rows at all, which the caller's own
-        wording already covers).
+    :return: a parenthesised detail clause, or "" when ``dropped`` is empty
+        because the tournament files were absent -- the caller's own text
+        already conveys that state. (An all-zero ``dropped`` cannot reach a
+        caller: :func:`_load_tournament_rows` returns a bare ``{}`` for the
+        missing-files case and otherwise only omits counts it never saw.)
     """
     hit = sorted(
         ((k, v) for k, v in dropped.items() if v), key=lambda kv: (-kv[1], kv[0])
     )
     if not hit:
         return ""
-    shown = ", ".join(f"{k}={v}" for k, v in hit[:3])
+    # Every reason is listed, not the top few: each `k=v` is a handful of
+    # characters, and a truncated list beside a total summed over ALL of them
+    # reads as an arithmetic error ("17 dropped: a=10, b=5, c=1").
+    shown = ", ".join(f"{k}={v}" for k, v in hit)
     return f" ({sum(v for _, v in hit)} tournament row(s) dropped: {shown})"
 
 
@@ -979,15 +984,11 @@ def enrich(
                     "source": "tournament",
                     "accepted": len(fallback_rows),
                     "rejected": {k: v for k, v in fallback_dropped.items() if v},
-                    # Top-level `no_row_id` means "rows we KEPT that lacked a
-                    # row_id" (production semantics — they bypass dedup, so
-                    # they are a warning about kept data). The tournament arm
-                    # DROPS such rows instead, so its count is a drop reason
-                    # and already sits in `rejected` above; this diagnostic is
-                    # 0 by construction. Echoing the drop count here made one
-                    # set of rows readable as both kept-and-suspect and
-                    # dropped, and double-counted them for anything summing
-                    # the two.
+                    # The tournament arm DROPS rows that lack a row_id, so that
+                    # count belongs in `rejected` above. This top-level key
+                    # means "rows we KEPT despite having no row_id" (production
+                    # semantics -- they bypass dedup), which is 0 by
+                    # construction here.
                     "no_row_id": 0,
                     "production_attempt": {
                         "accepted": production_accepted,
@@ -1069,6 +1070,22 @@ def enrich(
             f"tournament arm has none either{_drop_reason_detail(fallback_dropped)}"
         )
     _log_platform_breakdown(enriched)
+
+    # Rows lost between the sample and here (no delivery hash, unfetchable
+    # prompt, unparseable components) leave on bare `continue`s with no bucket,
+    # so they are the one shortfall a reader cannot attribute when reconciling
+    # the pool size against the scored count. The sidecar was written before
+    # the fetch ran, so record the loss now rather than leaving it only in a
+    # log line the PR comment never sees.
+    if len(enriched) < len(rows):
+        stats = json.loads(stats_path.read_text(encoding="utf-8"))
+        stats["enrichment_failed"] = len(rows) - len(enriched)
+        stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        log.info(
+            "%d row(s) lost during IPFS enrichment; recorded in %s",
+            len(rows) - len(enriched),
+            stats_path,
+        )
 
     # Write
     _write_replay_rows(output, enriched)
@@ -1979,10 +1996,13 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         ``benchmark.tools.TOOL_REGISTRY``; ``--candidate-tool`` names a tool
         that is not either; a vLLM candidate is paired with a non-superforcaster
         baseline (it renders its prompt from that family's extracted sources);
-        or the candidate is a two-stage reasoning tool while the rows carry no
-        ``extracted_reasoning`` (tournament-sourced rows never do). Raised
-        rather than returned so a mis-specified benchmark fails the job instead
-        of publishing a verdict computed from nothing.
+        the candidate is a two-stage reasoning tool while the rows carry no
+        ``extracted_reasoning`` (tournament-sourced rows never do); or the
+        candidate's template asks for a placeholder the enriched rows do not
+        carry (via :func:`_assert_prompt_is_replayable`, which names the
+        missing field -- the most useful of the five when a schema regression
+        is the cause). Raised rather than returned so a mis-specified benchmark
+        fails the job instead of publishing a verdict computed from nothing.
     """
     # Load enriched dataset first to detect tool
     sampled: list[dict[str, Any]] = load_jsonl(dataset)

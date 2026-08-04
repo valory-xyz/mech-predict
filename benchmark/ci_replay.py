@@ -84,18 +84,30 @@ def pair_arms(
     Pairing is positional: ``replay()`` writes exactly one baseline and one
     candidate row per sampled market, in a single loop, with no path that emits
     one without the other. ``row_id`` looks like the natural join key but
-    cannot be used -- it is salted with the arm name AND with each arm's own
-    ``model`` (production's for the baseline, the replay model for the
-    candidate), so the two arms never share one.
+    cannot be used -- both arms hash the same payload and differ only in the
+    ``"baseline"`` / ``"candidate"`` prefix, so they never share a row_id and
+    joining on it would silently match nothing.
 
     :param baseline_rows: rows from ``baseline.jsonl``.
     :param candidate_rows: rows from ``candidate.jsonl``.
     :return: ``(baseline subset, candidate subset)``, index-aligned and
         restricted to markets scored by both.
-    :raises SystemExit: when the two arms disagree on the market at some
-        position. Comparing metrics computed over different markets is a worse
-        failure than not reporting, so this refuses rather than degrades.
+    :raises SystemExit: when the arms have different lengths, or disagree on
+        the market at some position. Comparing metrics computed over different
+        markets is a worse failure than not reporting, so this refuses rather
+        than degrades.
     """
+    # `zip` stops at the shorter arm, which would silently drop the baseline
+    # tail and score a truncated run as if it were complete. That is reachable
+    # by the same crash the empty-candidate guard in main() exists for: a
+    # replay dying mid-run flushes SOME candidate rows, not none, and a
+    # partial run must not render a plausible verdict.
+    if len(baseline_rows) != len(candidate_rows):
+        raise SystemExit(
+            f"baseline and candidate arms have different lengths "
+            f"({len(baseline_rows)} vs {len(candidate_rows)}); one arm was "
+            "truncated mid-run. Refusing to compare."
+        )
     paired: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for base, cand in zip(baseline_rows, candidate_rows):
         if base.get("question_text") != cand.get("question_text"):
@@ -640,9 +652,7 @@ def main() -> None:
     # markets the candidate could not answer, which is exactly what pairing
     # removes. Computed on the paired subset it would report "0 of N" forever,
     # deleting the signal the health block exists to carry.
-    candidate_metrics["parse_reliability"] = compute_metrics(candidate_rows)[
-        "parse_reliability"
-    ]
+    candidate_metrics["parse_reliability"] = _compute_parse_reliability(candidate_rows)
 
     # Infer tool from data
     tool = baseline_rows[0].get("tool_name", "unknown")

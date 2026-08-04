@@ -707,9 +707,6 @@ def _drop_reason_detail(dropped: dict[str, int]) -> str:
     )
     if not hit:
         return ""
-    # Every reason is listed, not the top few: each `k=v` is a handful of
-    # characters, and a truncated list beside a total summed over ALL of them
-    # reads as an arithmetic error ("17 dropped: a=10, b=5, c=1").
     shown = ", ".join(f"{k}={v}" for k, v in hit)
     return f" ({sum(v for _, v in hit)} tournament row(s) dropped: {shown})"
 
@@ -937,18 +934,15 @@ def enrich(
     # an invisible assumption.
     stats_path = output.with_name(output.name + ".filter_stats.json")
     stats_path.parent.mkdir(parents=True, exist_ok=True)
-    stats_path.write_text(
-        json.dumps(
-            {
-                "source": "production",
-                "accepted": len(rows),
-                "rejected": rejected,
-                "no_row_id": no_row_id,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    # Kept in memory so the post-enrichment update below can rewrite the file
+    # from this dict rather than reading its own output back.
+    production_stats: dict[str, Any] = {
+        "source": "production",
+        "accepted": len(rows),
+        "rejected": rejected,
+        "no_row_id": no_row_id,
+    }
+    stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
     log.info("Wrote filter stats: %s", stats_path)
 
     scope = f" [platform={platform_filter}]" if platform_filter else ""
@@ -1078,9 +1072,11 @@ def enrich(
     # the fetch ran, so record the loss now rather than leaving it only in a
     # log line the PR comment never sees.
     if len(enriched) < len(rows):
-        stats = json.loads(stats_path.read_text(encoding="utf-8"))
-        stats["enrichment_failed"] = len(rows) - len(enriched)
-        stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        # Rebuilt from the in-memory dict, not read back from disk: a deleted
+        # or truncated sidecar would otherwise raise here and throw away rows
+        # that were already fetched and enriched.
+        production_stats["enrichment_failed"] = len(rows) - len(enriched)
+        stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
         log.info(
             "%d row(s) lost during IPFS enrichment; recorded in %s",
             len(rows) - len(enriched),

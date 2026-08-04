@@ -21,6 +21,18 @@ from benchmark.ci_replay import (
 )
 
 
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    """Write rows as JSONL. Same construction as the sibling test module.
+
+    :param path: destination.
+    :param rows: rows to serialise.
+    """
+    path.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _row(status: str = "valid", p_yes: float | None = 0.6) -> dict:
     return {
         "platform": "omen",
@@ -433,7 +445,7 @@ class TestFormatReportFooter:
         assert "[@LOCKhart07]" not in footer
 
     def test_footer_order_deliveries_seed_triggered_by(self) -> None:
-        """Footer parts stay in the existing order: deliveries → seed → triggered-by."""
+        """Footer parts stay in the existing order: scored → seed → triggered-by."""
         report = self._report(
             seed="1337",
             triggered_by="LOCKhart07",
@@ -578,13 +590,33 @@ class TestArmPairing:
         # Health still reports against the FULL arm, not the paired subset.
         assert "no usable prediction on 3 of 100 markets" in report
 
+    def test_truncated_arm_refuses_to_render(self) -> None:
+        """A partial candidate flush must fail, not score a truncated pair.
+
+        `zip` stops at the shorter arm, so without this a replay that died
+        after writing some — but not all — candidate rows would silently drop
+        the baseline tail and publish a plausible verdict over whatever
+        happened to be flushed. The empty-candidate guard in `main()` only
+        catches the zero case; this is the 1..n-1 case.
+        """
+        base, cand = _arm_pair(10, candidate_fails_on=set())
+        with pytest.raises(SystemExit) as exc:
+            pair_arms(base, cand[:4])
+        msg = str(exc.value)
+        assert "different lengths" in msg
+        assert "10 vs 4" in msg
+        assert "Refusing to compare" in msg
+
     def test_misaligned_arms_refuse_to_render(self) -> None:
         """Different markets at the same position must fail loudly, not silently."""
         base, cand = _arm_pair(3, candidate_fails_on=set())
         cand[1]["question_text"] = "a completely different market"
         with pytest.raises(SystemExit) as exc:
             pair_arms(base, cand)
-        assert "misaligned" in str(exc.value)
+        msg = str(exc.value)
+        assert "misaligned" in msg
+        assert "Refusing to compare" in msg
+        assert "a completely different market" in msg, "name the conflict"
 
 
 class TestSampleBlockNegativeCases:
@@ -708,15 +740,6 @@ class TestTournamentRenderingCoverage:
 class TestMainRowGuards:
     """`main()` must refuse to render a verdict from a missing arm."""
 
-    @staticmethod
-    def _write(path: Path, rows: list[dict]) -> None:
-        """Write JSONL rows.
-
-        :param path: destination.
-        :param rows: rows to serialise.
-        """
-        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-
     def _run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cand: list[dict]
     ) -> int:
@@ -729,11 +752,11 @@ class TestMainRowGuards:
         """
 
         base_p, cand_p = tmp_path / "baseline.jsonl", tmp_path / "candidate.jsonl"
-        self._write(
+        _write_jsonl(
             base_p,
             [{**_row("valid"), "question_text": f"Q{i}?"} for i in range(3)],
         )
-        self._write(cand_p, cand)
+        _write_jsonl(cand_p, cand)
         monkeypatch.setattr(
             sys,
             "argv",
@@ -808,8 +831,8 @@ class TestMainRowGuards:
         """
         base, cand = _arm_pair(100, candidate_fails_on={0, 1, 2})
         base_p, cand_p = tmp_path / "baseline.jsonl", tmp_path / "candidate.jsonl"
-        self._write(base_p, base)
-        self._write(cand_p, cand)
+        _write_jsonl(base_p, base)
+        _write_jsonl(cand_p, cand)
 
         monkeypatch.setattr(
             sys,
@@ -819,7 +842,21 @@ class TestMainRowGuards:
         ci_replay.main()
         out = capsys.readouterr().out
         assert "Computed on 97 markets" in out, "main() scored the arms unpaired"
-        # Brier row: candidate must be the WORSE number once paired.
-        brier_row = next(line for line in out.splitlines() if "Brier score" in line)
-        b_val, c_val = (float(x) for x in brier_row.split("|")[2:4])
+        # Health must still describe the FULL arm. Sourcing it from the
+        # paired subset would read "0 of 97" and delete the signal.
+        assert "no usable prediction on 3 of 100 markets" in out
+        # Locate the Brier columns via the table HEADER rather than fixed
+        # offsets: hardcoding them makes an added column raise ValueError
+        # (a table-formatting error) instead of failing as a regression.
+        lines = out.splitlines()
+        header = next(line for line in lines if "| Metric" in line)
+        cols = [c.strip() for c in header.split("|")]
+        # Match by PREFIX: the baseline label carries the row source
+        # ("Baseline (prod)" / "Baseline (tourn)") and the candidate is
+        # "Candidate (PR)".
+        b_i = next(i for i, c in enumerate(cols) if c.startswith("Baseline"))
+        c_i = next(i for i, c in enumerate(cols) if c.startswith("Candidate"))
+        brier_row = next(line for line in lines if "Brier score" in line)
+        cells = [c.strip() for c in brier_row.split("|")]
+        b_val, c_val = float(cells[b_i]), float(cells[c_i])
         assert c_val > b_val, f"paired candidate must be worse, got {brier_row}"

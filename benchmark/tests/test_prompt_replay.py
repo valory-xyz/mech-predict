@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,7 @@ from benchmark.prompt_replay import (
     _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
+    _drop_reason_detail,
     _extract_factual_research_prompt_components,
     _get_structured_output_schema,
     _load_and_filter_rows,
@@ -25,7 +27,9 @@ from benchmark.prompt_replay import (
     _log_replay_summary,
     _parse_vllm_candidate,
     _prepare_output_dir,
+    _render_tournament_evidence,
     _replay_vllm_candidate,
+    _write_replay_rows,
     enrich,
     extract_prompt_components,
     main,
@@ -286,6 +290,70 @@ class TestEnrichZeroRows:
         assert "platform=polymarket" in str(exc.value)
         assert not output.exists()
         assert (tmp_path / "out" / "dataset.jsonl.filter_stats.json").exists()
+
+
+class TestStratifiedSampleBudget:
+    """`--sample N` must return exactly N rows."""
+
+    @staticmethod
+    def _pool(n: int, pool_seed: int = 1) -> list:
+        """A pool spanning every (outcome, brier-bucket) stratum.
+
+        :param n: how many rows.
+        :param pool_seed: seed for the pool SHAPE (stratum sizes), which is
+            what decides whether the proportional pass rounds up. Varying it
+            is what makes the budget assertion bite above the smallest
+            budgets -- one fixed shape only overshoots at budget=10.
+        :return: rows.
+        """
+        rng = random.Random(pool_seed)
+        return [
+            {
+                "platform": "polymarket",
+                "final_outcome": rng.random() < 0.5,
+                "p_yes": round(rng.random(), 3),
+                "row_id": f"r{i}",
+            }
+            for i in range(n)
+        ]
+
+    @pytest.mark.parametrize("budget", [10, 50, 100, 300, 500])
+    @pytest.mark.parametrize("pool_seed", range(8))
+    def test_returns_exactly_the_budget(self, budget: int, pool_seed: int) -> None:
+        """Neither the per-stratum floor nor round() may overshoot.
+
+        Both could: the floor gives every non-empty stratum a row (so a budget
+        below the stratum count overshot), and the proportional pass rounds.
+        Only the deficit direction was corrected, so `--sample 300` returned
+        301 and `--sample 10` returned 12. Budgets BELOW the stratum count are
+        excluded here: that overshoot is deliberate and pinned separately.
+
+        The pool SHAPE, not the budget, decides whether rounding overshoots --
+        against a single fixed pool only `budget=10` regressed, so the other
+        four budgets passed with the fix removed and the parametrisation
+        promised coverage it did not deliver. Varying the pool seed pins the
+        fix at every budget.
+
+        :param budget: requested sample size.
+        :param pool_seed: seed for the pool shape.
+        """
+        pool = self._pool(2000, pool_seed)
+        assert len(stratified_sample(pool, budget, seed=42)) == budget
+
+    def test_budget_above_pool_returns_the_pool(self) -> None:
+        """Asking for more than exists yields everything, not an error."""
+        assert len(stratified_sample(self._pool(120), 500, seed=42)) == 120
+
+    def test_budget_below_stratum_count_keeps_every_stratum(self) -> None:
+        """Fewer budget than strata is the ONE case allowed to exceed N.
+
+        Covering every (outcome, brier-bucket) stratum matters more than the
+        exact count there -- dropping strata biases the sample. Pinned by
+        ``TestStratifiedSampleSinglePlatform.test_per_stratum_floor_can_exceed_budget``;
+        this test exists so the budget fix is not later mistaken for licence
+        to break that trade.
+        """
+        assert len(stratified_sample(self._pool(600), 5, seed=42)) > 5
 
 
 class TestStratifiedSampleSinglePlatform:
@@ -1712,3 +1780,439 @@ class TestTournamentFallback:
         assert not _load_tournament_rows(
             "t", "polymarket", tmp_path / "no.jsonl", tmp_path / "no2.jsonl"
         )[0]
+
+
+class TestTournamentArmReportingFixes:
+    """Provenance/diagnostic behaviours of the tournament arm.
+
+    Every assertion here pins a fix whose visible effect is a string in a log
+    line, a key in the sidecar, or which writer got called -- none of which
+    the rest of the suite constrains. Without them each fix reverts silently
+    with the suite still green.
+    """
+
+    @staticmethod
+    def _write(path: Path, rows: list[dict]) -> None:
+        """Write JSONL rows to path.
+
+        :param path: destination.
+        :param rows: rows to serialise.
+        """
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    def _tournament_pair(self, tmp_path: Path, n: int = 1) -> tuple[Path, Path]:
+        """Build a minimal scored/predictions pair the fallback can consume.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param n: how many replayable rows to emit.
+        :return: (scored path, predictions path).
+        """
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": f"t{i}",
+                    "tool_name": "superforcaster",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                }
+                for i in range(n)
+            ],
+        )
+        self._write(
+            preds, [{"row_id": f"t{i}", "source_content": "evidence"} for i in range(n)]
+        )
+        return scored, preds
+
+    def test_fallback_reason_counts_sampled_rows_not_the_whole_pool(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """``fallback_reason`` must name the rows actually handed to IPFS.
+
+        Sampling happens before enrichment, so a 6-row pool cut to 2 attempts
+        exactly 2 fetches. Reporting the pre-sample 6 reads as "all 6 failed"
+        -- and this string reaches the PR comment verbatim.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(
+            log_path,
+            [
+                {
+                    **_row(deliver_id=f"0x{i}", platform="polymarket"),
+                    "p_yes": 0.6,
+                }
+                for i in range(6)
+            ],
+        )
+        scored, preds = self._tournament_pair(tmp_path)
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(
+            log_path,
+            "superforcaster",
+            output,
+            sample_per_platform=2,
+            tournament_scored=scored,
+            tournament_predictions=preds,
+        )
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["fallback_reason"].startswith(
+            "2 production rows"
+        ), f"must report the sampled count, got {stats['fallback_reason']!r}"
+        assert (
+            stats["production_attempt"]["accepted"] == 6
+        ), "the full pool size must stay available under production_attempt"
+
+    def test_tournament_sidecar_does_not_double_write_no_row_id(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A dropped-for-no-row_id row is a rejection, not a kept-row warning.
+
+        Top-level ``no_row_id`` means "rows we KEPT that lacked one". The
+        tournament arm drops them, so the count belongs in ``rejected`` only;
+        emitting it in both places double-counts the same rows.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row()])
+        scored, preds = self._tournament_pair(tmp_path)
+        with open(scored, "a", encoding="utf-8") as handle:
+            for _ in range(2):
+                handle.write(
+                    json.dumps(
+                        {
+                            "tool_name": "superforcaster",
+                            "platform": "polymarket",
+                            "question_text": "Q?",
+                            "p_yes": 0.6,
+                            "p_no": 0.4,
+                            "final_outcome": True,
+                        }
+                    )
+                    + "\n"
+                )
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(pr, "_fetch_and_extract_prompts", lambda *a, **k: [])
+
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(
+            log_path,
+            "superforcaster",
+            output,
+            tournament_scored=scored,
+            tournament_predictions=preds,
+        )
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["rejected"]["no_row_id"] == 2, "the drop must be recorded once"
+        assert (
+            stats["no_row_id"] == 0
+        ), "the kept-row diagnostic is 0 by construction on the tournament arm"
+
+    def test_exit_message_names_the_dominant_drop_reason(self, tmp_path: Path) -> None:
+        """Both arms empty must say WHY, not just that they were.
+
+        A roster/name mismatch (every row ``wrong_tool``) and a genuinely
+        absent tool are indistinguishable without it.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(tool="something-else")])
+        scored = tmp_path / "s.jsonl"
+        preds = tmp_path / "p.jsonl"
+        self._write(
+            scored,
+            [
+                {
+                    "row_id": f"t{i}",
+                    "tool_name": "a-different-tool",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.6,
+                    "p_no": 0.4,
+                    "final_outcome": True,
+                }
+                for i in range(3)
+            ],
+        )
+        self._write(preds, [{"row_id": "t0", "source_content": "e"}])
+
+        with pytest.raises(SystemExit) as exc:
+            pr.enrich(
+                log_path,
+                "superforcaster",
+                tmp_path / "out" / "dataset.jsonl",
+                tournament_scored=scored,
+                tournament_predictions=preds,
+            )
+        assert "wrong_tool=3" in str(
+            exc.value
+        ), f"must name the dominant drop reason, got {exc.value!r}"
+
+    def test_production_write_goes_through_the_shared_writer(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """The production path must use ``_write_replay_rows`` like the fallback.
+
+        A second inline writer is how the two paths' on-disk bytes drift apart
+        (``ensure_ascii``, trailing newline) without any test noticing.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        calls: list[int] = []
+        real = _write_replay_rows
+
+        def _spy(output: Path, rows: list) -> None:
+            """Record the call, then delegate.
+
+            :param output: destination path.
+            :param rows: rows to write.
+            """
+            calls.append(len(rows))
+            real(output, rows)
+
+        monkeypatch.setattr(pr, "_write_replay_rows", _spy)
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row()])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        assert calls == [1], "production must write via the shared writer"
+
+    def test_unrenderable_evidence_logs_the_exception(self, caplog: Any) -> None:
+        """The drop warning must carry the traceback that caused it.
+
+        The except clause spans five exception types; without ``exc_info`` a
+        whole enrich run can drop every row and leave no way to tell which of
+        the five fired, or where.
+
+        :param caplog: pytest caplog fixture.
+        """
+        with caplog.at_level("WARNING"):
+            result = _render_tournament_evidence(
+                "superforcaster",
+                # A list of strings breaks `item.get(...)` inside the formatter.
+                {"mode": "x", "serper_response": {"organic": ["not-a-dict"]}},
+            )
+        assert result is None
+        drops = [r for r in caplog.records if "cannot render" in r.getMessage()]
+        assert drops, "the drop must be logged"
+        assert drops[0].exc_info is not None, "the warning must carry the traceback"
+
+
+class TestPrefilterBreakdownVocabulary:
+    """The Pre-filter breakdown must use the vocabulary of its own source."""
+
+    def _summary(self, tmp_path: Path, caplog: Any, stats: dict) -> str:
+        """Run ``_log_replay_summary`` with ``stats`` and return the log text.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        :param stats: the sidecar dict to render.
+        :return: captured log text.
+        """
+        candidate = tmp_path / "candidate.jsonl"
+        _write_jsonl(candidate, [{"p_yes": 0.8, "p_no": 0.2, "final_outcome": True}])
+        with caplog.at_level("INFO"):
+            _log_replay_summary(
+                sampled=[
+                    {"p_yes": 0.7, "p_no": 0.3, "final_outcome": True, "tool_name": "x"}
+                ],
+                candidate_path=candidate,
+                baseline_brier_sum=0.1,
+                candidate_brier_sum=0.2,
+                total=1,
+                n_scored=1,
+                baseline_path=candidate,
+                status_counts={
+                    "valid": 1,
+                    "missing_fields": 0,
+                    "malformed": 0,
+                    "error": 0,
+                },
+                filter_stats=stats,
+            )
+        return caplog.text
+
+    def test_tournament_breakdown_uses_tournament_reasons(
+        self, tmp_path: Path, caplog: Any
+    ) -> None:
+        """Tournament drops must render as themselves, not as zeroed scoping buckets.
+
+        Enumerating SCOPING_BUCKETS on a tournament sidecar printed six
+        production buckets at zero beside a non-zero total -- a line that
+        contradicts itself.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        text = self._summary(
+            tmp_path,
+            caplog,
+            {
+                "source": "tournament",
+                "accepted": 1,
+                "rejected": {"no_evidence": 950, "unrenderable": 3},
+                "no_row_id": 0,
+                "production_attempt": {"accepted": 0},
+                "fallback_reason": "0 production rows",
+            },
+        )
+        assert "Rejected: 953" in text
+        assert "no_evidence=950" in text
+        assert "unrenderable=3" in text
+        assert (
+            "duplicate=0" not in text
+        ), "production buckets must not be printed for a tournament sidecar"
+
+    def test_production_breakdown_still_enumerates_every_bucket(
+        self, tmp_path: Path, caplog: Any
+    ) -> None:
+        """Production keeps enumerating zero buckets: a vanished bucket is a signal.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        text = self._summary(
+            tmp_path,
+            caplog,
+            {
+                "source": "production",
+                "accepted": 1,
+                "rejected": {"duplicate": 0, "wrong_tool": 7, "not_valid_parse": 2},
+                "no_row_id": 0,
+            },
+        )
+        assert "duplicate=0" in text
+        assert "wrong_tool=7" in text
+        assert "not_valid_parse=2" in text
+
+
+class TestEnrichmentLossRecorded:
+    """Rows lost to IPFS enrichment must be attributable, not silent."""
+
+    def test_sidecar_records_the_enrichment_shortfall(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """Rows dropped between the sample and the write land in the sidecar.
+
+        They leave on bare ``continue``s with no bucket, so without this the
+        pool size and the scored count cannot be reconciled by a reader.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(deliver_id=f"0x{i}") for i in range(5)])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        # 5 rows in, only 2 survive enrichment.
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows[:2]
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert stats["enrichment_failed"] == 3
+        assert stats["accepted"] == 5, "the pool count must stay as-is"
+
+    def test_no_key_when_nothing_was_lost(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A clean enrichment writes no shortfall key.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        log_path = tmp_path / "log.jsonl"
+        _write_jsonl(log_path, [_row(deliver_id=f"0x{i}") for i in range(3)])
+        monkeypatch.setattr(pr, "_fetch_ipfs_hashes_for_deliver_ids", lambda *a: {})
+        monkeypatch.setattr(
+            pr,
+            "_fetch_and_extract_prompts",
+            lambda rows, *a, **k: [
+                {
+                    **r,
+                    "extracted_user_prompt": "q",
+                    "extracted_additional_information": "e",
+                }
+                for r in rows
+            ],
+        )
+        output = tmp_path / "out" / "dataset.jsonl"
+        pr.enrich(log_path, "superforcaster", output)
+        stats = json.loads(
+            output.with_name(output.name + ".filter_stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert "enrichment_failed" not in stats
+
+
+class TestDropReasonDetail:
+    """The failure clause must be arithmetically self-consistent."""
+
+    def test_all_drop_reasons_listed(self) -> None:
+        """Every reason is shown, so the total always sums to the visible list.
+
+        Showing only the top 3 beside a total summed over ALL reasons reads as
+        an arithmetic error to anyone who adds them up.
+        """
+        detail = _drop_reason_detail(
+            {"no_evidence": 10, "bad_json": 5, "wrong_tool": 1, "duplicate": 1}
+        )
+        assert detail.startswith(" (17 tournament row(s) dropped: ")
+        for reason in ("no_evidence=10", "bad_json=5", "wrong_tool=1", "duplicate=1"):
+            assert reason in detail, f"{reason} missing"
+        # The listed counts must reconcile to the stated total.
+        shown = detail.split(": ", 1)[1].rstrip(")")
+        assert sum(int(p.split("=")[1]) for p in shown.split(", ")) == 17
+
+    def test_empty_when_files_were_absent(self) -> None:
+        """An empty dict means the tournament files were absent."""
+        assert _drop_reason_detail({}) == ""

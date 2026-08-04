@@ -116,6 +116,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v5 -- Issue #422 H1 fix: utterance-question
+    # detection at prompt-construction stage (gate-visible). Historical utterance
+    # records (TYPE B) were misclassified as TYPE A, producing overconfident YES on
+    # "Will X say Y at event Z?" questions (Issue #422: 9/10 high-p_yes utterance
+    # predictions resolved NO; current-CID Brier=0.3543 vs non-utterance 0.0635).
+    # Fix: UTTERANCE_QUESTION_RE detection in run() + UTTERANCE_QUESTION_ADDENDUM
+    # injected into prompt, anchoring base rate at 20-50% when TYPE A absent.
+    "superforcaster-polymarket-v5": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v5"
+            ".superforcaster_polymarket_v5"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

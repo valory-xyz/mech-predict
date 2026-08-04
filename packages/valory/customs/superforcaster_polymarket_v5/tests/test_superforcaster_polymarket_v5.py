@@ -28,9 +28,9 @@ import requests
 from pydantic import ValidationError
 
 from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+    PredictionResult,
     UTTERANCE_QUESTION_ADDENDUM,
     UTTERANCE_QUESTION_RE,
-    PredictionResult,
     _parse_completion,
     run,
 )
@@ -62,7 +62,9 @@ FAKE_PREDICTION = PredictionResult(
 )
 
 PROMPT = "Will X happen? p_yes and p_no?"
-UTTERANCE_PROMPT = 'question "Will Trump say Fake News during Fox appearance?" and the `yes` answer'
+UTTERANCE_PROMPT = (
+    'question "Will Trump say Fake News during Fox appearance?" and the `yes` answer'
+)
 
 
 def _make_mock_api_keys() -> MagicMock:

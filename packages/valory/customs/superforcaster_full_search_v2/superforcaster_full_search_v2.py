@@ -193,6 +193,7 @@ def with_key_rotation(func: Callable) -> Callable:
                         "confidence": 0.0,
                         "info_utility": 0.0,
                         "error": str(e),
+                        "error_type": type(e).__name__,
                     }
                 )
                 return error_json, "", None, None, None, api_keys
@@ -210,10 +211,17 @@ class OpenAIClientManager:
         self.api_key = api_key
         self._client: Optional["openai.OpenAI"] = None
 
-    def __enter__(self) -> "openai.OpenAI":
-        """Initializes and returns LLM client."""
-        self._client = openai.OpenAI(api_key=self.api_key)
+    @property
+    def client(self) -> "openai.OpenAI":
+        """Return the underlying OpenAI client."""
+        if self._client is None:
+            raise RuntimeError("OpenAIClientManager not entered")
         return self._client
+
+    def __enter__(self) -> "OpenAIClientManager":
+        """Initializes the LLM client and returns self."""
+        self._client = openai.OpenAI(api_key=self.api_key)
+        return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
         """Closes the LLM client"""
@@ -437,7 +445,7 @@ def _parse_completion(
             attempt += 1
             last_error = e
     raise RuntimeError(
-        f"Failed to generate prediction after retries: {last_error}"
+        f"Failed to generate prediction after {retries} attempts: {last_error}"
     ) from last_error
 
 
@@ -740,7 +748,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         print("Getting structured prediction response...")
         prediction: PredictionResult
         prediction, counter_callback = _parse_completion(
-            client=llm_client,
+            client=llm_client.client,
             model=model,
             messages=messages,
             response_format=PredictionResult,

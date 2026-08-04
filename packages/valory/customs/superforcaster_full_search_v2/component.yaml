@@ -6,16 +6,16 @@ description: A tool for making binary predictions on markets. Sibling of superfo
   that adds OpenAI Structured Outputs (Pydantic PredictionResult via beta.chat.completions.parse)
   and a mandatory word_mention_check reasoning field. Fetches full search-result pages
   (top organic results) and extracts the main article text via readability + markdownify.
-  The word_mention_check field forces the model to apply event-specific base rates and
-  discount circular prediction-market evidence before committing to p_yes, targeting
+  The word_mention_check field forces the model to apply event-specific base rates
+  and discount circular prediction-market evidence before committing to p_yes, targeting
   systematic overconfidence on word-mention markets.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
-  __init__.py: bafybeigshithxsxx7snbewu4vkyvq34pifbjhugto3yzmrufqt7e72nc3e
-  superforcaster_full_search_v2.py: bafybeiaufsrtjvafvtqrrs62qoqihaplmgpdqqope6br3hh6ky6w4vi5wq
-  tests/__init__.py: bafybeicjjiva4xwunuufy65xbzx3lzmyfb4p2je4qqq7f3b7el6ipkqdbu
-  tests/test_superforcaster_full_search_v2.py: bafybeihd3vlopq4dba5wbcvwddyw3a6eilyv2rafllznvhi2xtdfmzcdxm
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
+  superforcaster_full_search_v2.py: bafybeifpbib4n6767fgo6kchml4dllzptwrjvka4sm4ufji6ckboqazzji
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster_full_search_v2.py: bafybeidoo3v3utm6azklqlee5aabysplidji4xvq6x2334l2pqhtc2fapq
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_full_search_v2.py
 callable: run

@@ -12,7 +12,7 @@ fingerprint:
   __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
   superforcaster_polymarket_v5.py: bafybeiavfxyw4iyr4r5z3o2dln45k4ggsquedkwt2o4cmfumhniawrjwua
   tests/__init__.py: bafybeigf7jeqv5jjnfrky3ecxnsh2o63u77r5jpxhfix5pzqvskpcnrbd4
-  tests/test_superforcaster_polymarket_v5.py: bafybeicy3m4wblvfmsdlmh3yxywqftlvpmkt7i4sq6ogvlwd3f7xwduzae
+  tests/test_superforcaster_polymarket_v5.py: bafybeihf7l56vxoyzoktndq5h2j7ekjh34sukkyqwg7iltiaavph65v67m
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_polymarket_v5.py
 callable: run

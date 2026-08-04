@@ -164,7 +164,7 @@ class TestPredictionResultSchema:
             )
 
     def test_word_mention_check_field_present(self) -> None:
-        """PredictionResult must have a word_mention_check field (the structural fix)."""
+        """Verify PredictionResult has a word_mention_check field (the structural fix)."""
         assert "word_mention_check" in PredictionResult.model_fields
 
     def test_parse_completion_takes_client_and_schema(self) -> None:
@@ -195,9 +195,9 @@ class TestPredictionResultSchema:
         fields = list(PredictionResult.model_fields)
         wm_idx = fields.index("word_mention_check")
         p_yes_idx = fields.index("p_yes")
-        assert wm_idx < p_yes_idx, (
-            f"word_mention_check (idx {wm_idx}) must precede p_yes (idx {p_yes_idx})"
-        )
+        assert (
+            wm_idx < p_yes_idx
+        ), f"word_mention_check (idx {wm_idx}) must precede p_yes (idx {p_yes_idx})"
 
 
 class TestFailurePathContract:

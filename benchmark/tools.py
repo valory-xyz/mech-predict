@@ -116,6 +116,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_full_search_v2 -- adds structured outputs (Pydantic
+    # PredictionResult via beta.chat.completions.parse) and a mandatory
+    # word-mention market screen field (word_mention_check) to fix systematic
+    # overconfidence on word-mention markets by forcing event-specific base-rate
+    # reasoning before committing to p_yes. Parent: superforcaster_full_search.
+    "superforcaster_full_search_v2": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_full_search_v2"
+            ".superforcaster_full_search_v2"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

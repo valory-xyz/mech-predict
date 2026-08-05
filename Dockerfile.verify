@@ -42,9 +42,18 @@ WORKDIR /app
 # the entrypoint runs and puts /app/scripts on sys.path[0].
 ENV PYTHONPATH=/app
 
+# Non-root runtime — image writes to /reports which infra mounts,
+# never to /app. Create the user BEFORE ``uv sync`` so the virtualenv
+# and every file layered on top are owned by ``verifier`` at build
+# time, avoiding a redundant recursive chown of the (large) .venv tree
+# at the end of the build.
+RUN useradd --system --create-home --uid 1001 verifier \
+    && chown verifier:verifier /app
+USER verifier
+
 # Layer dep install ahead of source copy so a script edit doesn't
 # invalidate the (slow) dependency layer.
-COPY pyproject.toml uv.lock ./
+COPY --chown=verifier:verifier pyproject.toml uv.lock ./
 
 # --no-dev: the verifier doesn't need pytest, black, mypy, etc.
 # --no-install-project: the ``benchmark`` package is copied in below
@@ -54,14 +63,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy only what the script imports. benchmark/ is the transitive
 # dep footprint; scripts/verify_migration_swap.py is the entry point.
-COPY benchmark/ ./benchmark/
-COPY scripts/verify_migration_swap.py ./scripts/verify_migration_swap.py
-
-# Non-root runtime — image writes to /reports which infra mounts,
-# never to /app.
-RUN useradd --system --create-home --uid 1001 verifier \
-    && chown -R verifier:verifier /app
-USER verifier
+COPY --chown=verifier:verifier benchmark/ ./benchmark/
+COPY --chown=verifier:verifier \
+    scripts/verify_migration_swap.py \
+    ./scripts/verify_migration_swap.py
 
 # uv.venv sits at /app/.venv; using `uv run` keeps env + interpreter
 # discovery consistent with local invocations.

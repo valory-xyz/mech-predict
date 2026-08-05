@@ -22,7 +22,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 import requests
@@ -2201,3 +2201,274 @@ class TestEnrichmentSkipsPrefilled:
             rows, "http://gnosis"
         )
         assert rows[0]["tool_version"] == "bafyexact"
+
+
+class TestInjectTimestampLt:
+    """_inject_timestamp_lt splices an upper bound into a delivers query."""
+
+    def test_inserts_upper_bound_alongside_lower(self) -> None:
+        """Both bounds land in the same ``where`` clause."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        result = fp._inject_timestamp_lt(  # pylint: disable=protected-access
+            fp.DELIVER_REQUEST_IDS_QUERY, 1700000000, "DELIVER_REQUEST_IDS_QUERY"
+        )
+        assert (
+            "where: { blockTimestamp_gt: %(timestamp_gt)s, "
+            "blockTimestamp_lt: 1700000000 }"
+        ) in result
+
+    def test_raises_valueerror_when_target_absent(self) -> None:
+        """Silent-no-op protection: a drifted literal raises, not returns."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        # ``str.replace`` on a missing target returns the source unchanged.
+        # The guard has to raise so a future reformat of the query literal
+        # is caught at run time and can't silently revert the delivery-time
+        # bound to ``since → now`` (which would break coverage on any
+        # window not ending at "now").
+        drifted = "{ delivers( where: { blockTimestamp_gte: 0 } ) { id } }"
+        with pytest.raises(ValueError, match="literal drifted"):
+            fp._inject_timestamp_lt(  # pylint: disable=protected-access
+                drifted, 1700000000, "custom_test_query"
+            )
+
+
+class TestFetchAllDeliveryRequestIds:
+    """Coverage-side enumeration + request-time filter + truncation guard."""
+
+    @staticmethod
+    def _deliver(
+        deliver_id: str,
+        delivery_ts: int,
+        request_id: Optional[str],
+        request_ts: Optional[int],
+    ) -> dict[str, Any]:
+        """Build one raw delivers-row shape as the subgraph returns it."""
+        request: dict[str, Any] = {}
+        if request_id is not None:
+            request["id"] = request_id
+        if request_ts is not None:
+            request["blockTimestamp"] = str(request_ts)
+        return {
+            "id": deliver_id,
+            "blockTimestamp": str(delivery_ts),
+            "request": request,
+        }
+
+    def test_filters_client_side_on_request_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deliveries whose request time falls inside the window survive.
+
+        The delivery-time envelope has to be widened (subgraph filter),
+        then the client-side filter narrows to request time. Verifies:
+        (a) only requests inside ``(request_ts_gt, request_ts_lt)`` are
+        returned, (b) the subgraph is asked for the widened delivery
+        upper bound.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        captured: dict[str, Any] = {}
+
+        def fake_paginated(
+            _url: str,
+            query: str,
+            _entity: str,
+            template_vars: dict[str, Any],
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["query"] = query
+            captured["template_vars"] = template_vars
+            # inside window, both bounds
+            in_window = self._deliver(
+                "0xd1",
+                delivery_ts=request_ts_gt + 500,
+                request_id="0xreq_in",
+                request_ts=request_ts_gt + 100,
+            )
+            # request predates window (crosses the exclusive lower bound)
+            below = self._deliver(
+                "0xd2",
+                delivery_ts=request_ts_gt + 200,
+                request_id="0xreq_below",
+                request_ts=request_ts_gt,
+            )
+            # request past window upper bound
+            above = self._deliver(
+                "0xd3",
+                delivery_ts=request_ts_lt + 3600,
+                request_id="0xreq_above",
+                request_ts=request_ts_lt,
+            )
+            # oldest delivery reaches the lower bound so the truncation
+            # guard is satisfied
+            floor = self._deliver(
+                "0xd4",
+                delivery_ts=request_ts_gt - 10,
+                request_id="0xreq_floor",
+                request_ts=request_ts_gt - 100,
+            )
+            return [in_window, below, above, floor]
+
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+        )
+        # Only the request whose time is strictly inside the window survives.
+        assert ids == {"0xreq_in"}
+        assert dropped == 0
+        # Widened delivery-time upper bound goes to the subgraph.
+        # pylint: disable-next=protected-access
+        delivery_upper = request_ts_lt + fp._DELIVERY_LAG_ENVELOPE_S
+        assert f"blockTimestamp_lt: {delivery_upper}" in captured["query"]
+        # The subgraph lower bound is the raw request lower bound.
+        assert captured["template_vars"] == {"timestamp_gt": request_ts_gt}
+
+    def test_drops_rows_missing_request_id_or_ts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows without a resolvable ``request.id`` or ``blockTimestamp`` drop.
+
+        Each dropped row is counted so the caller can gate PASS on a
+        zero drop count (any drop is a coverage denominator gap).
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+
+        def fake_paginated(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                # valid — kept in the set
+                self._deliver(
+                    "0xok",
+                    delivery_ts=request_ts_gt + 100,
+                    request_id="0xreq_ok",
+                    request_ts=request_ts_gt + 50,
+                ),
+                # missing request.id — dropped
+                self._deliver(
+                    "0xno_id",
+                    delivery_ts=request_ts_gt + 200,
+                    request_id=None,
+                    request_ts=request_ts_gt + 60,
+                ),
+                # missing request.blockTimestamp — dropped
+                self._deliver(
+                    "0xno_ts",
+                    delivery_ts=request_ts_gt + 300,
+                    request_id="0xreq_no_ts",
+                    request_ts=None,
+                ),
+                # unparseable blockTimestamp — dropped
+                {
+                    "id": "0xbad_ts",
+                    "blockTimestamp": str(request_ts_gt + 400),
+                    "request": {
+                        "id": "0xreq_bad_ts",
+                        "blockTimestamp": "not-an-int",
+                    },
+                },
+                # missing delivery blockTimestamp — dropped
+                {
+                    "id": "0xno_dt",
+                    "request": {
+                        "id": "0xreq_no_dt",
+                        "blockTimestamp": str(request_ts_gt + 50),
+                    },
+                },
+                # floor row so the truncation guard passes
+                self._deliver(
+                    "0xfloor",
+                    delivery_ts=request_ts_gt - 10,
+                    request_id="0xreq_floor",
+                    request_ts=request_ts_gt - 100,
+                ),
+            ]
+
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+        )
+        assert ids == {"0xreq_ok"}
+        # Four rows are unresolvable (no id, no ts, bad ts, no delivery ts).
+        assert dropped == 4
+
+    def test_raises_on_truncated_sweep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Oldest returned delivery > lower bound means paginator truncated.
+
+        A silent short-page-as-EOF exit inside a graph-node ``first``
+        clamp would leave the oldest delivery well above
+        ``request_ts_gt`` and bias coverage toward PASS by shrinking the
+        denominator. Must raise, not silently pass.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+
+        def fake_paginated(*_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+            # Oldest delivery blockTimestamp is well above request_ts_gt
+            # (paginator gave up before reaching the lower bound).
+            return [
+                self._deliver(
+                    "0xa",
+                    delivery_ts=request_ts_gt + 90_000,
+                    request_id="0xreq_a",
+                    request_ts=request_ts_gt + 10,
+                ),
+                self._deliver(
+                    "0xb",
+                    delivery_ts=request_ts_gt + 80_000,
+                    request_id="0xreq_b",
+                    request_ts=request_ts_gt + 20,
+                ),
+            ]
+
+        monkeypatch.setattr(fp, "_paginated_fetch", fake_paginated)
+        with pytest.raises(RuntimeError, match="truncated sweep"):
+            fp.fetch_all_delivery_request_ids(
+                "http://marketplace",
+                request_ts_gt=request_ts_gt,
+                request_ts_lt=request_ts_lt,
+            )
+
+    def test_empty_sweep_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Zero deliveries returned is a legitimate empty window, not truncation.
+
+        ``oldest_delivery_ts is None`` on an empty sweep — the completeness
+        guard must skip the raise for this case. The caller's
+        ``--min-marketplace-rows`` floor is the right gate for empty
+        windows.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        monkeypatch.setattr(fp, "_paginated_fetch", lambda *a, **kw: [])
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=1_700_000_000,
+            request_ts_lt=1_700_100_000,
+        )
+        assert ids == set()
+        assert dropped == 0

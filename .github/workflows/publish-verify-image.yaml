@@ -4,15 +4,30 @@ name: Publish verify image
 # a K8s Job for the mech-analytics parity verification (Dockerfile.verify,
 # entry point is scripts/verify_migration_swap.py).
 #
-# Publishes on release only. Tag stripped of the leading v to match the
-# existing release.yaml convention (v0.5.4 → valory/mech-predict-verify:0.5.4).
+# * On release: builds AND pushes tagged image to Docker Hub.
+# * On PR touching Dockerfile.verify, the verify script, the workflow,
+#   or the deps that end up in the image: builds only (no push, no
+#   credentials needed) and runs ``--help`` against the built image so
+#   the entry point wiring is exercised end-to-end. Prevents shipping a
+#   broken Dockerfile (chown ordering, PYTHONPATH, deps drift) whose
+#   only signal today is "infra tries to run it and it crashes".
 
 on:
   release:
     types: [prereleased, released]
+  pull_request:
+    paths:
+      - "Dockerfile.verify"
+      - ".dockerignore"
+      - "scripts/verify_migration_swap.py"
+      - "benchmark/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/publish-verify-image.yaml"
 
 jobs:
   publish:
+    if: github.event_name == 'release'
     runs-on: ubuntu-22.04
     env:
       IMAGE: valory/mech-predict-verify
@@ -47,3 +62,33 @@ jobs:
           # revision without needing git inside the runtime image.
           build-args: |
             GIT_SHA=${{ github.sha }}
+
+  build-only:
+    # PR-triggered smoke build — no registry push, no secrets required,
+    # so it runs safely on fork PRs. Load the image into the local
+    # Docker daemon and invoke ``--help`` to catch any regression in
+    # Dockerfile layer ordering, PYTHONPATH, or entrypoint that would
+    # otherwise only surface when infra tries to run the released tag.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    env:
+      IMAGE: valory/mech-predict-verify:pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.verify
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+
+      - name: Smoke-test entrypoint
+        run: docker run --rm ${{ env.IMAGE }} --help

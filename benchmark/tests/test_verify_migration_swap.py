@@ -101,7 +101,9 @@ def _patch_pulls(
         ``mp_rows``.
     :param marketplace_ids_by_platform: explicit override for the
         marketplace-side coverage IDs. Defaults to ``mp_rows`` request
-        ids on the omen platform and empty on polymarket.
+        ids on the omen platform only — polymarket is omitted so the
+        per-platform vacuous-sweep floor doesn't secondarily block
+        parity-focused tests whose fixtures are single-platform.
     :param lake_ids_unfiltered: explicit override for the lake-side
         coverage IDs. Defaults to a union of ``lake_rows`` and
         ``mp_rows`` so parity tests don't secondarily fail the
@@ -119,7 +121,7 @@ def _patch_pulls(
     marketplace = (
         marketplace_ids_by_platform
         if marketplace_ids_by_platform is not None
-        else {"omen": mp_ids, "polymarket": set()}
+        else {"omen": mp_ids}
     )
     # Default: lake has at least everything mech-predict has (no coverage
     # gap) so pre-existing parity tests aren't secondarily blocked by the
@@ -362,6 +364,54 @@ class TestCoverageGate:
             "5",
             "--min-marketplace-rows",
             "1",
+        ]
+        assert vms.main(argv) == 4
+
+    def test_single_platform_vacuous_returns_four(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One populated platform can't mask an outage on the other.
+
+        The floor is enforced per platform, not on the aggregate. If
+        omen returns 12 IDs (above the floor of 10) but polymarket
+        returns zero (well below), aggregate = 12 would silently PASS
+        an aggregate check while polymarket's coverage is fully
+        vacuous. This test would fail if the guard were ever collapsed
+        back to a sum-across-platforms check.
+
+        :param monkeypatch: pytest fixture used to stub the pulls with
+            one populated and one empty platform.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(12)]
+        lake = [_lake_row(f"r{i}") for i in range(12)]
+        omen_ids = {r["request_id"] for r in rows}
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            # omen well above the floor, polymarket empty.
+            marketplace_ids_by_platform={
+                "omen": omen_ids,
+                "polymarket": set(),
+            },
+            # Lake covers every marketplace ID so ``missing_from_lake`` is
+            # zero — this test isolates the per-platform floor from the
+            # set-diff failure mode.
+            lake_ids_unfiltered=omen_ids,
+        )
+        argv = [
+            "--since",
+            (datetime.now(timezone.utc) - timedelta(days=2))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--until",
+            (datetime.now(timezone.utc) - timedelta(days=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--min-rows",
+            "5",
+            "--min-marketplace-rows",
+            "10",
         ]
         assert vms.main(argv) == 4
 

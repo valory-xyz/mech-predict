@@ -1237,7 +1237,10 @@ def fetch_deliveries(
 # in a window is present in the lake, regardless of whether mech-predict
 # would currently use it. Selecting a smaller field set keeps
 # marketplace-subgraph load lower during coverage sweeps than the full
-# DELIVERS_QUERY would.
+# DELIVERS_QUERY would. Selects ``request.blockTimestamp`` because the
+# parity verifier needs to filter on REQUEST time (matches the lake side's
+# ``requested_at`` semantics), not delivery time — see the comment on
+# ``fetch_all_delivery_request_ids``.
 DELIVER_REQUEST_IDS_QUERY = """
 {
   delivers(
@@ -1248,18 +1251,58 @@ DELIVER_REQUEST_IDS_QUERY = """
     where: { blockTimestamp_gt: %(timestamp_gt)s }
   ) {
     id
-    request { id }
+    blockTimestamp
+    request { id blockTimestamp }
   }
 }
 """
 
+# Envelope around the request window on the delivery-time bound sent to
+# the subgraph. A request submitted just before ``request_ts_until`` may
+# be delivered after it, so the delivery-time upper bound has to be
+# widened by an assumed maximum request→delivery lag; a request
+# submitted just after ``request_ts_gt`` cannot be delivered before it,
+# so the lower bound uses the raw request window boundary. 7 days is a
+# generous upper bound relative to normal mech latency (seconds to
+# minutes) and catches operator-side stalls without inflating the sweep
+# more than 1-2× on a typical 3-day parity window.
+_DELIVERY_LAG_ENVELOPE_S = 7 * 24 * 60 * 60
+
 
 def fetch_all_delivery_request_ids(
     marketplace_url: str,
-    timestamp_gt: int,
-    timestamp_lt: Optional[int] = None,
+    request_ts_gt: int,
+    request_ts_lt: int,
 ) -> tuple[set[str], int]:
-    """Return the full set of on-chain request_ids delivered in the window.
+    """Return every on-chain request_id whose *request time* is in the window.
+
+    The coverage check compares this set against the mech-analytics
+    lake's set for the same window. Both sides must be bounded on the
+    same clock or the diff produces false alarms:
+
+    * The lake's ``/v1/data/scored-rows`` endpoint filters on
+      ``requested_at`` (verified in mech-analytics
+      ``etl/api/routes/data.py``).
+    * The marketplace subgraph's ``Deliver`` entity carries a
+      ``blockTimestamp`` (delivery time) and a nested
+      ``request { blockTimestamp }`` (request time).
+
+    Bounding the marketplace sweep on delivery time and comparing to a
+    lake set bounded on request time creates two systematic errors:
+    leading-edge requests (submitted just before ``since``, delivered
+    inside the window) show up as "missing from lake" false alarms, and
+    trailing-edge requests (submitted just before ``until``, delivered
+    after it) are permanently invisible to any window's check. Both
+    happen without any real coverage gap and both are the wrong signal
+    at a cutover gate.
+
+    Fix: enumerate deliveries within a widened delivery-time envelope
+    ``(request_ts_gt, request_ts_lt + _DELIVERY_LAG_ENVELOPE_S)`` — which
+    catches every delivery whose request could fall inside the window
+    — then filter client-side to
+    ``request.blockTimestamp in (request_ts_gt, request_ts_lt)``.
+    Bounds are exclusive on both sides to mirror the marketplace
+    subgraph's ``blockTimestamp_gt`` / ``blockTimestamp_lt`` semantics.
 
     Unlike :func:`fetch_deliveries`, this does not skip deliveries with
     a null ``parsedRequest`` — the point of the coverage check is to
@@ -1269,39 +1312,89 @@ def fetch_all_delivery_request_ids(
     what today's business logic happens to consume.
 
     The second return value is the count of deliveries that came back
-    without a resolvable ``request.id`` and were therefore dropped from
-    the coverage denominator. Callers surface this so a non-zero drop
-    can't be hidden inside a "no missing IDs" PASS verdict — every
-    dropped row is a request that could genuinely be absent from the
-    lake but that we can never report as absent.
+    without a resolvable ``request.id`` (or without a
+    ``request.blockTimestamp`` we could bucket on) and were therefore
+    dropped from the coverage denominator. Callers surface this so a
+    non-zero drop can't be hidden inside a "no missing IDs" PASS verdict
+    — every dropped row is a request that could genuinely be absent
+    from the lake but that we can never report as absent.
+
+    Includes a completeness assertion at end-of-sweep: the oldest
+    delivery returned must have ``blockTimestamp`` at or below
+    ``request_ts_gt``, because the query is sorted
+    ``orderDirection: desc`` and a truncated paginator (silent
+    ``len(page) < first`` truncation, the same shape as the
+    ``fetch_open`` bug fixed in #392) would otherwise bias coverage
+    toward PASS by shrinking the denominator.
 
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
-    :param timestamp_gt: unix seconds, exclusive lower bound.
-    :param timestamp_lt: optional unix seconds, exclusive upper bound.
+    :param request_ts_gt: unix seconds, exclusive lower bound on
+        request time (matches the lake's ``since``).
+    :param request_ts_lt: unix seconds, exclusive upper bound on
+        request time (matches the lake's ``until``).
     :return: tuple of (request_ids set, dropped_no_rid_count).
+    :raises RuntimeError: if the paginator returned a truncated sweep
+        (oldest delivery blockTimestamp did not reach ``request_ts_gt``).
     """
-    query = DELIVER_REQUEST_IDS_QUERY
-    if timestamp_lt is not None:
-        query = _inject_timestamp_lt(query, timestamp_lt, "DELIVER_REQUEST_IDS_QUERY")
+    delivery_ts_lt = request_ts_lt + _DELIVERY_LAG_ENVELOPE_S
+    query = _inject_timestamp_lt(
+        DELIVER_REQUEST_IDS_QUERY, delivery_ts_lt, "DELIVER_REQUEST_IDS_QUERY"
+    )
     raw = _paginated_fetch(
         marketplace_url,
         query,
         "delivers",
-        {"timestamp_gt": timestamp_gt},
+        {"timestamp_gt": request_ts_gt},
     )
+
     request_ids: set[str] = set()
     dropped_no_rid = 0
+    oldest_delivery_ts: Optional[int] = None
     for d in raw:
+        try:
+            delivery_ts = int(d["blockTimestamp"])
+        except (KeyError, TypeError, ValueError):
+            dropped_no_rid += 1
+            continue
+        if oldest_delivery_ts is None or delivery_ts < oldest_delivery_ts:
+            oldest_delivery_ts = delivery_ts
+
         request = d.get("request") or {}
         rid = request.get("id")
-        if rid:
-            request_ids.add(rid)
-        else:
+        req_ts_raw = request.get("blockTimestamp")
+        if not rid or req_ts_raw is None:
             dropped_no_rid += 1
+            continue
+        try:
+            req_ts = int(req_ts_raw)
+        except (TypeError, ValueError):
+            dropped_no_rid += 1
+            continue
+        if request_ts_gt < req_ts < request_ts_lt:
+            request_ids.add(rid)
+
+    # Completeness check: if the paginator stopped early on a
+    # graph-node-clamped short page, the oldest delivery in our set
+    # will still be well above ``request_ts_gt``. A complete
+    # descending-order sweep must have reached the lower bound.
+    # ``oldest_delivery_ts is None`` means the query returned zero
+    # rows, which is a legitimate empty window and not truncation —
+    # the caller's ``--min-marketplace-rows`` floor is the right gate
+    # for that condition.
+    if oldest_delivery_ts is not None and oldest_delivery_ts > request_ts_gt:
+        raise RuntimeError(
+            f"fetch_all_delivery_request_ids: truncated sweep — oldest "
+            f"delivery blockTimestamp={oldest_delivery_ts} > "
+            f"request_ts_gt={request_ts_gt}. The paginator likely hit a "
+            f"short-page-as-EOF exit inside a graph-node ``first`` clamp; "
+            f"coverage denominator is incomplete and cannot be trusted."
+        )
+
     if dropped_no_rid:
         log.warning(
             "fetch_all_delivery_request_ids: dropped %d delivery/deliveries "
-            "with missing request.id from coverage denominator",
+            "with missing/unparseable request.id or blockTimestamp from "
+            "coverage denominator",
             dropped_no_rid,
         )
     return request_ids, dropped_no_rid
@@ -1313,16 +1406,21 @@ def _inject_timestamp_lt(query: str, timestamp_lt: int, query_name: str) -> str:
     ``str.replace`` returns the source unchanged when the target isn't
     found — a silent no-op that would revert the query back to the
     unbounded ``since → now`` shape and hide it behind a successful
-    pagination. Asserting the substitution actually landed catches
-    a future reformat of the query literal at run time instead of at
-    review time.
+    pagination. Raising when the substitution didn't land catches a
+    future reformat of the query literal at run time instead of at
+    review time. ``raise`` (rather than ``assert``) is deliberate: this
+    guard has to survive ``python -O`` / ``PYTHONOPTIMIZE=1``, which
+    strip ``assert`` statements and would silently disable the check
+    exactly when the image is slim-optimised for deployment.
 
     :param query: the raw GraphQL query text with a
         ``where: { blockTimestamp_gt: %(timestamp_gt)s }`` clause.
     :param timestamp_lt: the exclusive upper bound to insert.
-    :param query_name: source name for the assertion message.
+    :param query_name: source name for the error message.
     :return: the query with both ``blockTimestamp_gt`` and
         ``blockTimestamp_lt`` in the ``where`` clause.
+    :raises ValueError: if the target substring is not present in the
+        query (literal drifted between reformat and this call).
     """
     target = "where: { blockTimestamp_gt: %(timestamp_gt)s }"
     replacement = (
@@ -1330,10 +1428,11 @@ def _inject_timestamp_lt(query: str, timestamp_lt: int, query_name: str) -> str:
         f"blockTimestamp_lt: {int(timestamp_lt)} }}"
     )
     new_query = query.replace(target, replacement)
-    assert new_query != query, (
-        f"_inject_timestamp_lt: bound did not apply to {query_name} — "
-        f"literal drifted from expected substring {target!r}"
-    )
+    if new_query == query:
+        raise ValueError(
+            f"_inject_timestamp_lt: bound did not apply to {query_name} — "
+            f"literal drifted from expected substring {target!r}"
+        )
     return new_query
 
 
@@ -1455,36 +1554,18 @@ class ResolvedMarkets:
         return len(self._seen) > 0
 
 
-def fetch_omen_resolved(
-    resolved_after: int, resolved_before: Optional[int] = None
-) -> ResolvedMarkets:
+def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
     """Bulk fetch Omen markets that resolved after the given timestamp.
 
     Filters by resolution time (currentAnswerTimestamp), not bet placement time.
     Indexes by both market ID (fpmm address) and question title.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
-    :param resolved_before: optional UNIX timestamp; when set, cap resolution
-        time strictly below this value. Used by the parity script to bound
-        the enumeration to a specific window instead of "since X to now".
     :return: ResolvedMarkets indexed by ID and title.
     """
-    query = OMEN_BETS_QUERY
-    if resolved_before is not None:
-        target = "currentAnswerTimestamp_gt: %(resolved_after)s"
-        replacement = (
-            f"currentAnswerTimestamp_gt: %(resolved_after)s\n"
-            f"        currentAnswerTimestamp_lt: {int(resolved_before)}"
-        )
-        new_query = query.replace(target, replacement)
-        assert new_query != query, (
-            "fetch_omen_resolved: resolved_before bound did not apply — "
-            f"OMEN_BETS_QUERY literal drifted from {target!r}"
-        )
-        query = new_query
     raw = _paginated_fetch(
         PREDICT_OMEN_SUBGRAPH_URL,
-        query,
+        OMEN_BETS_QUERY,
         "bets",
         {"resolved_after": resolved_after},
     )
@@ -1521,9 +1602,7 @@ def fetch_omen_resolved(
     return markets
 
 
-def fetch_polymarket_resolved(
-    resolved_after: int, resolved_before: Optional[int] = None
-) -> ResolvedMarkets:
+def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
     """Bulk fetch Polymarket markets that resolved after the given timestamp.
 
     Discovers resolved markets directly from the ``questions`` entity using
@@ -1532,26 +1611,11 @@ def fetch_polymarket_resolved(
     bets fell outside a candidate window.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
-    :param resolved_before: optional UNIX timestamp; when set, cap resolution
-        time strictly below this value.
     :return: ResolvedMarkets indexed by ID and title.
     """
-    query = POLYMARKET_RESOLVED_QUESTIONS_QUERY
-    if resolved_before is not None:
-        target = "resolution_: { blockTimestamp_gt: %(resolved_after)s }"
-        replacement = (
-            f"resolution_: {{ blockTimestamp_gt: %(resolved_after)s, "
-            f"blockTimestamp_lt: {int(resolved_before)} }}"
-        )
-        new_query = query.replace(target, replacement)
-        assert new_query != query, (
-            "fetch_polymarket_resolved: resolved_before bound did not apply — "
-            f"POLYMARKET_RESOLVED_QUESTIONS_QUERY literal drifted from {target!r}"
-        )
-        query = new_query
     raw = _paginated_fetch(
         PREDICT_POLYMARKET_SUBGRAPH_URL,
-        query,
+        POLYMARKET_RESOLVED_QUESTIONS_QUERY,
         "questions",
         {"resolved_after": resolved_after},
     )

@@ -272,7 +272,9 @@ def _pull_marketplace_request_ids(
             until_ts,
         )
         ids, dropped = fp.fetch_all_delivery_request_ids(
-            marketplace_url, since_ts, timestamp_lt=until_ts
+            marketplace_url,
+            request_ts_gt=since_ts,
+            request_ts_lt=until_ts,
         )
         ids_by_platform[platform] = ids
         dropped_by_platform[platform] = dropped
@@ -699,6 +701,7 @@ def _report_coverage_check(
     marketplace_ids_by_platform: dict[str, set[str]],
     dropped_by_platform: dict[str, int],
     lake_ids: set[str],
+    min_marketplace_rows: int,
 ) -> _CoverageResult:
     """Coverage check: prove every on-chain request is in the lake.
 
@@ -715,11 +718,12 @@ def _report_coverage_check(
       deliveries whose ``request.id`` was missing, so those requests
       never entered the coverage denominator and could be silently
       absent from the lake without being reported.
-    * ``total_marketplace < min_marketplace_rows`` (checked by caller) —
-      an empty or near-empty coverage sweep is indistinguishable from
-      complete coverage on the set-diff alone; the caller enforces a
-      floor to distinguish "healthy sweep, no gap" from "sweep
-      returned nothing, so of course there's no diff".
+    * per-platform ``marketplace_count < min_marketplace_rows`` (checked
+      by caller) — an empty or near-empty coverage sweep on any single
+      platform is indistinguishable from complete coverage on the
+      set-diff alone; the caller enforces the floor per platform so a
+      subgraph outage on one platform can't be masked by a healthy pull
+      on the other.
 
     :param marketplace_ids_by_platform: output of
         :func:`_pull_marketplace_request_ids` (first tuple element).
@@ -728,6 +732,12 @@ def _report_coverage_check(
         per-platform count of deliveries dropped because their
         ``request.id`` was missing.
     :param lake_ids: output of :func:`_pull_lake_request_ids_unfiltered`.
+    :param min_marketplace_rows: floor from ``--min-marketplace-rows``,
+        used here purely for the per-platform ``✗`` marker so an
+        under-populated platform is called out in the report body even
+        though the verdict itself is decided in the caller. Keeping the
+        floor in one place (the failure-reason helper) is what
+        determines PASS/FAIL; this is a display hint only.
     :return: :class:`_CoverageResult` with per-platform and aggregate stats.
     """
     _section("Coverage check (marketplace subgraph → mech-analytics lake)")
@@ -742,9 +752,12 @@ def _report_coverage_check(
         total_missing += len(missing)
         total_marketplace += len(marketplace_ids)
         dropped = dropped_by_platform.get(platform, 0)
-        marker = "✓" if not missing and dropped == 0 else "✗"
+        vacuous = len(marketplace_ids) < min_marketplace_rows
+        marker = "✓" if not missing and dropped == 0 and not vacuous else "✗"
+        vacuous_note = f" (below floor {min_marketplace_rows})" if vacuous else ""
         print(
-            f"  {platform}: marketplace={len(marketplace_ids):>7}  "
+            f"  {platform}: marketplace={len(marketplace_ids):>7}"
+            f"{vacuous_note}  "
             f"missing_from_lake={len(missing):>5}  "
             f"dropped_no_request_id={dropped:>4}  {marker}"
         )
@@ -990,10 +1003,13 @@ class _Tee:
         # ``sys.__stdout__`` is typed ``Optional[TextIO]`` (it's None when
         # the interpreter runs with stdout detached, e.g. under some
         # embedded contexts). This script only runs as an ordinary CLI so
-        # the field is always populated; assert to encode that invariant
-        # for mypy so the write/flush calls below don't need a runtime
-        # None check on every emit.
-        assert sys.__stdout__ is not None, "sys.__stdout__ unavailable"
+        # the field is always populated. Raise (not assert) so ``-O`` /
+        # ``PYTHONOPTIMIZE`` cannot strip the guard and cause a downstream
+        # ``AttributeError`` on the first write.
+        if sys.__stdout__ is None:
+            raise RuntimeError(
+                "sys.__stdout__ unavailable; _Tee requires an attached stdout stream"
+            )
         self._stdout = sys.__stdout__
 
     def write(self, s: str) -> int:
@@ -1063,7 +1079,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         lake_ids_unfiltered = _pull_lake_request_ids_unfiltered(since, until)
         coverage = _report_coverage_check(
-            marketplace_ids_by_platform, dropped_by_platform, lake_ids_unfiltered
+            marketplace_ids_by_platform,
+            dropped_by_platform,
+            lake_ids_unfiltered,
+            args.min_marketplace_rows,
         )
         coverage_summary = {
             "marketplace_ids_by_platform_count": coverage.marketplace_counts,
@@ -1207,10 +1226,12 @@ def _coverage_failure_reason(
 
     Three ways coverage can fail, in priority order:
 
-    1. ``total_marketplace < min_marketplace_rows`` — the marketplace
-       sweep is vacuous. ``marketplace_ids - lake_ids`` is trivially
-       empty when the marketplace side is empty, so without this floor
-       any subgraph outage would silently PASS as "no missing IDs".
+    1. Any single platform has ``marketplace_count < min_marketplace_rows``
+       — that platform's sweep is vacuous. ``marketplace_ids - lake_ids``
+       is trivially empty when a platform's marketplace side is empty,
+       so without this per-platform floor a subgraph outage on ONE
+       platform would silently PASS as "no missing IDs" (the healthy
+       platform's rows would carry the aggregate above the floor).
     2. ``total_dropped_no_rid > 0`` — deliveries came back without a
        resolvable ``request.id`` and were dropped from the coverage
        denominator. Each dropped row is a request that could be absent
@@ -1219,16 +1240,26 @@ def _coverage_failure_reason(
     3. ``total_missing > 0`` — a genuine coverage gap.
 
     :param coverage: the result of :func:`_report_coverage_check`.
-    :param min_marketplace_rows: floor from ``--min-marketplace-rows``.
+    :param min_marketplace_rows: floor from ``--min-marketplace-rows``,
+        enforced per platform (not on the aggregate).
     :return: human-readable failure reason, or ``None`` on success.
     """
-    if coverage.total_marketplace < min_marketplace_rows:
+    vacuous_platforms = sorted(
+        (platform, count)
+        for platform, count in coverage.marketplace_counts.items()
+        if count < min_marketplace_rows
+    )
+    if vacuous_platforms:
+        details = ", ".join(
+            f"{platform}={count}" for platform, count in vacuous_platforms
+        )
         return (
-            f"vacuous coverage sweep — total marketplace deliveries "
-            f"{coverage.total_marketplace} < min_marketplace_rows "
-            f"{min_marketplace_rows}. An empty coverage side makes "
-            f"``marketplace_ids - lake_ids`` trivially empty and would "
-            f"otherwise report PASS. Check the marketplace subgraph."
+            f"vacuous coverage sweep on {len(vacuous_platforms)} platform(s) "
+            f"({details}) — each below min_marketplace_rows "
+            f"{min_marketplace_rows}. An empty coverage side for even one "
+            f"platform makes ``marketplace_ids - lake_ids`` trivially empty "
+            f"for that platform and would otherwise report PASS. Check the "
+            f"marketplace subgraph for the affected platform(s)."
         )
     if coverage.total_dropped_no_rid > 0:
         return (

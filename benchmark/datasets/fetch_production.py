@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl
@@ -1110,6 +1111,7 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 def fetch_deliveries(
     marketplace_url: str,
     timestamp_gt: int,
+    timestamp_lt: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], Optional[int]]:
     """Bulk fetch all recent deliveries with prediction data.
 
@@ -1134,6 +1136,12 @@ def fetch_deliveries(
     query_template = (
         DELIVERS_QUERY if schema == DELIVERS_SCHEMA_PARSED else DELIVERS_QUERY_LEGACY
     )
+    if timestamp_lt is not None:
+        query_template = query_template.replace(
+            "where: { blockTimestamp_gt: %(timestamp_gt)s }",
+            f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
+            f"blockTimestamp_lt: {int(timestamp_lt)} }}",
+        )
     raw = _paginated_fetch(
         marketplace_url,
         query_template,
@@ -1214,6 +1222,69 @@ def fetch_deliveries(
         log.info("  %d/%d deliveries have market_id", has_market_id, len(deliveries))
 
     return deliveries, unparsed_request_cap
+
+
+# Coverage-check query: only the request.id, no parsedRequest gate. Used
+# by the mech-analytics parity verifier to prove every on-chain request
+# in a window is present in the lake, regardless of whether mech-predict
+# would currently use it. Selecting a smaller field set keeps
+# marketplace-subgraph load lower during coverage sweeps than the full
+# DELIVERS_QUERY would.
+DELIVER_REQUEST_IDS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    skip: %(skip)s
+    orderBy: blockTimestamp
+    orderDirection: desc
+    where: { blockTimestamp_gt: %(timestamp_gt)s }
+  ) {
+    id
+    request { id }
+  }
+}
+"""
+
+
+def fetch_all_delivery_request_ids(
+    marketplace_url: str,
+    timestamp_gt: int,
+    timestamp_lt: Optional[int] = None,
+) -> set[str]:
+    """Return the full set of on-chain request_ids delivered in the window.
+
+    Unlike :func:`fetch_deliveries`, this does not skip deliveries with
+    a null ``parsedRequest`` — the point of the coverage check is to
+    prove every delivered request is in the lake, including ones
+    mech-predict currently discards because their IPFS payload didn't
+    parse. Coverage is a claim about ingest completeness, not about
+    what today's business logic happens to consume.
+
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param timestamp_gt: unix seconds, exclusive lower bound.
+    :param timestamp_lt: optional unix seconds, exclusive upper bound.
+    :return: set of on-chain request_ids (Request.id) delivered in the window.
+    """
+    query = DELIVER_REQUEST_IDS_QUERY
+    if timestamp_lt is not None:
+        query = query.replace(
+            "where: { blockTimestamp_gt: %(timestamp_gt)s }",
+            f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
+            f"blockTimestamp_lt: {int(timestamp_lt)} }}",
+        )
+    raw = _paginated_fetch(
+        marketplace_url,
+        query,
+        "delivers",
+        {"timestamp_gt": timestamp_gt},
+    )
+    request_ids: set[str] = set()
+    for d in raw:
+        request = d.get("request") or {}
+        rid = request.get("id")
+        if rid:
+            request_ids.add(rid)
+    return request_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1334,18 +1405,30 @@ class ResolvedMarkets:
         return len(self._seen) > 0
 
 
-def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
+def fetch_omen_resolved(
+    resolved_after: int, resolved_before: Optional[int] = None
+) -> ResolvedMarkets:
     """Bulk fetch Omen markets that resolved after the given timestamp.
 
     Filters by resolution time (currentAnswerTimestamp), not bet placement time.
     Indexes by both market ID (fpmm address) and question title.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :param resolved_before: optional UNIX timestamp; when set, cap resolution
+        time strictly below this value. Used by the parity script to bound
+        the enumeration to a specific window instead of "since X to now".
     :return: ResolvedMarkets indexed by ID and title.
     """
+    query = OMEN_BETS_QUERY
+    if resolved_before is not None:
+        query = query.replace(
+            "currentAnswerTimestamp_gt: %(resolved_after)s",
+            f"currentAnswerTimestamp_gt: %(resolved_after)s\n"
+            f"        currentAnswerTimestamp_lt: {int(resolved_before)}",
+        )
     raw = _paginated_fetch(
         PREDICT_OMEN_SUBGRAPH_URL,
-        OMEN_BETS_QUERY,
+        query,
         "bets",
         {"resolved_after": resolved_after},
     )
@@ -1382,7 +1465,9 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
     return markets
 
 
-def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
+def fetch_polymarket_resolved(
+    resolved_after: int, resolved_before: Optional[int] = None
+) -> ResolvedMarkets:
     """Bulk fetch Polymarket markets that resolved after the given timestamp.
 
     Discovers resolved markets directly from the ``questions`` entity using
@@ -1391,11 +1476,20 @@ def fetch_polymarket_resolved(resolved_after: int) -> ResolvedMarkets:
     bets fell outside a candidate window.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
+    :param resolved_before: optional UNIX timestamp; when set, cap resolution
+        time strictly below this value.
     :return: ResolvedMarkets indexed by ID and title.
     """
+    query = POLYMARKET_RESOLVED_QUESTIONS_QUERY
+    if resolved_before is not None:
+        query = query.replace(
+            "resolution_: { blockTimestamp_gt: %(resolved_after)s }",
+            f"resolution_: {{ blockTimestamp_gt: %(resolved_after)s, "
+            f"blockTimestamp_lt: {int(resolved_before)} }}",
+        )
     raw = _paginated_fetch(
         PREDICT_POLYMARKET_SUBGRAPH_URL,
-        POLYMARKET_RESOLVED_QUESTIONS_QUERY,
+        query,
         "questions",
         {"resolved_after": resolved_after},
     )
@@ -2280,6 +2374,7 @@ def process_platform(
     delivery_ts_gt: int,
     existing_ids: set[str],
     pending_deliveries: list[dict[str, Any]],
+    delivery_ts_lt: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     """Process one platform: fetch deliveries, match to resolved markets, build rows.
 
@@ -2326,7 +2421,7 @@ def process_platform(
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)
     new_deliveries, unparsed_request_cap = fetch_deliveries(
-        marketplace_url, delivery_ts_gt
+        marketplace_url, delivery_ts_gt, timestamp_lt=delivery_ts_lt
     )
     log.info(
         "%s: %d new deliveries, %d resolved markets, %d pending from before",

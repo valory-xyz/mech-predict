@@ -19,36 +19,46 @@
 # ------------------------------------------------------------------------------
 r"""Reconcile mech-predict's row universe against mech-analytics.
 
-Runs the four divergence-class checks documented in
-``mech-analytics/docs/testing_mech_predict.md`` for a chosen window,
-plus a per-tool aggregate parity comparison on the reconciled row set.
+Two checks per window:
 
-Left side: the actual production path in mech-predict — marketplace
-subgraph + IPFS via ``benchmark.datasets.fetch_production``. Both
-platforms (Omen on Gnosis, Polymarket on Polygon), multi-day, comparing
-field values not id membership.
+* **Coverage** — every on-chain request_id the marketplace subgraph
+  knows about must be present in the mech-analytics lake. This proves
+  ingest completeness ahead of the mech-predict cutover: switching to
+  the lake cannot silently drop rows that today's production path can
+  see. Fails with exit code 4 if any on-chain request is missing.
+* **Parity** — on the resolved intersection, ``final_outcome``,
+  ``market_id`` binding, and per-tool ``brier`` / ``directional_accuracy``
+  must agree between the two sides. Fails with exit code 3 if the
+  overlap fraction is under ``--min-overlap-fraction`` or the outcome
+  mismatch rate exceeds ``--max-outcome-mismatch-fraction``.
 
-Right side: mech-analytics's ``/v1/data/scored-rows`` endpoint via
-``benchmark.mech_analytics_client``.
+Left side (both checks): the actual production path in mech-predict —
+marketplace subgraph + IPFS via ``benchmark.datasets.fetch_production``.
+Both platforms (Omen on Gnosis, Polymarket on Polygon).
 
-Reports:
-    1. Row-set overlap on ``request_id``: intersection, mech-predict
-       only, lake only.
-    2. ``final_outcome`` diff on rows resolved on both sides.
-    3. ``market_id`` diff on rows present in both sets.
-    4. Multi-deliver-per-request rate on mech-predict + NULL rate
-       for ``market_prob_at_prediction`` / ``market_liquidity_usd`` /
-       ``market_spread_at_prediction`` on the lake side.
-    5. Per-tool aggregate on the overlap (brier, log_loss,
-       directional_accuracy).
+Right side (both checks): mech-analytics's ``/v1/data/scored-rows``
+endpoint via ``benchmark.mech_analytics_client``. Coverage uses the
+unfiltered call; parity uses ``resolved=true`` to match production's
+scorer path.
 
-Fails loud if either side returns under ``MINIMUM_ROWS_PER_SIDE`` so a
-vacuous match on empty data doesn't get reported as parity.
+Fails loud with exit code 2 if either side returns under
+``MINIMUM_ROWS_PER_SIDE`` so a vacuous match on empty data doesn't get
+reported as parity.
 
 Usage:
+    # local, prints to stdout
     scripts/verify_migration_swap.py --days 7
+
+    # K8s Job style — also writes <window>.md and <window>.json
     scripts/verify_migration_swap.py --since 2026-07-01T00:00:00Z \\
-                                     --until 2026-07-08T00:00:00Z
+                                     --until 2026-07-08T00:00:00Z \\
+                                     --output-dir /reports
+
+Exit codes:
+    0 — coverage complete, parity within thresholds
+    2 — min-row guard tripped (window too thin to conclude anything)
+    3 — parity divergence exceeds thresholds
+    4 — coverage gap (at least one on-chain request missing from lake)
 
 Required env vars:
     MECH_ANALYTICS_URL             (lake-side endpoint)
@@ -59,11 +69,17 @@ Required env vars:
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import logging
+import os
 import statistics
+import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Sequence
 
 log = logging.getLogger("verify_migration_swap")
@@ -111,7 +127,10 @@ def _pull_mech_predict_rows(
     ]
     for platform, marketplace_url, fetch_resolved in platforms:
         log.info("pulling mech-predict rows: platform=%s", platform)
-        resolved = fetch_resolved(resolved_after=since_ts)
+        # Bound both queries to the window so enumeration doesn't fan out from
+        # `since` to `now` for old windows (the source of hours-long runs
+        # against 6-month-old windows).
+        resolved = fetch_resolved(resolved_after=since_ts, resolved_before=until_ts)
         rows, _still_pending, _max_delivery_ts, _max_resolved_ts = fp.process_platform(
             platform=platform,
             marketplace_url=marketplace_url,
@@ -119,6 +138,7 @@ def _pull_mech_predict_rows(
             delivery_ts_gt=since_ts,
             existing_ids=set(),
             pending_deliveries=[],
+            delivery_ts_lt=until_ts,
         )
         rows = [
             r
@@ -197,6 +217,67 @@ def _pull_lake_rows(since: datetime, until: datetime) -> list[dict[str, Any]]:
         "pulling lake rows since=%s until=%s", since.isoformat(), until.isoformat()
     )
     return list(iter_scored_rows(since=since, until=until, resolved=True))
+
+
+def _pull_marketplace_request_ids(since_ts: int, until_ts: int) -> dict[str, set[str]]:
+    """Fetch every on-chain request_id delivered in the window, per platform.
+
+    Coverage-check input: the ground truth of on-chain mech traffic
+    for the window, straight from the marketplace subgraph without any
+    parsedRequest / tool filter. Compared against the unfiltered lake
+    ID set below to prove no on-chain request is missing from the
+    lake.
+
+    :param since_ts: unix seconds, inclusive lower bound.
+    :param until_ts: unix seconds, exclusive upper bound.
+    :return: platform name → set of on-chain request_ids for that platform.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark.datasets import fetch_production as fp
+
+    platforms = [
+        ("omen", fp.MECH_MARKETPLACE_GNOSIS_URL),
+        ("polymarket", fp.MECH_MARKETPLACE_POLYGON_URL),
+    ]
+    ids_by_platform: dict[str, set[str]] = {}
+    for platform, marketplace_url in platforms:
+        log.info(
+            "pulling marketplace request_ids: platform=%s window=[%s, %s)",
+            platform,
+            since_ts,
+            until_ts,
+        )
+        ids_by_platform[platform] = fp.fetch_all_delivery_request_ids(
+            marketplace_url, since_ts, timestamp_lt=until_ts
+        )
+    return ids_by_platform
+
+
+def _pull_lake_request_ids_unfiltered(since: datetime, until: datetime) -> set[str]:
+    """Fetch every lake request_id in the window regardless of resolution.
+
+    Coverage-check counterpart to :func:`_pull_marketplace_request_ids`.
+    Includes pending rows and off-chain rows, because the coverage
+    question is "is this on-chain request in the lake at all?", not
+    "did mech-analytics finish scoring it?".
+
+    :param since: timezone-aware datetime, inclusive lower bound.
+    :param until: timezone-aware datetime, exclusive upper bound.
+    :return: set of request_ids the lake has for the window.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark.mech_analytics_client import iter_scored_rows
+
+    log.info(
+        "pulling lake request_ids (unfiltered) since=%s until=%s",
+        since.isoformat(),
+        until.isoformat(),
+    )
+    return {
+        row["request_id"]
+        for row in iter_scored_rows(since=since, until=until, resolved=None)
+        if row.get("request_id")
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -566,6 +647,137 @@ def _section(title: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Coverage check                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def _report_coverage_check(
+    marketplace_ids_by_platform: dict[str, set[str]],
+    lake_ids: set[str],
+) -> tuple[int, dict[str, list[str]]]:
+    """Coverage check: prove every on-chain request is in the lake.
+
+    For each platform, computes the set of request_ids the marketplace
+    subgraph knows about but the lake does not. Prints a per-platform
+    breakdown and returns the total gap size plus the per-platform ID
+    lists so the caller can put the full lists in the JSON artifact
+    and act on the gate.
+
+    :param marketplace_ids_by_platform: output of
+        :func:`_pull_marketplace_request_ids`.
+    :param lake_ids: output of :func:`_pull_lake_request_ids_unfiltered`.
+    :return: tuple of (total_missing_count, per-platform missing lists).
+    """
+    _section("Coverage check (marketplace subgraph → mech-analytics lake)")
+    missing_by_platform: dict[str, list[str]] = {}
+    total_missing = 0
+    for platform, marketplace_ids in marketplace_ids_by_platform.items():
+        missing = sorted(marketplace_ids - lake_ids)
+        missing_by_platform[platform] = missing
+        total_missing += len(missing)
+        marker = "✓" if not missing else "✗"
+        print(
+            f"  {platform}: marketplace={len(marketplace_ids):>7}  "
+            f"missing_from_lake={len(missing):>5}  {marker}"
+        )
+    print(f"  lake (all chains, incl. off-chain): {len(lake_ids):>7}")
+    print(
+        f"  total missing from lake:            {total_missing:>7}  "
+        f"{'✓' if total_missing == 0 else '✗'}"
+    )
+    if total_missing:
+        print()
+        print("  These on-chain request_ids are not in the mech-analytics lake.")
+        print("  Check ``mech_migration_failures`` on the predict-api DB for each")
+        print("  ID to see if it's a known-loss backfill failure")
+        print("  (parsed_request_null, unhandled_type_prompt, etc.).")
+        print()
+        for platform, missing in missing_by_platform.items():
+            if not missing:
+                continue
+            print(f"  {platform} — first 20 of {len(missing)}:")
+            for rid in missing[:20]:
+                print(f"    {rid}")
+            print("    (full list in the .json artifact)")
+    return total_missing, missing_by_platform
+
+
+# --------------------------------------------------------------------------- #
+# Report artifact writers                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _git_sha() -> str:
+    """Return the current git commit SHA, or ``unknown`` if git isn't
+    available (e.g. running inside a stripped-down container).
+    """
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                cwd=Path(__file__).resolve().parent,
+            )
+            .decode()
+            .strip()
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
+
+
+def _print_metadata(
+    since: datetime, until: datetime, mech_analytics_url: str
+) -> dict[str, Any]:
+    """Print the run's provenance header and return the same fields as a
+    dict for the JSON artifact.
+
+    Every artifact this script writes needs to be dated and attributable
+    so a reviewer months later can tell whether a report is still
+    current — which mech-analytics version it verified, which script
+    commit produced it, when it ran.
+    """
+    metadata = {
+        "run_at_utc": datetime.now(timezone.utc).isoformat(),
+        "script_git_sha": _git_sha(),
+        "mech_analytics_url": mech_analytics_url,
+        "window": {
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+        },
+    }
+    print("=== Run metadata ===")
+    for line in (
+        f"  run_at (UTC):        {metadata['run_at_utc']}",
+        f"  script git SHA:      {metadata['script_git_sha']}",
+        f"  mech-analytics URL:  {metadata['mech_analytics_url']}",
+        f"  window:              {since.isoformat()} → {until.isoformat()}",
+    ):
+        print(line)
+    return metadata
+
+
+def _write_report_files(
+    output_dir: Path,
+    window_slug: str,
+    human_report: str,
+    json_data: dict[str, Any],
+) -> None:
+    """Write the human report and structured JSON to ``output_dir``.
+
+    A K8s Job mounts a PVC or emptyDir at ``output_dir``; a reviewer or
+    a follow-up step can then read the ``.md`` for the human summary
+    and the ``.json`` for full ID lists and machine consumption.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    md_path = output_dir / f"{window_slug}.md"
+    json_path = output_dir / f"{window_slug}.json"
+    md_path.write_text(human_report)
+    json_path.write_text(json.dumps(json_data, indent=2, default=str))
+    print(f"\nwrote {md_path}")
+    print(f"wrote {json_path}")
+
+
+# --------------------------------------------------------------------------- #
 # CLI                                                                         #
 # --------------------------------------------------------------------------- #
 
@@ -595,6 +807,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.02,
         help="max outcome_mismatch / resolved_both to accept parity (default 0.02)",
     )
+    p.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "if set, write <window>.md and <window>.json report artifacts to "
+            "this directory in addition to printing to stdout. "
+            "Intended for K8s Job runs that publish reports to a PVC."
+        ),
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -617,13 +839,35 @@ def _compute_window(args: argparse.Namespace) -> tuple[datetime, datetime]:
     return since, until
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run all reconciliation checks and print the report to stdout.
+class _Tee:
+    """Duplicate every ``print`` to the real stdout and a StringIO buffer.
+
+    Lets ``main`` emit its report live to the console (for local runs
+    and K8s pod logs) while also capturing the full text for the
+    ``--output-dir`` report artifact.
+    """
+
+    def __init__(self, buffer: io.StringIO) -> None:
+        self._buffer = buffer
+        self._stdout = sys.__stdout__
+
+    def write(self, s: str) -> int:
+        self._stdout.write(s)
+        return self._buffer.write(s)
+
+    def flush(self) -> None:
+        self._stdout.flush()
+
+
+def main(
+    argv: Sequence[str] | None = None,
+) -> int:  # pylint: disable=too-many-locals,too-many-statements
+    """Run coverage + parity checks and emit a report to stdout (+ file).
 
     :param argv: optional CLI argument override; defaults to ``sys.argv``.
-    :return: 0 on parity within thresholds; 2 on min-row guard trip;
-        3 on divergence above --min-overlap-fraction /
-        --max-outcome-mismatch-fraction.
+    :return: exit code — 0 pass; 2 min-row guard trip; 3 parity
+        divergence above thresholds; 4 coverage gap
+        (on-chain requests missing from the lake).
     """
     args = _parse_args(argv)
     logging.basicConfig(
@@ -631,81 +875,150 @@ def main(argv: Sequence[str] | None = None) -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     since, until = _compute_window(args)
-    print(f"window: {since.isoformat()} to {until.isoformat()} (excl. trailing 24h)")
 
-    since_ts = int(since.timestamp())
-    until_ts = int(until.timestamp())
+    # Tee stdout so the human-readable report can also be written to
+    # ``--output-dir`` at the end without a second pass.
+    report_buffer = io.StringIO()
+    sys.stdout = _Tee(report_buffer)  # type: ignore[assignment]
+    started_at = time.monotonic()
+    exit_code = 0
+    metadata: dict[str, Any] = {}
+    coverage_summary: dict[str, Any] = {}
+    parity_summary: dict[str, Any] = {}
+    try:
+        mech_analytics_url = os.environ.get("MECH_ANALYTICS_URL", "<unset>")
+        metadata = _print_metadata(since, until, mech_analytics_url)
 
-    mp_rows, deliver_to_request_by_platform = _pull_mech_predict_rows(
-        since_ts, until_ts
-    )
-    lake_rows = _pull_lake_rows(since, until)
+        since_ts = int(since.timestamp())
+        until_ts = int(until.timestamp())
 
-    # Min-row guard: fail loud on either side coming back thin.
-    if len(mp_rows) < args.min_rows or len(lake_rows) < args.min_rows:
-        print()
+        # --- Coverage check (fast-fail: if the lake is missing on-chain
+        # requests, parity on the overlap doesn't rescue that).
+        marketplace_ids_by_platform = _pull_marketplace_request_ids(since_ts, until_ts)
+        lake_ids_unfiltered = _pull_lake_request_ids_unfiltered(since, until)
+        total_missing, missing_by_platform = _report_coverage_check(
+            marketplace_ids_by_platform, lake_ids_unfiltered
+        )
+        coverage_summary = {
+            "marketplace_ids_by_platform_count": {
+                p: len(v) for p, v in marketplace_ids_by_platform.items()
+            },
+            "lake_ids_unfiltered_count": len(lake_ids_unfiltered),
+            "missing_from_lake_by_platform": missing_by_platform,
+            "total_missing": total_missing,
+        }
+
+        # --- Parity check on the resolved intersection.
+        mp_rows, deliver_to_request_by_platform = _pull_mech_predict_rows(
+            since_ts, until_ts
+        )
+        lake_rows = _pull_lake_rows(since, until)
+
+        if len(mp_rows) < args.min_rows or len(lake_rows) < args.min_rows:
+            print()
+            print(
+                f"FAIL: min-row guard tripped "
+                f"(mech-predict={len(mp_rows)}, lake={len(lake_rows)}, "
+                f"threshold={args.min_rows})"
+            )
+            print(
+                "Refusing to report parity on a vacuous window. "
+                "Extend the window, check the endpoints, or lower --min-rows."
+            )
+            exit_code = 2
+            return exit_code
+
+        print(f"mech-predict rows: {len(mp_rows)}   lake rows: {len(lake_rows)}")
+
+        intersection, only_mp, only_lake = _report_row_set_overlap(mp_rows, lake_rows)
+        resolved_both, outcome_mismatch = _report_final_outcome_diff(
+            mp_rows, lake_rows, intersection
+        )
+        _report_market_id_diff(mp_rows, lake_rows, intersection)
+        _report_dedup_granularity(mp_rows, deliver_to_request_by_platform)
+        _report_null_provenance(lake_rows)
+        _report_per_tool_aggregate(mp_rows, lake_rows, intersection)
+
+        # --- Verdict.
+        _section("Verdict")
+        mp_ids_size = len(intersection) + len(only_mp)
+        lake_ids_size = len(intersection) + len(only_lake)
+        overlap_denom = min(mp_ids_size, lake_ids_size)
+        overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
+        mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
+        print(f"  coverage: missing_from_lake={total_missing} " f"(threshold == 0)")
         print(
-            f"FAIL: min-row guard tripped "
-            f"(mech-predict={len(mp_rows)}, lake={len(lake_rows)}, "
-            f"threshold={args.min_rows})"
+            f"  overlap:  {len(intersection)} / {overlap_denom} = "
+            f"{overlap_fraction:.4f}  (threshold >= {args.min_overlap_fraction})"
         )
         print(
-            "Refusing to report parity on a vacuous window. "
-            "Extend the window, check the endpoints, or lower --min-rows."
+            f"  outcome:  {outcome_mismatch} / {resolved_both} = "
+            f"{mismatch_fraction:.4f}  (threshold <= {args.max_outcome_mismatch_fraction})"
         )
-        return 2
+        parity_summary = {
+            "mp_rows": len(mp_rows),
+            "lake_rows_resolved": len(lake_rows),
+            "intersection": len(intersection),
+            "only_mp": len(only_mp),
+            "only_lake": len(only_lake),
+            "outcome_mismatch": outcome_mismatch,
+            "resolved_both": resolved_both,
+            "overlap_fraction": overlap_fraction,
+            "mismatch_fraction": mismatch_fraction,
+        }
 
-    print(f"mech-predict rows: {len(mp_rows)}   " f"lake rows: {len(lake_rows)}")
+        # Coverage failure takes precedence — an incomplete lake means
+        # even a perfect parity number is describing an incomplete
+        # picture. Reviewer needs to know the gap first.
+        if total_missing > 0:
+            print()
+            print(
+                f"FAIL (coverage): {total_missing} on-chain request_ids "
+                f"are missing from the lake."
+            )
+            exit_code = 4
+            return exit_code
 
-    intersection, only_mp, only_lake = _report_row_set_overlap(mp_rows, lake_rows)
-    resolved_both, outcome_mismatch = _report_final_outcome_diff(
-        mp_rows, lake_rows, intersection
-    )
-    _report_market_id_diff(mp_rows, lake_rows, intersection)
-    _report_dedup_granularity(mp_rows, deliver_to_request_by_platform)
-    _report_null_provenance(lake_rows)
-    _report_per_tool_aggregate(mp_rows, lake_rows, intersection)
-
-    print()
-    _section("Divergence gate")
-    # Denominator is a set size to match the numerator (also a set size).
-    # Row counts would under-report on the two conditions this script
-    # explicitly measures elsewhere: rows without request_id (WARN in
-    # _report_row_set_overlap) and multi-deliver-per-request (class 4a
-    # in _report_dedup_granularity).
-    mp_ids_size = len(intersection) + len(only_mp)
-    lake_ids_size = len(intersection) + len(only_lake)
-    overlap_denom = min(mp_ids_size, lake_ids_size)
-    overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
-    mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
-    print(
-        f"  overlap: {len(intersection)} / {overlap_denom} = "
-        f"{overlap_fraction:.4f}  (threshold >= {args.min_overlap_fraction})"
-    )
-    print(
-        f"  outcome mismatch: {outcome_mismatch} / {resolved_both} = "
-        f"{mismatch_fraction:.4f}  (threshold <= {args.max_outcome_mismatch_fraction})"
-    )
-    failures: list[str] = []
-    if overlap_fraction < args.min_overlap_fraction:
-        failures.append(
-            f"overlap_fraction {overlap_fraction:.4f} < "
-            f"min_overlap_fraction {args.min_overlap_fraction}"
-        )
-    if mismatch_fraction > args.max_outcome_mismatch_fraction:
-        failures.append(
-            f"outcome_mismatch_fraction {mismatch_fraction:.4f} > "
-            f"max_outcome_mismatch_fraction {args.max_outcome_mismatch_fraction}"
-        )
-    if failures:
+        failures: list[str] = []
+        if overlap_fraction < args.min_overlap_fraction:
+            failures.append(
+                f"overlap_fraction {overlap_fraction:.4f} < "
+                f"min_overlap_fraction {args.min_overlap_fraction}"
+            )
+        if mismatch_fraction > args.max_outcome_mismatch_fraction:
+            failures.append(
+                f"outcome_mismatch_fraction {mismatch_fraction:.4f} > "
+                f"max_outcome_mismatch_fraction {args.max_outcome_mismatch_fraction}"
+            )
+        if failures:
+            print()
+            print("FAIL (parity): divergence exceeds thresholds:")
+            for reason in failures:
+                print(f"  - {reason}")
+            exit_code = 3
+            return exit_code
         print()
-        print("FAIL: divergence exceeds thresholds:")
-        for reason in failures:
-            print(f"  - {reason}")
-        return 3
-    print()
-    print("PASS: divergence within thresholds")
-    return 0
+        print("PASS: coverage complete, parity within thresholds")
+        return exit_code
+    finally:
+        elapsed_s = time.monotonic() - started_at
+        print(f"\nwall time: {elapsed_s:.1f}s")
+        sys.stdout = sys.__stdout__  # type: ignore[assignment]
+        if args.output_dir:
+            window_slug = f"{since.date().isoformat()}_to_{until.date().isoformat()}"
+            json_data = {
+                "metadata": {**metadata, "wall_time_s": round(elapsed_s, 1)},
+                "coverage": coverage_summary,
+                "parity": parity_summary,
+                "verdict": "PASS" if exit_code == 0 else "FAIL",
+                "exit_code": exit_code,
+            }
+            _write_report_files(
+                Path(args.output_dir),
+                window_slug,
+                report_buffer.getvalue(),
+                json_data,
+            )
 
 
 if __name__ == "__main__":

@@ -69,17 +69,18 @@ Required env vars:
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
 import io
 import json
 import logging
 import os
-from pathlib import Path
 import statistics
 import subprocess
 import sys
 import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Sequence
 
 log = logging.getLogger("verify_migration_swap")
@@ -89,8 +90,14 @@ log = logging.getLogger("verify_migration_swap")
 # Guards / knobs                                                              #
 # --------------------------------------------------------------------------- #
 
-# Below this row count on either side the comparison is vacuous.
+# Below this row count on either side the parity comparison is vacuous.
 MINIMUM_ROWS_PER_SIDE = 100
+
+# Below this total across all platforms the coverage sweep is vacuous —
+# an empty marketplace side makes ``marketplace_ids - lake_ids`` trivially
+# empty regardless of whether the lake actually has anything. The floor
+# distinguishes "healthy sweep, no gap" from "sweep returned nothing".
+MINIMUM_MARKETPLACE_ROWS = 10
 
 # Comparing floats coming from independent code paths — allow small drift.
 FLOAT_TOL = 1e-6
@@ -127,10 +134,18 @@ def _pull_mech_predict_rows(
     ]
     for platform, marketplace_url, fetch_resolved in platforms:
         log.info("pulling mech-predict rows: platform=%s", platform)
-        # Bound both queries to the window so enumeration doesn't fan out from
-        # `since` to `now` for old windows (the source of hours-long runs
-        # against 6-month-old windows).
-        resolved = fetch_resolved(resolved_after=since_ts, resolved_before=until_ts)
+        # Delivery time IS bounded to the window here (parity's row set is
+        # keyed on delivery, which both sides agree on). Resolution time is
+        # NOT bounded: the lake's ``/v1/data/scored-rows`` endpoint only
+        # supports filtering on ``requested_at``, not on resolution time.
+        # Narrowing the mech-predict side on resolution time while the
+        # lake side has no equivalent bound would deflate the overlap
+        # near the trailing edge — markets that resolve shortly after
+        # ``until`` would stay in the lake but disappear from
+        # mech-predict, showing up as ``only_lake`` for reasons unrelated
+        # to real migration divergence. Pay the enumeration cost for
+        # correctness.
+        resolved = fetch_resolved(resolved_after=since_ts)
         rows, _still_pending, _max_delivery_ts, _max_resolved_ts = fp.process_platform(
             platform=platform,
             marketplace_url=marketplace_url,
@@ -219,7 +234,9 @@ def _pull_lake_rows(since: datetime, until: datetime) -> list[dict[str, Any]]:
     return list(iter_scored_rows(since=since, until=until, resolved=True))
 
 
-def _pull_marketplace_request_ids(since_ts: int, until_ts: int) -> dict[str, set[str]]:
+def _pull_marketplace_request_ids(
+    since_ts: int, until_ts: int
+) -> tuple[dict[str, set[str]], dict[str, int]]:
     """Fetch every on-chain request_id delivered in the window, per platform.
 
     Coverage-check input: the ground truth of on-chain mech traffic
@@ -228,9 +245,15 @@ def _pull_marketplace_request_ids(since_ts: int, until_ts: int) -> dict[str, set
     ID set below to prove no on-chain request is missing from the
     lake.
 
+    Also threads the per-platform "delivery had no request.id" drop
+    count out of ``fetch_all_delivery_request_ids``. A non-zero drop
+    means the coverage denominator shrank silently — those requests
+    could be genuinely absent from the lake but the check has no way
+    to name them. The caller blocks PASS on any non-zero drop.
+
     :param since_ts: unix seconds, inclusive lower bound.
     :param until_ts: unix seconds, exclusive upper bound.
-    :return: platform name → set of on-chain request_ids for that platform.
+    :return: tuple of (platform → request_ids set, platform → dropped_no_rid).
     """
     # pylint: disable=import-outside-toplevel
     from benchmark.datasets import fetch_production as fp
@@ -240,6 +263,7 @@ def _pull_marketplace_request_ids(since_ts: int, until_ts: int) -> dict[str, set
         ("polymarket", fp.MECH_MARKETPLACE_POLYGON_URL),
     ]
     ids_by_platform: dict[str, set[str]] = {}
+    dropped_by_platform: dict[str, int] = {}
     for platform, marketplace_url in platforms:
         log.info(
             "pulling marketplace request_ids: platform=%s window=[%s, %s)",
@@ -247,10 +271,12 @@ def _pull_marketplace_request_ids(since_ts: int, until_ts: int) -> dict[str, set
             since_ts,
             until_ts,
         )
-        ids_by_platform[platform] = fp.fetch_all_delivery_request_ids(
+        ids, dropped = fp.fetch_all_delivery_request_ids(
             marketplace_url, since_ts, timestamp_lt=until_ts
         )
-    return ids_by_platform
+        ids_by_platform[platform] = ids
+        dropped_by_platform[platform] = dropped
+    return ids_by_platform, dropped_by_platform
 
 
 def _pull_lake_request_ids_unfiltered(since: datetime, until: datetime) -> set[str]:
@@ -651,39 +677,86 @@ def _section(title: str) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _CoverageResult:
+    """Structured outcome of the coverage check.
+
+    Groups every fact the verdict decision needs plus everything the
+    JSON artifact needs to persist, so ``main`` doesn't juggle five
+    parallel dicts and the caller can't accidentally rely on stale
+    fields.
+    """
+
+    total_missing: int
+    missing_by_platform: dict[str, list[str]]
+    total_dropped_no_rid: int
+    dropped_by_platform: dict[str, int]
+    marketplace_counts: dict[str, int]
+    total_marketplace: int
+
+
 def _report_coverage_check(
     marketplace_ids_by_platform: dict[str, set[str]],
+    dropped_by_platform: dict[str, int],
     lake_ids: set[str],
-) -> tuple[int, dict[str, list[str]]]:
+) -> _CoverageResult:
     """Coverage check: prove every on-chain request is in the lake.
 
     For each platform, computes the set of request_ids the marketplace
     subgraph knows about but the lake does not. Prints a per-platform
-    breakdown and returns the total gap size plus the per-platform ID
-    lists so the caller can put the full lists in the JSON artifact
-    and act on the gate.
+    breakdown and returns a :class:`_CoverageResult` with every fact
+    the caller needs to compute the verdict and populate the artifact.
+
+    Coverage failure modes the caller must gate on:
+
+    * ``total_missing > 0`` — genuine gap, on-chain requests absent
+      from the lake.
+    * ``total_dropped_no_rid > 0`` — the marketplace pull returned
+      deliveries whose ``request.id`` was missing, so those requests
+      never entered the coverage denominator and could be silently
+      absent from the lake without being reported.
+    * ``total_marketplace < min_marketplace_rows`` (checked by caller) —
+      an empty or near-empty coverage sweep is indistinguishable from
+      complete coverage on the set-diff alone; the caller enforces a
+      floor to distinguish "healthy sweep, no gap" from "sweep
+      returned nothing, so of course there's no diff".
 
     :param marketplace_ids_by_platform: output of
-        :func:`_pull_marketplace_request_ids`.
+        :func:`_pull_marketplace_request_ids` (first tuple element).
+    :param dropped_by_platform: output of
+        :func:`_pull_marketplace_request_ids` (second tuple element) —
+        per-platform count of deliveries dropped because their
+        ``request.id`` was missing.
     :param lake_ids: output of :func:`_pull_lake_request_ids_unfiltered`.
-    :return: tuple of (total_missing_count, per-platform missing lists).
+    :return: :class:`_CoverageResult` with per-platform and aggregate stats.
     """
     _section("Coverage check (marketplace subgraph → mech-analytics lake)")
     missing_by_platform: dict[str, list[str]] = {}
+    marketplace_counts: dict[str, int] = {}
     total_missing = 0
+    total_marketplace = 0
     for platform, marketplace_ids in marketplace_ids_by_platform.items():
         missing = sorted(marketplace_ids - lake_ids)
         missing_by_platform[platform] = missing
+        marketplace_counts[platform] = len(marketplace_ids)
         total_missing += len(missing)
-        marker = "✓" if not missing else "✗"
+        total_marketplace += len(marketplace_ids)
+        dropped = dropped_by_platform.get(platform, 0)
+        marker = "✓" if not missing and dropped == 0 else "✗"
         print(
             f"  {platform}: marketplace={len(marketplace_ids):>7}  "
-            f"missing_from_lake={len(missing):>5}  {marker}"
+            f"missing_from_lake={len(missing):>5}  "
+            f"dropped_no_request_id={dropped:>4}  {marker}"
         )
+    total_dropped = sum(dropped_by_platform.values())
     print(f"  lake (all chains, incl. off-chain): {len(lake_ids):>7}")
     print(
         f"  total missing from lake:            {total_missing:>7}  "
         f"{'✓' if total_missing == 0 else '✗'}"
+    )
+    print(
+        f"  total dropped_no_request_id:        {total_dropped:>7}  "
+        f"{'✓' if total_dropped == 0 else '✗'}"
     )
     if total_missing:
         print()
@@ -699,7 +772,23 @@ def _report_coverage_check(
             for rid in missing[:20]:
                 print(f"    {rid}")
             print("    (full list in the .json artifact)")
-    return total_missing, missing_by_platform
+    if total_dropped:
+        print()
+        print(
+            f"  {total_dropped} marketplace delivery/deliveries had a missing "
+            f"``request.id`` and were dropped from the coverage denominator. "
+            f"Each dropped row is a request that could genuinely be absent "
+            f"from the lake but that the check cannot name. Investigate "
+            f"the marketplace subgraph schema."
+        )
+    return _CoverageResult(
+        total_missing=total_missing,
+        missing_by_platform=missing_by_platform,
+        total_dropped_no_rid=total_dropped,
+        dropped_by_platform=dropped_by_platform,
+        marketplace_counts=marketplace_counts,
+        total_marketplace=total_marketplace,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -710,15 +799,21 @@ def _report_coverage_check(
 def _git_sha() -> str:
     """Return the current git commit SHA, or ``unknown`` on failure.
 
-    ``git`` is resolved via PATH deliberately: hardcoding an absolute
-    path would be brittle across environments (Linux/macOS/CI/Docker
-    all put git in different locations) and the argv is a fixed literal
-    that never accepts user input. ``unknown`` is returned when the
-    tool isn't installed (stripped-down container) or the working
-    directory isn't a git repo.
+    Reads from the ``GIT_SHA`` env var first, then falls back to
+    invoking ``git rev-parse``. The env-var branch is what the shipped
+    K8s image uses: the Dockerfile has no ``git`` binary and no
+    ``.git`` directory, so the ``git`` branch would always fail there
+    and every artifact would attribute the run to ``unknown``. The
+    publish workflow bakes ``GITHUB_SHA`` into the image at build
+    time via ``--build-arg GIT_SHA=...`` so the artifact can point
+    at the exact commit that produced it. Local dev runs use the
+    ``git`` branch.
 
     :return: 40-char SHA hex string, or the literal ``unknown``.
     """
+    from_env = os.environ.get("GIT_SHA", "").strip()
+    if from_env:
+        return from_env
     try:
         return (
             subprocess.check_output(  # nosec B603 B607
@@ -730,6 +825,10 @@ def _git_sha() -> str:
             .strip()
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
+        log.warning(
+            "_git_sha: neither GIT_SHA env var nor git binary available; "
+            "run provenance will be attributed to 'unknown'"
+        )
         return "unknown"
 
 
@@ -813,6 +912,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=MINIMUM_ROWS_PER_SIDE,
         help=f"min rows per side to accept comparison (default {MINIMUM_ROWS_PER_SIDE})",
+    )
+    p.add_argument(
+        "--min-marketplace-rows",
+        type=int,
+        default=MINIMUM_MARKETPLACE_ROWS,
+        help=(
+            "min total marketplace deliveries across platforms for the "
+            "coverage check to be non-vacuous. An empty coverage sweep "
+            "makes an empty set-diff, which would otherwise report PASS. "
+            f"Default {MINIMUM_MARKETPLACE_ROWS}."
+        ),
     )
     p.add_argument(
         "--min-overlap-fraction",
@@ -905,9 +1015,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     :param argv: optional CLI argument override; defaults to ``sys.argv``.
     :return: exit code — 0 pass; 2 min-row guard trip; 3 parity
         divergence above thresholds; 4 coverage gap
-        (on-chain requests missing from the lake).
+        (on-chain requests missing from the lake, or drops in the
+        marketplace pull, or vacuous coverage sweep).
     """
-    # pylint: disable=too-many-locals,too-many-statements
+    # pylint: disable=too-many-locals,too-many-statements,too-many-branches
     args = _parse_args(argv)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
@@ -920,7 +1031,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     report_buffer = io.StringIO()
     sys.stdout = _Tee(report_buffer)  # type: ignore[assignment]
     started_at = time.monotonic()
-    exit_code = 0
+    # Sentinel: any non-zero exit + non-PASS verdict. Only the explicit
+    # success path flips these to 0 / "PASS". If the try body raises
+    # before reaching the verdict block, the ``finally`` writes the
+    # artifact certifying "ERROR" — matches what the pod's non-zero
+    # exit already tells the K8s Job runner, but now the persisted
+    # report on the PVC agrees instead of falsely certifying PASS.
+    exit_code = 1
+    verdict = "ERROR"
     metadata: dict[str, Any] = {}
     coverage_summary: dict[str, Any] = {}
     parity_summary: dict[str, Any] = {}
@@ -932,20 +1050,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         until_ts = int(until.timestamp())
 
         # --- Coverage check (fast-fail: if the lake is missing on-chain
-        # requests, parity on the overlap doesn't rescue that).
-        marketplace_ids_by_platform = _pull_marketplace_request_ids(since_ts, until_ts)
+        # requests, parity on the overlap doesn't rescue that. Return
+        # exit 4 *before* the parity pull so a coverage gap can't be
+        # miscategorised by the min-row guard.).
+        marketplace_ids_by_platform, dropped_by_platform = (
+            _pull_marketplace_request_ids(since_ts, until_ts)
+        )
         lake_ids_unfiltered = _pull_lake_request_ids_unfiltered(since, until)
-        total_missing, missing_by_platform = _report_coverage_check(
-            marketplace_ids_by_platform, lake_ids_unfiltered
+        coverage = _report_coverage_check(
+            marketplace_ids_by_platform, dropped_by_platform, lake_ids_unfiltered
         )
         coverage_summary = {
-            "marketplace_ids_by_platform_count": {
-                p: len(v) for p, v in marketplace_ids_by_platform.items()
-            },
+            "marketplace_ids_by_platform_count": coverage.marketplace_counts,
+            "total_marketplace": coverage.total_marketplace,
             "lake_ids_unfiltered_count": len(lake_ids_unfiltered),
-            "missing_from_lake_by_platform": missing_by_platform,
-            "total_missing": total_missing,
+            "missing_from_lake_by_platform": coverage.missing_by_platform,
+            "total_missing": coverage.total_missing,
+            "dropped_no_request_id_by_platform": coverage.dropped_by_platform,
+            "total_dropped_no_request_id": coverage.total_dropped_no_rid,
         }
+
+        # Gate on the coverage side BEFORE hitting parity: a coverage
+        # gap or a vacuous sweep or a schema-drift drop is worth its
+        # own dedicated exit code, and the min-row guard on the parity
+        # pull below would otherwise swallow the same situation as a
+        # generic "window too thin".
+        coverage_failure = _coverage_failure_reason(coverage, args.min_marketplace_rows)
+        if coverage_failure is not None:
+            print()
+            print(f"FAIL (coverage): {coverage_failure}")
+            exit_code = 4
+            verdict = "FAIL"
+            return exit_code
 
         # --- Parity check on the resolved intersection.
         mp_rows, deliver_to_request_by_platform = _pull_mech_predict_rows(
@@ -965,6 +1101,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "Extend the window, check the endpoints, or lower --min-rows."
             )
             exit_code = 2
+            verdict = "FAIL"
             return exit_code
 
         print(f"mech-predict rows: {len(mp_rows)}   lake rows: {len(lake_rows)}")
@@ -985,7 +1122,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         overlap_denom = min(mp_ids_size, lake_ids_size)
         overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
         mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
-        print(f"  coverage: missing_from_lake={total_missing} " f"(threshold == 0)")
+        print(
+            f"  coverage: missing_from_lake={coverage.total_missing} "
+            f"dropped_no_request_id={coverage.total_dropped_no_rid} "
+            f"total_marketplace={coverage.total_marketplace} (thresholds "
+            f"missing==0, dropped==0, marketplace>={args.min_marketplace_rows})"
+        )
         print(
             f"  overlap:  {len(intersection)} / {overlap_denom} = "
             f"{overlap_fraction:.4f}  (threshold >= {args.min_overlap_fraction})"
@@ -1006,18 +1148,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mismatch_fraction": mismatch_fraction,
         }
 
-        # Coverage failure takes precedence — an incomplete lake means
-        # even a perfect parity number is describing an incomplete
-        # picture. Reviewer needs to know the gap first.
-        if total_missing > 0:
-            print()
-            print(
-                f"FAIL (coverage): {total_missing} on-chain request_ids "
-                f"are missing from the lake."
-            )
-            exit_code = 4
-            return exit_code
-
         failures: list[str] = []
         if overlap_fraction < args.min_overlap_fraction:
             failures.append(
@@ -1035,13 +1165,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             for reason in failures:
                 print(f"  - {reason}")
             exit_code = 3
+            verdict = "FAIL"
             return exit_code
         print()
         print("PASS: coverage complete, parity within thresholds")
+        exit_code = 0
+        verdict = "PASS"
         return exit_code
     finally:
         elapsed_s = time.monotonic() - started_at
-        print(f"\nwall time: {elapsed_s:.1f}s")
+        print(
+            f"\nwall time: {elapsed_s:.1f}s  verdict: {verdict}  exit_code: {exit_code}"
+        )
         sys.stdout = sys.__stdout__  # type: ignore[assignment]
         if args.output_dir:
             window_slug = f"{since.date().isoformat()}_to_{until.date().isoformat()}"
@@ -1049,7 +1184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "metadata": {**metadata, "wall_time_s": round(elapsed_s, 1)},
                 "coverage": coverage_summary,
                 "parity": parity_summary,
-                "verdict": "PASS" if exit_code == 0 else "FAIL",
+                "verdict": verdict,
                 "exit_code": exit_code,
             }
             _write_report_files(
@@ -1058,6 +1193,51 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report_buffer.getvalue(),
                 json_data,
             )
+
+
+def _coverage_failure_reason(
+    coverage: "_CoverageResult", min_marketplace_rows: int
+) -> str | None:
+    """Return a human-readable failure reason for the coverage check, or None.
+
+    Three ways coverage can fail, in priority order:
+
+    1. ``total_marketplace < min_marketplace_rows`` — the marketplace
+       sweep is vacuous. ``marketplace_ids - lake_ids`` is trivially
+       empty when the marketplace side is empty, so without this floor
+       any subgraph outage would silently PASS as "no missing IDs".
+    2. ``total_dropped_no_rid > 0`` — deliveries came back without a
+       resolvable ``request.id`` and were dropped from the coverage
+       denominator. Each dropped row is a request that could be absent
+       from the lake but that we can never name, so a "no missing IDs"
+       PASS would be misleading.
+    3. ``total_missing > 0`` — a genuine coverage gap.
+
+    :param coverage: the result of :func:`_report_coverage_check`.
+    :param min_marketplace_rows: floor from ``--min-marketplace-rows``.
+    :return: human-readable failure reason, or ``None`` on success.
+    """
+    if coverage.total_marketplace < min_marketplace_rows:
+        return (
+            f"vacuous coverage sweep — total marketplace deliveries "
+            f"{coverage.total_marketplace} < min_marketplace_rows "
+            f"{min_marketplace_rows}. An empty coverage side makes "
+            f"``marketplace_ids - lake_ids`` trivially empty and would "
+            f"otherwise report PASS. Check the marketplace subgraph."
+        )
+    if coverage.total_dropped_no_rid > 0:
+        return (
+            f"{coverage.total_dropped_no_rid} marketplace delivery/"
+            f"deliveries dropped from the coverage denominator because "
+            f"``request.id`` was missing. Each dropped row is a request "
+            f"the check can't name — cannot confirm coverage."
+        )
+    if coverage.total_missing > 0:
+        return (
+            f"{coverage.total_missing} on-chain request_ids are "
+            f"missing from the lake."
+        )
+    return None
 
 
 if __name__ == "__main__":

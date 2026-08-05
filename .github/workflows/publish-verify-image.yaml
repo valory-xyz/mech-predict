@@ -42,3 +42,8 @@ jobs:
           file: Dockerfile.verify
           push: true
           tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          # Bake the source commit into the image so the verify script's
+          # metadata header can attribute each artifact to a specific
+          # revision without needing git inside the runtime image.
+          build-args: |
+            GIT_SHA=${{ github.sha }}

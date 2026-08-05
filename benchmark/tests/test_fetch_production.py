@@ -2110,7 +2110,9 @@ class TestUnparsedRequestCursorCap:
         )
         lagging_cap = now - 600
         monkeypatch.setattr(
-            fp, "fetch_deliveries", lambda url, ts: ([matched], lagging_cap)
+            fp,
+            "fetch_deliveries",
+            lambda url, ts, **_kwargs: ([matched], lagging_cap),
         )
         monkeypatch.setattr(
             fp, "_enrich_rows_with_ipfs_metadata", lambda rows, url: None
@@ -2162,7 +2164,9 @@ class TestPendingSurvivesQuietRun:
             "parsed_missing": False,
         }
         monkeypatch.setattr(
-            fp, "fetch_deliveries", lambda url, ts: ([new_delivery], None)
+            fp,
+            "fetch_deliveries",
+            lambda url, ts, **_kwargs: ([new_delivery], None),
         )
 
         rows, all_pending, _, _ = fp.process_platform(

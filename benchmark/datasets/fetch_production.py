@@ -19,20 +19,19 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import shutil
 import sys
 import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl
@@ -1141,11 +1140,16 @@ def fetch_deliveries(
         DELIVERS_QUERY if schema == DELIVERS_SCHEMA_PARSED else DELIVERS_QUERY_LEGACY
     )
     if timestamp_lt is not None:
-        query_template = query_template.replace(
-            "where: { blockTimestamp_gt: %(timestamp_gt)s }",
-            f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
-            f"blockTimestamp_lt: {int(timestamp_lt)} }}",
+        # Both DELIVERS_QUERY and DELIVERS_QUERY_LEGACY carry the same
+        # ``where: { blockTimestamp_gt: %(timestamp_gt)s }`` literal, so
+        # reformatting one but not the other would silently strip the
+        # upper bound only for that schema variant.
+        variant = (
+            "DELIVERS_QUERY"
+            if schema == DELIVERS_SCHEMA_PARSED
+            else "DELIVERS_QUERY_LEGACY"
         )
+        query_template = _inject_timestamp_lt(query_template, timestamp_lt, variant)
     raw = _paginated_fetch(
         marketplace_url,
         query_template,
@@ -1254,7 +1258,7 @@ def fetch_all_delivery_request_ids(
     marketplace_url: str,
     timestamp_gt: int,
     timestamp_lt: Optional[int] = None,
-) -> set[str]:
+) -> tuple[set[str], int]:
     """Return the full set of on-chain request_ids delivered in the window.
 
     Unlike :func:`fetch_deliveries`, this does not skip deliveries with
@@ -1264,18 +1268,21 @@ def fetch_all_delivery_request_ids(
     parse. Coverage is a claim about ingest completeness, not about
     what today's business logic happens to consume.
 
+    The second return value is the count of deliveries that came back
+    without a resolvable ``request.id`` and were therefore dropped from
+    the coverage denominator. Callers surface this so a non-zero drop
+    can't be hidden inside a "no missing IDs" PASS verdict — every
+    dropped row is a request that could genuinely be absent from the
+    lake but that we can never report as absent.
+
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param timestamp_gt: unix seconds, exclusive lower bound.
     :param timestamp_lt: optional unix seconds, exclusive upper bound.
-    :return: set of on-chain request_ids (Request.id) delivered in the window.
+    :return: tuple of (request_ids set, dropped_no_rid_count).
     """
     query = DELIVER_REQUEST_IDS_QUERY
     if timestamp_lt is not None:
-        query = query.replace(
-            "where: { blockTimestamp_gt: %(timestamp_gt)s }",
-            f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
-            f"blockTimestamp_lt: {int(timestamp_lt)} }}",
-        )
+        query = _inject_timestamp_lt(query, timestamp_lt, "DELIVER_REQUEST_IDS_QUERY")
     raw = _paginated_fetch(
         marketplace_url,
         query,
@@ -1283,12 +1290,51 @@ def fetch_all_delivery_request_ids(
         {"timestamp_gt": timestamp_gt},
     )
     request_ids: set[str] = set()
+    dropped_no_rid = 0
     for d in raw:
         request = d.get("request") or {}
         rid = request.get("id")
         if rid:
             request_ids.add(rid)
-    return request_ids
+        else:
+            dropped_no_rid += 1
+    if dropped_no_rid:
+        log.warning(
+            "fetch_all_delivery_request_ids: dropped %d delivery/deliveries "
+            "with missing request.id from coverage denominator",
+            dropped_no_rid,
+        )
+    return request_ids, dropped_no_rid
+
+
+def _inject_timestamp_lt(query: str, timestamp_lt: int, query_name: str) -> str:
+    """Insert a ``blockTimestamp_lt`` bound into a delivers query.
+
+    ``str.replace`` returns the source unchanged when the target isn't
+    found — a silent no-op that would revert the query back to the
+    unbounded ``since → now`` shape and hide it behind a successful
+    pagination. Asserting the substitution actually landed catches
+    a future reformat of the query literal at run time instead of at
+    review time.
+
+    :param query: the raw GraphQL query text with a
+        ``where: { blockTimestamp_gt: %(timestamp_gt)s }`` clause.
+    :param timestamp_lt: the exclusive upper bound to insert.
+    :param query_name: source name for the assertion message.
+    :return: the query with both ``blockTimestamp_gt`` and
+        ``blockTimestamp_lt`` in the ``where`` clause.
+    """
+    target = "where: { blockTimestamp_gt: %(timestamp_gt)s }"
+    replacement = (
+        f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
+        f"blockTimestamp_lt: {int(timestamp_lt)} }}"
+    )
+    new_query = query.replace(target, replacement)
+    assert new_query != query, (
+        f"_inject_timestamp_lt: bound did not apply to {query_name} — "
+        f"literal drifted from expected substring {target!r}"
+    )
+    return new_query
 
 
 # ---------------------------------------------------------------------------
@@ -1425,11 +1471,17 @@ def fetch_omen_resolved(
     """
     query = OMEN_BETS_QUERY
     if resolved_before is not None:
-        query = query.replace(
-            "currentAnswerTimestamp_gt: %(resolved_after)s",
+        target = "currentAnswerTimestamp_gt: %(resolved_after)s"
+        replacement = (
             f"currentAnswerTimestamp_gt: %(resolved_after)s\n"
-            f"        currentAnswerTimestamp_lt: {int(resolved_before)}",
+            f"        currentAnswerTimestamp_lt: {int(resolved_before)}"
         )
+        new_query = query.replace(target, replacement)
+        assert new_query != query, (
+            "fetch_omen_resolved: resolved_before bound did not apply — "
+            f"OMEN_BETS_QUERY literal drifted from {target!r}"
+        )
+        query = new_query
     raw = _paginated_fetch(
         PREDICT_OMEN_SUBGRAPH_URL,
         query,
@@ -1486,11 +1538,17 @@ def fetch_polymarket_resolved(
     """
     query = POLYMARKET_RESOLVED_QUESTIONS_QUERY
     if resolved_before is not None:
-        query = query.replace(
-            "resolution_: { blockTimestamp_gt: %(resolved_after)s }",
+        target = "resolution_: { blockTimestamp_gt: %(resolved_after)s }"
+        replacement = (
             f"resolution_: {{ blockTimestamp_gt: %(resolved_after)s, "
-            f"blockTimestamp_lt: {int(resolved_before)} }}",
+            f"blockTimestamp_lt: {int(resolved_before)} }}"
         )
+        new_query = query.replace(target, replacement)
+        assert new_query != query, (
+            "fetch_polymarket_resolved: resolved_before bound did not apply — "
+            f"POLYMARKET_RESOLVED_QUESTIONS_QUERY literal drifted from {target!r}"
+        )
+        query = new_query
     raw = _paginated_fetch(
         PREDICT_POLYMARKET_SUBGRAPH_URL,
         query,

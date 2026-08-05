@@ -1,0 +1,23 @@
+# Only used by Dockerfile.verify today. If more Dockerfiles land, tighten
+# this per-image with named contexts rather than making it broader.
+
+# Test fixtures and captured logs — never needed inside the image.
+benchmark/tests/
+benchmark/datasets/logs/
+benchmark/datasets/logs_fresh/
+tests/
+
+# Build artifacts and caches.
+.venv/
+.tox/
+.mypy_cache/
+.pytest_cache/
+.coverage
+__pycache__/
+*.pyc
+
+# Local scratch.
+state/
+results/
+production_log*.jsonl
+*.docx

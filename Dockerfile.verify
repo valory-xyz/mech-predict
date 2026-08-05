@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+#
+# Image for the mech-predict / mech-analytics parity verification script
+# (scripts/verify_migration_swap.py). Used by infra as a K8s Job during
+# consumer-migration rollouts to prove the mech-analytics lake covers
+# every on-chain request the marketplace subgraph knows about and the
+# per-tool numbers agree.
+#
+# Published on tag as valory/mech-predict-verify:<version> via
+# .github/workflows/publish-verify-image.yaml.
+#
+# The image is deliberately narrow: only benchmark/ (the subgraph +
+# lake client modules the script imports) and scripts/verify_migration_swap.py
+# ship. Runtime deps come from uv.lock so the image is reproducible
+# from any commit.
+#
+# Runtime contract:
+#   * env: MECH_ANALYTICS_URL, plus subgraph URLs (see script docstring)
+#   * mount: /reports for --output-dir report artifacts
+#   * exit codes: 0 pass, 2 min-row, 3 parity divergence, 4 coverage gap
+
+FROM python:3.13-slim AS base
+
+# uv comes from its official static-linked distroless image; matches
+# the version mech-predict CI already uses (uv sync + uv.lock).
+COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /uvx /usr/local/bin/
+
+WORKDIR /app
+
+# Layer dep install ahead of source copy so a script edit doesn't
+# invalidate the (slow) dependency layer.
+COPY pyproject.toml uv.lock ./
+
+# --no-dev: the verifier doesn't need pytest, black, mypy, etc.
+# --no-install-project: mech-predict itself isn't imported as an
+# installed package here; we just need the third-party wheels.
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy only what the script imports. benchmark/ is the transitive
+# dep footprint of scripts/verify_migration_swap.py; scripts/ holds
+# the entry point.
+COPY benchmark/ ./benchmark/
+COPY scripts/verify_migration_swap.py ./scripts/verify_migration_swap.py
+
+# Non-root runtime — image writes to /reports which infra mounts,
+# never to /app.
+RUN useradd --system --create-home --uid 1001 verifier \
+    && chown -R verifier:verifier /app
+USER verifier
+
+# uv.venv sits at /app/.venv; using `uv run` keeps env + interpreter
+# discovery consistent with local invocations.
+ENTRYPOINT ["uv", "run", "--no-sync", "python", "scripts/verify_migration_swap.py"]

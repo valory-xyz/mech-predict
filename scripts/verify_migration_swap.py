@@ -710,10 +710,15 @@ def _report_coverage_check(
 def _git_sha() -> str:
     """Return the current git commit SHA, or ``unknown`` if git isn't
     available (e.g. running inside a stripped-down container).
+
+    ``git`` is resolved via PATH deliberately: hardcoding an absolute
+    path would be brittle across environments (Linux/macOS/CI/Docker
+    all put git in different locations) and the argv is a fixed literal
+    that never accepts user input.
     """
     try:
         return (
-            subprocess.check_output(
+            subprocess.check_output(  # nosec B603 B607
                 ["git", "rev-parse", "HEAD"],
                 stderr=subprocess.DEVNULL,
                 cwd=Path(__file__).resolve().parent,

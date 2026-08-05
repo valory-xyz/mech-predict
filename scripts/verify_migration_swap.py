@@ -69,17 +69,17 @@ Required env vars:
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import logging
 import os
+from pathlib import Path
 import statistics
 import subprocess
 import sys
 import time
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Sequence
 
 log = logging.getLogger("verify_migration_swap")
@@ -708,13 +708,16 @@ def _report_coverage_check(
 
 
 def _git_sha() -> str:
-    """Return the current git commit SHA, or ``unknown`` if git isn't
-    available (e.g. running inside a stripped-down container).
+    """Return the current git commit SHA, or ``unknown`` on failure.
 
     ``git`` is resolved via PATH deliberately: hardcoding an absolute
     path would be brittle across environments (Linux/macOS/CI/Docker
     all put git in different locations) and the argv is a fixed literal
-    that never accepts user input.
+    that never accepts user input. ``unknown`` is returned when the
+    tool isn't installed (stripped-down container) or the working
+    directory isn't a git repo.
+
+    :return: 40-char SHA hex string, or the literal ``unknown``.
     """
     try:
         return (
@@ -733,13 +736,19 @@ def _git_sha() -> str:
 def _print_metadata(
     since: datetime, until: datetime, mech_analytics_url: str
 ) -> dict[str, Any]:
-    """Print the run's provenance header and return the same fields as a
-    dict for the JSON artifact.
+    """Print the run's provenance header and return the same as a dict.
 
     Every artifact this script writes needs to be dated and attributable
     so a reviewer months later can tell whether a report is still
     current — which mech-analytics version it verified, which script
     commit produced it, when it ran.
+
+    :param since: window lower bound (inclusive, timezone-aware).
+    :param until: window upper bound (exclusive, timezone-aware).
+    :param mech_analytics_url: the ``MECH_ANALYTICS_URL`` this run hit
+        (or ``<unset>`` when the env var was missing).
+    :return: the same metadata as a dict, for embedding in the
+        ``.json`` artifact.
     """
     metadata = {
         "run_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -772,6 +781,11 @@ def _write_report_files(
     A K8s Job mounts a PVC or emptyDir at ``output_dir``; a reviewer or
     a follow-up step can then read the ``.md`` for the human summary
     and the ``.json`` for full ID lists and machine consumption.
+
+    :param output_dir: directory to write into; created if missing.
+    :param window_slug: filename stem, typically ``<since>_to_<until>``.
+    :param human_report: full stdout capture from the run.
+    :param json_data: structured summary (metadata + coverage + parity).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / f"{window_slug}.md"
@@ -853,20 +867,39 @@ class _Tee:
     """
 
     def __init__(self, buffer: io.StringIO) -> None:
+        """Store the buffer and snapshot the original stdout stream.
+
+        :param buffer: in-memory buffer that receives every write.
+        """
         self._buffer = buffer
+        # ``sys.__stdout__`` is typed ``Optional[TextIO]`` (it's None when
+        # the interpreter runs with stdout detached, e.g. under some
+        # embedded contexts). This script only runs as an ordinary CLI so
+        # the field is always populated; assert to encode that invariant
+        # for mypy so the write/flush calls below don't need a runtime
+        # None check on every emit.
+        assert sys.__stdout__ is not None, "sys.__stdout__ unavailable"
         self._stdout = sys.__stdout__
 
     def write(self, s: str) -> int:
+        """Write ``s`` to both the original stdout and the capture buffer.
+
+        :param s: the text ``print`` handed us.
+        :return: number of characters the buffer accepted (satisfies the
+            file-like contract ``print`` relies on).
+        """
         self._stdout.write(s)
         return self._buffer.write(s)
 
     def flush(self) -> None:
+        """Flush the underlying stdout so line-buffered pods see output.
+
+        The buffer is in-memory so it has no flush semantics.
+        """
         self._stdout.flush()
 
 
-def main(
-    argv: Sequence[str] | None = None,
-) -> int:  # pylint: disable=too-many-locals,too-many-statements
+def main(argv: Sequence[str] | None = None) -> int:
     """Run coverage + parity checks and emit a report to stdout (+ file).
 
     :param argv: optional CLI argument override; defaults to ``sys.argv``.
@@ -874,6 +907,7 @@ def main(
         divergence above thresholds; 4 coverage gap
         (on-chain requests missing from the lake).
     """
+    # pylint: disable=too-many-locals,too-many-statements
     args = _parse_args(argv)
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,

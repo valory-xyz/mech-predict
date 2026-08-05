@@ -19,16 +19,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import sys
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Optional
 
 import requests
@@ -1130,6 +1130,10 @@ def fetch_deliveries(
 
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
+    :param timestamp_lt: optional UNIX timestamp; when set, cap the
+        fetch strictly below this value. Used by the parity verifier
+        to bound enumeration to a specific window instead of
+        ``since → now``.
     :return: tuple of (delivery dicts, delivery-cursor cap or None).
     """
     schema = detect_delivers_schema(marketplace_url)
@@ -2388,6 +2392,10 @@ def process_platform(
     :param delivery_ts_gt: only fetch deliveries after this UNIX timestamp.
     :param existing_ids: row IDs already written, for deduplication.
     :param pending_deliveries: unmatched deliveries from previous runs.
+    :param delivery_ts_lt: optional UNIX timestamp forwarded to
+        ``fetch_deliveries`` as ``timestamp_lt``. When set, deliveries
+        are capped strictly below this value. Used by the parity
+        verifier to bound the window.
     :return: tuple of (rows, still_pending, max_delivery_timestamp,
         max_resolved_timestamp).
     """

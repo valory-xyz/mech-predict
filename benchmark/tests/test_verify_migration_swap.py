@@ -91,6 +91,21 @@ def _patch_pulls(
     so tests that only care about parity don't have to spell them out.
     ``marketplace_ids_by_platform`` and ``lake_ids_unfiltered`` are
     explicit knobs for the coverage-focused tests.
+
+    :param monkeypatch: pytest fixture used to swap the four pull
+        entry points on ``vms``.
+    :param mp_rows: synthetic mech-predict rows.
+    :param lake_rows: synthetic lake rows for the resolved parity pull.
+    :param deliver_to_request: per-platform ``{deliver_id: request_id}``.
+        Defaults to a 1:1 map on the omen platform derived from
+        ``mp_rows``.
+    :param marketplace_ids_by_platform: explicit override for the
+        marketplace-side coverage IDs. Defaults to ``mp_rows`` request
+        ids on the omen platform and empty on polymarket.
+    :param lake_ids_unfiltered: explicit override for the lake-side
+        coverage IDs. Defaults to a union of ``lake_rows`` and
+        ``mp_rows`` so parity tests don't secondarily fail the
+        coverage gate.
     """
     dtr = (
         deliver_to_request
@@ -145,6 +160,8 @@ def _base_argv() -> list[str]:
     and the coverage-side floor exists to catch a subgraph outage in
     production, not to constrain fixtures. Tests that specifically
     exercise the min-marketplace-rows gate pass their own value.
+
+    :return: argv list suitable for feeding to ``vms.main``.
     """
     now = datetime.now(timezone.utc)
     since = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
@@ -283,6 +300,9 @@ class TestCoverageGate:
         a non-zero drop means one or more requests could be silently
         absent from the lake without the check being able to name them.
         The gate must fail.
+
+        :param monkeypatch: pytest fixture used to override the
+            marketplace pull stub with a non-zero drop count.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -314,6 +334,9 @@ class TestCoverageGate:
         ``marketplace_ids - lake_ids`` is trivially empty when the
         marketplace side is empty. Without the ``--min-marketplace-rows``
         floor a subgraph outage would silently PASS as "no missing IDs".
+
+        :param monkeypatch: pytest fixture used to stub the pulls with
+            empty marketplace-side sets.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -344,13 +367,21 @@ class TestCoverageGate:
 
 
 class TestArtifact:
-    """--output-dir artifact contract: PASS runs write PASS + exit_code 0;
-    exception in flight writes ERROR + non-zero exit_code (never a false PASS).
+    """--output-dir artifact contract.
+
+    PASS runs write ``verdict=PASS + exit_code=0``; an exception in
+    flight writes ``verdict=ERROR + non-zero exit_code`` — never a
+    false PASS on the mounted volume regardless of what killed the run.
     """
 
     def test_pass_run_writes_pass_verdict_and_zero_exit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """A clean parity+coverage PASS lands the expected artifact.
+
+        :param monkeypatch: pytest fixture used to swap the pull entries.
+        :param tmp_path: pytest fixture giving a per-test writable dir.
+        """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
         _patch_pulls(monkeypatch, rows, lake)
@@ -375,6 +406,10 @@ class TestArtifact:
         landed a JSON artifact with ``verdict: PASS`` on the mounted
         PVC. The K8s Job runner's non-zero exit told the truth, the
         report on the volume did not.
+
+        :param monkeypatch: pytest fixture used to inject a raising
+            stub into the first coverage pull.
+        :param tmp_path: pytest fixture giving a per-test writable dir.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]

@@ -279,17 +279,36 @@ class TestCoverageGate:
     def test_marketplace_id_missing_from_lake_returns_four(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A single request_id in the marketplace but not the lake trips exit 4."""
+        """A single request_id in the marketplace but not the lake trips exit 4.
+
+        Both platforms are populated above the vacuous floor so the ONLY
+        reason to return 4 is the missing_from_lake predicate. A previous
+        version of this test seeded ``polymarket: set()`` which tripped the
+        per-platform vacuous floor before the missing-from-lake check ever
+        fired — the test asserted exit 4 for the wrong reason. Mutating
+        ``if coverage.total_missing > 0: → if False:`` would silently keep
+        the old test green while completely deleting the feature this PR
+        adds. This test is written so that mutation now fails.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entry points.
+        """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
-        marketplace_ids = {r["request_id"] for r in rows} | {"only-marketplace"}
-        # Lake unfiltered lacks ``only-marketplace``.
+        omen_ids = {r["request_id"] for r in rows} | {"only-marketplace"}
+        # Populate polymarket too, all present in the lake, so only the
+        # missing "only-marketplace" ID is the reason for a coverage gap.
+        polymarket_ids = {f"poly{i}" for i in range(5)}
+        lake_unfiltered = {r["request_id"] for r in lake} | polymarket_ids
         _patch_pulls(
             monkeypatch,
             rows,
             lake,
-            marketplace_ids_by_platform={"omen": marketplace_ids, "polymarket": set()},
-            lake_ids_unfiltered={r["request_id"] for r in lake},
+            marketplace_ids_by_platform={
+                "omen": omen_ids,
+                "polymarket": polymarket_ids,
+            },
+            lake_ids_unfiltered=lake_unfiltered,
         )
         assert vms.main(_base_argv()) == 4
 
@@ -303,29 +322,111 @@ class TestCoverageGate:
         absent from the lake without the check being able to name them.
         The gate must fail.
 
+        Both platforms populated above the vacuous floor here for the same
+        reason as the sibling test above — the drop counter is what has to
+        trip, not the floor. Mutating ``if coverage.total_dropped_no_rid >
+        0: → if False:`` must fail this test.
+
         :param monkeypatch: pytest fixture used to override the
             marketplace pull stub with a non-zero drop count.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
-        marketplace_ids = {r["request_id"] for r in rows}
+        omen_ids = {r["request_id"] for r in rows}
+        polymarket_ids = {f"poly{i}" for i in range(5)}
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int
         ) -> tuple[dict[str, set[str]], dict[str, int]]:
-            # One row dropped on the omen side, nothing missing from the
-            # lake for what we DID resolve.
-            return {"omen": marketplace_ids, "polymarket": set()}, {
+            # One row dropped on the omen side; nothing missing from the
+            # lake for anything the sweep did resolve.
+            return {"omen": omen_ids, "polymarket": polymarket_ids}, {
                 "omen": 1,
                 "polymarket": 0,
             }
 
         def _lake_ids(_since: datetime, _until: datetime) -> set[str]:
-            return marketplace_ids
+            return omen_ids | polymarket_ids
 
         _patch_pulls(monkeypatch, rows, lake)
         monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
         monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
+        assert vms.main(_base_argv()) == 4
+
+    def test_min_marketplace_rows_zero_still_traps_empty_platform(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator setting the flag to 0 must not turn off the zero-backstop.
+
+        ``--min-marketplace-rows 0`` used to let a total marketplace
+        outage on one platform PASS: the enforcement was strict
+        ``count < min``, and ``count < 0`` never held. That would let
+        an operator opt out of the check entirely with one env var,
+        turning a subgraph outage into a green artifact. The floor is
+        now ``max(1, min_marketplace_rows)`` so zero is always
+        vacuous, regardless of the flag.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entry points.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform={"omen": set(), "polymarket": set()},
+            lake_ids_unfiltered={r["request_id"] for r in lake},
+        )
+        argv = [
+            "--since",
+            (datetime.now(timezone.utc) - timedelta(days=2))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--until",
+            (datetime.now(timezone.utc) - timedelta(days=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--min-rows",
+            "5",
+            "--min-marketplace-rows",
+            "0",
+        ]
+        assert vms.main(argv) == 4
+
+    def test_coverage_gap_precedence_over_min_row_guard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When both min-rows (2) and coverage-gap (4) could fire, coverage wins.
+
+        Sets up a state where the parity pull is thin enough to trip the
+        min-row guard AND the marketplace side has a missing-from-lake
+        request. If the order in ``main()`` is ever swapped (or the
+        coverage check moved after the parity min-row check), this
+        assertion flips to 2. That would produce artifacts labelled as
+        "window too thin" for actual coverage gaps — misleading exactly
+        the operator this gate exists for.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entry points.
+        """
+        # Two rows on each side (below --min-rows 5 in _base_argv). Both
+        # platforms above the vacuous floor.
+        rows = [_mp_row(f"r{i}") for i in range(2)]
+        lake = [_lake_row(f"r{i}") for i in range(2)]
+        omen_ids = {r["request_id"] for r in rows} | {"only-marketplace"}
+        polymarket_ids = {f"poly{i}" for i in range(5)}
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform={
+                "omen": omen_ids,
+                "polymarket": polymarket_ids,
+            },
+            # Lake missing "only-marketplace" → coverage-gap condition met.
+            lake_ids_unfiltered={r["request_id"] for r in lake} | polymarket_ids,
+        )
         assert vms.main(_base_argv()) == 4
 
     def test_vacuous_marketplace_side_returns_four(

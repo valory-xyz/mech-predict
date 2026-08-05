@@ -1254,12 +1254,17 @@ def _coverage_failure_reason(
 
     Three ways coverage can fail, in priority order:
 
-    1. Any single platform has ``marketplace_count < min_marketplace_rows``
-       — that platform's sweep is vacuous. ``marketplace_ids - lake_ids``
-       is trivially empty when a platform's marketplace side is empty,
-       so without this per-platform floor a subgraph outage on ONE
-       platform would silently PASS as "no missing IDs" (the healthy
-       platform's rows would carry the aggregate above the floor).
+    1. Any single platform has ``marketplace_count <
+       max(1, min_marketplace_rows)`` — that platform's sweep is
+       vacuous. ``marketplace_ids - lake_ids`` is trivially empty when
+       a platform's marketplace side is empty, so without this
+       per-platform floor a subgraph outage on ONE platform would
+       silently PASS as "no missing IDs" (the healthy platform's rows
+       would carry the aggregate above the floor). The ``max(1, ...)``
+       is an unconditional zero-backstop: an operator lowering
+       ``--min-marketplace-rows`` to ``0`` is opting into a weaker
+       check, not out of the check — a total outage on a platform
+       must still fail closed.
     2. ``total_dropped_no_rid > 0`` — deliveries came back without a
        resolvable ``request.id`` and were dropped from the coverage
        denominator. Each dropped row is a request that could be absent
@@ -1269,13 +1274,15 @@ def _coverage_failure_reason(
 
     :param coverage: the result of :func:`_report_coverage_check`.
     :param min_marketplace_rows: floor from ``--min-marketplace-rows``,
-        enforced per platform (not on the aggregate).
+        enforced per platform (not on the aggregate). Effective floor
+        is ``max(1, min_marketplace_rows)`` — see item 1.
     :return: human-readable failure reason, or ``None`` on success.
     """
+    effective_floor = max(1, min_marketplace_rows)
     vacuous_platforms = sorted(
         (platform, count)
         for platform, count in coverage.marketplace_counts.items()
-        if count < min_marketplace_rows
+        if count < effective_floor
     )
     if vacuous_platforms:
         details = ", ".join(
@@ -1283,10 +1290,12 @@ def _coverage_failure_reason(
         )
         return (
             f"vacuous coverage sweep on {len(vacuous_platforms)} platform(s) "
-            f"({details}) — each below min_marketplace_rows "
-            f"{min_marketplace_rows}. An empty coverage side for even one "
-            f"platform makes ``marketplace_ids - lake_ids`` trivially empty "
-            f"for that platform and would otherwise report PASS. Check the "
+            f"({details}) — each below effective floor {effective_floor} "
+            f"(from --min-marketplace-rows={min_marketplace_rows}, promoted "
+            f"to at least 1 so a total outage always fails closed). An "
+            f"empty coverage side for even one platform makes "
+            f"``marketplace_ids - lake_ids`` trivially empty for that "
+            f"platform and would otherwise report PASS. Check the "
             f"marketplace subgraph for the affected platform(s)."
         )
     if coverage.total_dropped_no_rid > 0:
@@ -1298,7 +1307,7 @@ def _coverage_failure_reason(
         )
     if coverage.total_missing > 0:
         return (
-            f"{coverage.total_missing} on-chain request_ids are "
+            f"{coverage.total_missing} delivered request_ids are "
             f"missing from the lake."
         )
     return None

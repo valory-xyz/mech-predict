@@ -28,9 +28,12 @@ FROM python:3.13-slim AS base
 ARG GIT_SHA=unknown
 ENV GIT_SHA=$GIT_SHA
 
-# uv comes from its official static-linked distroless image; matches
-# the version mech-predict CI already uses (uv sync + uv.lock).
-COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /uvx /usr/local/bin/
+# uv comes from its official static-linked distroless image. Must be
+# >= 0.6 because pyproject.toml uses the ``default-groups = "all"``
+# string shorthand (the older list form landed in uv 0.4; the string
+# shorthand only in 0.6). 0.5.14 fails at ``uv sync`` parse time with
+# "invalid type: string \"all\", expected a sequence".
+COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 

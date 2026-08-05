@@ -91,4 +91,14 @@ jobs:
             GIT_SHA=${{ github.sha }}
 
       - name: Smoke-test entrypoint
-        run: docker run --rm ${{ env.IMAGE }} --help
+        # ``--help`` proves the ENTRYPOINT + argparse layer wire up,
+        # but the script's ``from benchmark.datasets import ...``
+        # calls are function-local, so ``--help`` returns before
+        # touching PYTHONPATH. A second call under the same
+        # ``uv run`` interpreter that actually imports benchmark
+        # catches a broken PYTHONPATH / WORKDIR / COPY layout
+        # regression at PR time instead of at deploy time.
+        run: |
+          docker run --rm ${{ env.IMAGE }} --help
+          docker run --rm --entrypoint uv ${{ env.IMAGE }} \
+            run --no-sync python -c "from benchmark.datasets import fetch_production"

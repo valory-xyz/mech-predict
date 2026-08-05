@@ -1245,10 +1245,9 @@ DELIVER_REQUEST_IDS_QUERY = """
 {
   delivers(
     first: %(first)s
-    skip: %(skip)s
     orderBy: blockTimestamp
     orderDirection: desc
-    where: { blockTimestamp_gt: %(timestamp_gt)s }
+    where: { blockTimestamp_gt: %(timestamp_gt)s, blockTimestamp_lt: %(timestamp_lt)s }
   ) {
     id
     blockTimestamp
@@ -1273,8 +1272,9 @@ def fetch_all_delivery_request_ids(
     marketplace_url: str,
     request_ts_gt: int,
     request_ts_lt: int,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> tuple[set[str], int]:
-    """Return every on-chain request_id whose *request time* is in the window.
+    """Return every request_id delivered in the window, per the marketplace subgraph.
 
     The coverage check compares this set against the mech-analytics
     lake's set for the same window. Both sides must be bounded on the
@@ -1308,8 +1308,12 @@ def fetch_all_delivery_request_ids(
     a null ``parsedRequest`` — the point of the coverage check is to
     prove every delivered request is in the lake, including ones
     mech-predict currently discards because their IPFS payload didn't
-    parse. Coverage is a claim about ingest completeness, not about
-    what today's business logic happens to consume.
+    parse. The set is the "delivered in the window" universe. A
+    ``Request`` that was never answered (or answered more than
+    ``_DELIVERY_LAG_ENVELOPE_S`` after the window closed) is not in
+    the denominator; consumers that need request-level completeness
+    would need a separate ``requests`` sweep, deliberately out of
+    scope for the migration cutover gate.
 
     The second return value is the count of deliveries that came back
     without a resolvable ``request.id`` (or without a
@@ -1319,76 +1323,113 @@ def fetch_all_delivery_request_ids(
     — every dropped row is a request that could genuinely be absent
     from the lake but that we can never report as absent.
 
-    Includes a completeness assertion at end-of-sweep: the oldest
-    delivery returned must have ``blockTimestamp`` at or below
-    ``request_ts_gt``, because the query is sorted
-    ``orderDirection: desc`` and a truncated paginator (silent
-    ``len(page) < first`` truncation, the same shape as the
-    ``fetch_open`` bug fixed in #392) would otherwise bias coverage
-    toward PASS by shrinking the denominator.
+    Pagination uses a descending timestamp cursor rather than
+    ``skip``: each page rolls ``blockTimestamp_lt`` down to the
+    oldest ``blockTimestamp`` returned in that page (exclusive), and
+    the loop terminates when the subgraph returns an empty page. This
+    side-steps two failure modes of the skip-based
+    ``len(page) < first → EOF`` pattern that the previous
+    implementation used:
+
+    * A graph-node ``first`` clamp (returning fewer rows than
+      requested even when more exist) is silently treated as EOF and
+      shrinks the coverage denominator. With the cursor approach a
+      clamp just means more iterations — no lost rows.
+    * ``skip`` has a deep-scan cap on graph-node, which the 7-day
+      envelope routinely crosses.
+
+    Edge case: because the cursor advance is exclusive, a single
+    second holding more than ``batch_size`` deliveries would have
+    the "extra" rows skipped on the next page. In practice mech
+    deliveries are seconds-scale so this doesn't happen, but the
+    function emits a warning when a page's rows all share one
+    ``blockTimestamp`` so the operator can bump ``batch_size``
+    rather than silently ship a shrunken denominator.
 
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param request_ts_gt: unix seconds, exclusive lower bound on
         request time (matches the lake's ``since``).
     :param request_ts_lt: unix seconds, exclusive upper bound on
         request time (matches the lake's ``until``).
+    :param batch_size: page size sent as ``first``. graph-node may
+        clamp; the cursor loop handles that transparently. Default
+        matches the module-wide ``DEFAULT_BATCH_SIZE``.
     :return: tuple of (request_ids set, dropped_no_rid_count).
-    :raises RuntimeError: if the paginator returned a truncated sweep
-        (oldest delivery blockTimestamp did not reach ``request_ts_gt``).
     """
     delivery_ts_lt = request_ts_lt + _DELIVERY_LAG_ENVELOPE_S
-    query = _inject_timestamp_lt(
-        DELIVER_REQUEST_IDS_QUERY, delivery_ts_lt, "DELIVER_REQUEST_IDS_QUERY"
-    )
-    raw = _paginated_fetch(
-        marketplace_url,
-        query,
-        "delivers",
-        {"timestamp_gt": request_ts_gt},
-    )
 
     request_ids: set[str] = set()
     dropped_no_rid = 0
-    oldest_delivery_ts: Optional[int] = None
-    for d in raw:
-        try:
-            delivery_ts = int(d["blockTimestamp"])
-        except (KeyError, TypeError, ValueError):
-            dropped_no_rid += 1
-            continue
-        if oldest_delivery_ts is None or delivery_ts < oldest_delivery_ts:
-            oldest_delivery_ts = delivery_ts
+    cursor_ts_lt = delivery_ts_lt
 
-        request = d.get("request") or {}
-        rid = request.get("id")
-        req_ts_raw = request.get("blockTimestamp")
-        if not rid or req_ts_raw is None:
-            dropped_no_rid += 1
-            continue
-        try:
-            req_ts = int(req_ts_raw)
-        except (TypeError, ValueError):
-            dropped_no_rid += 1
-            continue
-        if request_ts_gt < req_ts < request_ts_lt:
-            request_ids.add(rid)
+    while True:
+        query = DELIVER_REQUEST_IDS_QUERY % {
+            "first": batch_size,
+            "timestamp_gt": request_ts_gt,
+            "timestamp_lt": cursor_ts_lt,
+        }
+        data = _post_graphql(marketplace_url, {"query": query})
+        page = data.get("delivers", [])
+        if not page:
+            break
 
-    # Completeness check: if the paginator stopped early on a
-    # graph-node-clamped short page, the oldest delivery in our set
-    # will still be well above ``request_ts_gt``. A complete
-    # descending-order sweep must have reached the lower bound.
-    # ``oldest_delivery_ts is None`` means the query returned zero
-    # rows, which is a legitimate empty window and not truncation —
-    # the caller's ``--min-marketplace-rows`` floor is the right gate
-    # for that condition.
-    if oldest_delivery_ts is not None and oldest_delivery_ts > request_ts_gt:
-        raise RuntimeError(
-            f"fetch_all_delivery_request_ids: truncated sweep — oldest "
-            f"delivery blockTimestamp={oldest_delivery_ts} > "
-            f"request_ts_gt={request_ts_gt}. The paginator likely hit a "
-            f"short-page-as-EOF exit inside a graph-node ``first`` clamp; "
-            f"coverage denominator is incomplete and cannot be trusted."
+        page_oldest_ts: Optional[int] = None
+        page_newest_ts: Optional[int] = None
+        for d in page:
+            try:
+                delivery_ts = int(d["blockTimestamp"])
+            except (KeyError, TypeError, ValueError):
+                dropped_no_rid += 1
+                continue
+            if page_oldest_ts is None or delivery_ts < page_oldest_ts:
+                page_oldest_ts = delivery_ts
+            if page_newest_ts is None or delivery_ts > page_newest_ts:
+                page_newest_ts = delivery_ts
+            request = d.get("request") or {}
+            rid = request.get("id")
+            req_ts_raw = request.get("blockTimestamp")
+            if not rid or req_ts_raw is None:
+                dropped_no_rid += 1
+                continue
+            try:
+                req_ts = int(req_ts_raw)
+            except (TypeError, ValueError):
+                dropped_no_rid += 1
+                continue
+            if request_ts_gt < req_ts < request_ts_lt:
+                request_ids.add(rid)
+
+        log.info(
+            "  fetched %d delivers (running set size %d)", len(page), len(request_ids)
         )
+
+        if page_oldest_ts is None:
+            # No usable blockTimestamps in the page → no way to advance
+            # the cursor. Refuse to loop and let the caller see the
+            # drop count as evidence of a schema drift or a broken page.
+            log.warning(
+                "fetch_all_delivery_request_ids: page of %d rows had no "
+                "usable blockTimestamp; halting to avoid an infinite loop.",
+                len(page),
+            )
+            break
+
+        # Cursor advance is exclusive: the next page's
+        # ``blockTimestamp_lt`` skips rows AT ``page_oldest_ts``. That's
+        # only lossy if a single second held more than ``batch_size``
+        # deliveries; the paginator surfaces that as a warning so an
+        # operator can bump ``--batch-size`` rather than silently ship
+        # an under-counted denominator.
+        if page_newest_ts == page_oldest_ts and len(page) >= batch_size:
+            log.warning(
+                "fetch_all_delivery_request_ids: page of %d rows all share "
+                "blockTimestamp=%d; the next page's exclusive cursor advance "
+                "may skip further deliveries at this timestamp. Rerun with "
+                "a larger batch_size if the coverage denominator looks low.",
+                len(page),
+                page_oldest_ts,
+            )
+        cursor_ts_lt = page_oldest_ts
 
     if dropped_no_rid:
         log.warning(

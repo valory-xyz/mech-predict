@@ -21,11 +21,17 @@ r"""Reconcile mech-predict's row universe against mech-analytics.
 
 Two checks per window:
 
-* **Coverage** — every on-chain request_id the marketplace subgraph
-  knows about must be present in the mech-analytics lake. This proves
-  ingest completeness ahead of the mech-predict cutover: switching to
-  the lake cannot silently drop rows that today's production path can
-  see. Fails with exit code 4 if any on-chain request is missing.
+* **Coverage** — every request delivered in the window (per the
+  marketplace subgraph's ``delivers`` collection) must be present in
+  the mech-analytics lake. This proves ingest completeness ahead of
+  the mech-predict cutover: switching to the lake cannot silently
+  drop rows that today's production path can see. Note this is a
+  delivery-derived denominator: a ``Request`` never answered (or
+  answered more than the delivery-lag envelope after the window
+  closed) is outside the set. That matches what today's mech-predict
+  path consumes; it is not a claim about request-level completeness.
+  Fails with exit code 4 if any delivered request is missing from
+  the lake.
 * **Parity** — on the resolved intersection, ``final_outcome``,
   ``market_id`` binding, and per-tool ``brier`` / ``directional_accuracy``
   must agree between the two sides. Fails with exit code 3 if the
@@ -58,7 +64,7 @@ Exit codes:
     0 — coverage complete, parity within thresholds
     2 — min-row guard tripped (window too thin to conclude anything)
     3 — parity divergence exceeds thresholds
-    4 — coverage gap (at least one on-chain request missing from lake)
+    4 — coverage gap (at least one delivered request missing from lake)
 
 Required env vars:
     MECH_ANALYTICS_URL             (lake-side endpoint)
@@ -93,10 +99,14 @@ log = logging.getLogger("verify_migration_swap")
 # Below this row count on either side the parity comparison is vacuous.
 MINIMUM_ROWS_PER_SIDE = 100
 
-# Below this total across all platforms the coverage sweep is vacuous —
-# an empty marketplace side makes ``marketplace_ids - lake_ids`` trivially
-# empty regardless of whether the lake actually has anything. The floor
-# distinguishes "healthy sweep, no gap" from "sweep returned nothing".
+# Applied per platform: any single platform with fewer than
+# ``MINIMUM_MARKETPLACE_ROWS`` delivered requests in the window fails
+# the coverage gate. An empty coverage side on one platform makes
+# ``marketplace_ids - lake_ids`` trivially empty regardless of whether
+# the lake actually has anything, so a healthy pull on the other
+# platform must not mask a subgraph outage on this one. The floor
+# distinguishes "healthy sweep, no gap" from "sweep returned nothing"
+# on a per-platform basis.
 MINIMUM_MARKETPLACE_ROWS = 10
 
 # Comparing floats coming from independent code paths — allow small drift.
@@ -237,13 +247,18 @@ def _pull_lake_rows(since: datetime, until: datetime) -> list[dict[str, Any]]:
 def _pull_marketplace_request_ids(
     since_ts: int, until_ts: int
 ) -> tuple[dict[str, set[str]], dict[str, int]]:
-    """Fetch every on-chain request_id delivered in the window, per platform.
+    """Fetch every request delivered in the window, per platform.
 
-    Coverage-check input: the ground truth of on-chain mech traffic
-    for the window, straight from the marketplace subgraph without any
-    parsedRequest / tool filter. Compared against the unfiltered lake
-    ID set below to prove no on-chain request is missing from the
-    lake.
+    Coverage-check input: the ground truth of delivered mech traffic
+    for the window, straight from the marketplace subgraph's
+    ``delivers`` collection without any parsedRequest / tool filter.
+    Compared against the unfiltered lake ID set below to prove no
+    delivered request is missing from the lake. Requests that were
+    never delivered — or delivered more than
+    ``fp._DELIVERY_LAG_ENVELOPE_S`` after ``until_ts`` — are outside
+    this set by construction; the coverage claim is about ingest
+    completeness for the mech-predict path, which itself consumes
+    deliveries.
 
     Also threads the per-platform "delivery had no request.id" drop
     count out of ``fetch_all_delivery_request_ids``. A non-zero drop
@@ -286,7 +301,7 @@ def _pull_lake_request_ids_unfiltered(since: datetime, until: datetime) -> set[s
 
     Coverage-check counterpart to :func:`_pull_marketplace_request_ids`.
     Includes pending rows and off-chain rows, because the coverage
-    question is "is this on-chain request in the lake at all?", not
+    question is "is this delivered request in the lake at all?", not
     "did mech-analytics finish scoring it?".
 
     :param since: timezone-aware datetime, inclusive lower bound.
@@ -703,16 +718,20 @@ def _report_coverage_check(
     lake_ids: set[str],
     min_marketplace_rows: int,
 ) -> _CoverageResult:
-    """Coverage check: prove every on-chain request is in the lake.
+    """Coverage check: prove every delivered request is in the lake.
 
     For each platform, computes the set of request_ids the marketplace
-    subgraph knows about but the lake does not. Prints a per-platform
-    breakdown and returns a :class:`_CoverageResult` with every fact
-    the caller needs to compute the verdict and populate the artifact.
+    subgraph has a ``Deliver`` for in the window but the lake does
+    not. Prints a per-platform breakdown and returns a
+    :class:`_CoverageResult` with every fact the caller needs to
+    compute the verdict and populate the artifact. Requests that were
+    never answered — or answered after the widened delivery envelope
+    — are not in the marketplace set by construction, so they cannot
+    be reported missing here.
 
     Coverage failure modes the caller must gate on:
 
-    * ``total_missing > 0`` — genuine gap, on-chain requests absent
+    * ``total_missing > 0`` — genuine gap, delivered requests absent
       from the lake.
     * ``total_dropped_no_rid > 0`` — the marketplace pull returned
       deliveries whose ``request.id`` was missing, so those requests
@@ -773,7 +792,7 @@ def _report_coverage_check(
     )
     if total_missing:
         print()
-        print("  These on-chain request_ids are not in the mech-analytics lake.")
+        print("  These delivered request_ids are not in the mech-analytics lake.")
         print("  Check ``mech_migration_failures`` on the predict-api DB for each")
         print("  ID to see if it's a known-loss backfill failure")
         print("  (parsed_request_null, unhandled_type_prompt, etc.).")
@@ -936,10 +955,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=MINIMUM_MARKETPLACE_ROWS,
         help=(
-            "min total marketplace deliveries across platforms for the "
-            "coverage check to be non-vacuous. An empty coverage sweep "
-            "makes an empty set-diff, which would otherwise report PASS. "
-            f"Default {MINIMUM_MARKETPLACE_ROWS}."
+            "min marketplace deliveries per platform for the coverage "
+            "check to be non-vacuous. Applied to each platform "
+            "independently — an empty coverage sweep on one platform "
+            "makes an empty set-diff and would otherwise let a subgraph "
+            "outage on that platform hide behind a healthy pull on the "
+            f"other. Default {MINIMUM_MARKETPLACE_ROWS}."
         ),
     )
     p.add_argument(
@@ -1036,8 +1057,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     :param argv: optional CLI argument override; defaults to ``sys.argv``.
     :return: exit code — 0 pass; 2 min-row guard trip; 3 parity
         divergence above thresholds; 4 coverage gap
-        (on-chain requests missing from the lake, or drops in the
-        marketplace pull, or vacuous coverage sweep).
+        (delivered requests missing from the lake, or drops in the
+        marketplace pull, or a below-floor coverage sweep on any
+        single platform).
     """
     # pylint: disable=too-many-locals,too-many-statements,too-many-branches
     args = _parse_args(argv)
@@ -1146,11 +1168,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         overlap_denom = min(mp_ids_size, lake_ids_size)
         overlap_fraction = len(intersection) / overlap_denom if overlap_denom else 0.0
         mismatch_fraction = outcome_mismatch / resolved_both if resolved_both else 0.0
+        per_platform_counts = ", ".join(
+            f"{platform}={count}"
+            for platform, count in sorted(coverage.marketplace_counts.items())
+        )
         print(
             f"  coverage: missing_from_lake={coverage.total_missing} "
             f"dropped_no_request_id={coverage.total_dropped_no_rid} "
+            f"marketplace_per_platform=[{per_platform_counts}] "
             f"total_marketplace={coverage.total_marketplace} (thresholds "
-            f"missing==0, dropped==0, marketplace>={args.min_marketplace_rows})"
+            f"missing==0, dropped==0, "
+            f"per-platform marketplace>={args.min_marketplace_rows})"
         )
         print(
             f"  overlap:  {len(intersection)} / {overlap_denom} = "

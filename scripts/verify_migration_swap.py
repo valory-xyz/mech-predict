@@ -889,8 +889,13 @@ def _write_report_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / f"{window_slug}.md"
     json_path = output_dir / f"{window_slug}.json"
-    md_path.write_text(human_report)
-    json_path.write_text(json.dumps(json_data, indent=2, default=str))
+    # Encoding is pinned to UTF-8: the report body contains the Unicode
+    # arrow (``→``) in the coverage-check section header, which the
+    # Windows default codec (cp1252) can't encode. K8s images run
+    # Linux so this only shows up in the CI matrix's Windows job, but
+    # the fix is portable and doesn't cost anything on Linux/macOS.
+    md_path.write_text(human_report, encoding="utf-8")
+    json_path.write_text(json.dumps(json_data, indent=2, default=str), encoding="utf-8")
     print(f"\nwrote {md_path}")
     print(f"wrote {json_path}")
 

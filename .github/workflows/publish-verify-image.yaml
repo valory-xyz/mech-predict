@@ -4,78 +4,41 @@ name: Publish verify image
 # a K8s Job for the mech-analytics parity verification (Dockerfile.verify,
 # entry point is scripts/verify_migration_swap.py).
 #
-# Triggers:
-#   * release (prerelease or released) → tags the image with the release
-#     name (v-prefix stripped so ``v0.5.3`` → ``valory/mech-predict-verify:0.5.3``)
-#     to match the existing convention in release.yaml.
-#   * workflow_dispatch → tags the image ``dev-<short_sha>`` so infra
-#     can smoke-test the K8s Job spec off a feature branch without
-#     cutting a full release.
-#   * pull_request touching Dockerfile.verify, the script, or its
-#     imports → build only (no push, no secrets required). Keeps the
-#     Dockerfile honest: a rename or a missing dep won't ship broken
-#     because it wasn't built until release day.
+# Publishes on release only. Tag stripped of the leading v to match the
+# existing release.yaml convention (v0.5.4 → valory/mech-predict-verify:0.5.4).
 
 on:
   release:
     types: [prereleased, released]
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Git ref to build (branch or SHA)."
-        default: "main"
-  pull_request:
-    paths:
-      - "Dockerfile.verify"
-      - "scripts/verify_migration_swap.py"
-      - "benchmark/datasets/fetch_production.py"
-      - "benchmark/mech_analytics_client.py"
-      - "pyproject.toml"
-      - "uv.lock"
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-22.04
     env:
       IMAGE: valory/mech-predict-verify
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref || github.ref }}
 
       - name: Compute image tag
         id: tag
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            # Strip the leading "v" to match release.yaml's oar-<agent> convention.
-            tag="${GITHUB_REF_NAME#v}"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="dev-$(git rev-parse --short HEAD)"
-          else
-            # pull_request: don't push, tag is only used locally for the build step.
-            tag="pr-$(git rev-parse --short HEAD)"
-          fi
+          tag="${GITHUB_REF_NAME#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Computed tag: $tag"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login only when we're going to push. Pull-request runs skip the
-      # secret entirely so a fork PR can still build.
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build (and push on release / dispatch)
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.verify
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

@@ -1,0 +1,40 @@
+name: superforcaster_full_search_v2
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Sibling of superforcaster_full_search
+  that adds OpenAI Structured Outputs (Pydantic PredictionResult via beta.chat.completions.parse)
+  and a mandatory word_mention_check reasoning field. Fetches full search-result pages
+  (top organic results) and extracts the main article text via readability + markdownify.
+  The word_mention_check field forces the model to apply event-specific base rates
+  and discount circular prediction-market evidence before committing to p_yes, targeting
+  systematic overconfidence on word-mention markets.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
+  superforcaster_full_search_v2.py: bafybeidi4axq5u3uvu6cf7wkxuls2ymcuqw6na5aprml6cry4wsz254afe
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster_full_search_v2.py: bafybeiaeoyspn7x4egdem6asbhlweiqgbk56p6rdlfqnjb4bd3rnugmxyq
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_full_search_v2.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

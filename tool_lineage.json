@@ -54,6 +54,10 @@
       "parent": "predict-fine-tuned",
       "reason": "Same GRPO fine-tuned checkpoint, requesting ft-serve's calibrated served name (a Platt calibrator applied to p_yes) instead of the raw one."
     },
+    "predict-fine-tuned-calibrated-v1": {
+      "parent": "predict-fine-tuned-calibrated",
+      "reason": "Bypass miscalibrated Platt proxy: request qwen-14b-fine-tuned instead of qwen-14b-fine-tuned-calibrated (issue #411)."
+    },
     "superforcaster-polymarket-v1": {
       "parent": "superforcaster",
       "reason": "Carve out the older uncalibrated superforcaster as a Polymarket-specific tool, leaving the original superforcaster untouched."

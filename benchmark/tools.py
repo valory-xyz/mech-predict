@@ -191,6 +191,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         backend="vllm",
         family="default",
     ),
+    # valory/finetuned_prediction_v1 -- v1 bypasses the miscalibrated Platt proxy;
+    # requests qwen-14b-fine-tuned (raw) instead of qwen-14b-fine-tuned-calibrated.
+    "predict-fine-tuned-calibrated-v1": ToolSpec(
+        module=(
+            "packages.valory.customs.finetuned_prediction_v1" ".finetuned_prediction_v1"
+        ),
+        backend="vllm",
+        family="default",
+    ),
     # nickcom007/prediction_request_sme — default schema: PREDICTION_PROMPT uses
     # {user_prompt}/{additional_information} and the module exports no
     # SYSTEM_PROMPT_FORECASTER. (It is NOT superforcaster-shaped despite

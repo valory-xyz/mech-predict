@@ -1,0 +1,21 @@
+name: finetuned_prediction_v1
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. Serves the fine-tuned
+  14B Qwen model via vLLM without the miscalibrated Platt calibrator proxy (v1).
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeibne6rjasyabrgxyreafxz24bxvq7fze7vm3ju2i7cibm6xkyfbgy
+  finetuned_prediction_v1.py: bafybeid3hrptns6hdxoqu5somvzuw67qgr6hetdfdqpwiezykl2vqwyoee
+fingerprint_ignore_patterns: []
+entry_point: finetuned_prediction_v1.py
+callable: run
+dependencies:
+  openai:
+    version: ==1.30.2
+  httpx:
+    version: ==0.25.2
+  requests:
+    version: ==2.32.5

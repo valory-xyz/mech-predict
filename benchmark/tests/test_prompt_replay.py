@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import json
 import random
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2216,3 +2217,87 @@ class TestDropReasonDetail:
     def test_empty_when_files_were_absent(self) -> None:
         """An empty dict means the tournament files were absent."""
         assert _drop_reason_detail({}) == ""
+
+
+class TestStructuredOutputIsDerivedNotListed:
+    """Every structured-output tool gets structured outputs, with no list to update."""
+
+    def test_every_tool_defining_the_schema_resolves_it(self) -> None:
+        """A tool that defines ``PredictionResult`` must replay structurally.
+
+        The hand-maintained name->schema map this replaces was never once
+        updated at the time a tool was added: ``factual_research-v1``/``-v2``/
+        ``-v3`` were replayed unstructured for two months, and
+        ``superforcaster-polymarket-v4`` for 22 days. The failure is silent --
+        replay falls back to a plain call, the model answers in prose, and
+        every row scores malformed while the run still reports success.
+
+        Deriving it removes the obligation; this test pins that nothing
+        reintroduces a lookup that can fall behind the tools.
+        """
+        missed = []
+        for name, spec in TOOL_REGISTRY.items():
+            try:
+                module = importlib.import_module(spec.module)
+            except ImportError:  # optional third-party deps in CI
+                continue
+            if not hasattr(module, "PredictionResult"):
+                continue
+            schema = _get_structured_output_schema(name)
+            if schema is None or schema is not module.PredictionResult:
+                missed.append(name)
+        assert not missed, (
+            f"tools define PredictionResult but replay would call them "
+            f"unstructured: {sorted(missed)}"
+        )
+
+    def test_plain_tools_resolve_to_none(self) -> None:
+        """A tool without the attribute must NOT be forced through the schema path.
+
+        ``superforcaster_full_search`` puts its format directives in the
+        prompt, so a schema here would change what production does.
+        """
+        assert _get_structured_output_schema("superforcaster_full_search") is None
+        assert _get_structured_output_schema("superforcaster-polymarket-v1") is None
+
+    def test_unregistered_tool_resolves_to_none(self) -> None:
+        """An unknown name is not an error here -- replay raises on it earlier."""
+        assert _get_structured_output_schema("no-such-tool") is None
+
+
+class TestShippedSuperforcastersAreRegistered:
+    """Every shipped superforcaster package must be reachable from the registry."""
+
+    def test_no_shipped_superforcaster_is_unregistered(self) -> None:
+        """A shipped, served tool the benchmark cannot run has no validation path.
+
+        ``superforcaster_full_search`` shipped, went live on Polymarket and
+        produced the scored rows triage reads -- but was absent from the
+        registry, so ``replay()`` raised and the improvement loop could not
+        validate any fix for it. ``superforcaster_calibrated_full_search`` had
+        the same gap.
+
+        Scoped to the superforcaster family deliberately: ``custom/`` also
+        ships non-prediction tools (``prepare_tx``, ``resolve_market``,
+        ``dalle_request``) that the replay path is not meant to drive, so a
+        repo-wide assertion would be false. Every ``superforcaster_*`` package
+        IS a prediction tool, which makes this one mechanical and true. The
+        general invariant -- "assessable implies replayable" -- belongs in the
+        actionable-tool gate, where the served set is known.
+        """
+        packages_json = (
+            Path(__file__).resolve().parents[2] / "packages" / "packages.json"
+        )
+        data = json.loads(packages_json.read_text(encoding="utf-8"))
+        shipped = set()
+        for section in ("dev", "third_party"):
+            for key in data.get(section) or {}:
+                match = re.match(r"^custom/[^/]+/([^/]+)/", key)
+                if match and match.group(1).startswith("superforcaster"):
+                    shipped.add(match.group(1))
+        registered = {spec.module.rsplit(".", 1)[-1] for spec in TOOL_REGISTRY.values()}
+        unregistered = sorted(shipped - registered)
+        assert not unregistered, (
+            "shipped superforcaster packages with no TOOL_REGISTRY entry — "
+            f"the benchmark cannot replay them: {unregistered}"
+        )

@@ -1363,8 +1363,6 @@ def _call_openai_structured(
         client.close()
 
 
-# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
-# Map: tool_name → (tool_module_import_path, schema_class_name).
 # Name of the Pydantic schema every structured-output tool exposes. Tools that
 # call ``client.beta.chat.completions.parse`` in their own ``run()`` define it;
 # tools that put format directives in the prompt do not.

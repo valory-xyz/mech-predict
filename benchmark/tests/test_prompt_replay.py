@@ -2266,7 +2266,17 @@ class TestStructuredOutputIsDerivedNotListed:
 
         ``superforcaster_full_search`` puts its format directives in the
         prompt, so a schema here would change what production does.
+
+        Registration is asserted FIRST because ``None`` is also what an
+        unregistered name resolves to: without the membership check this test
+        cannot distinguish "registered, plain-prompt tool" from "not
+        registered at all", and deleting the tool's ToolSpec entry would pass
+        the whole suite. Prompt-directive tools define no prediction schema,
+        so the AST discovery class below structurally cannot pin their
+        registration -- this direct assertion is what does.
         """
+        assert "superforcaster_full_search" in TOOL_REGISTRY
+        assert "superforcaster-polymarket-v1" in TOOL_REGISTRY
         assert _get_structured_output_schema("superforcaster_full_search") is None
         assert _get_structured_output_schema("superforcaster-polymarket-v1") is None
 
@@ -2276,7 +2286,7 @@ class TestStructuredOutputIsDerivedNotListed:
 
 
 class TestPredictionToolsSelfDiscovered:
-    """Every prediction tool in the repo is found by scanning, not by a list.
+    """Every STRUCTURED prediction tool is found by scanning, not by a list.
 
     The registry-driven sweep above can only examine tools someone already
     registered -- the same blind spot as the deleted hand-maintained map, one
@@ -2285,6 +2295,12 @@ class TestPredictionToolsSelfDiscovered:
     unregistered) where a registry-driven check flags nothing. The file
     system is the ground truth here; no allowlist, no family prefix, no
     registry as input.
+
+    Honest scope: discovery keys on a prediction-shaped SCHEMA CLASS, which
+    only structured-output tools define. A prompt-directive tool (the
+    ``superforcaster_full_search`` shape) is invisible to it by construction;
+    its registration is pinned directly in
+    ``test_plain_tools_resolve_to_none`` instead.
     """
 
     #: The four fields ``_call_openai_structured`` reads off the parsed

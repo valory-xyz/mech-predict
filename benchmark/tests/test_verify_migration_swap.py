@@ -36,6 +36,26 @@ import pytest
 from scripts import verify_migration_swap as vms
 
 
+@pytest.fixture(autouse=True)
+def _isolate_predict_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip ``PREDICT_API_POSTGRES_URL`` from the process env for every test.
+
+    ``main()`` reads this variable as a fallback for ``--predict-api-url``.
+    If it leaks in from the ambient shell (CLAUDE.md's ``source .env``
+    workflow, a docker-compose ``.env`` file, a CI job export), every
+    test that constructs an argv without ``--predict-api-url`` would
+    silently try to hit that DSN — attempting a real ``psycopg.connect``
+    with a 30 s timeout AND changing the verdict path (raw vs adjusted)
+    so pre-existing tests fail for reasons unrelated to what they
+    assert. Autouse so no test has to remember, module-scoped so the
+    coupling is impossible to reintroduce accidentally.
+
+    :param monkeypatch: pytest fixture used to unset the env var
+        for the duration of every test in this module.
+    """
+    monkeypatch.delenv("PREDICT_API_POSTGRES_URL", raising=False)
+
+
 def _mp_row(request_id: str, **overrides: Any) -> dict[str, Any]:
     """Synthetic mech-predict row with the fields the gate reads."""
     row = {
@@ -755,17 +775,17 @@ class TestKnownLossAdjustment:
     ) -> None:
         """The vacuous-sweep floor compares against the adjusted count.
 
-        A platform whose marketplace side is dominated by known-loss
-        can legitimately drop below the raw floor while its ingestible
-        population is above the floor. The verdict must accept that.
-        Bug case: if the floor compared against
-        ``raw_marketplace_counts`` a healthy pipeline would fail
-        exit 4 on a platform where 95% of raw activity is unparseable.
+        The direction that matters: raw is always >= adjusted, so
+        checking raw counts against the floor risks a false PASS when
+        the adjusted (ingestible) population is genuinely too thin
+        to draw a conclusion from. The floor has to see the adjusted
+        number to catch a vacuous adjusted sweep.
 
-        This test wires up a platform with 15 raw marketplace IDs, 10
-        of which are known-loss. Raw count 15 >= floor 12 (would pass
-        raw); adjusted count 5 < floor 12 (fails adjusted). If a
-        future edit checks raw counts here, the test flips to PASS.
+        Fixture: 15 raw omen IDs, 5 of which are known-loss ->
+        adjusted count = 15 - 5 = 10. Floor is 12. Adjusted 10 < 12
+        trips the floor and returns exit 4. If a future edit checks
+        the raw count here (15 > 12) the assertion flips to 0 and
+        the vacuous-adjusted-sweep case slips through.
 
         :param monkeypatch: pytest fixture used to swap the four pull
             entries and the known-loss pull on the module under test.
@@ -815,9 +835,8 @@ class TestKnownLossAdjustment:
             "--predict-api-url",
             "postgresql://ignored",
         ]
-        # Raw omen = 15 (above 12) but adjusted omen = 10 - 5 = 10 (below 12).
-        # Wait: adjusted count = 15 raw - 5 excluded = 10, still under 12.
-        # So this fails the vacuous floor on the adjusted count.
+        # Raw omen = 15 (above floor 12), adjusted omen = 15 - 5 = 10
+        # (below floor 12). Fails on the adjusted count.
         assert vms.main(argv) == 4
 
     def test_report_shape_contains_raw_and_adjusted(
@@ -1010,3 +1029,45 @@ class TestReportCoverageCheckDirect:
         assert result.known_loss_applied is True
         assert result.total_excluded == 0
         assert result.missing_by_platform == {"omen": []}
+
+    def test_known_loss_pull_failure_writes_error_not_false_pass(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A predict-api DB failure must land an ERROR artifact.
+
+        Same class of guarantee as
+        ``test_exception_in_flight_writes_error_not_false_pass`` but
+        for the ``_pull_known_loss_failures`` call site: a psycopg
+        connect timeout, a role-permission error, or a network hiccup
+        must not certify PASS in the artifact just because raw
+        coverage would have been zero missing. The sentinel discipline
+        that keeps ``exit_code`` at 1 and ``verdict`` at ERROR until
+        the explicit success path flips them has to hold here too.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and inject a raising known-loss stub.
+        :param tmp_path: pytest fixture giving a per-test writable dir.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        _patch_pulls(monkeypatch, rows, lake)
+
+        def _boom(_url: str) -> dict[str, set[str]]:
+            raise RuntimeError("simulated predict-api DB outage")
+
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", _boom)
+        argv = _base_argv() + [
+            "--output-dir",
+            str(tmp_path),
+            "--predict-api-url",
+            "postgresql://ignored",
+        ]
+
+        with pytest.raises(RuntimeError, match="simulated predict-api DB outage"):
+            vms.main(argv)
+
+        artifacts = sorted(tmp_path.glob("*.json"))
+        assert len(artifacts) == 1
+        data = json.loads(artifacts[0].read_text())
+        assert data["verdict"] == "ERROR"
+        assert data["exit_code"] != 0

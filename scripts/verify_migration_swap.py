@@ -133,6 +133,36 @@ _CHAIN_ID_TO_PLATFORM: dict[int, str] = {
     137: "polymarket",  # Polygon
 }
 
+# Only these reasons are structurally unrecoverable — the IPFS payload
+# itself is unparseable and no downstream ingestor can recover it. We
+# subtract them from the coverage denominator because failing exit 4
+# on a payload predict-api can never parse doesn't measure anything
+# actionable.
+#
+# NOT included here on purpose: any transient reason predict-api may
+# add later (``ipfs_timeout``, rate-limit, etc.) OR a payload type it
+# later learns to parse. A regression that starts mis-tagging
+# well-formed deliveries under one of those must NOT be silently
+# subtracted from the denominator — that's exactly the coverage-gap
+# class the pre-adjustment raw check was catching. If predict-api
+# publishes a new structurally-unrecoverable reason, add it here
+# explicitly.
+_KNOWN_LOSS_REASONS: tuple[str, ...] = (
+    "parsed_request_null",
+    "parsed_delivery_null",
+    "unhandled_type_prompt",
+)
+
+# Per-query statement timeout for the predict-api pull. The table is
+# ~1.16M rows in prod, small in absolute terms, and the query has
+# ``WHERE request_id IS NOT NULL AND reason IN (...)`` on it — but a
+# missing index, a replica lag spike, or a lock contention burst
+# turns the documented "few seconds" into an unbounded hang with
+# only K8s ``activeDeadlineSeconds`` to stop it. Bound it here so
+# the failure mode surfaces as a psycopg timeout on the K8s Job's
+# logs rather than a mysterious pod hang.
+_KNOWN_LOSS_STATEMENT_TIMEOUT_MS = 60_000
+
 
 # --------------------------------------------------------------------------- #
 # Data pulls                                                                  #
@@ -387,16 +417,30 @@ def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
             "known-loss adjustment."
         ) from exc
 
-    log.info("pulling known-loss failures from predict-api")
+    log.info(
+        "pulling known-loss failures from predict-api (reasons=%s)",
+        ", ".join(_KNOWN_LOSS_REASONS),
+    )
     by_platform: dict[str, set[str]] = {
         p: set() for p in _CHAIN_ID_TO_PLATFORM.values()
     }
     unknown_chain_counts: dict[int, int] = {}
-    with psycopg.connect(predict_api_url, connect_timeout=30) as conn:
+    # Setting statement_timeout at connect time via the DSN options
+    # applies it to every statement on the session. Only bounding
+    # connect_timeout leaves the actual SELECT unbounded — see
+    # ``_KNOWN_LOSS_STATEMENT_TIMEOUT_MS`` above for why.
+    connect_options = f"-c statement_timeout={_KNOWN_LOSS_STATEMENT_TIMEOUT_MS}"
+    with psycopg.connect(
+        predict_api_url,
+        connect_timeout=30,
+        options=connect_options,
+    ) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT chain_id, request_id FROM mech_migration_failures "
-                "WHERE request_id IS NOT NULL"
+                "WHERE request_id IS NOT NULL "
+                "AND reason = ANY(%(reasons)s)",
+                {"reasons": list(_KNOWN_LOSS_REASONS)},
             )
             for chain_id, request_id in cur:
                 platform = _CHAIN_ID_TO_PLATFORM.get(chain_id)
@@ -411,7 +455,14 @@ def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
             "known-loss pull: dropped %d row(s) on unmapped chain(s) %s "
             "(add to _CHAIN_ID_TO_PLATFORM if these should be excluded)",
             sum(unknown_chain_counts.values()),
-            sorted(unknown_chain_counts.items()),
+            # ``chain_id`` may be NULL upstream and NULL vs int is not
+            # orderable under Python 3's total ordering. Push None to
+            # the end explicitly so a NULL-chain row can't crash the
+            # warning path whose entire job is to safely flag it.
+            sorted(
+                unknown_chain_counts.items(),
+                key=lambda kv: (kv[0] is None, kv[0]),
+            ),
         )
     for platform, ids in by_platform.items():
         log.info("known-loss failures: platform=%s count=%d", platform, len(ids))
@@ -805,8 +856,12 @@ class _CoverageResult:
     ``raw_missing_by_platform`` / ``raw_marketplace_counts`` and the
     excluded count in ``excluded_by_platform`` / ``total_excluded`` so
     the artifact and human report can show both. The verdict and the
-    per-platform floor operate on the adjusted values so a chain-wide
-    known-loss population can never fail the gate.
+    per-platform floor operate on the adjusted values so the gate
+    measures what the pipeline can actually ingest rather than a
+    structurally-unrecoverable known-loss population. The floor can
+    still trip on the adjusted count if a real subgraph outage drives
+    a platform below it — the adjustment only removes rows the
+    pipeline could never process, not rows the pipeline should have.
     """
 
     total_missing: int
@@ -896,7 +951,30 @@ def _report_coverage_check(
     total_raw_marketplace = 0
     for platform, marketplace_ids in marketplace_ids_by_platform.items():
         raw_missing_set = marketplace_ids - lake_ids
-        excluded_set = raw_missing_set & known_loss.get(platform, set())
+        platform_known_loss = known_loss.get(platform, set())
+        excluded_set = raw_missing_set & platform_known_loss
+        # Sanity flag: if predict-api returned a substantial known-loss
+        # set for this platform but zero of them intersect the raw
+        # missing set, that's near-certainly an ID-format mismatch
+        # between the subgraph and predict-api rather than a genuine
+        # zero. Without this warning the feature silently no-ops and
+        # the run still fails exit 4 with no hint that the adjustment
+        # didn't apply. Threshold 100 keeps small windows quiet.
+        if (
+            known_loss_applied
+            and len(platform_known_loss) >= 100
+            and len(raw_missing_set) > 0
+            and len(excluded_set) == 0
+        ):
+            log.warning(
+                "known-loss no-op on %s: predict-api returned %d IDs but 0 "
+                "intersect the %d raw-missing set — likely an ID-format "
+                "mismatch between the subgraph and predict-api (case, prefix, "
+                "encoding). Adjustment did not apply for this platform.",
+                platform,
+                len(platform_known_loss),
+                len(raw_missing_set),
+            )
         adjusted_missing_set = raw_missing_set - excluded_set
         adjusted_marketplace_count = len(marketplace_ids) - len(excluded_set)
         raw_missing_by_platform[platform] = sorted(raw_missing_set)
@@ -1177,12 +1255,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "postgres DSN for predict-api. When set, the coverage check "
-            "queries ``mech_migration_failures`` and excludes rows the "
-            "IPFS ingestor marks as unparseable-upstream "
-            "(parsed_request_null / parsed_delivery_null / "
-            "unhandled_type_prompt) from the missing-from-lake set BEFORE "
-            "the verdict is computed. Without this flag the verdict is "
-            "raw coverage — every known-loss row inflates the 'missing' "
+            "queries ``mech_migration_failures`` and excludes rows whose "
+            "reason is in a hardcoded structurally-unrecoverable set "
+            f"({', '.join(_KNOWN_LOSS_REASONS)}) from the "
+            "missing-from-lake set BEFORE the verdict is computed. Any "
+            "other reason predict-api may record in that table (e.g. a "
+            "transient network reason or a payload type it later learns "
+            "to parse) is NOT excluded, so a coverage regression that "
+            "starts mis-tagging deliveries under a new reason still "
+            "fails exit 4. Without this flag the verdict is raw "
+            "coverage — every known-loss row inflates the 'missing' "
             "count and can fail exit 4 for a population the pipeline is "
             "structurally unable to ingest. Falls back to the "
             "``PREDICT_API_POSTGRES_URL`` env var."

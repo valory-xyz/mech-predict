@@ -19,6 +19,7 @@
 """Tests for benchmark/notify_slack.py — platform-scoped Slack summaries."""
 
 import io
+import logging
 from email.message import Message
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from urllib.request import Request
 import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
+    _LEVEL_PREFIX_FORMAT,
     _build_system_prompt,
     _compute_top_k,
     _count_eligible_tools,
@@ -149,6 +151,39 @@ class TestBuildSystemPrompt:
         assert "n-descending order" in prompt
         assert "re-rank by n, not take the first 3 you see" in prompt
         assert "insufficient tool × category data" in prompt
+
+
+class TestLogFormat:
+    """The flywheel log format keeps WARNING distinguishable from INFO."""
+
+    def test_level_is_recoverable_from_a_rendered_line(self) -> None:
+        """A WARNING and an INFO with the same text render differently.
+
+        The ROI freshness and malformed-payload guards report through
+        log.warning. Under the previous bare "%(message)s" format they were
+        byte-identical to the surrounding INFO chatter, so the log half of the
+        guard was write-only: nothing could grep or filter for it.
+        """
+        formatter = logging.Formatter(_LEVEL_PREFIX_FORMAT)
+
+        def render(level: int) -> str:
+            record = logging.LogRecord(
+                name="benchmark.roi_slack",
+                level=level,
+                pathname=__file__,
+                lineno=1,
+                msg="ROI results are 6.0 days old",
+                args=(),
+                exc_info=None,
+            )
+            return formatter.format(record)
+
+        warning_line = render(logging.WARNING)
+        info_line = render(logging.INFO)
+        assert warning_line != info_line
+        assert "WARNING" in warning_line
+        # Greppable by level at line start -- the property an operator uses.
+        assert warning_line.startswith("WARNING")
 
 
 class TestInferPlatformLabel:

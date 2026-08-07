@@ -45,14 +45,19 @@ log = logging.getLogger(__name__)
 # ~2x that cadence almost always mean the roi_sim step failed and a previous
 # run's file is being reused -- flag those rather than posting stale numbers as
 # if current (the file parses fine, so _load_results cannot catch this).
+#
+# Day-granular, deliberately: roi_sim writes `as_of` as a bare date, so age is
+# measured from that date's UTC midnight, not the write time. The real lead
+# time before this trips therefore varies by up to a calendar day depending on
+# when the flywheel ran. The threshold is a "clearly not today's run" signal,
+# not a precise SLA -- a full timestamp in roi_sim would be needed for that.
 STALE_AFTER_DAYS = 2.0
 
 # Slack desktop code blocks SCROLL horizontally -- they do NOT wrap -- so a
-# wide table renders fine. The tool name and numeric columns are never
-# truncated; MAX_LINE_WIDTH is a best-effort target. The free-form FLAGS column
-# shrinks toward its floor ONLY when that alone brings a line back under the
-# target -- a long tool name may still exceed it (flags is kept intact rather
-# than clipped for nothing).
+# wide table renders fine. NOT enforced at render time: no column is clipped to
+# satisfy it (see _render_table). It is a DESIGN TARGET, asserted by
+# test_typical_rows_fit, that the column set stays narrow enough for a typical
+# row to fit without scrolling. A long tool name legitimately exceeds it.
 MAX_LINE_WIDTH = 160
 
 # Truncation guard for very wide deployments: keep the top rows by staked
@@ -106,10 +111,6 @@ _FLAG_SHORT = {
 }
 _PARSE_RELIABILITY_RE = re.compile(r"(\d+)% parse reliability")
 _SEP = " | "
-# Backstop only: if a line still exceeds MAX_LINE_WIDTH (pathological flag
-# text), shrink the FLAGS column down to this floor. The tool name and the
-# numeric columns are never touched.
-_FLAGS_MIN = 6
 
 _ELLIPSIS = "…"
 
@@ -255,13 +256,14 @@ def _format_line(cells: tuple[str, ...], widths: list[int]) -> str:
 def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     """Render header + divider + data lines.
 
-    Each column width is content-driven: max(header, widest cell). Only the
-    free-form flags column is capped; the tool name and every numeric column
-    render in full (Slack code blocks scroll horizontally). MAX_LINE_WIDTH is a
-    best-effort target: the flags column shrinks toward its floor ONLY when that
-    alone brings the line back under it. When a long tool name is the cause,
-    clipping flags cannot restore the bound, so flags is left intact and the
-    line may exceed the target.
+    Each column width is content-driven: max(header, widest cell). The only
+    bound is the per-column ``_FLAGS_CAP`` on the free-form flags text; the tool
+    name and every numeric column render in full (Slack code blocks scroll
+    horizontally). There is NO whole-line backstop: with the tool column
+    uncapped a line-width guarantee is not achievable, and every case where
+    clipping flags could still restore MAX_LINE_WIDTH is one where a long tool
+    name -- not the flags text -- caused the overflow, so clipping would destroy
+    useful text to pay for a column that is uncapped by design.
 
     :param rows: pre-formatted cell tuples, one per table row. Each tuple
         MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
@@ -279,13 +281,6 @@ def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
     for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
         content = max(len(header), *(len(row[i]) for row in rows))
         widths.append(content if cap is None else min(cap, content))
-    # Best-effort width backstop: shrink flags ONLY when doing so brings the
-    # line back under MAX_LINE_WIDTH (flags is the overflow cause). A long tool
-    # name alone can exceed the target; clipping flags then cannot restore it
-    # and would only destroy useful text, so flags is left intact.
-    overflow = sum(widths) + len(_SEP) * (len(_HEADERS) - 1) - MAX_LINE_WIDTH
-    if 0 < overflow <= widths[-1] - _FLAGS_MIN:
-        widths[-1] -= overflow
     lines = [
         _format_line(_HEADERS, widths),
         _format_line(tuple("-" * width for width in widths), widths),
@@ -438,6 +433,18 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
         if isinstance(group, dict) and group.get("platform") == platform
     ]
     if not platform_groups:
+        # "No data for this platform yet" is legitimate and silent. A non-empty
+        # groups list that yields no dicts at all is not: that is a truncated or
+        # schema-drifted roi_sim write wearing the same silence. Separate the
+        # two so the second cannot hide behind the first.
+        if groups and not any(isinstance(group, dict) for group in groups):
+            log.warning(
+                "ROI results carry %d 'groups' entries but none are objects "
+                "(first is %s); the roi_sim write is likely truncated or "
+                "schema-drifted -- skipping the section.",
+                len(groups),
+                type(groups[0]).__name__,
+            )
         return None
 
     # Forward-compatible deployment filter: groups explicitly marked

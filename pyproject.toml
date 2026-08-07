@@ -78,6 +78,13 @@ dependencies = [
     "prometheus-client>=0.23.1,<0.24",
     "pebble==5.1.3",
     "python-dotenv==0.21.1",
+    # psycopg with the pre-built binary wheel — used only by
+    # scripts/verify_migration_swap.py to query predict-api's
+    # ``mech_migration_failures`` when the operator passes
+    # --predict-api-url (or PREDICT_API_POSTGRES_URL). The binary extra
+    # avoids the libpq system-library requirement on the alpine/slim
+    # verify image.
+    "psycopg[binary]==3.3.4",
 ]
 
 [project.urls]

@@ -33,9 +33,10 @@ from benchmark.notify_slack import (
     _compute_top_k,
     _count_eligible_tools,
     _infer_platform_label,
+    _main_window_label,
     post_to_slack,
 )
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 
 
 # A "headline" prompt used by structural tests that don't care about the
@@ -167,6 +168,34 @@ class TestInferPlatformLabel:
         assert _infer_platform_label(Path("/tmp/report_gnosis.md")) is None
 
 
+class TestMainWindowLabel:
+    """Prompt label follows the flag so MTD data isn't described as All-Time."""
+
+    def test_flag_off_uses_all_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Legacy path keeps the All-Time label."""
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        assert _main_window_label() == "All-Time"
+
+    def test_flag_on_uses_mtd(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Self-contained mode labels the main window as MTD."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        assert _main_window_label() == "MTD"
+
+    def test_prompt_renders_provided_label(self) -> None:
+        """Whatever label is passed shows up in the prompt string."""
+        prompt = _build_system_prompt(
+            "Omenstrat", eligible_count=5, main_window_label="MTD"
+        )
+        assert "`MTD` (cumulative)" in prompt
+        assert "Δ vs MTD" in prompt
+        assert "All-Time" not in prompt
+
+    def test_prompt_defaults_to_all_time(self) -> None:
+        """The default keeps behavior identical for flag-off callers."""
+        prompt = _build_system_prompt("Omenstrat", eligible_count=5)
+        assert "All-Time" in prompt
+
+
 class TestPromptRejectsUnformattedPlaceholder:
     """Guard against a missed ``{platform_label}`` replacement."""
 
@@ -186,10 +215,14 @@ class TestPromptRejectsUnformattedPlaceholder:
             _build_system_prompt(label, eligible_count=5)
 
     def test_no_unfilled_placeholder_in_rendered_prompt(self) -> None:
-        """Rendered prompt has no surviving ``{platform_label}`` after dispatch."""
+        """Rendered prompt has no surviving placeholders after dispatch."""
         for n in (0, 1, 3, 5, 10):
             prompt = _build_system_prompt("Omenstrat", eligible_count=n)
             assert "{platform_label}" not in prompt
+            # main_window_label was added when the flag-on path landed.
+            # Regression guard exists precisely to catch a future refactor
+            # that misses one of the two placeholders.
+            assert "{main_window_label}" not in prompt
 
 
 class TestEligibilityBlock:

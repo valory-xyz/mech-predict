@@ -28,43 +28,46 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from benchmark.grouping import _accumulate_group, _derive_group
 from benchmark.scorer import (
-    DISAGREE_THRESHOLD,
-    LARGE_TRADE_THRESHOLD,
-    LATENCY_RESERVOIR_SIZE,
     PLATFORMS,
-    WORST_BEST_SIZE,
-    _accumulate_group,
+    SOURCE_LEGACY_LOGS,
+    SOURCE_MECH_ANALYTICS,
     _cli_legacy_full_recompute,
     _cli_period,
-    _derive_group,
     _derive_platform_path,
     _derive_tournament_path,
-    _empty_group,
     _is_edge_eligible,
     _partition_rows_by_platform,
     _score_extreme_predictions,
     _score_latency_reservoir,
-    brier_score,
-    classify_difficulty,
-    classify_disagreement,
-    classify_horizon,
-    classify_liquidity,
     compute_calibration_regression,
     compute_ece,
     compute_group_stats,
-    disagree_bucket,
-    edge_score,
     group_by,
     group_by_horizon,
     group_by_month,
     load_history,
-    log_loss_score,
     rebuild,
     score,
     score_period,
     score_period_split_by_platform,
     update,
+)
+from benchmark.scoring_primitives import (
+    DISAGREE_THRESHOLD,
+    LARGE_TRADE_THRESHOLD,
+    LATENCY_RESERVOIR_SIZE,
+    WORST_BEST_SIZE,
+    _empty_group,
+    brier_score,
+    classify_difficulty,
+    classify_disagreement,
+    classify_horizon,
+    classify_liquidity,
+    disagree_bucket,
+    edge_score,
+    log_loss_score,
 )
 
 # ---------------------------------------------------------------------------
@@ -1625,6 +1628,150 @@ class TestUpdateDedup:
         dedup_ids = json.loads(dedup_path.read_text())
         assert "legacy1" in dedup_ids
 
+    def test_update_rebuilds_after_source_flip(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """update() must rebuild from logs when scores.json is mech-analytics."""
+        # Regression for the flag-rollback double-count. The two paths dedup on
+        # disjoint namespaces (request_id vs platform:deliver_id). Without the
+        # source-flip guard, the incremental merge on flag-off would resume
+        # the request-id-keyed totals in scores.json and add the fetch-window
+        # rows on top — the same rows that live in logs/ would then be counted
+        # a second time under platform:deliver_id keys.
+        # This is the flag-OFF branch; the flag-ON branch has its own test.
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        tourn_path = tmp_path / "scores_tournament.json"
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        log_row = _row(
+            p_yes=0.7,
+            outcome=True,
+            row_id="omen:d1",
+            predicted_at="2026-03-10T10:00:00Z",
+        )
+        with open(logs_dir / "production_log_test.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps(log_row) + "\n")
+
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            # Seed a valid resumable scores.json by running a warm-up update
+            # over five stand-in rows keyed on synthetic request_ids — this
+            # simulates the mech-analytics-fed accumulator before the
+            # rollback. n=5 baked in.
+            warmup_rows = [
+                _row(
+                    p_yes=0.6,
+                    outcome=True,
+                    row_id=f"req_{i}",
+                    predicted_at="2026-03-05T10:00:00Z",
+                )
+                for i in range(5)
+            ]
+            update(
+                warmup_rows,
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+            # Flip the on-disk source marker to mimic what
+            # rebuild_from_mech_analytics would have stamped.
+            stale = json.loads(scores_path.read_text())
+            assert stale["overall"]["n"] == 5
+            stale["source"] = SOURCE_MECH_ANALYTICS
+            scores_path.write_text(json.dumps(stale))
+            # Legacy dedup file is untouched by the mech-analytics path, so
+            # clear it — the request_ids in there would otherwise dedup
+            # against the legacy platform:deliver_id keys spuriously.
+            dedup_path.unlink()
+
+            # Now the flag flips back off. fetch has repopulated logs/;
+            # update() gets the fresh 7-day slice.
+            result = update(
+                [log_row],
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+
+        saved = json.loads(scores_path.read_text())
+        assert saved.get("source") == SOURCE_LEGACY_LOGS
+        # Without the guard: resume from n=5 and add the incoming log_row
+        # (fresh dedup namespace, not in scored_row_ids.json) -> n=6.
+        # With the guard: rebuild from logs -> n=1, then dedup skips the
+        # incoming row -> n=1.
+        assert result["overall"]["n"] == 1
+
+    def test_update_skips_rebuild_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Flag-on update() must NOT treat a mech_analytics marker as rollback."""
+        # On a flag-on night the Score step stamps scores.json as
+        # mech_analytics by design; the tournament-merge step's downstream
+        # scorer --update would otherwise read that marker as a rollback,
+        # wipe the just-built MTD accumulator, rebuild from a frozen logs/
+        # (fetch is skipped flag-on), and stamp legacy_logs on disk —
+        # silently disarming the safety net for a real future rollback.
+        # This test pins BOTH: n survives, and source stays mech_analytics.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        dedup_path = tmp_path / "dedup.json"
+        tourn_path = tmp_path / "scores_tournament.json"
+
+        with patch("benchmark.scorer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 3, 15, tzinfo=timezone.utc)
+            mock_dt.side_effect = datetime
+            warmup_rows = [
+                _row(
+                    p_yes=0.6,
+                    outcome=True,
+                    row_id=f"req_{i}",
+                    predicted_at="2026-03-05T10:00:00Z",
+                )
+                for i in range(5)
+            ]
+            update(
+                warmup_rows,
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+            # Mimic what rebuild_from_mech_analytics would have stamped
+            # earlier in the same nightly.
+            stale = json.loads(scores_path.read_text())
+            assert stale["overall"]["n"] == 5
+            stale["source"] = SOURCE_MECH_ANALYTICS
+            scores_path.write_text(json.dumps(stale))
+
+            # Tournament merge step arrives with an extra row.
+            extra_row = _row(
+                p_yes=0.7,
+                outcome=True,
+                row_id="req_extra",
+                predicted_at="2026-03-05T10:00:00Z",
+            )
+            result = update(
+                [extra_row],
+                scores_path=scores_path,
+                history_path=history_path,
+                dedup_path=dedup_path,
+                tournament_scores_path=tourn_path,
+            )
+
+        saved = json.loads(scores_path.read_text())
+        # Marker survives so a real future rollback still trips the guard.
+        assert saved.get("source") == SOURCE_MECH_ANALYTICS
+        # No rebuild-from-empty-logs; the extra row is merged on top.
+        assert result["overall"]["n"] == 6
+
 
 # ---------------------------------------------------------------------------
 # Directional accuracy and no-signal rate
@@ -3178,3 +3325,433 @@ class TestScoreIncludesNewRollingFields:
         assert result["latency_reservoir"] == {}
         assert result["worst_10"] == []
         assert result["best_10"] == []
+
+
+# pylint: disable=import-outside-toplevel
+
+
+def _ma_row(**overrides: Any) -> dict[str, Any]:
+    """Base row shape produced by mech_analytics_client._map_row."""
+    row: dict[str, Any] = {
+        "request_id": "req-1",
+        "tool_name": "superforcaster",
+        "tool_version": "abc123",
+        "platform": "omen",
+        "question_text": "Will X happen?",
+        "p_yes": 0.7,
+        "p_no": 0.3,
+        "confidence": 0.85,
+        "prediction_parse_status": "valid",
+        "market_prob_at_prediction": 0.5,
+        "market_liquidity_at_prediction": 1000.0,
+        "market_spread_at_prediction": 0.02,
+        "market_id": "0xabcd",
+        "final_outcome": True,
+        "resolved_at": "2026-07-02T12:00:00Z",
+        "brier": 0.09,
+        "log_loss": 0.3567,
+        "edge": 0.15,
+        "directional_correct": True,
+        "latency_s": 5.0,
+        "requested_at": "2026-07-01T00:00:00Z",
+        "delivered_at": "2026-07-01T00:00:05Z",
+        "mode": None,
+        "config_hash": None,
+        "prediction_lead_time_days": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _patch_iter_and_classifier(
+    monkeypatch: pytest.MonkeyPatch, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Install fake iter_scored_rows + classify_category, return captured kwargs list."""
+    from benchmark import mech_analytics_client
+    from benchmark.datasets import fetch_production
+
+    captured: list[dict[str, Any]] = []
+
+    def _fake_iter(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        yield from rows
+
+    monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+    monkeypatch.setattr(
+        fetch_production, "classify_category", lambda _text, _plat: "sports"
+    )
+    return captured
+
+
+class TestRebuildFromMechAnalytics:
+    """Cover the mech-analytics-fed rebuild path end-to-end.
+
+    Mocks the HTTP client + category classifier; accumulate_row runs
+    for real so the on-disk output shape is genuinely produced. Each
+    test seeds a scratch tmp_path so history / dedup files start clean.
+    """
+
+    def _write_history(self, history_path: Path) -> None:
+        """Seed a minimal scores_history.jsonl so the missing-history gate passes."""
+        history_path.write_text('{"month": "2026-06", "brier": 0.2, "n": 100}\n')
+
+    def test_writes_scores_json_from_endpoint_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Fetched rows land as scores.json with the expected total."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        captured = _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 2
+        assert scores_path.exists()
+        on_disk = json.loads(scores_path.read_text())
+        assert on_disk["overall"]["n"] == 2
+        # resolved=True is load-bearing: unresolved rows would dilute
+        # the accumulator's n and break reliability.
+        assert captured[0].get("resolved") is True
+
+    def test_missing_request_id_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Row without request_id triggers a MechAnalyticsError (no silent double-count)."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        bad_row = _ma_row()
+        bad_row["request_id"] = None
+        _patch_iter_and_classifier(monkeypatch, [bad_row])
+        with pytest.raises(MechAnalyticsError, match="missing request_id"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_dedup_file_neither_read_nor_written(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rebuild does not touch scored_row_ids.json (owned by --update)."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        dedup_path = scores_path.parent / "scored_row_ids.json"
+        self._write_history(history_path)
+        # Pre-seed dedup with an id that also appears in the fetched
+        # rows. If the rebuild consulted this file, row "a" would be
+        # skipped and the accumulator would land at n=1 instead of 2.
+        dedup_path.write_text(json.dumps(["a"]))
+        _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 2, "full-window refetch must not dedup"
+        # And the pre-seeded content is untouched.
+        assert json.loads(dedup_path.read_text()) == ["a"]
+
+    def test_starts_fresh_ignoring_existing_scores_json(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A pre-existing scores.json must not blend into the rebuilt output."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+        scores_path.write_text(
+            json.dumps(
+                {
+                    "current_month": "2026-07",
+                    "overall": {"n": 99999, "brier_sum": 1234.5},
+                }
+            )
+        )
+        _patch_iter_and_classifier(
+            monkeypatch, [_ma_row(request_id="a"), _ma_row(request_id="b")]
+        )
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 2  # not 99999+2
+
+    def test_missing_history_refuses_to_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rebuild refuses whenever history is absent, regardless of scores.json."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        # Neither scores nor history exists — this is the CI force-rebuild
+        # wipe path (both files deleted together). Guard must trip.
+        _patch_iter_and_classifier(monkeypatch, [])
+        with pytest.raises(MechAnalyticsError, match="scores_history.jsonl missing"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_missing_history_with_existing_scores_still_refuses(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The narrower version of this guard let CI's wipe through."""
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        scores_path.write_text("{}")
+        _patch_iter_and_classifier(monkeypatch, [])
+        with pytest.raises(MechAnalyticsError, match="scores_history.jsonl missing"):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_cold_start_allowed_with_opt_in(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Explicit opt-in via env var lets a truly-fresh setup run."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        monkeypatch.setenv("MECH_ANALYTICS_ALLOW_EMPTY_HISTORY", "true")
+        result = rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert result["total_rows"] == 1
+
+    def test_fetch_widened_by_resolution_lag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """iter_scored_rows is called with since - lag_days, not the raw anchor."""
+        # Predictions requested late in month M that only resolve in early
+        # M+1 fail the ``resolved=True`` filter on M's last run and fall out
+        # of the ``[start_of_month, now)`` window on M+1's first run. The
+        # widened fetch closes that gap. Regression against a future edit
+        # that passes ``since`` straight through.
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        captured = _patch_iter_and_classifier(monkeypatch, [])
+
+        since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        rebuild_from_mech_analytics(
+            since=since,
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert len(captured) == 1
+        # Widened AND snapped to the 1st. Jul 1 - 45d = May 17, but the
+        # oldest re-derived month must be fully covered for the upsert to
+        # replace history with complete data — hence the snap to May 1.
+        assert captured[0]["since"] == datetime(2026, 5, 1, tzinfo=timezone.utc)
+        assert captured[0]["since"].day == 1
+        assert captured[0].get("resolved") is True
+
+    def test_prior_month_rows_upserted_into_history(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rows dated in prior months land in history, not the live accumulator."""
+        # Attribution key is ``requested_at[:7]``. A late-resolving M-1
+        # prediction returned by the widened fetch belongs in month M-1's
+        # snapshot, not in month M's live scores.json. The old flat-pass
+        # design silently rolled every fetched row into the current
+        # accumulator.
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        self._write_history(history_path)
+
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [
+                _ma_row(request_id="cur1", requested_at="2026-07-05T00:00:00Z"),
+                _ma_row(request_id="jun1", requested_at="2026-06-28T00:00:00Z"),
+                _ma_row(request_id="jun2", requested_at="2026-06-29T00:00:00Z"),
+            ],
+        )
+
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+
+        # Live accumulator only counts the July row.
+        saved = json.loads(scores_path.read_text())
+        assert saved["overall"]["n"] == 1
+
+        # June rows became a single upserted snapshot.
+        june_entries = [
+            json.loads(line)
+            for line in history_path.read_text().splitlines()
+            if line.strip() and json.loads(line).get("month") == "2026-06"
+        ]
+        assert len(june_entries) == 1
+        assert june_entries[0]["overall"]["n"] == 2
+
+    def test_history_rows_outside_lag_window_preserved(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Pre-existing history rows for months outside the fetch window survive."""
+        # The upsert only touches months present in the current response.
+        # A future edit that unlinks ``scores_history.jsonl`` (as
+        # ``_rebuild_single_mode`` does) would silently drop everything
+        # older than ``lag_days`` on the first rebuild — this pins the
+        # upsert-not-truncate semantics.
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        # Seed two months of history that will not be re-derived: the
+        # widened fetch only reaches back lag_days from July.
+        history_path.write_text(
+            '{"month": "2025-01", "overall": {"n": 500}}\n'
+            '{"month": "2025-12", "overall": {"n": 700}}\n'
+        )
+
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [_ma_row(request_id="cur", requested_at="2026-07-02T00:00:00Z")],
+        )
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+
+        months = [
+            json.loads(line)["month"]
+            for line in history_path.read_text().splitlines()
+            if line.strip()
+        ]
+        assert "2025-01" in months
+        assert "2025-12" in months
+
+    def test_boundary_month_snapshot_not_truncated_by_partial_bucket(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The oldest re-derived month must use its full bucket, not a partial."""
+        # Without the day=1 snap, ``since - lag_days`` lands mid-month and
+        # the oldest bucket only holds day-N..31 rows. The upsert then
+        # replaces the previously-complete history row with a truncated
+        # re-derivation. Regression: seed a complete May row (n=1000),
+        # rebuild with a lag that lands May 17 raw, and pin that:
+        #   (a) the endpoint is fetched from May 1 (snap works)
+        #   (b) the May history row after the rebuild reflects the full
+        #       May bucket the endpoint served, not a Day-17-onward slice.
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        # Complete pre-existing May snapshot that must not be truncated.
+        history_path.write_text('{"month": "2026-05", "overall": {"n": 1000}}\n')
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+
+        # Endpoint returns a full-May bucket (early + late) plus a July row.
+        # ``_ma_row`` uses today-shaped default resolved_at etc, so the
+        # accumulator will count each one.
+        may_rows = [
+            _ma_row(request_id=f"may{i:02d}", requested_at=f"2026-05-{d:02d}T12:00:00Z")
+            for i, d in enumerate([2, 10, 20, 28])
+        ]
+        jul_rows = [_ma_row(request_id="jul1", requested_at="2026-07-02T00:00:00Z")]
+        captured = _patch_iter_and_classifier(monkeypatch, may_rows + jul_rows)
+
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+
+        # Endpoint was asked from May 1, not mid-May.
+        assert captured[0]["since"] == datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+        # May row in history reflects the full May bucket returned by the
+        # endpoint, not just the trailing partial slice.
+        may_entries = [
+            json.loads(line)
+            for line in history_path.read_text().splitlines()
+            if line.strip() and json.loads(line).get("month") == "2026-05"
+        ]
+        assert len(may_entries) == 1
+        assert may_entries[0]["overall"]["n"] == 4
+
+    def test_upsert_fails_loud_on_malformed_history_line(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A malformed history line raises instead of silently vanishing."""
+        # Guard against a future edit that catches ``json.JSONDecodeError``
+        # with ``continue`` — the rewrite would then permanently drop the
+        # offending line even though the on-disk file is the only place
+        # the row lived.
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        history_path.write_text(
+            '{"month": "2026-06", "overall": {"n": 100}}\nnot-json-at-all\n'
+        )
+        monkeypatch.setenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "45")
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [_ma_row(request_id="jun1", requested_at="2026-06-05T00:00:00Z")],
+        )
+        with pytest.raises(json.JSONDecodeError):
+            rebuild_from_mech_analytics(
+                since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                scores_path=scores_path,
+                history_path=history_path,
+            )
+
+    def test_tournament_scores_untouched(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Existing scores_tournament*.json is not clobbered by the rebuild."""
+        from benchmark.scorer import rebuild_from_mech_analytics
+
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "scores_history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+        self._write_history(history_path)
+        tournament_path.write_text(json.dumps({"tournament": "preserved"}))
+        _patch_iter_and_classifier(monkeypatch, [_ma_row()])
+        rebuild_from_mech_analytics(
+            since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            scores_path=scores_path,
+            history_path=history_path,
+        )
+        assert json.loads(tournament_path.read_text()) == {"tournament": "preserved"}

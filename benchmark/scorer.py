@@ -17,8 +17,7 @@ import argparse
 import glob as glob_mod
 import json
 import logging
-import math
-import random
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -30,8 +29,30 @@ import numpy as np
 # isort treats `benchmark` as third-party (not in known_first_party=autonomy);
 # pylint treats it as first-party. The two views disagree on import order.
 # isort wins; silence pylint's complaint about the resulting block.
-from benchmark.io import load_jsonl as load_rows  # pylint: disable=wrong-import-order
-from scipy.optimize import minimize  # type: ignore[import-untyped]
+from benchmark.grouping import (  # pylint: disable=wrong-import-order
+    _derive_group,
+    accumulate_row,
+)
+from benchmark.io import load_jsonl as load_rows
+from benchmark.scoring_primitives import (
+    CALIBRATION_BINS,
+    LATENCY_RESERVOIR_SIZE,
+    MIN_SAMPLE_SIZE,
+    WORST_BEST_SIZE,
+    _bin_label,
+    _empty_group,
+    brier_score,
+    classify_difficulty,
+    classify_disagreement,
+    classify_horizon,
+    classify_liquidity,
+    disagree_bucket,
+    edge_score,
+    log_loss_score,
+)
+from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
+    minimize,
+)
 
 DEFAULT_INPUT = Path(__file__).parent / "datasets" / "production_log.jsonl"
 DEFAULT_OUTPUT = Path(__file__).parent / "results" / "scores.json"
@@ -39,6 +60,17 @@ DEFAULT_OUTPUT_TOURNAMENT = Path(__file__).parent / "results" / "scores_tourname
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
+
+# Data-source markers written into ``scores.json``. The legacy incremental
+# path (``update``) and legacy log-based ``rebuild`` stamp
+# ``SOURCE_LEGACY_LOGS``. The mech-analytics-fed rebuild stamps
+# ``SOURCE_MECH_ANALYTICS``. ``update()`` reads this on entry so a
+# ``USE_MECH_ANALYTICS_ROWS`` rollback can detect a source flip and rebuild
+# from ``logs/`` before merging incremental rows — the two paths dedup on
+# disjoint key namespaces (``request_id`` vs ``platform:deliver_id``), so
+# without the rebuild every row inside the fetch lookback double-counts.
+SOURCE_LEGACY_LOGS = "legacy_logs"
+SOURCE_MECH_ANALYTICS = "mech_analytics"
 
 PRODUCTION_MODE = "production_replay"
 TOURNAMENT_MODE = "tournament"
@@ -66,7 +98,7 @@ def _partition_rows_by_mode(
     """Split rows into (production, tournament) lists.
 
     Rows are routed by ``row["mode"]``. Missing mode defaults to
-    production — matches the historical default in ``_accumulate_row``.
+    production — matches the historical default in ``accumulate_row``.
 
     :param rows: input rows (any mode).
     :return: tuple of (production_rows, tournament_rows).
@@ -131,21 +163,8 @@ def _partition_rows_by_platform(
     return buckets
 
 
-LATENCY_RESERVOIR_SIZE = 200
-CALIBRATION_PAIRS_RESERVOIR_SIZE = 50_000
-_RESERVOIR_RNG = random.Random(
-    42
-)  # nosec B311 — reservoir sampling for reproducible scoring
-WORST_BEST_SIZE = 10
-
 RELIABILITY_GATE = 0.80
-MIN_SAMPLE_SIZE = 30
 MIN_CALIBRATION_BIN_SIZE = 20
-
-# Diagnostic edge metric thresholds (PROPOSAL.md Stage 4).
-# Fixed for now — will version if changed.
-DISAGREE_THRESHOLD = 0.03
-LARGE_TRADE_THRESHOLD = 0.10
 
 # Keys that must be persisted in scores.json for incremental resume.
 # Used in update() and rebuild() when merging accumulators into output.
@@ -206,44 +225,6 @@ def _save_dedup_ids(dedup_path: Path, ids: set[str]) -> None:
     dedup_path.write_text(json.dumps(sorted(ids)))
 
 
-def brier_score(p_yes: float, outcome: bool) -> float:
-    """Compute Brier score for a single prediction."""
-    return (p_yes - (1.0 if outcome else 0.0)) ** 2
-
-
-def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
-    """Compute edge over market for a single prediction.
-
-    Edge = market_brier - tool_brier. Positive means the tool's prediction
-    was closer to the outcome than the market's price.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :param outcome: actual outcome (True = yes).
-    :return: edge score (positive = tool beat market).
-    """
-    outcome_val = 1.0 if outcome else 0.0
-    market_brier = (market_prob - outcome_val) ** 2
-    tool_brier = (p_yes - outcome_val) ** 2
-    return market_brier - tool_brier
-
-
-_LOG_LOSS_EPSILON = 1e-15
-
-
-def log_loss_score(p_yes: float, outcome: bool) -> float:
-    """Compute log loss for a single prediction.
-
-    :param p_yes: predicted probability of yes.
-    :param outcome: actual outcome.
-    :return: log loss value (lower is better).
-    """
-    p = max(_LOG_LOSS_EPSILON, min(1 - _LOG_LOSS_EPSILON, p_yes))
-    if outcome:
-        return -math.log(p)
-    return -math.log(1 - p)
-
-
 def _is_edge_eligible(row: dict[str, Any]) -> bool:
     """Check if a row has all fields needed for edge-over-market calculation."""
     return (
@@ -252,89 +233,6 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
         and row.get("p_yes") is not None
         and row.get("market_prob_at_prediction") is not None
     )
-
-
-# ---------------------------------------------------------------------------
-# Diagnostic edge metric helpers (PROPOSAL.md Stage 4)
-# ---------------------------------------------------------------------------
-
-
-def classify_disagreement(p_yes: float, market_prob: float, outcome: bool) -> str:
-    """Classify whether tool or market was closer to the outcome.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :param outcome: actual outcome (True = yes).
-    :return: ``"tool_win"``, ``"market_win"``, or ``"tie"``.
-    """
-    outcome_val = 1.0 if outcome else 0.0
-    tool_dist = abs(p_yes - outcome_val)
-    market_dist = abs(market_prob - outcome_val)
-    if tool_dist < market_dist:
-        return "tool_win"
-    if tool_dist > market_dist:
-        return "market_win"
-    return "tie"
-
-
-def disagree_bucket(p_yes: float, market_prob: float) -> str:
-    """Bucket a prediction by disagreement magnitude with the market.
-
-    :param p_yes: tool's predicted probability.
-    :param market_prob: market probability at prediction time.
-    :return: ``"no_trade"``, ``"small_trade"``, or ``"large_trade"``.
-    """
-    d = round(abs(p_yes - market_prob), 10)
-    if d <= DISAGREE_THRESHOLD:
-        return "no_trade"
-    if d <= LARGE_TRADE_THRESHOLD:
-        return "small_trade"
-    return "large_trade"
-
-
-# ---------------------------------------------------------------------------
-# Difficulty and liquidity classification
-# ---------------------------------------------------------------------------
-
-# Thresholds are initial values from PROPOSAL.md. Adjust after inspecting
-# the actual data distribution from the first scorer run.
-DIFFICULTY_THRESHOLDS = (0.15, 0.3)
-LIQUIDITY_THRESHOLDS = (500.0, 5000.0)
-
-
-def classify_difficulty(market_prob: float | None) -> str:
-    """Classify market difficulty based on distance from 0.5.
-
-    Uses market_prob_at_prediction (not final market price).
-
-    :param market_prob: market probability at prediction time.
-    :return: difficulty bucket name.
-    """
-    if market_prob is None:
-        return "unknown"
-    distance = round(abs(market_prob - 0.5), 10)
-    lo, hi = DIFFICULTY_THRESHOLDS
-    if distance < lo:
-        return "hard"
-    if distance <= hi:
-        return "medium"
-    return "easy"
-
-
-def classify_liquidity(liquidity_usd: float | None) -> str:
-    """Classify market liquidity into buckets.
-
-    :param liquidity_usd: market liquidity in USD at prediction time.
-    :return: liquidity bucket name.
-    """
-    if liquidity_usd is None:
-        return "unknown"
-    lo, hi = LIQUIDITY_THRESHOLDS
-    if liquidity_usd < lo:
-        return "low"
-    if liquidity_usd <= hi:
-        return "medium"
-    return "high"
 
 
 _DIAGNOSTIC_NONE: dict[str, Any] = {
@@ -534,22 +432,6 @@ def compute_group_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Horizon classification
-# ---------------------------------------------------------------------------
-
-
-def classify_horizon(lead_time_days: float | None) -> str:
-    """Classify prediction lead time into a horizon bucket."""
-    if lead_time_days is None:
-        return "unknown"
-    if lead_time_days < 7:
-        return "short_lt_7d"
-    if lead_time_days <= 30:
-        return "medium_7_30d"
-    return "long_gt_30d"
-
-
-# ---------------------------------------------------------------------------
 # Grouping helpers
 # ---------------------------------------------------------------------------
 
@@ -627,25 +509,6 @@ def group_by_composite(
 # ---------------------------------------------------------------------------
 # Calibration
 # ---------------------------------------------------------------------------
-
-CALIBRATION_BINS = [
-    (0.0, 0.1),
-    (0.1, 0.2),
-    (0.2, 0.3),
-    (0.3, 0.4),
-    (0.4, 0.5),
-    (0.5, 0.6),
-    (0.6, 0.7),
-    (0.7, 0.8),
-    (0.8, 0.9),
-    (0.9, 1.01),
-]
-
-
-def _bin_label(lo: float, hi: float) -> str:
-    """Human-readable label for a calibration bin."""
-    hi_display = 1.0 if hi > 1.0 else hi
-    return f"{lo:.1f}-{hi_display:.1f}"
 
 
 def compute_calibration(
@@ -1098,35 +961,6 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
 # ---------------------------------------------------------------------------
 
 
-def _empty_group() -> dict[str, Any]:
-    """Return a fresh group accumulator."""
-    return {
-        "n": 0,
-        "valid_n": 0,
-        "brier_sum": 0.0,
-        "correct_count": 0,
-        "n_directional": 0,
-        "no_signal_count": 0,
-        "sharpness_sum": 0.0,
-        "outcome_yes_count": 0,
-        "log_loss_sum": 0.0,
-        "edge_sum": 0.0,
-        "edge_n": 0,
-        "edge_positive_count": 0,
-        # Diagnostic edge metrics
-        "disagree_tool_win_count": 0,
-        "disagree_n": 0,
-        "brier_sum_no_trade": 0.0,
-        "n_no_trade": 0,
-        "brier_sum_small_trade": 0.0,
-        "n_small_trade": 0,
-        "brier_sum_large_trade": 0.0,
-        "n_large_trade": 0,
-        "bias_sum": 0.0,
-        "n_bias_losses": 0,
-    }
-
-
 def _empty_scores(current_month: str) -> dict[str, Any]:
     """Return a fresh scores.json structure with empty accumulators.
 
@@ -1162,353 +996,6 @@ def _empty_scores(current_month: str) -> dict[str, Any]:
         "best_10": [],
         "calibration_pairs": [],
     }
-
-
-def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
-    """Merge one row into a group accumulator (mutates *group*).
-
-    :param group: accumulator dict with n, valid_n, brier_sum, etc.
-    :param row: a production log row dict.
-    """
-    group["n"] += 1
-    is_valid = (
-        row.get("prediction_parse_status") == "valid"
-        and row.get("final_outcome") is not None
-        and row.get("p_yes") is not None
-    )
-    if is_valid:
-        group["valid_n"] += 1
-        p_yes = row["p_yes"]
-        outcome = row["final_outcome"]
-        group["brier_sum"] += brier_score(p_yes, outcome)
-        group["log_loss_sum"] += log_loss_score(p_yes, outcome)
-        # Directional accuracy — exclude p_yes == 0.5
-        if p_yes != 0.5:
-            group["n_directional"] += 1
-            if (p_yes > 0.5) == outcome:
-                group["correct_count"] += 1
-        else:
-            group["no_signal_count"] += 1
-        group["sharpness_sum"] += abs(p_yes - 0.5)
-        if outcome:
-            group["outcome_yes_count"] += 1
-        # Edge over market
-        market_prob = row.get("market_prob_at_prediction")
-        if market_prob is not None:
-            brier = brier_score(p_yes, outcome)
-            edge = edge_score(p_yes, market_prob, outcome)
-            group["edge_sum"] += edge
-            group["edge_n"] += 1
-            if edge > 0:
-                group["edge_positive_count"] += 1
-            # Diagnostic edge metrics
-            bucket = disagree_bucket(p_yes, market_prob)
-            group[f"brier_sum_{bucket}"] += brier
-            group[f"n_{bucket}"] += 1
-            if bucket != "no_trade":
-                result = classify_disagreement(p_yes, market_prob, outcome)
-                if result != "tie":
-                    group["disagree_n"] += 1
-                    if result == "tool_win":
-                        group["disagree_tool_win_count"] += 1
-                    else:
-                        group["bias_sum"] += p_yes - (1.0 if outcome else 0.0)
-                        group["n_bias_losses"] += 1
-
-
-def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
-    """Compute derived fields from a group accumulator.
-
-    Returns a new dict with all accumulator fields plus derived
-    brier, accuracy, sharpness, reliability, and decision_worthy.
-
-    :param group: accumulator dict.
-    :return: dict with accumulators and derived stats.
-    """
-    result = dict(group)
-    n = group["n"]
-    valid_n = group["valid_n"]
-    if n == 0:
-        result.update(
-            brier=None,
-            directional_accuracy=None,
-            no_signal_rate=None,
-            log_loss=None,
-            sharpness=None,
-            reliability=None,
-            decision_worthy=False,
-            outcome_yes_rate=None,
-            baseline_brier=None,
-            brier_skill_score=None,
-        )
-    elif valid_n == 0:
-        result.update(
-            brier=None,
-            directional_accuracy=None,
-            no_signal_rate=None,
-            log_loss=None,
-            sharpness=None,
-            reliability=round(0.0, 4),
-            decision_worthy=False,
-            outcome_yes_rate=None,
-            baseline_brier=None,
-            brier_skill_score=None,
-        )
-    else:
-        brier = round(group["brier_sum"] / valid_n, 4)
-        yes_rate = group["outcome_yes_count"] / valid_n
-        baseline_brier = round(yes_rate * (1 - yes_rate), 4)
-        n_dir = group.get("n_directional", 0)
-        no_sig = group.get("no_signal_count", 0)
-        result["brier"] = brier
-        result["directional_accuracy"] = (
-            round(group["correct_count"] / n_dir, 4) if n_dir > 0 else None
-        )
-        result["n_directional"] = n_dir
-        result["no_signal_count"] = no_sig
-        result["no_signal_rate"] = round(no_sig / valid_n, 4)
-        result["log_loss"] = round(group["log_loss_sum"] / valid_n, 4)
-        result["sharpness"] = round(group["sharpness_sum"] / valid_n, 4)
-        result["reliability"] = round(valid_n / n, 4)
-        result["decision_worthy"] = valid_n >= MIN_SAMPLE_SIZE
-        result["outcome_yes_rate"] = round(yes_rate, 4)
-        result["baseline_brier"] = baseline_brier
-        if baseline_brier > 0:
-            result["brier_skill_score"] = round(1 - (brier / baseline_brier), 4)
-        else:
-            result["brier_skill_score"] = None
-
-    # Edge over market — derived from edge accumulators
-    edge_n = group.get("edge_n", 0)
-    result["edge_n"] = edge_n
-    if edge_n > 0:
-        result["edge"] = round(group["edge_sum"] / edge_n, 4)
-        result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
-    else:
-        result["edge"] = None
-        result["edge_positive_rate"] = None
-
-    # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias
-    _derive_diagnostic_metrics(group, result)
-
-    return result
-
-
-def _derive_diagnostic_metrics(group: dict[str, Any], result: dict[str, Any]) -> None:
-    """Derive diagnostic edge metrics from accumulators into *result*.
-
-    :param group: accumulator dict with diagnostic keys.
-    :param result: output dict to populate (mutated in place).
-    """
-    disagree_n = group.get("disagree_n", 0)
-    result["disagree_n"] = disagree_n
-    if disagree_n >= MIN_SAMPLE_SIZE:
-        result["conditional_accuracy_rate"] = round(
-            group["disagree_tool_win_count"] / disagree_n, 4
-        )
-    else:
-        result["conditional_accuracy_rate"] = None
-
-    for bucket in ("no_trade", "small_trade", "large_trade"):
-        n_bucket = group.get(f"n_{bucket}", 0)
-        result[f"n_{bucket}"] = n_bucket
-        if n_bucket >= MIN_SAMPLE_SIZE:
-            result[f"brier_{bucket}"] = round(
-                group[f"brier_sum_{bucket}"] / n_bucket, 4
-            )
-        else:
-            result[f"brier_{bucket}"] = None
-
-    n_losses = group.get("n_bias_losses", 0)
-    result["n_bias_losses"] = n_losses
-    if n_losses >= MIN_SAMPLE_SIZE:
-        result["directional_bias"] = round(group["bias_sum"] / n_losses, 4)
-    else:
-        result["directional_bias"] = None
-
-
-def _ensure_and_accumulate(
-    dimension: dict[str, dict[str, Any]],
-    key: str,
-    row: dict[str, Any],
-) -> None:
-    """Ensure a key exists in a dimension dict and accumulate the row into it.
-
-    :param dimension: dict mapping group keys to accumulator dicts.
-    :param key: the group key to accumulate into.
-    :param row: a production log row dict.
-    """
-    if key not in dimension:
-        dimension[key] = _empty_group()
-    _accumulate_group(dimension[key], row)
-
-
-def _update_extreme_list(
-    entries: list[dict[str, Any]],
-    new_entry: dict[str, Any],
-    keep: str = "worst",
-) -> list[dict[str, Any]]:
-    """Update a deduplicated worst/best list with a new entry.
-
-    Keeps one entry per unique ``question_text``. For ``keep="worst"``,
-    replaces an existing entry only if the new Brier is higher. For
-    ``keep="best"``, replaces only if lower.
-
-    :param entries: current list of extreme entries.
-    :param new_entry: candidate entry to insert.
-    :param keep: ``"worst"`` to keep highest Brier, ``"best"`` for lowest.
-    :return: updated list, sorted and truncated to ``WORST_BEST_SIZE``.
-    """
-    question = new_entry["question_text"]
-    existing = {e["question_text"]: e for e in entries}
-    is_better = (
-        (lambda new, old: new > old)
-        if keep == "worst"
-        else (lambda new, old: new < old)
-    )
-
-    if question in existing:
-        if is_better(new_entry["brier"], existing[question]["brier"]):
-            entries = [e for e in entries if e["question_text"] != question]
-            entries.append(new_entry)
-    else:
-        entries.append(new_entry)
-
-    reverse = keep == "worst"
-    entries.sort(key=lambda x: x["brier"], reverse=reverse)
-    return entries[:WORST_BEST_SIZE]
-
-
-def _accumulate_calibration(scores: dict[str, Any], row: dict[str, Any]) -> None:
-    """Accumulate calibration bins and pairs for a valid row.
-
-    :param scores: the full scores dict with calibration accumulators.
-    :param row: a valid production log row dict.
-    """
-    p = row["p_yes"]
-    for lo, hi in CALIBRATION_BINS:
-        if lo <= p < hi:
-            label = _bin_label(lo, hi)
-            bucket = scores["calibration"][label]
-            bucket["count"] += 1
-            bucket["outcome_sum"] += 1 if row["final_outcome"] else 0
-            bucket["predicted_sum"] += p
-            break
-    # Store (p_yes, outcome) for row-level calibration regression.
-    # Reservoir sampling: once at capacity, randomly replace entries
-    # so the sample remains representative without unbounded growth.
-    pair = [p, 1 if row["final_outcome"] else 0]
-    pairs = scores["calibration_pairs"]
-    if len(pairs) < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-        pairs.append(pair)
-    else:
-        idx = _RESERVOIR_RNG.randint(0, scores["overall"]["valid_n"] - 1)
-        if idx < CALIBRATION_PAIRS_RESERVOIR_SIZE:
-            pairs[idx] = pair
-
-
-def _accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
-    """Merge one row into all accumulator dimensions (mutates *scores*).
-
-    :param scores: the full scores dict with accumulators.
-    :param row: a production log row dict.
-    """
-    _accumulate_group(scores["overall"], row)
-
-    tool = row.get("tool_name") or "unknown"
-    platform = row.get("platform") or "unknown"
-    category = row.get("category") or "unknown"
-    horizon = classify_horizon(row.get("prediction_lead_time_days"))
-    # Production rows store the IPFS hash in `tool_version`; tournament rows
-    # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
-    tool_version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-    mode = row.get("mode") or "production_replay"
-    config_hash = row.get("config_hash") or "unknown"
-
-    _ensure_and_accumulate(scores["by_tool"], tool, row)
-    _ensure_and_accumulate(scores["by_platform"], platform, row)
-    _ensure_and_accumulate(scores["by_category"], category, row)
-    _ensure_and_accumulate(scores["by_horizon"], horizon, row)
-    _ensure_and_accumulate(scores["by_tool_platform"], f"{tool} | {platform}", row)
-    _ensure_and_accumulate(scores["by_tool_category"], f"{tool} | {category}", row)
-    _ensure_and_accumulate(
-        scores["by_category_platform"], f"{category} | {platform}", row
-    )
-    _ensure_and_accumulate(
-        scores["by_tool_category_platform"],
-        f"{tool} | {category} | {platform}",
-        row,
-    )
-    _ensure_and_accumulate(scores["by_tool_version"], f"{tool} | {tool_version}", row)
-    _ensure_and_accumulate(
-        scores["by_tool_version_mode"],
-        f"{tool} | {tool_version} | {mode}",
-        row,
-    )
-    _ensure_and_accumulate(scores["by_config"], f"{tool} | {config_hash}", row)
-
-    difficulty = classify_difficulty(row.get("market_prob_at_prediction"))
-    _ensure_and_accumulate(scores["by_difficulty"], difficulty, row)
-
-    liquidity = classify_liquidity(row.get("market_liquidity_at_prediction"))
-    _ensure_and_accumulate(scores["by_liquidity"], liquidity, row)
-
-    _ensure_and_accumulate(
-        scores["by_platform_difficulty"], f"{platform} | {difficulty}", row
-    )
-    _ensure_and_accumulate(
-        scores["by_platform_liquidity"], f"{platform} | {liquidity}", row
-    )
-
-    # Calibration buckets + pairs
-    is_valid = (
-        row.get("prediction_parse_status") == "valid"
-        and row.get("final_outcome") is not None
-        and row.get("p_yes") is not None
-    )
-    if is_valid:
-        _accumulate_calibration(scores, row)
-
-    # Parse breakdown
-    status = row.get("prediction_parse_status") or "unknown"
-    if tool not in scores["parse_breakdown"]:
-        scores["parse_breakdown"][tool] = {}
-    tool_pb = scores["parse_breakdown"][tool]
-    tool_pb[status] = tool_pb.get(status, 0) + 1
-
-    # Latency reservoir (last N per tool)
-    latency = row.get("latency_s")
-    if latency is not None:
-        if tool not in scores["latency_reservoir"]:
-            scores["latency_reservoir"][tool] = []
-        reservoir = scores["latency_reservoir"][tool]
-        reservoir.append(latency)
-        if len(reservoir) > LATENCY_RESERVOIR_SIZE:
-            reservoir.pop(0)
-
-    # Worst / best 10 (deduplicated by question_text)
-    question_text = row.get("question_text")
-    if is_valid and question_text:
-        row_brier = brier_score(row["p_yes"], row["final_outcome"])
-        entry = {
-            "question_text": question_text,
-            "tool_name": tool,
-            "p_yes": row["p_yes"],
-            "final_outcome": row["final_outcome"],
-            "brier": round(row_brier, 4),
-            "platform": platform,
-            "category": category,
-        }
-        scores["worst_10"] = _update_extreme_list(
-            scores["worst_10"],
-            entry,
-            keep="worst",
-        )
-        scores["best_10"] = _update_extreme_list(
-            scores["best_10"],
-            entry,
-            keep="best",
-        )
 
 
 def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
@@ -1647,12 +1134,64 @@ def load_history(history_path: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def _upsert_month_snapshot(
+    scores: dict[str, Any],
+    month: str,
+    history_path: Path,
+) -> None:
+    """Replace the snapshot row for ``month`` in-place, preserving other months.
+
+    The mech-analytics-fed rebuild fetches a widened trailing window
+    each night and re-derives every month in it from the current row
+    set. ``_snapshot_month`` unconditionally appends, so a naive port
+    would either double-write months on every rebuild or need to unlink
+    ``scores_history.jsonl`` (blowing away months older than the fetch
+    window). Upserting by ``month`` keeps older months untouched.
+
+    :param scores: accumulator state for ``month`` (will be finalized).
+    :param month: ``YYYY-MM`` key to replace.
+    :param history_path: path to ``scores_history.jsonl``.
+    """
+    finalized = _finalize_scores(scores)
+    new_entry = {
+        "month": month,
+        "overall": finalized["overall"],
+        "by_tool": finalized["by_tool"],
+        "by_platform": finalized["by_platform"],
+        "calibration": finalized["calibration"],
+    }
+    kept: list[dict[str, Any]] = []
+    if history_path.exists():
+        with open(history_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Fail loud on malformed history — silently dropping the
+                # line here would remove it from the rewrite permanently
+                # (the only place the file's contents live is on disk).
+                entry = json.loads(stripped)
+                if entry.get("month") != month:
+                    kept.append(entry)
+    kept.append(new_entry)
+    kept.sort(key=lambda e: e.get("month") or "")
+    # Atomic rewrite: write to a sibling tmp file and rename. os.replace is
+    # atomic on POSIX, so a crash or cancelled job mid-write leaves the
+    # original file intact rather than truncating everything to zero.
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = history_path.with_suffix(history_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        for entry in kept:
+            f.write(json.dumps(entry) + "\n")
+    os.replace(tmp_path, history_path)
+
+
 def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     """Load scores.json and reconstruct the raw accumulator state.
 
     The saved format includes both derived fields (brier, directional_accuracy)
     and raw accumulators (brier_sum, correct_count). This function extracts
-    the raw accumulators into the internal format used by ``_accumulate_row``.
+    the raw accumulators into the internal format used by ``accumulate_row``.
 
     :param scores_path: path to ``scores.json``.
     :return: raw accumulator dict or None.
@@ -1750,6 +1289,7 @@ def _accumulate_and_write(
     scores_path: Path,
     history_path: Path | None,
     emit_history: bool,
+    source: str = SOURCE_LEGACY_LOGS,
 ) -> dict[str, Any]:
     """Load existing scores (if any), accumulate *rows*, write output.
 
@@ -1762,10 +1302,17 @@ def _accumulate_and_write(
     :param scores_path: output path for the accumulator dict.
     :param history_path: optional history file for monthly snapshots.
     :param emit_history: when False, skip the snapshot step entirely.
+    :param source: fallback data-source marker. Used only when the file
+        does not yet exist or predates the marker; otherwise the
+        existing marker is preserved so a downstream ``update()`` call
+        (tournament merge, etc.) cannot disarm the flag-rollback
+        detection by silently rewriting a ``mech_analytics`` file with
+        the ``legacy_logs`` default.
     :return: finalized scores dict (also written to disk).
     """
     today_month = datetime.now(timezone.utc).strftime("%Y-%m")
 
+    existing_source = _read_scores_source(scores_path)
     existing = _load_scores_for_resume(scores_path)
     if existing is not None:
         scores = existing
@@ -1786,7 +1333,7 @@ def _accumulate_and_write(
     scores.pop("scored_row_ids", None)
 
     for row in rows:
-        _accumulate_row(scores, row)
+        accumulate_row(scores, row)
 
     finalized = _finalize_scores(scores)
     output = dict(finalized)
@@ -1818,11 +1365,87 @@ def _accumulate_and_write(
             }
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
+    output["source"] = existing_source if existing_source is not None else source
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
 
     return finalized
+
+
+def _read_scores_source(scores_path: Path) -> str | None:
+    """Read the ``source`` marker from an existing scores file.
+
+    Returns ``None`` when the file is missing, malformed, or predates
+    the marker (all treated the same: no rollback signal available).
+
+    :param scores_path: path to ``scores.json``.
+    :return: source marker string, or ``None``.
+    """
+    if not scores_path.exists():
+        return None
+    try:
+        data = json.loads(scores_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    source = data.get("source")
+    return source if isinstance(source, str) else None
+
+
+def _maybe_rebuild_after_source_flip(
+    scores_path: Path,
+    history_path: Path,
+    dedup_path: Path,
+    tournament_scores_path: Path,
+) -> None:
+    """Detect a rollback from a non-legacy source and rebuild from logs.
+
+    Reads the ``source`` marker on ``scores_path``. Rebuilds only when
+    the marker is non-legacy AND the current run is flag-off — that is
+    the actual rollback shape. On a flag-on night the marker is
+    ``SOURCE_MECH_ANALYTICS`` by design (the ``Score`` step just
+    stamped it) and the tournament-merge step's downstream
+    ``scorer --update`` call would otherwise read the same marker as a
+    rollback, wipe the just-built MTD accumulator, rebuild from a
+    frozen ``logs/``, and stamp ``SOURCE_LEGACY_LOGS`` on disk —
+    silently disarming the safety net for a real future rollback.
+
+    When triggered, wipes ``scores.json``, its per-platform siblings,
+    and ``scored_row_ids.json``, then invokes :func:`rebuild` to
+    repopulate all-time state from ``logs/``. Downstream ``update()``
+    then merges the incoming ``new_rows`` on top of a matching dedup
+    namespace and cannot double-count.
+
+    :param scores_path: path to production ``scores.json``.
+    :param history_path: path to ``scores_history.jsonl``.
+    :param dedup_path: path to ``scored_row_ids.json``.
+    :param tournament_scores_path: path to ``scores_tournament.json``.
+    """
+    source = _read_scores_source(scores_path)
+    if source is None or source == SOURCE_LEGACY_LOGS:
+        return
+    if _use_mech_analytics_rows():
+        return
+
+    log = logging.getLogger(__name__)
+    log.warning(
+        "scores.json carries source=%r (non-legacy); wiping and "
+        "rebuilding from %s so the request_id / platform:deliver_id "
+        "dedup namespaces stop overlapping.",
+        source,
+        DEFAULT_LOGS_DIR,
+    )
+    scores_path.unlink(missing_ok=True)
+    dedup_path.unlink(missing_ok=True)
+    for platform in PLATFORMS:
+        _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
+    rebuild(
+        logs_dir=DEFAULT_LOGS_DIR,
+        scores_path=scores_path,
+        history_path=history_path,
+        dedup_path=dedup_path,
+        tournament_scores_path=tournament_scores_path,
+    )
 
 
 def update(
@@ -1853,6 +1476,18 @@ def update(
         dedup_path = scores_path.parent / "scored_row_ids.json"
     if tournament_scores_path is None:
         tournament_scores_path = _derive_tournament_path(scores_path)
+
+    # Detect a rollback from the mech-analytics path. That path keys the
+    # accumulator on ``request_id``; the legacy incremental path here
+    # keys on ``platform:deliver_id``. The two dedup namespaces never
+    # collide, so if we resumed the mech-analytics-stamped file, every
+    # row inside the fetch lookback would enter ``update()`` as "new"
+    # and be counted a second time on top of the already-baked-in
+    # request_id-keyed totals. Wipe scores + dedup and rebuild from
+    # ``logs/`` once so subsequent incremental merges are safe.
+    _maybe_rebuild_after_source_flip(
+        scores_path, history_path, dedup_path, tournament_scores_path
+    )
 
     scored_ids = _load_dedup_ids(dedup_path)
     # Legacy migration: if an older scores.json still carries scored_row_ids
@@ -1961,6 +1596,7 @@ def _rebuild_single_mode(
     if not mode_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
         finalized = _finalize_scores(scores)
+        finalized["source"] = SOURCE_LEGACY_LOGS
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
         return finalized, set()
@@ -1986,7 +1622,7 @@ def _rebuild_single_mode(
             row_id = row.get("row_id")
             if row_id and row_id in all_row_ids:
                 continue
-            _accumulate_row(scores, row)
+            accumulate_row(scores, row)
             if row_id:
                 all_row_ids.add(row_id)
         if emit_history and history_path is not None:
@@ -1997,7 +1633,7 @@ def _rebuild_single_mode(
         row_id = row.get("row_id")
         if row_id and row_id in all_row_ids:
             continue
-        _accumulate_row(scores, row)
+        accumulate_row(scores, row)
         if row_id:
             all_row_ids.add(row_id)
 
@@ -2031,6 +1667,7 @@ def _rebuild_single_mode(
             }
     output["_calibration_accum"] = scores["calibration"]
     output["_calibration_pairs"] = scores["calibration_pairs"]
+    output["source"] = SOURCE_LEGACY_LOGS
 
     scores_path.parent.mkdir(parents=True, exist_ok=True)
     scores_path.write_text(json.dumps(output, indent=2))
@@ -2078,6 +1715,7 @@ def rebuild(
     if not all_rows:
         scores = _empty_scores(datetime.now(timezone.utc).strftime("%Y-%m"))
         finalized = _finalize_scores(scores)
+        finalized["source"] = SOURCE_LEGACY_LOGS
         scores_path.parent.mkdir(parents=True, exist_ok=True)
         scores_path.write_text(json.dumps(finalized, indent=2))
         tournament_scores_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2127,6 +1765,224 @@ def rebuild(
 # ---------------------------------------------------------------------------
 # Period scoring — score a time window of log files
 # ---------------------------------------------------------------------------
+
+
+def _resolution_lag_days() -> int:
+    """Days of extra trailing window to fetch beyond ``since``.
+
+    The endpoint filters ``since`` / ``until`` on ``requested_at`` (the
+    mech request timestamp, source: ``mech-analytics`` handler docstring
+    ``etl/api/routes/data.py``). Predictions late in month M that only
+    resolve early in month M+1 fail the ``resolved=True`` filter on M's
+    last run and fall out of window on M+1's first run. Fetching a lag
+    tail past ``since`` and re-deriving every month it covers plugs
+    that hole.
+
+    Overridable via ``MECH_ANALYTICS_RESOLUTION_LAG_DAYS`` for staging
+    smoke tests that want a shorter window. Default 90 days covers Omen
+    / Polymarket's tail resolution latency comfortably.
+
+    :return: lag window in days (positive integer; clamped to >=0).
+    """
+    raw = os.getenv("MECH_ANALYTICS_RESOLUTION_LAG_DAYS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 90
+    return max(value, 0)
+
+
+def rebuild_from_mech_analytics(
+    since: datetime,
+    until: datetime | None = None,
+    scores_path: Path = DEFAULT_OUTPUT,
+    history_path: Path = DEFAULT_HISTORY,
+    chain_id: int | None = None,
+) -> dict[str, Any]:
+    """Rebuild scores from mech-analytics's ``/v1/data/scored-rows`` endpoint.
+
+    Post off-chain migration the marketplace-subgraph + IPFS row-fetch layer
+    can't reach individual mech requests. mech-analytics is the new public
+    read path — it ingests from the predict-api data lake, scores each row
+    once, and serves the results. This function is the mech-analytics-fed
+    counterpart to :func:`rebuild`: same output shape, same
+    ``scores_<platform>.json`` files, same downstream consumers
+    (``analyze.py`` needs no changes).
+
+    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer;
+    default off so nothing changes until we flip.
+
+    **Timestamp windowing.** The endpoint applies ``since`` / ``until``
+    to ``requested_at``. Rows are bucketed into months here by the same
+    ``requested_at`` field so per-month attribution matches what the
+    endpoint served. To close the resolution-lag hole (predictions late
+    in month M that resolve early in M+1), the effective fetch window
+    is ``[since - _resolution_lag_days(), until]`` and every prior
+    month covered by that window is re-derived from the current
+    response and upserted into ``scores_history.jsonl`` on each run.
+    Only ``since``'s calendar month lands in ``scores.json`` (the live
+    accumulator). Months older than the lag window are preserved.
+
+    :param since: timezone-aware datetime for the current-month anchor.
+        The fetch reaches back beyond this by
+        ``_resolution_lag_days()`` internally.
+    :param until: timezone-aware datetime, exclusive upper bound. When
+        ``None``, the endpoint returns up to now.
+    :param scores_path: output path for the production ``scores.json``.
+    :param history_path: output path for ``scores_history.jsonl``.
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        ``None`` fetches every chain the endpoint serves.
+    :return: finalized production scores dict.
+    :raises MechAnalyticsError: when ``scores_history.jsonl`` is missing
+        and the ``MECH_ANALYTICS_ALLOW_EMPTY_HISTORY`` opt-in is not set.
+        The rebuild only fetches a trailing window, so a missing history
+        file would silently start us from scratch and drop prior months'
+        trend rows on the floor.
+    """
+    # Local import so a missing ``requests`` install can't break the module
+    # at import time on the sweep / tournament paths that don't use it.
+    # pylint: disable=import-outside-toplevel
+    import importlib
+
+    from benchmark.mech_analytics_client import iter_scored_rows
+
+    # ``classify_category`` lives in ``fetch_production``, which lazily
+    # imports ``scorer.update`` on its incremental path — a static ``from``
+    # here would surface as a cyclic-import warning even though both edges
+    # resolve inside functions. Route through ``importlib`` so pylint's
+    # static tracer doesn't count this edge.
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    # pylint: disable=import-outside-toplevel
+    from benchmark.mech_analytics_client import MechAnalyticsError
+
+    # History guard. Refuse whenever ``scores_history.jsonl`` is missing,
+    # regardless of whether the current-month accumulator exists — the
+    # CI ``Clear cached scores`` step wipes both files together, and the
+    # narrower ``and scores_path.exists()`` version of this check let
+    # that wipe through undetected (prior months' trend rows silently
+    # gone). Truly-fresh setups opt in via
+    # ``MECH_ANALYTICS_ALLOW_EMPTY_HISTORY=true`` so the guard is a
+    # deliberate override, not a silent skip.
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import parse_truthy_env
+
+    allow_empty_history = parse_truthy_env("MECH_ANALYTICS_ALLOW_EMPTY_HISTORY")
+    if not history_path.exists() and not allow_empty_history:
+        raise MechAnalyticsError(
+            f"scores_history.jsonl missing at {history_path}; the "
+            "mech-analytics rebuild only fetches a trailing window and "
+            "cannot repopulate historical snapshots on its own. Seed "
+            "history via the legacy rebuild path once, or set "
+            "MECH_ANALYTICS_ALLOW_EMPTY_HISTORY=true to accept starting "
+            "from an empty history."
+        )
+
+    lag_days = _resolution_lag_days()
+    # Snap the widened lower bound to the 1st of its calendar month so the
+    # oldest month bucket is fully covered. Without this,
+    # ``since - lag_days`` lands mid-month and the oldest bucket only
+    # holds day-N-through-31 rows; the subsequent upsert would then
+    # replace the previously-complete history snapshot for that month
+    # with a truncated re-derivation, and every month permanently loses
+    # its first ~0-30 days the moment it slides to the trailing edge of
+    # the lag window. Snapping costs at most 30 extra days of fetch;
+    # ``since`` is already a tz-aware month start so replace(day=1)
+    # keeps the 00:00 UTC anchor.
+    effective_since = (since - timedelta(days=lag_days)).replace(day=1)
+    current_month = since.strftime("%Y-%m")
+
+    # Bucket rows by ``requested_at`` month so late-resolving predictions
+    # from prior months land back in the month they were requested in,
+    # not silently in the current-month accumulator (which is what a
+    # single flat pass into ``_accumulate_and_write`` would do).
+    all_rows: list[dict[str, Any]] = []
+    prior_month_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    current_month_rows: list[dict[str, Any]] = []
+    for row in iter_scored_rows(
+        since=effective_since, until=until, chain_id=chain_id, resolved=True
+    ):
+        # ``category`` is derived locally from ``question_text`` — the
+        # endpoint carries the title but not the classified category, and
+        # ``accumulate_row`` groups on this key.
+        question_text = row.get("question_text")
+        platform = row.get("platform")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        request_id = row.get("request_id")
+        if not request_id:
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
+        row["row_id"] = row.get("row_id") or request_id
+        all_rows.append(row)
+
+        requested_at = row.get("requested_at") or ""
+        row_month = requested_at[:7] if requested_at else current_month
+        if row_month == current_month:
+            current_month_rows.append(row)
+        elif row_month < current_month:
+            prior_month_rows[row_month].append(row)
+        # Rows dated after the current-month anchor (clock skew or ingest
+        # of pre-scheduled markets) fold into the current bucket. Losing
+        # them would be worse than accepting a small dating drift.
+        else:
+            current_month_rows.append(row)
+
+    # No dedup filter on this path. ``iter_scored_rows`` returns the full
+    # window every rebuild, so filtering against a persisted
+    # ``scored_row_ids.json`` would drop rows that legitimately appear in
+    # later runs' windows too. Combined with the ``scores_path.unlink``
+    # below (fresh accumulator per rebuild), the earlier "read the dedup
+    # set, skip seen rows, save the union" logic collapsed the
+    # accumulator to a one-day slice from the second night onward.
+    # Full-window refetch is idempotent by construction; the dedup file
+    # is owned by the legacy ``--update`` incremental path and is
+    # neither read nor written here.
+
+    # A "rebuild" must start from _empty_scores, not silently merge into
+    # an existing accumulator. _accumulate_and_write resumes when the
+    # current_month matches, so unlink the aggregate files up front to
+    # force the fresh path. history_path is deliberately preserved —
+    # only scores_path (this month's live accumulator) gets wiped.
+    scores_path.unlink(missing_ok=True)
+    for platform in ("omen", "polymarket"):
+        _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
+
+    # mech-analytics has no tournament partition — leave existing
+    # scores_tournament*.json files untouched. Overwriting them with
+    # empty would clobber accumulated tournament state on every rebuild,
+    # and the subsequent workflow ``--update`` step would merge only
+    # that run's fresh tournament rows onto the emptied file.
+    prod_result = _accumulate_and_write(
+        current_month_rows,
+        scores_path,
+        history_path,
+        emit_history=False,
+        source=SOURCE_MECH_ANALYTICS,
+    )
+
+    for platform, plat_rows in _partition_rows_by_platform(current_month_rows).items():
+        _accumulate_and_write(
+            plat_rows,
+            _derive_platform_path(scores_path, platform),
+            None,
+            emit_history=False,
+            source=SOURCE_MECH_ANALYTICS,
+        )
+
+    # Re-derive every prior month covered by the widened fetch window
+    # from that month's row bucket and upsert the snapshot into
+    # scores_history.jsonl. Months older than the lag window are left
+    # untouched — the upsert only replaces rows for months present in
+    # the current response.
+    for month in sorted(prior_month_rows):
+        month_scores = _empty_scores(month)
+        for row in prior_month_rows[month]:
+            accumulate_row(month_scores, row)
+        _upsert_month_snapshot(month_scores, month, history_path)
+
+    return prod_result
 
 
 def _extract_date_from_log_path(path: str) -> str:
@@ -2468,15 +2324,37 @@ def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
 
 
 def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
-    """Handle the ``--rebuild`` CLI mode."""
-    print(f"Rebuilding scores from {args.logs_dir}")
-    result = rebuild(
-        logs_dir=args.logs_dir,
-        scores_path=args.output,
-        history_path=args.history,
-        tournament_input=args.tournament_input,
-        tournament_scores_path=output_tournament,
-    )
+    """Handle the ``--rebuild`` CLI mode.
+
+    When ``USE_MECH_ANALYTICS_ROWS`` is set truthy in the environment,
+    reroutes to :func:`rebuild_from_mech_analytics` instead of reading
+    log files. Off-chain migration: mech-analytics is the new source of
+    the scored-row stream. Defaults off; nothing changes until we flip.
+
+    :param args: parsed CLI namespace with ``output``, ``history``,
+        ``logs_dir``, and ``tournament_input``.
+    :param output_tournament: derived path for the tournament scores json.
+    """
+    if _use_mech_analytics_rows():
+        # pylint: disable=import-outside-toplevel
+        from benchmark.scoring_primitives import start_of_current_month_utc
+
+        since = start_of_current_month_utc()
+        print(f"Rebuilding scores from mech-analytics (since {since.isoformat()})")
+        result = rebuild_from_mech_analytics(
+            since=since,
+            scores_path=args.output,
+            history_path=args.history,
+        )
+    else:
+        print(f"Rebuilding scores from {args.logs_dir}")
+        result = rebuild(
+            logs_dir=args.logs_dir,
+            scores_path=args.output,
+            history_path=args.history,
+            tournament_input=args.tournament_input,
+            tournament_scores_path=output_tournament,
+        )
     print(
         f"Scores written to {args.output} (production) and "
         f"{output_tournament} (tournament)"
@@ -2486,6 +2364,14 @@ def _cli_rebuild(args: argparse.Namespace, output_tournament: Path) -> None:
         f"Production: Brier={overall['brier']},"
         f" DirAcc={overall.get('directional_accuracy')}, n={overall['n']}"
     )
+
+
+def _use_mech_analytics_rows() -> bool:
+    """Return True when the feature flag routes rebuilds via mech-analytics."""
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import use_mech_analytics_rows
+
+    return use_mech_analytics_rows()
 
 
 def _cli_legacy_full_recompute(

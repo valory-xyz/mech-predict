@@ -18,7 +18,10 @@
 # ------------------------------------------------------------------------------
 """Tests for benchmark/analyze.py"""
 
+import argparse as _argparse
 import json
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 from typing import Any
 
 import pytest
@@ -62,7 +65,7 @@ from benchmark.analyze import (
     section_version_deltas,
     section_weak_spots,
 )
-from benchmark.scorer import MIN_SAMPLE_SIZE
+from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 
 
 @pytest.fixture(autouse=True)
@@ -3194,3 +3197,385 @@ class TestGenerateReportDeploymentConfigUnavailable:
         }
         report = generate_report(scores, [], platform="omen", valid_tools={})
         assert "Deployment config unavailable" not in report
+
+
+# ---------------------------------------------------------------------------
+# mech-analytics self-contained mode
+# ---------------------------------------------------------------------------
+#
+# These tests exercise the new analyzer path that bypasses the on-disk
+# scores_<platform>.json files and fetches rows directly from
+# mech-analytics's /v1/data/scored-rows endpoint. Every mock lives at a
+# real boundary (iter_scored_rows for the HTTP layer, classify_category
+# for the local category classifier); the accumulator + finalizer run
+# for real so the dict shape is genuinely validated.
+
+# pylint: disable=protected-access,import-outside-toplevel
+
+
+class TestUseMechAnalyticsFlag:
+    """Env-var-gated feature flag helper.
+
+    Parser accepts ``true`` (case-insensitive, trimmed) and nothing
+    else — the CI workflow gates compare the same raw env var to the
+    literal ``'true'`` in YAML, so a broader set here would put Python
+    and CI on opposite branches for values like ``1``.
+    """
+
+    @pytest.mark.parametrize("value", ["true", "TRUE", "True", "  true  "])
+    def test_truthy_forms_return_true(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Only ``true`` (case-insensitive, trimmed) flips the flag on."""
+        from benchmark import analyze
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", value)
+        assert analyze._use_mech_analytics_flag() is True
+
+    @pytest.mark.parametrize(
+        "value", ["", "0", "1", "yes", "on", "false", "no", "off", "maybe"]
+    )
+    def test_falsy_forms_return_false(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Everything that isn't ``true`` reads as off (mirrors YAML gate)."""
+        from benchmark import analyze
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", value)
+        assert analyze._use_mech_analytics_flag() is False
+
+    def test_unset_env_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset env var reads as off, not as truthy."""
+        from benchmark import analyze
+
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        assert analyze._use_mech_analytics_flag() is False
+
+
+class TestStartOfCurrentMonthUtc:
+    """Default --since anchor for the main scores window."""
+
+    def test_returns_first_of_month_at_midnight_utc(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Anchors to the 1st of the current UTC month at 00:00:00."""
+        from benchmark import analyze, scoring_primitives
+
+        # Wrap ``datetime`` in a small shim so the helper sees a fixed
+        # ``now()`` while other datetime ops go through the real class.
+        # Subclassing ``datetime`` and overriding ``now`` here trips
+        # mypy on the Liskov return-type; a shim class attribute is
+        # simpler and type-clean.
+        fixed_now = _datetime(2026, 7, 27, 15, 42, 33, tzinfo=_timezone.utc)
+
+        class _DatetimeShim:
+            @staticmethod
+            def now(tz: Any = None) -> _datetime:
+                """Return the fixed test datetime for any tz."""
+                return fixed_now if tz is None else fixed_now.astimezone(tz)
+
+        # Patch ``scoring_primitives``, not ``analyze``: the helper is a thin
+        # delegate to ``scoring_primitives.start_of_current_month_utc``, so the
+        # name it reads at call time lives in THAT module. Patching `analyze`
+        # left the real clock in play and the assertion below passed only while
+        # the wall clock happened to be in the hardcoded month -- it began
+        # failing on the 1st of the next one.
+        monkeypatch.setattr(scoring_primitives, "datetime", _DatetimeShim)
+        result = analyze._start_of_current_month_utc()
+        assert result == _datetime(2026, 7, 1, 0, 0, 0, tzinfo=_timezone.utc)
+
+
+class TestParseIsoDatetimeArg:
+    """CLI arg parser for --since / --until."""
+
+    def test_accepts_z_suffix(self) -> None:
+        """`Z` suffix is treated as UTC."""
+        from benchmark import analyze
+
+        result = analyze._parse_iso_datetime_arg("2026-07-27T10:00:00Z")
+        assert result == _datetime(2026, 7, 27, 10, 0, 0, tzinfo=_timezone.utc)
+
+    def test_accepts_explicit_offset(self) -> None:
+        """Explicit `+00:00` offset parses to UTC."""
+        from benchmark import analyze
+
+        result = analyze._parse_iso_datetime_arg("2026-07-27T10:00:00+00:00")
+        assert result == _datetime(2026, 7, 27, 10, 0, 0, tzinfo=_timezone.utc)
+
+    def test_rejects_naive_datetime(self) -> None:
+        """Naive datetime is rejected to prevent silent timezone drift.
+
+        Naive input would default to the caller's local clock as UTC;
+        explicit rejection surfaces the missing offset instead.
+        """
+        from benchmark import analyze
+
+        with pytest.raises(_argparse.ArgumentTypeError, match="timezone offset"):
+            analyze._parse_iso_datetime_arg("2026-07-27T10:00:00")
+
+    def test_rejects_malformed_input(self) -> None:
+        """Non-ISO string surfaces as an ArgumentTypeError, not a crash."""
+        from benchmark import analyze
+
+        with pytest.raises(_argparse.ArgumentTypeError, match="not an ISO 8601"):
+            analyze._parse_iso_datetime_arg("garbage")
+
+
+def _sample_row(**overrides: Any) -> dict[str, Any]:
+    """Base row shape produced by `mech_analytics_client._map_row`."""
+    row: dict[str, Any] = {
+        "request_id": "req-1",
+        "tool_name": "superforcaster",
+        "tool_version": "abc123",
+        "platform": "omen",
+        "question_text": "Will X happen by 2026?",
+        "p_yes": 0.7,
+        "p_no": 0.3,
+        "confidence": 0.85,
+        "prediction_parse_status": "valid",
+        "market_prob_at_prediction": 0.5,
+        "market_liquidity_at_prediction": 1000.0,
+        "final_outcome": True,
+        "latency_s": 5.0,
+        "requested_at": "2026-07-25T10:00:00Z",
+        "delivered_at": "2026-07-25T10:00:05Z",
+        "mode": None,
+        "config_hash": None,
+        "prediction_lead_time_days": None,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestAllowEmptyMainScores:
+    """Early-month calendar guard on the main-scores empty check.
+
+    The mech-analytics main window defaults to ``[start of current UTC
+    month, now)``. On the 1st of the month that's a few hours of
+    resolved rows, near-certainly zero, and the fail-loud check would
+    crash the nightly. The guard opens the empty-allowance only on
+    days 1..N when ``--since`` was defaulted.
+    """
+
+    @pytest.mark.parametrize("day", [1, 2, 3])
+    def test_early_month_with_defaulted_since_allows_empty(self, day: int) -> None:
+        """Day 1..N with defaulted --since suppresses the empty-window fail."""
+        from benchmark import analyze
+
+        assert analyze._allow_empty_main_scores(since_defaulted=True, utc_day=day)
+
+    @pytest.mark.parametrize("day", [4, 5, 15, 28, 31])
+    def test_later_month_with_defaulted_since_fails_loud(self, day: int) -> None:
+        """Day 4+ keeps the fail-loud behavior even with defaulted --since."""
+        from benchmark import analyze
+
+        assert not analyze._allow_empty_main_scores(since_defaulted=True, utc_day=day)
+
+    @pytest.mark.parametrize("day", [1, 15, 31])
+    def test_explicit_since_never_suppresses(self, day: int) -> None:
+        """An explicit --since caller owns the semantic, no calendar-based override."""
+        from benchmark import analyze
+
+        assert not analyze._allow_empty_main_scores(since_defaulted=False, utc_day=day)
+
+
+class TestFleetPlusFlagExits:
+    """--fleet is not supported alongside USE_MECH_ANALYTICS_ROWS."""
+
+    def test_fleet_with_flag_on_raises_sysexit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Running --fleet with the flag on should sys.exit with a clear message."""
+        from benchmark import analyze
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["analyze.py", "--fleet"],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            analyze.main()
+        # Message should mention the incompatibility rather than a crash.
+        assert "self-contained mode" in str(excinfo.value)
+
+
+class TestBuildScoresFromMechAnalytics:
+    """The main worker that turns mech-analytics rows into a scores dict.
+
+    Mocks iter_scored_rows and classify_category (the two real
+    boundaries); accumulate_row + _finalize_scores run for real so the
+    output shape is genuinely produced by the same code the on-disk
+    path uses.
+    """
+
+    def _patch_iter_and_classifier(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        rows: list[dict[str, Any]],
+        classify_return: str = "sports",
+    ) -> dict[str, Any]:
+        """Install fakes for iter_scored_rows + classify_category, capture calls."""
+        # pylint: disable=too-many-locals
+        from benchmark import mech_analytics_client
+
+        captured: dict[str, Any] = {"iter_calls": [], "classify_calls": []}
+
+        def _fake_iter(
+            *,
+            since: Any,
+            until: Any = None,
+            platform: Any = None,
+            chain_id: Any = None,
+            resolved: Any = None,
+            **_kwargs: Any,
+        ) -> Any:
+            captured["iter_calls"].append(
+                {
+                    "since": since,
+                    "until": until,
+                    "platform": platform,
+                    "chain_id": chain_id,
+                    "resolved": resolved,
+                }
+            )
+            yield from rows
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+
+        # classify_category is imported lazily via importlib inside the
+        # helper; patch on the source module.
+        from benchmark.datasets import fetch_production
+
+        def _fake_classify(text: str, platform: str) -> str:
+            captured["classify_calls"].append((text, platform))
+            return classify_return
+
+        monkeypatch.setattr(fetch_production, "classify_category", _fake_classify)
+        return captured
+
+    def test_returns_finalized_dict_shape(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Output has every top-level key the section renderers read."""
+        from benchmark import analyze
+
+        rows = [_sample_row(), _sample_row(request_id="req-2")]
+        self._patch_iter_and_classifier(monkeypatch, rows)
+
+        since = _datetime(2026, 7, 1, tzinfo=_timezone.utc)
+        result = analyze._build_scores_from_mech_analytics("omen", since, None)
+
+        for key in (
+            "current_month",
+            "generated_at",
+            "overall",
+            "total_rows",
+            "by_tool",
+            "by_platform",
+            "by_category",
+            "by_tool_platform",
+            "calibration",
+            "ece",
+        ):
+            assert key in result, f"missing top-level key: {key}"
+        assert result["total_rows"] == 2
+
+    def test_passes_chain_id_and_platform_to_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chain-id derivation from platform + platform filter passthrough."""
+        from benchmark import analyze
+
+        captured = self._patch_iter_and_classifier(monkeypatch, [_sample_row()])
+
+        since = _datetime(2026, 7, 1, tzinfo=_timezone.utc)
+        until = _datetime(2026, 7, 27, tzinfo=_timezone.utc)
+        analyze._build_scores_from_mech_analytics("omen", since, until)
+        # resolved=True is load-bearing: unresolved rows would dilute the
+        # denominator on the accumulator's reliability calculation.
+        assert captured["iter_calls"][0]["resolved"] is True
+
+        assert len(captured["iter_calls"]) == 1
+        call = captured["iter_calls"][0]
+        assert call["platform"] == "omen"
+        assert call["chain_id"] == 100
+        assert call["since"] == since
+        assert call["until"] == until
+
+    def test_polymarket_maps_to_polygon_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Platform-to-chain-id derivation: polymarket → 137."""
+        from benchmark import analyze
+
+        captured = self._patch_iter_and_classifier(
+            monkeypatch, [_sample_row(platform="polymarket")]
+        )
+        analyze._build_scores_from_mech_analytics(
+            "polymarket", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+        )
+        assert captured["iter_calls"][0]["chain_id"] == 137
+        assert captured["iter_calls"][0]["platform"] == "polymarket"
+
+    def test_classify_category_called_per_row_with_question_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each row's question_text goes through the local category classifier."""
+        from benchmark import analyze
+
+        rows = [
+            _sample_row(question_text="Will A happen?"),
+            _sample_row(request_id="req-2", question_text="Will B happen?"),
+        ]
+        captured = self._patch_iter_and_classifier(monkeypatch, rows)
+
+        analyze._build_scores_from_mech_analytics(
+            "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+        )
+        assert captured["classify_calls"] == [
+            ("Will A happen?", "omen"),
+            ("Will B happen?", "omen"),
+        ]
+
+    def test_row_with_no_question_text_skips_classifier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Absent title = no category call (avoids classifying '')."""
+        from benchmark import analyze
+
+        rows = [_sample_row(question_text=None)]
+        captured = self._patch_iter_and_classifier(monkeypatch, rows)
+        analyze._build_scores_from_mech_analytics(
+            "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+        )
+        assert not captured["classify_calls"]
+
+    def test_empty_row_stream_raises_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Zero rows raises EmptyMechAnalyticsWindow so the nightly fails loudly."""
+        from benchmark import analyze
+
+        self._patch_iter_and_classifier(monkeypatch, [])
+
+        with pytest.raises(analyze.EmptyMechAnalyticsWindow, match="zero rows"):
+            analyze._build_scores_from_mech_analytics(
+                "omen", _datetime(2026, 7, 1, tzinfo=_timezone.utc), None
+            )
+
+    def test_empty_row_stream_allowed_when_flag_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """allow_empty=True returns an all-zero dict without raising."""
+        from benchmark import analyze
+
+        self._patch_iter_and_classifier(monkeypatch, [])
+
+        result = analyze._build_scores_from_mech_analytics(
+            "omen",
+            _datetime(2026, 7, 1, tzinfo=_timezone.utc),
+            None,
+            allow_empty=True,
+        )
+        assert result["total_rows"] == 0
+        assert result["overall"]["n"] == 0

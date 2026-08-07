@@ -2235,7 +2235,7 @@ class TestStructuredOutputIsDerivedNotListed:
         Deriving it removes the obligation; this test pins that nothing
         reintroduces a lookup that can fall behind the tools.
         """
-        missed = []
+        missed, checked = [], []
         for name, spec in TOOL_REGISTRY.items():
             try:
                 module = importlib.import_module(spec.module)
@@ -2243,9 +2243,18 @@ class TestStructuredOutputIsDerivedNotListed:
                 continue
             if not hasattr(module, "PredictionResult"):
                 continue
+            checked.append(name)
             schema = _get_structured_output_schema(name)
             if schema is None or schema is not module.PredictionResult:
                 missed.append(name)
+        # Without this the whole test passes vacuously wherever the tool
+        # modules cannot be imported -- exactly the environment where a
+        # regression would go unnoticed.
+        assert set(checked) >= {
+            "superforcaster",
+            "superforcaster-polymarket-v4",
+            "factual_research",
+        }, f"examined too few tools to be meaningful: {sorted(checked)}"
         assert not missed, (
             f"tools define PredictionResult but replay would call them "
             f"unstructured: {sorted(missed)}"

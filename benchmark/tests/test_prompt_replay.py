@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import random
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +17,7 @@ import pytest
 from benchmark import prompt_replay as pr
 from benchmark.prompt_replay import (
     DEFAULT_REPLAY_SYSTEM_PROMPT,
+    STRUCTURED_OUTPUT_SCHEMA_ATTR,
     _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
@@ -2274,39 +2275,86 @@ class TestStructuredOutputIsDerivedNotListed:
         assert _get_structured_output_schema("no-such-tool") is None
 
 
-class TestShippedSuperforcastersAreRegistered:
-    """Every shipped superforcaster package must be reachable from the registry."""
+class TestPredictionToolsSelfDiscovered:
+    """Every prediction tool in the repo is found by scanning, not by a list.
 
-    def test_no_shipped_superforcaster_is_unregistered(self) -> None:
-        """A shipped, served tool the benchmark cannot run has no validation path.
+    The registry-driven sweep above can only examine tools someone already
+    registered -- the same blind spot as the deleted hand-maintained map, one
+    level up. Run against pre-PR main, this scan flags
+    ``superforcaster_calibrated_full_search`` (shipped, prediction-shaped,
+    unregistered) where a registry-driven check flags nothing. The file
+    system is the ground truth here; no allowlist, no family prefix, no
+    registry as input.
+    """
 
-        ``superforcaster_full_search`` shipped, went live on Polymarket and
-        produced the scored rows triage reads -- but was absent from the
-        registry, so ``replay()`` raised and the improvement loop could not
-        validate any fix for it. ``superforcaster_calibrated_full_search`` had
-        the same gap.
+    #: The four fields ``_call_openai_structured`` reads off the parsed
+    #: response. A class carrying all four IS a prediction schema.
+    _REQUIRED = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
 
-        Scoped to the superforcaster family deliberately: ``custom/`` also
-        ships non-prediction tools (``prepare_tx``, ``resolve_market``,
-        ``dalle_request``) that the replay path is not meant to drive, so a
-        repo-wide assertion would be false. Every ``superforcaster_*`` package
-        IS a prediction tool, which makes this one mechanical and true. The
-        general invariant -- "assessable implies replayable" -- belongs in the
-        actionable-tool gate, where the served set is known.
+    @classmethod
+    def _discover(cls) -> list[tuple[str, str]]:
+        """Scan every tool module in ``packages/`` for prediction schemas.
+
+        Pure AST parse -- no imports, so a tool with unhappy third-party
+        dependencies is still discovered (an import-based scan would skip
+        exactly the tools most likely to be misconfigured).
+
+        :return: ``(package name, schema class name)`` pairs.
         """
-        packages_json = (
-            Path(__file__).resolve().parents[2] / "packages" / "packages.json"
+        found = []
+        packages = Path(__file__).resolve().parents[2] / "packages"
+        for path in sorted(packages.glob("*/customs/*/*.py")):
+            package = path.parent.name
+            if path.stem != package:  # only the tool's main module
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                fields = {
+                    item.target.id
+                    for item in node.body
+                    if isinstance(item, ast.AnnAssign)
+                    and isinstance(item.target, ast.Name)
+                }
+                if cls._REQUIRED <= fields:
+                    found.append((package, node.name))
+        return found
+
+    def test_discovery_finds_the_known_tools(self) -> None:
+        """The scan itself must work, or the tests below pass vacuously."""
+        packages = {pkg for pkg, _ in self._discover()}
+        assert {
+            "superforcaster",
+            "factual_research",
+        } <= packages, f"AST discovery broke -- found only: {sorted(packages)}"
+
+    def test_every_prediction_schema_is_named_prediction_result(self) -> None:
+        """Replay resolves the schema by name; any other name silently
+        downgrades that tool to plain calls -- prose out, 0% parse, and a
+        run that still reports success.
+        """
+        misnamed = [
+            (pkg, name)
+            for pkg, name in self._discover()
+            if name != STRUCTURED_OUTPUT_SCHEMA_ATTR
+        ]
+        assert not misnamed, (
+            f"prediction-shaped schemas replay cannot see: {misnamed}. "
+            f"Rename the class to {STRUCTURED_OUTPUT_SCHEMA_ATTR!r}."
         )
-        data = json.loads(packages_json.read_text(encoding="utf-8"))
-        shipped = set()
-        for section in ("dev", "third_party"):
-            for key in data.get(section) or {}:
-                match = re.match(r"^custom/[^/]+/([^/]+)/", key)
-                if match and match.group(1).startswith("superforcaster"):
-                    shipped.add(match.group(1))
+
+    def test_every_prediction_tool_is_registered(self) -> None:
+        """A shipped prediction tool absent from ``TOOL_REGISTRY`` cannot be
+        replayed, so no fix for it can ever be validated -- while triage
+        still assesses it and opens fix issues.
+        """
         registered = {spec.module.rsplit(".", 1)[-1] for spec in TOOL_REGISTRY.values()}
-        unregistered = sorted(shipped - registered)
+        unregistered = sorted({pkg for pkg, _ in self._discover()} - registered)
         assert not unregistered, (
-            "shipped superforcaster packages with no TOOL_REGISTRY entry — "
-            f"the benchmark cannot replay them: {unregistered}"
+            "prediction tools shipped but not in TOOL_REGISTRY — the "
+            f"benchmark cannot replay them: {unregistered}"
         )

@@ -70,6 +70,14 @@ Required env vars:
     MECH_ANALYTICS_URL             (lake-side endpoint)
     MECH_MARKETPLACE_GNOSIS_URL    (has default in fetch_production)
     MECH_MARKETPLACE_POLYGON_URL   (has default in fetch_production)
+
+Optional env vars:
+    PREDICT_API_POSTGRES_URL       (predict-api DSN). When set, the
+                                   coverage check excludes rows in
+                                   ``mech_migration_failures`` from the
+                                   missing-from-lake set before computing
+                                   the verdict. Falls back to the
+                                   ``--predict-api-url`` CLI flag.
 """
 
 from __future__ import annotations
@@ -111,6 +119,19 @@ MINIMUM_MARKETPLACE_ROWS = 10
 
 # Comparing floats coming from independent code paths — allow small drift.
 FLOAT_TOL = 1e-6
+
+# Mapping from chain_id (as stored in predict-api's ``mech_migration_failures``
+# table) to the platform label the coverage check keys on. Predict-api's
+# indexer records the origin chain per failed row, so a single chain-agnostic
+# query returns everything and this map partitions the result into the same
+# per-platform buckets the marketplace side uses. Extending to a new chain
+# means adding a row here AND a new ``(platform, marketplace_url)`` entry in
+# the marketplace pull — otherwise the excluded set would silently drop
+# failures for the new chain.
+_CHAIN_ID_TO_PLATFORM: dict[int, str] = {
+    100: "omen",  # Gnosis Chain
+    137: "polymarket",  # Polygon
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +342,80 @@ def _pull_lake_request_ids_unfiltered(since: datetime, until: datetime) -> set[s
         for row in iter_scored_rows(since=since, until=until, resolved=None)
         if row.get("request_id")
     }
+
+
+def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
+    """Fetch the set of request_ids predict-api can never ingest, per platform.
+
+    Predict-api's IPFS ingestor writes a row to ``mech_migration_failures``
+    every time it decodes an on-chain Deliver payload and the parsed
+    ``request`` or ``delivery`` field comes back null (or the payload type
+    is unhandled). These rows are structurally unrecoverable — the IPFS
+    payload itself is unparseable, not a transient network issue — so
+    mech-analytics's lake correctly never sees them. Without excluding
+    this set, the coverage check reports the entire known-loss population
+    as "missing from lake" and fails exit 4 for a condition the pipeline
+    can never resolve.
+
+    The query is chain-agnostic; the result is partitioned by
+    ``_CHAIN_ID_TO_PLATFORM`` so the caller can subtract per-platform.
+    Rows on chains not in the map are dropped (with a count logged) —
+    a new chain should be added to the map so its failures are excluded
+    on the correct platform bucket.
+
+    No time window filter: whether a request_id is in the failures table
+    is a permanent property of the payload, not a function of when
+    predict-api attempted the fetch. Table size is bounded (~1.16M rows
+    in prod as of 2026-08) and the whole thing loads in a few seconds.
+
+    :param predict_api_url: postgres DSN for the predict-api database.
+        Read-only access to ``mech_migration_failures`` is sufficient.
+    :return: dict mapping platform name to the set of request_ids
+        marked as known-loss on that platform's chain.
+    :raises RuntimeError: if psycopg is not installed. The caller must
+        catch or let it bubble; running without the exclusion is the
+        opt-in default (skip when the CLI flag is unset).
+    """
+    try:
+        # pylint: disable=import-outside-toplevel
+        import psycopg  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - env-specific
+        raise RuntimeError(
+            "psycopg is required to query mech_migration_failures. "
+            "Install with ``uv sync`` (psycopg is a runtime dep of the "
+            "mech-predict image) or omit --predict-api-url to skip the "
+            "known-loss adjustment."
+        ) from exc
+
+    log.info("pulling known-loss failures from predict-api")
+    by_platform: dict[str, set[str]] = {
+        p: set() for p in _CHAIN_ID_TO_PLATFORM.values()
+    }
+    unknown_chain_counts: dict[int, int] = {}
+    with psycopg.connect(predict_api_url, connect_timeout=30) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT chain_id, request_id FROM mech_migration_failures "
+                "WHERE request_id IS NOT NULL"
+            )
+            for chain_id, request_id in cur:
+                platform = _CHAIN_ID_TO_PLATFORM.get(chain_id)
+                if platform is None:
+                    unknown_chain_counts[chain_id] = (
+                        unknown_chain_counts.get(chain_id, 0) + 1
+                    )
+                    continue
+                by_platform[platform].add(request_id)
+    if unknown_chain_counts:
+        log.warning(
+            "known-loss pull: dropped %d row(s) on unmapped chain(s) %s "
+            "(add to _CHAIN_ID_TO_PLATFORM if these should be excluded)",
+            sum(unknown_chain_counts.values()),
+            sorted(unknown_chain_counts.items()),
+        )
+    for platform, ids in by_platform.items():
+        log.info("known-loss failures: platform=%s count=%d", platform, len(ids))
+    return by_platform
 
 
 # --------------------------------------------------------------------------- #
@@ -702,6 +797,16 @@ class _CoverageResult:
     JSON artifact needs to persist, so ``main`` doesn't juggle five
     parallel dicts and the caller can't accidentally rely on stale
     fields.
+
+    Adjusted-vs-raw distinction: when the caller supplies a known-loss
+    set, ``missing_by_platform`` / ``total_missing`` and
+    ``marketplace_counts`` / ``total_marketplace`` are the *adjusted*
+    values (raw minus known-loss). The raw values are also kept in
+    ``raw_missing_by_platform`` / ``raw_marketplace_counts`` and the
+    excluded count in ``excluded_by_platform`` / ``total_excluded`` so
+    the artifact and human report can show both. The verdict and the
+    per-platform floor operate on the adjusted values so a chain-wide
+    known-loss population can never fail the gate.
     """
 
     total_missing: int
@@ -710,6 +815,11 @@ class _CoverageResult:
     dropped_by_platform: dict[str, int]
     marketplace_counts: dict[str, int]
     total_marketplace: int
+    raw_missing_by_platform: dict[str, list[str]]
+    raw_marketplace_counts: dict[str, int]
+    excluded_by_platform: dict[str, int]
+    total_excluded: int
+    known_loss_applied: bool
 
 
 def _report_coverage_check(
@@ -717,6 +827,7 @@ def _report_coverage_check(
     dropped_by_platform: dict[str, int],
     lake_ids: set[str],
     min_marketplace_rows: int,
+    known_loss_by_platform: dict[str, set[str]] | None = None,
 ) -> _CoverageResult:
     """Coverage check: prove every delivered request is in the lake.
 
@@ -756,36 +867,96 @@ def _report_coverage_check(
         under-populated platform is called out in the report body even
         though the verdict itself is decided in the caller. Keeping the
         floor in one place (the failure-reason helper) is what
-        determines PASS/FAIL; this is a display hint only.
+        determines PASS/FAIL; this is a display hint only. The floor is
+        compared against the *adjusted* marketplace count so a
+        known-loss-dominated platform doesn't fail the vacuous-sweep
+        check for a population the pipeline can't ingest.
+    :param known_loss_by_platform: per-platform set of request_ids
+        predict-api marks as unparseable-upstream in
+        ``mech_migration_failures``. When supplied, these IDs are
+        removed from both the missing set and the marketplace
+        denominator before the verdict is decided; the report shows
+        both raw and adjusted numbers so a reviewer can see what got
+        excluded. ``None`` (the default) skips the adjustment and the
+        verdict is on the raw counts, matching the pre-flag behaviour.
     :return: :class:`_CoverageResult` with per-platform and aggregate stats.
     """
     _section("Coverage check (marketplace subgraph → mech-analytics lake)")
+    known_loss = known_loss_by_platform or {}
+    known_loss_applied = known_loss_by_platform is not None
+    raw_missing_by_platform: dict[str, list[str]] = {}
     missing_by_platform: dict[str, list[str]] = {}
+    raw_marketplace_counts: dict[str, int] = {}
     marketplace_counts: dict[str, int] = {}
+    excluded_by_platform: dict[str, int] = {}
     total_missing = 0
     total_marketplace = 0
+    total_excluded = 0
+    total_raw_missing = 0
+    total_raw_marketplace = 0
     for platform, marketplace_ids in marketplace_ids_by_platform.items():
-        missing = sorted(marketplace_ids - lake_ids)
-        missing_by_platform[platform] = missing
-        marketplace_counts[platform] = len(marketplace_ids)
-        total_missing += len(missing)
-        total_marketplace += len(marketplace_ids)
+        raw_missing_set = marketplace_ids - lake_ids
+        excluded_set = raw_missing_set & known_loss.get(platform, set())
+        adjusted_missing_set = raw_missing_set - excluded_set
+        adjusted_marketplace_count = len(marketplace_ids) - len(excluded_set)
+        raw_missing_by_platform[platform] = sorted(raw_missing_set)
+        missing_by_platform[platform] = sorted(adjusted_missing_set)
+        raw_marketplace_counts[platform] = len(marketplace_ids)
+        marketplace_counts[platform] = adjusted_marketplace_count
+        excluded_by_platform[platform] = len(excluded_set)
+        total_missing += len(adjusted_missing_set)
+        total_marketplace += adjusted_marketplace_count
+        total_excluded += len(excluded_set)
+        total_raw_missing += len(raw_missing_set)
+        total_raw_marketplace += len(marketplace_ids)
         dropped = dropped_by_platform.get(platform, 0)
-        vacuous = len(marketplace_ids) < min_marketplace_rows
-        marker = "✓" if not missing and dropped == 0 and not vacuous else "✗"
-        vacuous_note = f" (below floor {min_marketplace_rows})" if vacuous else ""
-        print(
-            f"  {platform}: marketplace={len(marketplace_ids):>7}"
-            f"{vacuous_note}  "
-            f"missing_from_lake={len(missing):>5}  "
-            f"dropped_no_request_id={dropped:>4}  {marker}"
+        vacuous = adjusted_marketplace_count < min_marketplace_rows
+        marker = (
+            "✓" if not adjusted_missing_set and dropped == 0 and not vacuous else "✗"
         )
+        vacuous_note = f" (below floor {min_marketplace_rows})" if vacuous else ""
+        if known_loss_applied and len(excluded_set) > 0:
+            print(
+                f"  {platform}: marketplace_raw={len(marketplace_ids):>7} "
+                f"excluded_known_loss={len(excluded_set):>7}  "
+                f"marketplace_adjusted={adjusted_marketplace_count:>7}"
+                f"{vacuous_note}  "
+                f"missing_from_lake={len(adjusted_missing_set):>5} "
+                f"(raw {len(raw_missing_set):>5})  "
+                f"dropped_no_request_id={dropped:>4}  {marker}"
+            )
+        else:
+            print(
+                f"  {platform}: marketplace={len(marketplace_ids):>7}"
+                f"{vacuous_note}  "
+                f"missing_from_lake={len(adjusted_missing_set):>5}  "
+                f"dropped_no_request_id={dropped:>4}  {marker}"
+            )
     total_dropped = sum(dropped_by_platform.values())
     print(f"  lake (all chains, incl. off-chain): {len(lake_ids):>7}")
-    print(
-        f"  total missing from lake:            {total_missing:>7}  "
-        f"{'✓' if total_missing == 0 else '✗'}"
-    )
+    if known_loss_applied:
+        print(
+            f"  excluded as unparseable upstream:   {total_excluded:>7}  "
+            f"(known-loss from predict-api mech_migration_failures)"
+        )
+        print(
+            f"  adjusted total marketplace:         {total_marketplace:>7}  "
+            f"(raw {total_raw_marketplace} - excluded {total_excluded})"
+        )
+        print(
+            f"  adjusted total missing from lake:   {total_missing:>7}  "
+            f"(raw {total_raw_missing} - excluded {total_excluded})  "
+            f"{'✓' if total_missing == 0 else '✗'}"
+        )
+    else:
+        print(
+            f"  total missing from lake:            {total_missing:>7}  "
+            f"{'✓' if total_missing == 0 else '✗'}"
+        )
+        print(
+            "  (raw coverage — --predict-api-url not set, so the verdict is "
+            "NOT adjusted for known-loss upstream. See --help.)"
+        )
     print(
         f"  total dropped_no_request_id:        {total_dropped:>7}  "
         f"{'✓' if total_dropped == 0 else '✗'}"
@@ -793,9 +964,19 @@ def _report_coverage_check(
     if total_missing:
         print()
         print("  These delivered request_ids are not in the mech-analytics lake.")
-        print("  Check ``mech_migration_failures`` on the predict-api DB for each")
-        print("  ID to see if it's a known-loss backfill failure")
-        print("  (parsed_request_null, unhandled_type_prompt, etc.).")
+        if known_loss_applied:
+            print(
+                "  Known-loss IDs (parsed_request_null, parsed_delivery_null, "
+                "unhandled_type_prompt) have already been excluded. The IDs below "
+                "are unexplained; investigate the lake ingest path."
+            )
+        else:
+            print("  Check ``mech_migration_failures`` on the predict-api DB for each")
+            print(
+                "  ID to see if it's a known-loss backfill failure "
+                "(parsed_request_null, unhandled_type_prompt, etc.). Re-run with "
+                "--predict-api-url to exclude those automatically."
+            )
         print()
         for platform, missing in missing_by_platform.items():
             if not missing:
@@ -820,6 +1001,11 @@ def _report_coverage_check(
         dropped_by_platform=dropped_by_platform,
         marketplace_counts=marketplace_counts,
         total_marketplace=total_marketplace,
+        raw_missing_by_platform=raw_missing_by_platform,
+        raw_marketplace_counts=raw_marketplace_counts,
+        excluded_by_platform=excluded_by_platform,
+        total_excluded=total_excluded,
+        known_loss_applied=known_loss_applied,
     )
 
 
@@ -985,6 +1171,23 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Intended for K8s Job runs that publish reports to a PVC."
         ),
     )
+    p.add_argument(
+        "--predict-api-url",
+        type=str,
+        default=None,
+        help=(
+            "postgres DSN for predict-api. When set, the coverage check "
+            "queries ``mech_migration_failures`` and excludes rows the "
+            "IPFS ingestor marks as unparseable-upstream "
+            "(parsed_request_null / parsed_delivery_null / "
+            "unhandled_type_prompt) from the missing-from-lake set BEFORE "
+            "the verdict is computed. Without this flag the verdict is "
+            "raw coverage — every known-loss row inflates the 'missing' "
+            "count and can fail exit 4 for a population the pipeline is "
+            "structurally unable to ingest. Falls back to the "
+            "``PREDICT_API_POSTGRES_URL`` env var."
+        ),
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -1100,11 +1303,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             _pull_marketplace_request_ids(since_ts, until_ts)
         )
         lake_ids_unfiltered = _pull_lake_request_ids_unfiltered(since, until)
+        # Optional known-loss adjustment: pull the set of request_ids
+        # predict-api's IPFS ingestor has permanently rejected and
+        # subtract them from the missing set before the verdict is
+        # computed. Off by default so the script still runs standalone
+        # without a predict-api DB URL; the caller opts in via the CLI
+        # flag or the ``PREDICT_API_POSTGRES_URL`` env var.
+        predict_api_url = args.predict_api_url or os.environ.get(
+            "PREDICT_API_POSTGRES_URL"
+        )
+        known_loss_by_platform: dict[str, set[str]] | None = None
+        if predict_api_url:
+            known_loss_by_platform = _pull_known_loss_failures(predict_api_url)
+        else:
+            log.warning(
+                "known-loss adjustment SKIPPED — --predict-api-url not set. "
+                "Coverage verdict will be RAW; a known-loss population "
+                "(parsed_request_null etc.) will be counted as missing."
+            )
         coverage = _report_coverage_check(
             marketplace_ids_by_platform,
             dropped_by_platform,
             lake_ids_unfiltered,
             args.min_marketplace_rows,
+            known_loss_by_platform=known_loss_by_platform,
         )
         coverage_summary = {
             "marketplace_ids_by_platform_count": coverage.marketplace_counts,
@@ -1114,6 +1336,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "total_missing": coverage.total_missing,
             "dropped_no_request_id_by_platform": coverage.dropped_by_platform,
             "total_dropped_no_request_id": coverage.total_dropped_no_rid,
+            "known_loss_applied": coverage.known_loss_applied,
+            "excluded_known_loss_by_platform": coverage.excluded_by_platform,
+            "total_excluded_known_loss": coverage.total_excluded,
+            "raw_marketplace_by_platform_count": coverage.raw_marketplace_counts,
+            "raw_missing_from_lake_by_platform_count": {
+                p: len(v) for p, v in coverage.raw_missing_by_platform.items()
+            },
         }
 
         # Gate on the coverage side BEFORE hitting parity: a coverage
@@ -1273,6 +1502,12 @@ def _coverage_failure_reason(
     3. ``total_missing > 0`` — a genuine coverage gap.
 
     :param coverage: the result of :func:`_report_coverage_check`.
+        Every count read here (``marketplace_counts``,
+        ``total_missing``) is the *adjusted* value when
+        ``--predict-api-url`` is set — known-loss IDs have already been
+        removed from both the missing set and the marketplace
+        denominator, so the vacuous floor and the missing-from-lake gate
+        both operate on what's ingestible, not on the raw counts.
     :param min_marketplace_rows: floor from ``--min-marketplace-rows``,
         enforced per platform (not on the aggregate). Effective floor
         is ``max(1, min_marketplace_rows)`` — see item 1.

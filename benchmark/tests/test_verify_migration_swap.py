@@ -581,3 +581,395 @@ class TestArtifact:
         data = json.loads(artifacts[0].read_text())
         assert data["verdict"] == "ERROR"
         assert data["exit_code"] != 0
+
+
+class TestKnownLossAdjustment:
+    """Coverage-gate contract with the known-loss adjustment on.
+
+    Predict-api marks structurally unrecoverable IPFS payloads in
+    ``mech_migration_failures`` (parsed_request_null,
+    parsed_delivery_null, unhandled_type_prompt). When the operator
+    passes ``--predict-api-url`` / ``PREDICT_API_POSTGRES_URL`` the
+    coverage check must subtract that set from the missing side AND
+    from the marketplace denominator BEFORE the verdict fires,
+    otherwise the check reports a coverage gap for a population the
+    pipeline cannot ingest. Every test here mutates one thing about
+    the production logic and confirms the assertion flips.
+    """
+
+    def test_known_loss_subtraction_flips_missing_to_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raw missing-from-lake set fully covered by known-loss must PASS.
+
+        Without the subtraction the coverage-gap branch fires (exit 4).
+        With the subtraction the adjusted missing set is empty and the
+        gate reaches the parity path (which passes for identical rows).
+        Mutating ``adjusted_missing_set = raw_missing_set - excluded_set``
+        back to ``adjusted_missing_set = raw_missing_set`` must fail
+        this test.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        # Marketplace has 10 IDs the lake also has plus 3 IDs the lake
+        # doesn't have. Predict-api marks all 3 of those as known-loss,
+        # so the adjusted missing set is empty.
+        marketplace = {
+            "omen": {r["request_id"] for r in rows}
+            | {"unparseable-a", "unparseable-b", "unparseable-c"},
+            "polymarket": {f"poly{i}" for i in range(5)},
+        }
+        lake_ids = {r["request_id"] for r in lake} | {f"poly{i}" for i in range(5)}
+        known_loss = {
+            "omen": {"unparseable-a", "unparseable-b", "unparseable-c"},
+            "polymarket": set(),
+        }
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", lambda _url: known_loss)
+        argv = _base_argv() + ["--predict-api-url", "postgresql://ignored"]
+        assert vms.main(argv) == 0
+
+    def test_raw_missing_from_lake_without_flag_still_fails_four(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without --predict-api-url the raw missing set still fails exit 4.
+
+        Guard against the case where the subtraction accidentally
+        applies unconditionally (e.g. a bug that treats ``None`` as
+        an empty dict at the wrong layer). If ``known_loss_by_platform``
+        is ``None`` the coverage gate must behave exactly as before
+        the flag existed.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        marketplace = {
+            "omen": {r["request_id"] for r in rows} | {"unparseable-a"},
+            "polymarket": {f"poly{i}" for i in range(5)},
+        }
+        lake_ids = {r["request_id"] for r in lake} | {f"poly{i}" for i in range(5)}
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        # NB: no --predict-api-url in argv; _pull_known_loss_failures
+        # must not be called. Assert that by monkeypatching to a raiser.
+        monkeypatch.setattr(
+            vms,
+            "_pull_known_loss_failures",
+            lambda _url: (_ for _ in ()).throw(
+                AssertionError("must not query known-loss without --predict-api-url")
+            ),
+        )
+        assert vms.main(_base_argv()) == 4
+
+    def test_known_loss_partial_leaves_residual_missing_and_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If only some of the missing IDs are known-loss, the rest fail exit 4.
+
+        Guards against a bug where the subtraction accidentally clears
+        the full missing set instead of the intersection with
+        known-loss.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        marketplace = {
+            "omen": {r["request_id"] for r in rows} | {"unparseable-a", "genuine-gap"},
+            "polymarket": {f"poly{i}" for i in range(5)},
+        }
+        lake_ids = {r["request_id"] for r in lake} | {f"poly{i}" for i in range(5)}
+        known_loss = {"omen": {"unparseable-a"}, "polymarket": set()}
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", lambda _url: known_loss)
+        argv = _base_argv() + ["--predict-api-url", "postgresql://ignored"]
+        assert vms.main(argv) == 4
+
+    def test_env_var_fallback_activates_known_loss(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """PREDICT_API_POSTGRES_URL alone is enough to activate the flag.
+
+        Infra sets the DSN as a K8s secret env, not as a CLI flag —
+        so the env-var fallback path must also enable the known-loss
+        pull. Mutating ``args.predict_api_url or os.environ.get(...)``
+        to only read ``args.predict_api_url`` must fail this test.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        marketplace = {
+            "omen": {r["request_id"] for r in rows} | {"unparseable-a"},
+            "polymarket": {f"poly{i}" for i in range(5)},
+        }
+        lake_ids = {r["request_id"] for r in lake} | {f"poly{i}" for i in range(5)}
+        known_loss = {"omen": {"unparseable-a"}, "polymarket": set()}
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        called: dict[str, str] = {}
+
+        def _fake_known_loss(url: str) -> dict[str, set[str]]:
+            called["url"] = url
+            return known_loss
+
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", _fake_known_loss)
+        monkeypatch.setenv("PREDICT_API_POSTGRES_URL", "postgresql://from-env")
+
+        assert vms.main(_base_argv()) == 0
+        assert called == {"url": "postgresql://from-env"}
+
+    def test_min_marketplace_rows_applies_to_adjusted_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The vacuous-sweep floor compares against the adjusted count.
+
+        A platform whose marketplace side is dominated by known-loss
+        can legitimately drop below the raw floor while its ingestible
+        population is above the floor. The verdict must accept that.
+        Bug case: if the floor compared against
+        ``raw_marketplace_counts`` a healthy pipeline would fail
+        exit 4 on a platform where 95% of raw activity is unparseable.
+
+        This test wires up a platform with 15 raw marketplace IDs, 10
+        of which are known-loss. Raw count 15 >= floor 12 (would pass
+        raw); adjusted count 5 < floor 12 (fails adjusted). If a
+        future edit checks raw counts here, the test flips to PASS.
+        """
+        # Small rows list under --min-rows just to isolate the coverage
+        # verdict from the parity gate — parity would trip on 10 rows
+        # regardless, but coverage runs first.
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        # 15 raw omen IDs, 10 of which are known-loss → adjusted count 5
+        raw_omen = {r["request_id"] for r in rows} | {
+            f"unparseable-{i}" for i in range(5)
+        }
+        marketplace = {
+            "omen": raw_omen,
+            "polymarket": {f"poly{i}" for i in range(20)},
+        }
+        # Lake has everything ingestible (the 10 real omen IDs plus
+        # polymarket) so ``missing_from_lake`` is only the known-loss
+        # set, which the subtraction handles.
+        lake_ids = {r["request_id"] for r in rows} | {f"poly{i}" for i in range(20)}
+        known_loss = {
+            "omen": {f"unparseable-{i}" for i in range(5)},
+            "polymarket": set(),
+        }
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", lambda _url: known_loss)
+        argv = [
+            "--since",
+            (datetime.now(timezone.utc) - timedelta(days=2))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--until",
+            (datetime.now(timezone.utc) - timedelta(days=1))
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "--min-rows",
+            "5",
+            "--min-marketplace-rows",
+            "12",
+            "--predict-api-url",
+            "postgresql://ignored",
+        ]
+        # Raw omen = 15 (above 12) but adjusted omen = 10 - 5 = 10 (below 12).
+        # Wait: adjusted count = 15 raw - 5 excluded = 10, still under 12.
+        # So this fails the vacuous floor on the adjusted count.
+        assert vms.main(argv) == 4
+
+    def test_report_shape_contains_raw_and_adjusted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The JSON artifact records both raw and adjusted counts.
+
+        A reviewer looking at a passed artifact still needs to see
+        how much was excluded and what the raw picture looked like —
+        otherwise the adjustment is invisible after the fact. The
+        exact key names below are what infra's report indexer keys
+        on; the ``coverage`` sub-object must carry every field.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        marketplace = {
+            "omen": {r["request_id"] for r in rows}
+            | {"unparseable-a", "unparseable-b"},
+            "polymarket": {f"poly{i}" for i in range(5)},
+        }
+        lake_ids = {r["request_id"] for r in lake} | {f"poly{i}" for i in range(5)}
+        known_loss = {
+            "omen": {"unparseable-a", "unparseable-b"},
+            "polymarket": set(),
+        }
+        _patch_pulls(
+            monkeypatch,
+            rows,
+            lake,
+            marketplace_ids_by_platform=marketplace,
+            lake_ids_unfiltered=lake_ids,
+        )
+        monkeypatch.setattr(vms, "_pull_known_loss_failures", lambda _url: known_loss)
+        argv = _base_argv() + [
+            "--output-dir",
+            str(tmp_path),
+            "--predict-api-url",
+            "postgresql://ignored",
+        ]
+
+        assert vms.main(argv) == 0
+
+        artifacts = sorted(tmp_path.glob("*.json"))
+        assert len(artifacts) == 1
+        data = json.loads(artifacts[0].read_text())
+        coverage = data["coverage"]
+        assert coverage["known_loss_applied"] is True
+        assert coverage["total_missing"] == 0
+        assert coverage["total_excluded_known_loss"] == 2
+        assert coverage["excluded_known_loss_by_platform"] == {
+            "omen": 2,
+            "polymarket": 0,
+        }
+        assert coverage["raw_marketplace_by_platform_count"] == {
+            "omen": len(marketplace["omen"]),
+            "polymarket": len(marketplace["polymarket"]),
+        }
+        assert coverage["raw_missing_from_lake_by_platform_count"] == {
+            "omen": 2,
+            "polymarket": 0,
+        }
+        # Adjusted counts also present — sanity check the arithmetic.
+        assert coverage["marketplace_ids_by_platform_count"] == {
+            "omen": len(marketplace["omen"]) - 2,
+            "polymarket": len(marketplace["polymarket"]),
+        }
+
+    def test_report_shape_when_flag_missing_flags_raw_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Without the flag the artifact records ``known_loss_applied: False``.
+
+        Downstream consumers need a machine-readable signal that this
+        run's verdict is on RAW coverage, not adjusted — otherwise a
+        historical dashboard mixes the two silently.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        _patch_pulls(monkeypatch, rows, lake)
+        argv = _base_argv() + ["--output-dir", str(tmp_path)]
+
+        assert vms.main(argv) == 0
+
+        artifacts = sorted(tmp_path.glob("*.json"))
+        data = json.loads(artifacts[0].read_text())
+        coverage = data["coverage"]
+        assert coverage["known_loss_applied"] is False
+        assert coverage["total_excluded_known_loss"] == 0
+        # Every platform is present in the excluded map with a zero count
+        # regardless of the flag (the map keys track what was iterated,
+        # not what was excluded). The flag/verdict signal is
+        # ``known_loss_applied`` — that's what downstream indexers key on.
+        assert coverage["excluded_known_loss_by_platform"] == {"omen": 0}
+
+
+class TestReportCoverageCheckDirect:
+    """Direct tests for :func:`_report_coverage_check`'s subtraction logic.
+
+    ``main()``-level tests are integration-style. These pin the small
+    unit that computes the subtraction so a future refactor that
+    changes the flow through ``main()`` doesn't hide an arithmetic
+    regression here.
+    """
+
+    def test_excluded_set_is_intersection_of_raw_missing_and_known_loss(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Excluded = raw_missing ∩ known_loss, not just known_loss.
+
+        A known-loss ID that IS in the lake (e.g. a stale entry the
+        indexer already retried and succeeded on) must not be counted
+        as excluded — that would inflate the excluded number without
+        actually shrinking the missing set. Mutating
+        ``excluded_set = raw_missing_set & known_loss`` back to
+        ``excluded_set = known_loss`` must fail this assertion.
+        """
+        marketplace = {"omen": {"a", "b", "c", "d"}}
+        # Lake has "a" (present) and "d" (present). Missing = {b, c}.
+        lake_ids = {"a", "d"}
+        # Known-loss claims "c" (in missing → real exclude) and
+        # "a" (in lake → must NOT count as excluded).
+        known_loss = {"omen": {"a", "c"}}
+        result = vms._report_coverage_check(
+            marketplace, {"omen": 0}, lake_ids, 1, known_loss_by_platform=known_loss
+        )
+        capsys.readouterr()  # discard printed output
+        assert result.excluded_by_platform == {"omen": 1}
+        assert result.total_excluded == 1
+        assert result.missing_by_platform == {"omen": ["b"]}
+        assert result.total_missing == 1
+        assert result.marketplace_counts == {"omen": 3}
+
+    def test_known_loss_none_yields_zero_exclusions_and_raw_verdict(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """``known_loss_by_platform=None`` skips the adjustment entirely.
+
+        ``known_loss_applied`` must be False and no exclusions should
+        be recorded. The raw counts should equal the adjusted counts.
+        """
+        marketplace = {"omen": {"a", "b"}}
+        lake_ids = {"a"}
+        result = vms._report_coverage_check(marketplace, {"omen": 0}, lake_ids, 1)
+        capsys.readouterr()
+        assert result.known_loss_applied is False
+        assert result.total_excluded == 0
+        assert result.excluded_by_platform == {"omen": 0}
+        assert result.missing_by_platform == {"omen": ["b"]}
+        assert result.raw_missing_by_platform == {"omen": ["b"]}
+        assert result.marketplace_counts == {"omen": 2}
+        assert result.raw_marketplace_counts == {"omen": 2}
+
+    def test_empty_known_loss_dict_still_marks_applied(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Passing ``{}`` is different from ``None`` — flag is on, zero excludes.
+
+        An operator whose predict-api instance has an empty
+        ``mech_migration_failures`` table (a happy but rare state)
+        must still see ``known_loss_applied=True`` — otherwise the
+        artifact conflates "we asked and got nothing" with "we didn't
+        ask".
+        """
+        marketplace = {"omen": {"a", "b"}}
+        lake_ids = {"a", "b"}
+        result = vms._report_coverage_check(
+            marketplace, {"omen": 0}, lake_ids, 1, known_loss_by_platform={}
+        )
+        capsys.readouterr()
+        assert result.known_loss_applied is True
+        assert result.total_excluded == 0
+        assert result.missing_by_platform == {"omen": []}

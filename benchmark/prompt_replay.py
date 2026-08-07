@@ -1363,36 +1363,41 @@ def _call_openai_structured(
         client.close()
 
 
-# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
-# Map: tool_name → (tool_module_import_path, schema_class_name).
-_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
-    "superforcaster": (
-        "packages.valory.customs.superforcaster.superforcaster",
-        "PredictionResult",
-    ),
-    "superforcaster-polymarket-v4": (
-        "packages.valory.customs.superforcaster_polymarket_v4."
-        "superforcaster_polymarket_v4",
-        "PredictionResult",
-    ),
-    "factual_research": (
-        "packages.valory.customs.factual_research.factual_research",
-        "PredictionResult",
-    ),
-}
+# Name of the Pydantic schema every structured-output tool exposes. Tools that
+# call ``client.beta.chat.completions.parse`` in their own ``run()`` define it;
+# tools that put format directives in the prompt do not.
+STRUCTURED_OUTPUT_SCHEMA_ATTR = "PredictionResult"
 
 
 def _get_structured_output_schema(tool_name: str) -> Optional[type]:
-    """Return the Pydantic schema class for a structured-output tool, or None."""
-    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
-    if entry is None:
+    """Return the Pydantic schema class for a structured-output tool, or None.
+
+    Read off the tool's own module rather than a hand-maintained name->schema
+    map. That map carried no information: every entry repeated the module path
+    already in ``TOOL_REGISTRY`` and named the same class. What it did carry
+    was an obligation to remember, and the record on that was 0 for 6 --
+    ``factual_research-v1``/``-v2``/``-v3`` were never added and were being
+    replayed unstructured, and ``superforcaster-polymarket-v4`` was missing for
+    22 days. The symptom is silent: replay falls back to a plain call, the
+    model answers in prose, and every row scores as malformed while the run
+    still reports success.
+
+    A tool defines this attribute exactly when its ``run()`` uses structured
+    outputs, so asking the module keeps replay faithful to production by
+    construction.
+
+    :param tool_name: registry key for the tool being replayed.
+    :return: the Pydantic schema class, or ``None`` when the tool is not a
+        structured-output tool (or is not registered).
+    """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
         return None
-    module_path, class_name = entry
     # pylint: disable=import-outside-toplevel
     from importlib import import_module
 
-    module = import_module(module_path)
-    return getattr(module, class_name)
+    module = import_module(spec.module)
+    return getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
 
 
 def _call_anthropic(

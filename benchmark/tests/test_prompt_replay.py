@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import random
@@ -16,6 +17,7 @@ import pytest
 from benchmark import prompt_replay as pr
 from benchmark.prompt_replay import (
     DEFAULT_REPLAY_SYSTEM_PROMPT,
+    STRUCTURED_OUTPUT_SCHEMA_ATTR,
     _assert_prompt_is_replayable,
     _baseline_family,
     _default_family_system_prompt,
@@ -2216,3 +2218,162 @@ class TestDropReasonDetail:
     def test_empty_when_files_were_absent(self) -> None:
         """An empty dict means the tournament files were absent."""
         assert _drop_reason_detail({}) == ""
+
+
+class TestStructuredOutputIsDerivedNotListed:
+    """Every structured-output tool gets structured outputs, with no list to update."""
+
+    def test_every_tool_defining_the_schema_resolves_it(self) -> None:
+        """A tool that defines ``PredictionResult`` must replay structurally.
+
+        The hand-maintained name->schema map this replaces was never once
+        updated at the time a tool was added: ``factual_research-v1``/``-v2``/
+        ``-v3`` were replayed unstructured for two months, and
+        ``superforcaster-polymarket-v4`` for 22 days. The failure is silent --
+        replay falls back to a plain call, the model answers in prose, and
+        every row scores malformed while the run still reports success.
+
+        Deriving it removes the obligation; this test pins that nothing
+        reintroduces a lookup that can fall behind the tools.
+        """
+        missed, checked = [], []
+        for name, spec in TOOL_REGISTRY.items():
+            try:
+                module = importlib.import_module(spec.module)
+            except ImportError:  # optional third-party deps in CI
+                continue
+            if not hasattr(module, "PredictionResult"):
+                continue
+            checked.append(name)
+            schema = _get_structured_output_schema(name)
+            if schema is None or schema is not module.PredictionResult:
+                missed.append(name)
+        # Without this the whole test passes vacuously wherever the tool
+        # modules cannot be imported -- exactly the environment where a
+        # regression would go unnoticed.
+        assert set(checked) >= {
+            "superforcaster",
+            "superforcaster-polymarket-v4",
+            "factual_research",
+        }, f"examined too few tools to be meaningful: {sorted(checked)}"
+        assert not missed, (
+            f"tools define PredictionResult but replay would call them "
+            f"unstructured: {sorted(missed)}"
+        )
+
+    def test_plain_tools_resolve_to_none(self) -> None:
+        """A tool without the attribute must NOT be forced through the schema path.
+
+        ``superforcaster_full_search`` puts its format directives in the
+        prompt, so a schema here would change what production does.
+
+        Registration is asserted FIRST because ``None`` is also what an
+        unregistered name resolves to: without the membership check this test
+        cannot distinguish "registered, plain-prompt tool" from "not
+        registered at all", and deleting the tool's ToolSpec entry would pass
+        the whole suite. Prompt-directive tools define no prediction schema,
+        so the AST discovery class below structurally cannot pin their
+        registration -- this direct assertion is what does.
+        """
+        assert "superforcaster_full_search" in TOOL_REGISTRY
+        assert "superforcaster-polymarket-v1" in TOOL_REGISTRY
+        assert _get_structured_output_schema("superforcaster_full_search") is None
+        assert _get_structured_output_schema("superforcaster-polymarket-v1") is None
+
+    def test_unregistered_tool_resolves_to_none(self) -> None:
+        """An unknown name is not an error here -- replay raises on it earlier."""
+        assert _get_structured_output_schema("no-such-tool") is None
+
+
+class TestPredictionToolsSelfDiscovered:
+    """Every STRUCTURED prediction tool is found by scanning, not by a list.
+
+    The registry-driven sweep above can only examine tools someone already
+    registered -- the same blind spot as the deleted hand-maintained map, one
+    level up. Run against pre-PR main, this scan flags
+    ``superforcaster_calibrated_full_search`` (shipped, prediction-shaped,
+    unregistered) where a registry-driven check flags nothing. The file
+    system is the ground truth here; no allowlist, no family prefix, no
+    registry as input.
+
+    Honest scope: discovery keys on a prediction-shaped SCHEMA CLASS, which
+    only structured-output tools define. A prompt-directive tool (the
+    ``superforcaster_full_search`` shape) is invisible to it by construction;
+    its registration is pinned directly in
+    ``test_plain_tools_resolve_to_none`` instead.
+    """
+
+    #: The four fields ``_call_openai_structured`` reads off the parsed
+    #: response. A class carrying all four IS a prediction schema.
+    _REQUIRED = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
+
+    @classmethod
+    def _discover(cls) -> list[tuple[str, str]]:
+        """Scan every tool module in ``packages/`` for prediction schemas.
+
+        Pure AST parse -- no imports, so a tool with unhappy third-party
+        dependencies is still discovered (an import-based scan would skip
+        exactly the tools most likely to be misconfigured).
+
+        :return: ``(package name, schema class name)`` pairs.
+        """
+        found = []
+        packages = Path(__file__).resolve().parents[2] / "packages"
+        for path in sorted(packages.glob("*/customs/*/*.py")):
+            package = path.parent.name
+            if path.stem != package:  # only the tool's main module
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in tree.body:
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                fields = {
+                    item.target.id
+                    for item in node.body
+                    if isinstance(item, ast.AnnAssign)
+                    and isinstance(item.target, ast.Name)
+                }
+                if cls._REQUIRED <= fields:
+                    found.append((package, node.name))
+        return found
+
+    def test_discovery_finds_the_known_tools(self) -> None:
+        """The scan itself must work, or the tests below pass vacuously."""
+        packages = {pkg for pkg, _ in self._discover()}
+        assert {
+            "superforcaster",
+            "factual_research",
+        } <= packages, f"AST discovery broke -- found only: {sorted(packages)}"
+
+    def test_every_prediction_schema_is_named_prediction_result(self) -> None:
+        """Any name but the canonical one downgrades the tool to plain calls.
+
+        Replay resolves the schema by name; a mismatch means prose out,
+        0% parse, and a run that still reports success.
+        """
+        misnamed = [
+            (pkg, name)
+            for pkg, name in self._discover()
+            if name != STRUCTURED_OUTPUT_SCHEMA_ATTR
+        ]
+        assert not misnamed, (
+            f"prediction-shaped schemas replay cannot see: {misnamed}. "
+            f"Rename the class to {STRUCTURED_OUTPUT_SCHEMA_ATTR!r}."
+        )
+
+    def test_every_prediction_tool_is_registered(self) -> None:
+        """Every discovered prediction tool must be in ``TOOL_REGISTRY``.
+
+        A shipped tool absent from it cannot be replayed, so no fix for it
+        can ever be validated -- while triage still assesses it and opens
+        fix issues.
+        """
+        registered = {spec.module.rsplit(".", 1)[-1] for spec in TOOL_REGISTRY.values()}
+        unregistered = sorted({pkg for pkg, _ in self._discover()} - registered)
+        assert not unregistered, (
+            "prediction tools shipped but not in TOOL_REGISTRY — the "
+            f"benchmark cannot replay them: {unregistered}"
+        )

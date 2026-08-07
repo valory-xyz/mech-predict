@@ -155,7 +155,7 @@ _KNOWN_LOSS_REASONS: tuple[str, ...] = (
 
 # Per-query statement timeout for the predict-api pull. The table is
 # ~1.16M rows in prod, small in absolute terms, and the query has
-# ``WHERE request_id IS NOT NULL AND reason IN (...)`` on it — but a
+# ``WHERE request_id IS NOT NULL AND error IN (...)`` on it — but a
 # missing index, a replica lag spike, or a lock contention burst
 # turns the documented "few seconds" into an unbounded hang with
 # only K8s ``activeDeadlineSeconds`` to stop it. Bound it here so
@@ -436,10 +436,15 @@ def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
         options=connect_options,
     ) as conn:
         with conn.cursor() as cur:
+            # The DB column is named ``error`` (per predict-api's schema:
+            # ``id, chain_id, request_id, cid, error, attempted_at``). We
+            # refer to the values as "reasons" in Python — matching how
+            # predict-api's own logs and this repo's docstrings describe
+            # them — but the SQL column is ``error``.
             cur.execute(
                 "SELECT chain_id, request_id FROM mech_migration_failures "
                 "WHERE request_id IS NOT NULL "
-                "AND reason = ANY(%(reasons)s)",
+                "AND error = ANY(%(reasons)s)",
                 {"reasons": list(_KNOWN_LOSS_REASONS)},
             )
             for chain_id, request_id in cur:

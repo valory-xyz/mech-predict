@@ -27,6 +27,7 @@ the artifact contract.
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1071,3 +1072,24 @@ class TestReportCoverageCheckDirect:
         data = json.loads(artifacts[0].read_text())
         assert data["verdict"] == "ERROR"
         assert data["exit_code"] != 0
+
+    def test_known_loss_query_targets_the_error_column_not_reason(self) -> None:
+        """The predict-api ``mech_migration_failures`` schema is
+        ``(id, chain_id, request_id, cid, error, attempted_at)`` — the
+        reason category lives in the ``error`` column, not ``reason``.
+        The v0.21.17 prod run crashed with
+        ``psycopg.errors.UndefinedColumn: column "reason" does not exist``
+        because the query was mis-named against the docs. Pinning the
+        SQL text keeps this from recurring.
+        """
+        # pylint: disable-next=protected-access
+        source = inspect.getsource(vms._pull_known_loss_failures)
+        assert "FROM mech_migration_failures" in source
+        assert "AND error = ANY(" in source, (
+            "known-loss query must filter on the ``error`` column; the DB "
+            "schema does not have a ``reason`` column"
+        )
+        assert "AND reason = ANY(" not in source, (
+            "``reason`` is the wrong column name — see the v0.21.17 prod "
+            'crash (UndefinedColumn: column "reason" does not exist)'
+        )

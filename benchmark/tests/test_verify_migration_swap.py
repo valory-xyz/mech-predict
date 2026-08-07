@@ -608,6 +608,9 @@ class TestKnownLossAdjustment:
         Mutating ``adjusted_missing_set = raw_missing_set - excluded_set``
         back to ``adjusted_missing_set = raw_missing_set`` must fail
         this test.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and the known-loss pull on the module under test.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -645,6 +648,10 @@ class TestKnownLossAdjustment:
         an empty dict at the wrong layer). If ``known_loss_by_platform``
         is ``None`` the coverage gate must behave exactly as before
         the flag existed.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and to install a raising stub on the known-loss
+            pull.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -660,8 +667,8 @@ class TestKnownLossAdjustment:
             marketplace_ids_by_platform=marketplace,
             lake_ids_unfiltered=lake_ids,
         )
-        # NB: no --predict-api-url in argv; _pull_known_loss_failures
-        # must not be called. Assert that by monkeypatching to a raiser.
+        # Argv omits the predict-api URL, so the known-loss pull must
+        # not be called. Assert that by monkeypatching it to a raiser.
         monkeypatch.setattr(
             vms,
             "_pull_known_loss_failures",
@@ -679,6 +686,9 @@ class TestKnownLossAdjustment:
         Guards against a bug where the subtraction accidentally clears
         the full missing set instead of the intersection with
         known-loss.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and the known-loss pull on the module under test.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -708,6 +718,10 @@ class TestKnownLossAdjustment:
         so the env-var fallback path must also enable the known-loss
         pull. Mutating ``args.predict_api_url or os.environ.get(...)``
         to only read ``args.predict_api_url`` must fail this test.
+
+        :param monkeypatch: pytest fixture used to swap the pull
+            entries, install a recording known-loss stub, and set
+            the ``PREDICT_API_POSTGRES_URL`` env var.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -752,6 +766,9 @@ class TestKnownLossAdjustment:
         of which are known-loss. Raw count 15 >= floor 12 (would pass
         raw); adjusted count 5 < floor 12 (fails adjusted). If a
         future edit checks raw counts here, the test flips to PASS.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and the known-loss pull on the module under test.
         """
         # Small rows list under --min-rows just to isolate the coverage
         # verdict from the parity gate — parity would trip on 10 rows
@@ -813,6 +830,11 @@ class TestKnownLossAdjustment:
         otherwise the adjustment is invisible after the fact. The
         exact key names below are what infra's report indexer keys
         on; the ``coverage`` sub-object must carry every field.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries and the known-loss pull on the module under test.
+        :param tmp_path: pytest fixture giving a per-test writable dir
+            that receives the ``--output-dir`` artifact.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -876,6 +898,11 @@ class TestKnownLossAdjustment:
         Downstream consumers need a machine-readable signal that this
         run's verdict is on RAW coverage, not adjusted — otherwise a
         historical dashboard mixes the two silently.
+
+        :param monkeypatch: pytest fixture used to swap the four pull
+            entries on the module under test.
+        :param tmp_path: pytest fixture giving a per-test writable dir
+            that receives the ``--output-dir`` artifact.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -916,6 +943,9 @@ class TestReportCoverageCheckDirect:
         actually shrinking the missing set. Mutating
         ``excluded_set = raw_missing_set & known_loss`` back to
         ``excluded_set = known_loss`` must fail this assertion.
+
+        :param capsys: pytest fixture used to discard the coverage
+            summary print so the test output stays clean.
         """
         marketplace = {"omen": {"a", "b", "c", "d"}}
         # Lake has "a" (present) and "d" (present). Missing = {b, c}.
@@ -923,7 +953,7 @@ class TestReportCoverageCheckDirect:
         # Known-loss claims "c" (in missing → real exclude) and
         # "a" (in lake → must NOT count as excluded).
         known_loss = {"omen": {"a", "c"}}
-        result = vms._report_coverage_check(
+        result = vms._report_coverage_check(  # pylint: disable=protected-access
             marketplace, {"omen": 0}, lake_ids, 1, known_loss_by_platform=known_loss
         )
         capsys.readouterr()  # discard printed output
@@ -940,9 +970,13 @@ class TestReportCoverageCheckDirect:
 
         ``known_loss_applied`` must be False and no exclusions should
         be recorded. The raw counts should equal the adjusted counts.
+
+        :param capsys: pytest fixture used to discard the coverage
+            summary print so the test output stays clean.
         """
         marketplace = {"omen": {"a", "b"}}
         lake_ids = {"a"}
+        # pylint: disable-next=protected-access
         result = vms._report_coverage_check(marketplace, {"omen": 0}, lake_ids, 1)
         capsys.readouterr()
         assert result.known_loss_applied is False
@@ -963,10 +997,13 @@ class TestReportCoverageCheckDirect:
         must still see ``known_loss_applied=True`` — otherwise the
         artifact conflates "we asked and got nothing" with "we didn't
         ask".
+
+        :param capsys: pytest fixture used to discard the coverage
+            summary print so the test output stays clean.
         """
         marketplace = {"omen": {"a", "b"}}
         lake_ids = {"a", "b"}
-        result = vms._report_coverage_check(
+        result = vms._report_coverage_check(  # pylint: disable=protected-access
             marketplace, {"omen": 0}, lake_ids, 1, known_loss_by_platform={}
         )
         capsys.readouterr()

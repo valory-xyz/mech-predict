@@ -39,6 +39,12 @@ from benchmark.tools import TOOL_REGISTRY
 
 log = logging.getLogger(__name__)
 
+# Every line carries its level, INFO included. Without the prefix, roi_slack's
+# freshness / malformed-payload warnings rendered byte-identically to the INFO
+# chatter around them -- unfilterable and unnoticeable in the flywheel log.
+# Uniform prefixing keeps "grep '^WARNING'" honest; nothing parses these lines.
+_LEVEL_PREFIX_FORMAT = "%(levelname)s: %(message)s"
+
 _PROMPT_HEADER = f"""\
 Summarize this Olas Predict benchmark report for the *{{platform_label}}* deployment using EXACTLY this structure (output will be posted to Slack). The report carries three windows per metric: `Current {ROLLING_WINDOW_DAYS}d` (trailing {ROLLING_WINDOW_DAYS}-day aggregate), `{{main_window_label}}` (cumulative), and `Prev {ROLLING_WINDOW_DAYS}d` (the immediately preceding non-overlapping {ROLLING_WINDOW_DAYS}-day window). Never mix numbers across windows; if you cite a value, state which window it came from. Do NOT compare platforms, reference tools or deployments belonging to other platforms, or cite metrics from another platform's rows.
 
@@ -511,5 +517,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # The level prefix is load-bearing, not decoration -- see the constant.
+    logging.basicConfig(level=logging.INFO, format=_LEVEL_PREFIX_FORMAT)
     main()

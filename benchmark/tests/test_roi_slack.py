@@ -21,15 +21,20 @@
 import json
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from unittest.mock import MagicMock
 
 import pytest
-from benchmark import notify_slack
+from benchmark import notify_slack, roi_slack
 from benchmark.roi_slack import (
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
+    STALE_AFTER_DAYS,
+    _FLAGS_CAP,
     _HEADERS,
+    _load_results,
     _render_table,
     build_roi_section,
 )
@@ -111,20 +116,30 @@ def _write_results(
     tmp_path: Path,
     groups: list[dict[str, Any]],
     window_days: int = 90,
+    as_of: Optional[str] = None,
 ) -> Path:
     """Write a roi_results.json fixture and return its path.
 
     :param tmp_path: pytest tmp_path fixture.
     :param groups: group entries to embed in the payload.
     :param window_days: trailing window length in days.
+    :param as_of: results timestamp; defaults to today so the freshness guard
+        treats the fixture as current. Pass an old date to exercise staleness.
     :return: path of the written roi_results.json.
     """
+    if as_of is None:
+        as_of = datetime.now(timezone.utc).date().isoformat()
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "roi_results.json"
+    # window_end mirrors roi_sim: as_of's DATE at midnight. Slicing the date
+    # part keeps the fixture well-formed when a test passes a full ISO
+    # timestamp as as_of (roi_slack ignores window_end, but malformed fixture
+    # data misleads the next reader).
     payload = {
-        "as_of": "2026-07-06",
+        "as_of": as_of,
         "window_days": window_days,
         "window_start": "2026-04-08T00:00:00+00:00",
-        "window_end": "2026-07-07T00:00:00+00:00",
+        "window_end": f"{as_of[:10]}T00:00:00+00:00",
         "groups": groups,
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -731,20 +746,21 @@ class TestTruncation:
 
 
 class TestLineWidth:
-    """Lines stay within the backstop; numeric cells are never ellipsized."""
+    """The tool name + numeric cells are never truncated; flags may shrink."""
 
-    def test_long_names_and_flags_fit(self, tmp_path: Path) -> None:
-        """Very long tool names / flags are truncated, not overflowed.
+    def test_long_tool_name_renders_in_full(self, tmp_path: Path) -> None:
+        """A long tool name is never truncated (Slack scrolls horizontally).
 
-        Numeric columns (preds, bets, Brier, staked, ROI, w/costs) must
-        never carry the ellipsis marker, however extreme their values.
+        Numeric columns (preds, bets, Brier, staked, ROI, w/costs) never carry
+        the ellipsis marker, however extreme their values.
 
         :param tmp_path: pytest tmp_path fixture.
         """
+        long_tool = "a-very-long-tool-name-that-exceeds-the-old-column-cap-x" * 2
         long_flag = "⚠ 45% parse reliability — possible response-format gap"
         groups = [
             _group(
-                tool="a-very-long-tool-name-that-exceeds-the-column-cap-x" * 2,
+                tool=long_tool,
                 model="claude-3-5-sonnet-20241022",
                 n_eligible=999999,
                 n_bets=888888,
@@ -760,13 +776,122 @@ class TestLineWidth:
         path = _write_results(tmp_path, groups)
         section = build_roi_section(path, "omen")
         assert section is not None
-        block = _code_block_lines(section)
-        for line in block:
-            assert len(line) <= MAX_LINE_WIDTH, f"too wide: {line!r}"
-        # Only tool + flags may ellipsize; every numeric value renders in full.
-        data_row = block[2]
+        data_row = _code_block_lines(section)[2]
+        # The tool cell is the first column, left-justified to its own width,
+        # so the row starts with the full name -- no ellipsis.
+        assert data_row.startswith(long_tool)
         for value in ("999999", "888888", "0.123", "0.654", "1234567.89"):
             assert value in data_row, f"numeric cell truncated: {value}"
+        # Flags is NOT sacrificed: no column is clipped to satisfy the width
+        # target, so flags keeps its own capped text ("⚠ parse 45%").
+        assert "parse 45%" in data_row
+
+    def test_flags_never_pays_for_a_long_tool_name(self, tmp_path: Path) -> None:
+        """Real registry (tool, model) pairs keep flags intact.
+
+        The regression this pins: while a whole-line backstop existed, these
+        rows exceeded MAX_LINE_WIDTH and -- because clipping flags COULD
+        restore the bound -- flags paid for it. Uncapping the tool column
+        widened that band rather than narrowing it.
+
+        Both pairs are real: the model comes from roi_sim's
+        TOURNAMENT_MODEL_OVERRIDES / CLAUDE_HARDCODED_MODEL, and neither model
+        is display-shortened by MODEL_DISPLAY, which is what makes these rows
+        genuinely wide in production. The first is over by exactly
+        ``flags_width - 6``, the equality boundary of the removed condition.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        pairs = (
+            ("predict-fine-tuned-calibrated", "qwen-14b-fine-tuned-calibrated"),
+            ("prediction-request-reasoning-claude-v1", "claude-sonnet-4-6"),
+        )
+        for tool, model in pairs:
+            path = _write_results(
+                tmp_path / tool,
+                [
+                    _group(
+                        tool=tool,
+                        model=model,
+                        mode="tournament",
+                        flags=["few bets - anecdotal", "low sample"],
+                    )
+                ],
+            )
+            section = build_roi_section(path, "omen")
+            assert section is not None
+            data_row = _code_block_lines(section)[2]
+            # Non-vacuous by construction: without an over-target line there is
+            # nothing for a backstop to react to.
+            assert len(data_row) > MAX_LINE_WIDTH, f"fixture no longer wide: {tool}"
+            assert data_row.startswith(tool), f"tool truncated: {tool}"
+            assert data_row.rstrip().endswith(
+                "few bets, low n"
+            ), f"flags clipped to pay for the tool name ({tool}): {data_row!r}"
+
+    def test_one_long_name_does_not_clip_flags_on_other_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Column widths are max() across rows, so the blast radius was global.
+
+        A single long-named tool used to shrink the flags column for EVERY row
+        in the table. Pins that a short-named row keeps its full flags text
+        while sharing a table with a row that exceeds the width target.
+
+        :param tmp_path: pytest tmp_path fixture.
+        """
+        path = _write_results(
+            tmp_path,
+            [
+                _group(
+                    tool="predict-fine-tuned-calibrated",
+                    model="qwen-14b-fine-tuned-calibrated",
+                    mode="tournament",
+                    n_bets=120,
+                    flags=["few bets - anecdotal", "low sample"],
+                ),
+                _group(
+                    tool="predict-base",
+                    model="qwen-14b-base",
+                    mode="tournament",
+                    n_bets=40,
+                    flags=["few bets - anecdotal", "low sample"],
+                ),
+            ],
+        )
+        section = build_roi_section(path, "omen")
+        assert section is not None
+        data_rows = _code_block_lines(section)[2:]
+        assert any(len(row) > MAX_LINE_WIDTH for row in data_rows), "fixture not wide"
+        for data_row in data_rows:
+            assert data_row.rstrip().endswith(
+                "few bets, low n"
+            ), f"flags clipped: {data_row!r}"
+
+    def test_no_column_is_clipped_to_satisfy_the_width_target(self) -> None:
+        """No whole-line backstop: a wide line is left wide.
+
+        Both regimes -- a far-over tool name and an overflow small enough that
+        clipping flags COULD restore the bound -- leave flags at its own cap.
+        The second case is the one a reinstated backstop would break.
+        """
+        n = len(_HEADERS)
+        # (1) Tool far over the target.
+        tool_row = ("x" * 200,) + ("y",) * (n - 2) + ("flagflag",)
+        line = _render_table([tool_row])[-1]
+        assert len(line) > MAX_LINE_WIDTH
+        assert line.split(" | ")[-1] == "flagflag"
+
+        # (2) Overflow small enough that shrinking flags WOULD fit the line;
+        # flags is still left intact and the line stays over the target.
+        flags_row = ("t" * 50,) + ("y",) * (n - 2) + ("f" * 30,)
+        line2 = _render_table([flags_row])[-1]
+        assert len(line2) > MAX_LINE_WIDTH
+        # Trimmed by its OWN column cap (24 incl. the ellipsis) and no further:
+        # a backstop would shrink it below _FLAGS_CAP to buy back the line.
+        flags_cell = line2.split(" | ")[-1]
+        assert len(flags_cell) == _FLAGS_CAP
+        assert flags_cell == "f" * (_FLAGS_CAP - 1) + "…"
 
     def test_six_digit_bets_not_ellipsized(self, tmp_path: Path) -> None:
         """A 6-digit bet count renders in full, never '1097…'.
@@ -1035,3 +1160,164 @@ class TestRenderTableGuards:
         long_row = tuple(f"c{i}" for i in range(len(_HEADERS) + 1))
         with pytest.raises(AssertionError):
             _render_table([long_row])
+
+
+# ---------------------------------------------------------------------------
+# Freshness + malformed-payload robustness
+# ---------------------------------------------------------------------------
+
+
+class TestRoiSectionFreshness:
+    """Stale results are flagged; malformed payloads are logged, not silent."""
+
+    def test_fresh_results_have_no_stale_marker(self, tmp_path: Path) -> None:
+        """A results file dated today renders without the stale marker."""
+        section = build_roi_section(_write_results(tmp_path, [_group()]), "omen")
+        assert section is not None
+        assert "stale" not in section
+
+    def test_old_results_are_marked_stale(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Results older than the cadence get a visible marker + a WARNING."""
+        path = _write_results(tmp_path, [_group()], as_of="2020-01-01")
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "*(stale — as of 2020-01-01)*" in section
+        assert "days old" in caplog.text
+
+    def test_malformed_groups_warns_and_skips(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A payload whose 'groups' is not a list is logged, not silently dropped."""
+        path = tmp_path / "roi_results.json"
+        path.write_text(json.dumps({"groups": {"oops": 1}}), encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert build_roi_section(path, "omen") is None
+        assert "no 'groups' list" in caplog.text
+
+    def test_load_results_quiet_on_missing_warns_on_broken(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Missing file stays silent (no data yet); a corrupt file warns."""
+        with caplog.at_level(logging.WARNING):
+            assert _load_results(tmp_path / "absent.json") is None
+        assert not caplog.records
+
+        corrupt = tmp_path / "roi_results.json"
+        corrupt.write_text("{not json", encoding="utf-8")
+        with caplog.at_level(logging.WARNING):
+            assert _load_results(corrupt) is None
+        assert "unreadable" in caplog.text
+
+    def test_garbled_timestamp_warns_and_skips_marker(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A present-but-unparseable as_of logs a WARNING and skips the marker."""
+        for bad in ("not-a-date", 12345):
+            path = tmp_path / "roi_results.json"
+            path.write_text(
+                json.dumps({"window_days": 90, "as_of": bad, "groups": [_group()]}),
+                encoding="utf-8",
+            )
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                section = build_roi_section(path, "omen")
+            assert section is not None and "stale" not in section
+            assert "unparseable 'as_of'" in caplog.text
+
+    def test_empty_string_timestamp_is_treated_as_absent(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``as_of: ""`` takes the quiet path, not the garbled one.
+
+        The only input where the two guards must agree: ``not stamp`` in
+        _payload_age_days returns None (age unknown), and the caller's
+        ``as_of not in (None, "")`` then suppresses the unparseable-warning.
+        Flipping either alone turns this into a spurious WARNING on every run.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"window_days": 90, "as_of": "", "groups": [_group()]}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None and "stale" not in section
+        assert not caplog.records
+
+    def test_groups_present_but_no_objects_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A truncated/schema-drifted write is not the same silence as no data.
+
+        A non-empty groups list holding no objects returns None like the
+        legitimate "no rows for this platform yet" case; only the WARNING
+        separates them.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"window_days": 90, "groups": ["truncated", None]}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING):
+            assert build_roi_section(path, "omen") is None
+        assert "none are objects" in caplog.text
+
+        # Contrast: a well-formed group for ANOTHER platform is the legitimate
+        # quiet case -- same None, no warning.
+        caplog.clear()
+        path.write_text(
+            json.dumps({"window_days": 90, "groups": [_group(platform="polymarket")]}),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING):
+            assert build_roi_section(path, "omen") is None
+        assert not caplog.records
+
+    def test_absent_timestamp_is_quiet(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A legacy payload with no as_of skips the check silently (age unknown)."""
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"window_days": 90, "groups": [_group()]}), encoding="utf-8"
+        )
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None and "stale" not in section
+        assert not caplog.records
+
+    def test_future_dated_results_are_not_stale(self, tmp_path: Path) -> None:
+        """A future as_of (negative age) is never marked stale."""
+        future = (datetime.now(timezone.utc) + timedelta(days=5)).date().isoformat()
+        section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=future), "omen"
+        )
+        assert section is not None and "stale" not in section
+
+    def test_stale_boundary_is_strict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Age == STALE_AFTER_DAYS is not stale (`>` is strict); just over is."""
+        frozen = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+        fake_dt = MagicMock(wraps=datetime)
+        fake_dt.now.return_value = frozen
+        monkeypatch.setattr(roi_slack, "datetime", fake_dt)
+        at = (frozen - timedelta(days=STALE_AFTER_DAYS)).isoformat()
+        over = (frozen - timedelta(days=STALE_AFTER_DAYS, seconds=1)).isoformat()
+        at_section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=at), "omen"
+        )
+        over_section = build_roi_section(
+            _write_results(tmp_path, [_group()], as_of=over), "omen"
+        )
+        assert at_section is not None and "stale" not in at_section
+        assert over_section is not None and "stale" in over_section

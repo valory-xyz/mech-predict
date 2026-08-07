@@ -2333,9 +2333,10 @@ class TestPredictionToolsSelfDiscovered:
         } <= packages, f"AST discovery broke -- found only: {sorted(packages)}"
 
     def test_every_prediction_schema_is_named_prediction_result(self) -> None:
-        """Replay resolves the schema by name; any other name silently
-        downgrades that tool to plain calls -- prose out, 0% parse, and a
-        run that still reports success.
+        """Any name but the canonical one downgrades the tool to plain calls.
+
+        Replay resolves the schema by name; a mismatch means prose out,
+        0% parse, and a run that still reports success.
         """
         misnamed = [
             (pkg, name)
@@ -2348,9 +2349,11 @@ class TestPredictionToolsSelfDiscovered:
         )
 
     def test_every_prediction_tool_is_registered(self) -> None:
-        """A shipped prediction tool absent from ``TOOL_REGISTRY`` cannot be
-        replayed, so no fix for it can ever be validated -- while triage
-        still assesses it and opens fix issues.
+        """Every discovered prediction tool must be in ``TOOL_REGISTRY``.
+
+        A shipped tool absent from it cannot be replayed, so no fix for it
+        can ever be validated -- while triage still assesses it and opens
+        fix issues.
         """
         registered = {spec.module.rsplit(".", 1)[-1] for spec in TOOL_REGISTRY.values()}
         unregistered = sorted({pkg for pkg, _ in self._discover()} - registered)

@@ -31,9 +31,9 @@ import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
-    _configure_logging,
     _build_system_prompt,
     _compute_top_k,
+    _configure_logging,
     _count_eligible_tools,
     _infer_platform_label,
     _main_window_label,

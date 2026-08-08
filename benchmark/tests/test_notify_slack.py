@@ -28,10 +28,10 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
-from benchmark import notify_slack
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
+    _configure_logging,
     _build_system_prompt,
     _compute_top_k,
     _count_eligible_tools,
@@ -175,7 +175,7 @@ class TestLogFormat:
             captured.update(kwargs)
 
         monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
-        notify_slack._configure_logging()
+        _configure_logging()
         assert captured["format"] == _LEVEL_PREFIX_FORMAT
         assert captured["level"] == logging.INFO
 

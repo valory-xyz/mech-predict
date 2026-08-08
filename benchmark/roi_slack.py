@@ -427,24 +427,27 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
             type(groups).__name__,
         )
         return None
+    # Report EVERY dropped entry, not just an all-garbage list. A partially
+    # truncated write (process killed mid-write, one entry replaced by an error
+    # placeholder) leaves valid groups beside the garbage, so it renders a
+    # normal-looking table with silently missing rows -- the more realistic
+    # corruption shape, and the one an all-or-nothing check cannot see.
+    malformed = [group for group in groups if not isinstance(group, dict)]
+    if malformed:
+        log.warning(
+            "%d of %d ROI 'groups' entries are not objects (first bad is %s); "
+            "the roi_sim write is likely truncated or schema-drifted -- "
+            "dropping them.",
+            len(malformed),
+            len(groups),
+            type(malformed[0]).__name__,
+        )
     platform_groups = [
         group
         for group in groups
         if isinstance(group, dict) and group.get("platform") == platform
     ]
     if not platform_groups:
-        # "No data for this platform yet" is legitimate and silent. A non-empty
-        # groups list that yields no dicts at all is not: that is a truncated or
-        # schema-drifted roi_sim write wearing the same silence. Separate the
-        # two so the second cannot hide behind the first.
-        if groups and not any(isinstance(group, dict) for group in groups):
-            log.warning(
-                "ROI results carry %d 'groups' entries but none are objects "
-                "(first is %s); the roi_sim write is likely truncated or "
-                "schema-drifted -- skipping the section.",
-                len(groups),
-                type(groups[0]).__name__,
-            )
         return None
 
     # Forward-compatible deployment filter: groups explicitly marked

@@ -516,7 +516,17 @@ def main() -> None:
     log.info("Done.")
 
 
-if __name__ == "__main__":
-    # The level prefix is load-bearing, not decoration -- see the constant.
+def _configure_logging() -> None:
+    """Configure the entry-point logger.
+
+    Lives outside the ``__main__`` guard so the call itself is reachable by a
+    test: the level prefix is the fix (see ``_LEVEL_PREFIX_FORMAT``), and a
+    guard-only call site cannot be executed by the suite, so dropping the
+    ``format`` argument would silently restore the unfilterable log.
+    """
     logging.basicConfig(level=logging.INFO, format=_LEVEL_PREFIX_FORMAT)
+
+
+if __name__ == "__main__":
+    _configure_logging()
     main()

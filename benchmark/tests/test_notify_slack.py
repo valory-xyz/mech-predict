@@ -33,6 +33,7 @@ from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
     _build_system_prompt,
     _compute_top_k,
+    _configure_logging,
     _count_eligible_tools,
     _infer_platform_label,
     _main_window_label,
@@ -155,6 +156,28 @@ class TestBuildSystemPrompt:
 
 class TestLogFormat:
     """The flywheel log format keeps WARNING distinguishable from INFO."""
+
+    def test_configure_logging_passes_the_prefix_format(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CALL SITE is pinned, not just the constant's value.
+
+        Reverting `format=_LEVEL_PREFIX_FORMAT` at the call site while leaving
+        the constant intact left the whole suite green, so the line that
+        actually fixes the flywheel log was unprotected -- a refactor or merge
+        dropping the argument would silently restore the unfilterable log.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: dict[str, Any] = {}
+
+        def fake_basic_config(**kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+        _configure_logging()
+        assert captured["format"] == _LEVEL_PREFIX_FORMAT
+        assert captured["level"] == logging.INFO
 
     def test_level_is_recoverable_from_a_rendered_line(self) -> None:
         """A WARNING and an INFO with the same text render differently.

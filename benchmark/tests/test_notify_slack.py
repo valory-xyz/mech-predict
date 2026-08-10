@@ -19,6 +19,7 @@
 """Tests for benchmark/notify_slack.py — platform-scoped Slack summaries."""
 
 import io
+import logging
 from email.message import Message
 from pathlib import Path
 from typing import Any
@@ -29,8 +30,10 @@ from urllib.request import Request
 import pytest
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
+    _LEVEL_PREFIX_FORMAT,
     _build_system_prompt,
     _compute_top_k,
+    _configure_logging,
     _count_eligible_tools,
     _infer_platform_label,
     _main_window_label,
@@ -149,6 +152,61 @@ class TestBuildSystemPrompt:
         assert "n-descending order" in prompt
         assert "re-rank by n, not take the first 3 you see" in prompt
         assert "insufficient tool × category data" in prompt
+
+
+class TestLogFormat:
+    """The flywheel log format keeps WARNING distinguishable from INFO."""
+
+    def test_configure_logging_passes_the_prefix_format(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CALL SITE is pinned, not just the constant's value.
+
+        Reverting `format=_LEVEL_PREFIX_FORMAT` at the call site while leaving
+        the constant intact left the whole suite green, so the line that
+        actually fixes the flywheel log was unprotected -- a refactor or merge
+        dropping the argument would silently restore the unfilterable log.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        captured: dict[str, Any] = {}
+
+        def fake_basic_config(**kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+        _configure_logging()
+        assert captured["format"] == _LEVEL_PREFIX_FORMAT
+        assert captured["level"] == logging.INFO
+
+    def test_level_is_recoverable_from_a_rendered_line(self) -> None:
+        """A WARNING and an INFO with the same text render differently.
+
+        The ROI freshness and malformed-payload guards report through
+        log.warning. Under the previous bare "%(message)s" format they were
+        byte-identical to the surrounding INFO chatter, so the log half of the
+        guard was write-only: nothing could grep or filter for it.
+        """
+        formatter = logging.Formatter(_LEVEL_PREFIX_FORMAT)
+
+        def render(level: int) -> str:
+            record = logging.LogRecord(
+                name="benchmark.roi_slack",
+                level=level,
+                pathname=__file__,
+                lineno=1,
+                msg="ROI results are 6.0 days old",
+                args=(),
+                exc_info=None,
+            )
+            return formatter.format(record)
+
+        warning_line = render(logging.WARNING)
+        info_line = render(logging.INFO)
+        assert warning_line != info_line
+        assert "WARNING" in warning_line
+        # Greppable by level at line start -- the property an operator uses.
+        assert warning_line.startswith("WARNING")
 
 
 class TestInferPlatformLabel:

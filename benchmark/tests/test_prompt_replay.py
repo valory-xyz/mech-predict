@@ -16,6 +16,7 @@ from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
 
+import pydantic
 import pytest
 from benchmark import prompt_replay as pr
 from benchmark.prompt_replay import (
@@ -27,6 +28,7 @@ from benchmark.prompt_replay import (
     _drop_reason_detail,
     _extract_factual_research_prompt_components,
     _get_structured_output_schema,
+    _is_openai_structured_model,
     _load_and_filter_rows,
     _load_tournament_rows,
     _log_replay_summary,
@@ -2313,24 +2315,11 @@ class TestStructuredGateAndValidation:
         :param monkeypatch: pytest monkeypatch fixture.
         :param caplog: pytest caplog fixture.
         """
-        calls = {"structured": 0, "plain": 0}
         payload = '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}'
-
-        def _stub(kind: str) -> Any:
-            """Counting LLM-call stub.
-
-            :param kind: which counter to bump.
-            :return: a stub callable returning a fixed valid payload.
-            """
-
-            def _call(**_kw: Any) -> str:
-                calls[kind] += 1
-                return payload
-
-            return _call
-
-        monkeypatch.setattr(pr, "_call_openai_structured", _stub("structured"))
-        monkeypatch.setattr(pr, "call_llm", _stub("plain"))
+        structured_stub = MagicMock(return_value=payload)
+        plain_stub = MagicMock(return_value=payload)
+        monkeypatch.setattr(pr, "_call_openai_structured", structured_stub)
+        monkeypatch.setattr(pr, "call_llm", plain_stub)
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         row = {
             "tool_name": "superforcaster",
@@ -2347,15 +2336,15 @@ class TestStructuredGateAndValidation:
         _write_jsonl(dataset, [row])
         with caplog.at_level("INFO"):
             pr.replay(dataset, tmp_path / "out", model="qwen-32b-vllm")
-        assert calls["structured"] == 0, "unknown model reached the OpenAI path"
-        assert calls["plain"] == 1
+        assert structured_stub.call_count == 0, "unknown model reached the OpenAI path"
+        assert plain_stub.call_count == 1
         assert "structured=False" in caplog.text, "decision must be logged"
 
         # And a genuine OpenAI model still takes the structured path.
         caplog.clear()
         with caplog.at_level("INFO"):
             pr.replay(dataset, tmp_path / "out2", model="gpt-4.1-2025-04-14")
-        assert calls["structured"] == 1
+        assert structured_stub.call_count == 1
         assert "structured=True" in caplog.text
 
     def test_malformed_schema_fails_loudly_not_per_row(self, monkeypatch: Any) -> None:
@@ -2384,6 +2373,114 @@ class TestStructuredGateAndValidation:
         assert "bad-tool" in msg and "bad_tool_module" in msg
         assert "p_yes" in msg
 
+    def test_wrong_shape_model_fails_loudly(self, monkeypatch: Any) -> None:
+        """Branch (b): a GENUINE BaseModel missing a read field must also raise.
+
+        This is the branch matching the docstring's failure story -- a
+        wrong-module copy-paste usually yields a valid model of the wrong
+        shape, not a non-model.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+
+        class WrongShape(pydantic.BaseModel):
+            """A valid model lacking ``info_utility``."""
+
+            p_yes: float = 0.5
+            p_no: float = 0.5
+            confidence: float = 0.5
+
+        bad = types.ModuleType("wrong_shape_module")
+        bad.PredictionResult = WrongShape  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "wrong_shape_module", bad)
+        monkeypatch.setitem(
+            pr.TOOL_REGISTRY,
+            "wrong-shape-tool",
+            type(pr.TOOL_REGISTRY["superforcaster"])(
+                module="wrong_shape_module", family="superforcaster"
+            ),
+        )
+        with pytest.raises(ValueError) as exc:
+            _get_structured_output_schema("wrong-shape-tool")
+        assert "info_utility" in str(exc.value)
+
+    def test_real_openai_id_shapes_pass_the_gate(self) -> None:
+        """``chatgpt-4o-latest`` and fine-tune IDs are OpenAI models.
+
+        Both are documented shapes the OpenAI client accepts directly; a bare
+        ``gpt-`` prefix missed them, sending a structured tool down the
+        plain-prompt path (prose out, 0% parse, green exit).
+        """
+        for model in ("chatgpt-4o-latest", "ft:gpt-4o-2024-08-06:org::id"):
+            assert _is_openai_structured_model(model), model
+        for model in ("claude-fable-5", "qwen-32b-vllm", "mistral-large"):
+            assert not _is_openai_structured_model(model), model
+
+    def test_config_error_fires_before_any_file_is_written(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """A malformed schema is startup-knowable: refuse BEFORE opening files.
+
+        Resolved per-row, the ValueError fired at row 1 after the first
+        baseline line was flushed -- a partial baseline.jsonl beside an empty
+        candidate.jsonl, indistinguishable from a crashed run.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        bad = types.ModuleType("bad_startup_module")
+        bad.PredictionResult = object  # type: ignore[attr-defined]
+        bad.PREDICTION_PROMPT = "{question}{today}{sources}"  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "bad_startup_module", bad)
+        monkeypatch.setitem(
+            pr.TOOL_REGISTRY,
+            "bad-startup-tool",
+            type(pr.TOOL_REGISTRY["superforcaster"])(
+                module="bad_startup_module", family="superforcaster"
+            ),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        dataset = tmp_path / "enriched.jsonl"
+        _write_jsonl(
+            dataset,
+            [
+                {
+                    "tool_name": "superforcaster",
+                    "platform": "polymarket",
+                    "question_text": "Q?",
+                    "p_yes": 0.7,
+                    "p_no": 0.3,
+                    "final_outcome": True,
+                    "extracted_user_prompt": "Q?",
+                    "extracted_additional_information": "e",
+                    "extracted_today": "2026-08-01",
+                }
+            ],
+        )
+        out = tmp_path / "out"
+        with pytest.raises(ValueError):
+            pr.replay(
+                dataset,
+                out,
+                model="gpt-4.1-2025-04-14",
+                candidate_tool="bad-startup-tool",
+            )
+        assert not (out / "baseline.jsonl").exists(), "partial baseline written"
+        assert not (out / "candidate.jsonl").exists()
+
+    def test_empty_discovery_raises_even_under_optimize(self) -> None:
+        """The empty-scan guard must be a real raise, not a bare assert.
+
+        Driven through the unwrapped function with an empty glob; a bare
+        ``assert`` would vanish under ``python -O`` and let the three
+        discovery tests pass vacuously.
+        """
+        raw = TestPredictionToolsSelfDiscovered.__dict__["_discover"]
+        func = raw.__func__.__wrapped__
+        with mock.patch.object(Path, "glob", return_value=iter([])):
+            with pytest.raises(AssertionError, match="found nothing"):
+                func(TestPredictionToolsSelfDiscovered)
+
 
 class TestPredictionToolsSelfDiscovered:
     """Every STRUCTURED prediction tool is found by scanning, not by a list.
@@ -2402,8 +2499,10 @@ class TestPredictionToolsSelfDiscovered:
     its registration is pinned directly in
     ``test_plain_tools_resolve_to_none`` instead.
 
-    Known scan limits, all absent from the repo today (verified by an
-    unrestricted walk finding the same 7 schemas): top-level ``ClassDef``
+    Known scan limits, all absent from the repo as of 2026-08 (verified by
+    an unrestricted walk finding the same schemas -- 7 at the time of
+    writing; a point-in-time count, unlike the limits below, which are
+    permanent properties of the scan): top-level ``ClassDef``
     only (a schema under ``if TYPE_CHECKING:``/``try:`` or nested is
     invisible); locally ANNOTATED fields only (a subclass inheriting
     ``p_yes``/``p_no`` from a shared base will not match); re-exports
@@ -2460,11 +2559,15 @@ class TestPredictionToolsSelfDiscovered:
                 }
                 if cls._REQUIRED <= fields:
                     found.append((package, node.name))
-        assert found, (
-            "prediction-schema discovery found nothing -- broken glob or "
-            "repo layout change; every downstream assertion would pass "
-            "vacuously"
-        )
+        if not found:
+            # Explicit raise, not a bare assert: `python -O` strips asserts,
+            # which would silently defeat exactly the vacuous-pass class this
+            # guard exists to prevent.
+            raise AssertionError(
+                "prediction-schema discovery found nothing -- broken glob or "
+                "repo layout change; every downstream assertion would pass "
+                "vacuously"
+            )
         return tuple(found)
 
     def test_discovery_finds_the_known_tools(self) -> None:

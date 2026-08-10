@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
+import pydantic
 import requests
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
@@ -1389,15 +1390,37 @@ def _get_structured_output_schema(tool_name: str) -> Optional[type]:
     :param tool_name: registry key for the tool being replayed.
     :return: the Pydantic schema class, or ``None`` when the tool is not a
         structured-output tool (or is not registered).
+    :raises ValueError: when the attribute exists but is not a usable
+        prediction schema (not a Pydantic model, or missing one of the four
+        fields ``_call_openai_structured`` reads). A renamed base class or a
+        ``spec.module`` pointing at the wrong-but-importable module must fail
+        HERE, by name, not as an opaque OpenAI 400 per row.
+    :raises ImportError: when ``spec.module`` cannot be imported. Unreachable
+        at the production call site (``replay()`` imports the candidate module
+        unconditionally before the per-row loop, so this always hits
+        ``sys.modules``) but reachable for direct callers such as tests.
     """
     spec = TOOL_REGISTRY.get(tool_name)
     if spec is None:
         return None
-    # pylint: disable=import-outside-toplevel
-    from importlib import import_module
-
-    module = import_module(spec.module)
-    return getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
+    module = importlib.import_module(spec.module)
+    schema = getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
+    if schema is None:
+        return None
+    required = {"p_yes", "p_no", "confidence", "info_utility"}
+    if not (
+        isinstance(schema, type)
+        and issubclass(schema, pydantic.BaseModel)
+        and required <= set(schema.model_fields)
+    ):
+        raise ValueError(
+            f"{tool_name}: {STRUCTURED_OUTPUT_SCHEMA_ATTR} in {spec.module} is "
+            "not a usable prediction schema (must be a Pydantic model with "
+            f"fields {sorted(required)}). Refusing to replay it structured -- "
+            "a bad schema would fail per-row inside a broad except and score "
+            "0% while the run reports success."
+        )
+    return schema
 
 
 def _call_anthropic(
@@ -2260,10 +2283,22 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                 # baseline: for an in-place edit the two names match, but for a
                 # new-version candidate (e.g. superforcaster-polymarket-v1 ->
                 # -v4) the candidate may be structured while the baseline is not.
+                # Positive gate, not `"claude" not in model`: the structured
+                # path is hardwired to OpenAI's `beta.chat.completions.parse`,
+                # and a model that merely ISN'T claude (a vLLM tag, a typo)
+                # would fail per-row inside the broad except and score 0%
+                # while the run reports success. Unknown models take the
+                # plain-prompt path, which every backend can serve.
                 structured_schema = (
                     _get_structured_output_schema(candidate_tool_name)
-                    if "claude" not in model
+                    if model.startswith(("gpt-", "o1", "o3", "o4"))
                     else None
+                )
+                log.info(
+                    "candidate=%s model=%s structured=%s",
+                    candidate_tool_name,
+                    model,
+                    structured_schema is not None,
                 )
                 if structured_schema is not None:
                     response_text = _call_openai_structured(

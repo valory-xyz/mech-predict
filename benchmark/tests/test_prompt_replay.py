@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import json
 import random
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2255,6 +2258,13 @@ class TestStructuredOutputIsDerivedNotListed:
             "superforcaster",
             "superforcaster-polymarket-v4",
             "factual_research",
+            # The versioned tools are the ones this PR exists to repair; a
+            # broken import silently skipping them is exactly the vacuous
+            # pass this guard exists to prevent.
+            "factual_research-v1",
+            "factual_research-v2",
+            "factual_research-v3",
+            "superforcaster_calibrated_full_search",
         }, f"examined too few tools to be meaningful: {sorted(checked)}"
         assert not missed, (
             f"tools define PredictionResult but replay would call them "
@@ -2285,6 +2295,92 @@ class TestStructuredOutputIsDerivedNotListed:
         assert _get_structured_output_schema("no-such-tool") is None
 
 
+class TestStructuredGateAndValidation:
+    """The structured path is opt-in by model AND schema shape."""
+
+    def test_unknown_model_takes_the_plain_path(
+        self, tmp_path: Path, monkeypatch: Any, caplog: Any
+    ) -> None:
+        """A non-OpenAI, non-claude model must NOT be routed to the OpenAI
+        structured client.
+
+        The old gate was negative ("claude" not in model): a vLLM tag or a
+        typo'd model went to ``beta.chat.completions.parse``, failed per-row
+        inside the broad except, and scored 0% while the run reported
+        success -- the exact failure class this PR removes, re-entered from
+        the model-compatibility angle.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        calls = {"structured": 0, "plain": 0}
+        monkeypatch.setattr(
+            pr,
+            "_call_openai_structured",
+            lambda **kw: calls.__setitem__("structured", calls["structured"] + 1)
+            or '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}',
+        )
+        monkeypatch.setattr(
+            pr,
+            "call_llm",
+            lambda **kw: calls.__setitem__("plain", calls["plain"] + 1)
+            or '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}',
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        row = {
+            "tool_name": "superforcaster",
+            "platform": "polymarket",
+            "question_text": "Q?",
+            "p_yes": 0.7,
+            "p_no": 0.3,
+            "final_outcome": True,
+            "extracted_user_prompt": "Q?",
+            "extracted_additional_information": "evidence",
+            "extracted_today": "2026-08-01",
+        }
+        dataset = tmp_path / "enriched.jsonl"
+        _write_jsonl(dataset, [row])
+        with caplog.at_level("INFO"):
+            pr.replay(dataset, tmp_path / "out", model="qwen-32b-vllm")
+        assert calls["structured"] == 0, "unknown model reached the OpenAI path"
+        assert calls["plain"] == 1
+        assert "structured=False" in caplog.text, "decision must be logged"
+
+        # And a genuine OpenAI model still takes the structured path.
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            pr.replay(dataset, tmp_path / "out2", model="gpt-4.1-2025-04-14")
+        assert calls["structured"] == 1
+        assert "structured=True" in caplog.text
+
+    def test_malformed_schema_fails_loudly_not_per_row(self, monkeypatch: Any) -> None:
+        """A present-but-unusable ``PredictionResult`` must raise by name.
+
+        A renamed base or wrong-module copy-paste previously surfaced as an
+        opaque OpenAI 400 per row, swallowed by the broad except: 0% parse,
+        successful exit. The resolver now refuses with the tool and module
+        named.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        bad = types.ModuleType("bad_tool_module")
+        bad.PredictionResult = object  # not a pydantic model
+        monkeypatch.setitem(sys.modules, "bad_tool_module", bad)
+        monkeypatch.setitem(
+            pr.TOOL_REGISTRY,
+            "bad-tool",
+            type(pr.TOOL_REGISTRY["superforcaster"])(
+                module="bad_tool_module", family="superforcaster"
+            ),
+        )
+        with pytest.raises(ValueError) as exc:
+            _get_structured_output_schema("bad-tool")
+        msg = str(exc.value)
+        assert "bad-tool" in msg and "bad_tool_module" in msg
+        assert "p_yes" in msg
+
+
 class TestPredictionToolsSelfDiscovered:
     """Every STRUCTURED prediction tool is found by scanning, not by a list.
 
@@ -2301,6 +2397,19 @@ class TestPredictionToolsSelfDiscovered:
     ``superforcaster_full_search`` shape) is invisible to it by construction;
     its registration is pinned directly in
     ``test_plain_tools_resolve_to_none`` instead.
+
+    Known scan limits, all absent from the repo today (verified by an
+    unrestricted walk finding the same 7 schemas): top-level ``ClassDef``
+    only (a schema under ``if TYPE_CHECKING:``/``try:`` or nested is
+    invisible); locally ANNOTATED fields only (a subclass inheriting
+    ``p_yes``/``p_no`` from a shared base will not match); re-exports
+    (``from .schemas import PredictionResult``) are not ``ClassDef``s --
+    though production ``getattr`` WOULD resolve those; the glob assumes one
+    directory level under ``customs/``; and the registered-modules
+    comparison assumes ``<pkg>.<pkg>`` module paths. A false POSITIVE is
+    also possible if a third-party helper class ever carries all four field
+    names. If any of these starts to bite, extend the scan rather than
+    trusting it silently.
     """
 
     #: The four fields ``_call_openai_structured`` reads off the parsed
@@ -2308,14 +2417,23 @@ class TestPredictionToolsSelfDiscovered:
     _REQUIRED = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
 
     @classmethod
-    def _discover(cls) -> list[tuple[str, str]]:
+    @functools.lru_cache(maxsize=1)
+    def _discover(cls) -> tuple[tuple[str, str], ...]:
         """Scan every tool module in ``packages/`` for prediction schemas.
 
         Pure AST parse -- no imports, so a tool with unhappy third-party
         dependencies is still discovered (an import-based scan would skip
         exactly the tools most likely to be misconfigured).
 
+        Raises rather than returning an empty result: every assertion downstream
+        is of the form ``assert not [bad for x in discover()]``, which an empty
+        scan satisfies vacuously. The sibling known-tools test also pins this,
+        but a filtered run (``pytest -k``, a sharded CI job) can execute one
+        test without the other, so the guard lives IN the scan.
+
         :return: ``(package name, schema class name)`` pairs.
+        :raises AssertionError: when the scan finds nothing -- a broken glob
+            or repo layout change, never a real state of this repo.
         """
         found = []
         packages = Path(__file__).resolve().parents[2] / "packages"
@@ -2338,7 +2456,12 @@ class TestPredictionToolsSelfDiscovered:
                 }
                 if cls._REQUIRED <= fields:
                     found.append((package, node.name))
-        return found
+        assert found, (
+            "prediction-schema discovery found nothing -- broken glob or "
+            "repo layout change; every downstream assertion would pass "
+            "vacuously"
+        )
+        return tuple(found)
 
     def test_discovery_finds_the_known_tools(self) -> None:
         """The scan itself must work, or the tests below pass vacuously."""

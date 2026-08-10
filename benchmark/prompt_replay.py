@@ -1387,6 +1387,12 @@ def _get_structured_output_schema(tool_name: str) -> Optional[type]:
     outputs, so asking the module keeps replay faithful to production by
     construction.
 
+    ``import_module`` can additionally propagate ``ImportError`` for an
+    unimportable module -- unreachable at the production call site
+    (``replay()`` imports the candidate module unconditionally before the
+    per-row loop, so this always hits ``sys.modules``) but reachable for
+    direct callers such as tests.
+
     :param tool_name: registry key for the tool being replayed.
     :return: the Pydantic schema class, or ``None`` when the tool is not a
         structured-output tool (or is not registered).
@@ -1395,10 +1401,6 @@ def _get_structured_output_schema(tool_name: str) -> Optional[type]:
         fields ``_call_openai_structured`` reads). A renamed base class or a
         ``spec.module`` pointing at the wrong-but-importable module must fail
         HERE, by name, not as an opaque OpenAI 400 per row.
-    :raises ImportError: when ``spec.module`` cannot be imported. Unreachable
-        at the production call site (``replay()`` imports the candidate module
-        unconditionally before the per-row loop, so this always hits
-        ``sys.modules``) but reachable for direct callers such as tests.
     """
     spec = TOOL_REGISTRY.get(tool_name)
     if spec is None:
@@ -1408,11 +1410,10 @@ def _get_structured_output_schema(tool_name: str) -> Optional[type]:
     if schema is None:
         return None
     required = {"p_yes", "p_no", "confidence", "info_utility"}
-    if not (
-        isinstance(schema, type)
-        and issubclass(schema, pydantic.BaseModel)
-        and required <= set(schema.model_fields)
-    ):
+    usable = isinstance(schema, type) and issubclass(schema, pydantic.BaseModel)
+    if usable and not required <= set(schema.model_fields):
+        usable = False
+    if not usable:
         raise ValueError(
             f"{tool_name}: {STRUCTURED_OUTPUT_SCHEMA_ATTR} in {spec.module} is "
             "not a usable prediction schema (must be a Pydantic model with "

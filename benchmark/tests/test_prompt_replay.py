@@ -2301,8 +2301,7 @@ class TestStructuredGateAndValidation:
     def test_unknown_model_takes_the_plain_path(
         self, tmp_path: Path, monkeypatch: Any, caplog: Any
     ) -> None:
-        """A non-OpenAI, non-claude model must NOT be routed to the OpenAI
-        structured client.
+        """An unknown model must never be routed to the OpenAI structured client.
 
         The old gate was negative ("claude" not in model): a vLLM tag or a
         typo'd model went to ``beta.chat.completions.parse``, failed per-row
@@ -2315,18 +2314,23 @@ class TestStructuredGateAndValidation:
         :param caplog: pytest caplog fixture.
         """
         calls = {"structured": 0, "plain": 0}
-        monkeypatch.setattr(
-            pr,
-            "_call_openai_structured",
-            lambda **kw: calls.__setitem__("structured", calls["structured"] + 1)
-            or '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}',
-        )
-        monkeypatch.setattr(
-            pr,
-            "call_llm",
-            lambda **kw: calls.__setitem__("plain", calls["plain"] + 1)
-            or '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}',
-        )
+        payload = '{"p_yes": 0.6, "p_no": 0.4, "confidence": 0.8, "info_utility": 0.5}'
+
+        def _stub(kind: str) -> Any:
+            """Counting LLM-call stub.
+
+            :param kind: which counter to bump.
+            :return: a stub callable returning a fixed valid payload.
+            """
+
+            def _call(**_kw: Any) -> str:
+                calls[kind] += 1
+                return payload
+
+            return _call
+
+        monkeypatch.setattr(pr, "_call_openai_structured", _stub("structured"))
+        monkeypatch.setattr(pr, "call_llm", _stub("plain"))
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         row = {
             "tool_name": "superforcaster",
@@ -2365,7 +2369,7 @@ class TestStructuredGateAndValidation:
         :param monkeypatch: pytest monkeypatch fixture.
         """
         bad = types.ModuleType("bad_tool_module")
-        bad.PredictionResult = object  # not a pydantic model
+        bad.PredictionResult = object  # type: ignore[attr-defined]  # not a pydantic model
         monkeypatch.setitem(sys.modules, "bad_tool_module", bad)
         monkeypatch.setitem(
             pr.TOOL_REGISTRY,

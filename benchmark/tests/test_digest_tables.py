@@ -24,6 +24,9 @@ the payoff: each asserts a specific cell against a specific input field.
 """
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -319,3 +322,193 @@ class TestRobustness:
     def test_render_is_deterministic(self, results: Path) -> None:
         """Same inputs, same bytes -- the property golden files depend on."""
         assert _body(results) == (_body(results))
+
+
+class TestRoiKeying:
+    """roi_sim groups by model too, so (tool, mode) is not unique."""
+
+    def test_duplicate_keys_keep_the_group_with_a_real_roi(
+        self, tmp_path: Path
+    ) -> None:
+        """A None-roi group must not shadow a real one.
+
+        A live roi_results.json carries 14 colliding (platform, tool, mode)
+        keys; plain last-wins dropped omen factual_research's +15.8% because a
+        model-less group with roi_mid None sorted last.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": _stats()})
+        _write(results, "scores_tournament_polymarket.json", {})
+        common = {
+            "tool_name": "alpha",
+            "mode": "production",
+            "platform": "polymarket",
+        }
+        (results / "roi_results.json").write_text(
+            json.dumps(
+                {
+                    "groups": [
+                        {**common, "model": "gpt-4.1", "roi_mid": 15.8, "n_bets": 31},
+                        {**common, "model": "unknown", "roi_mid": None},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert "+15.8%" in _cells(_body(results), "alpha")
+
+
+class TestAlertComparators:
+    """Below-market and below-no-skill are different claims."""
+
+    def test_beating_the_floor_but_losing_to_market_is_not_no_skill(
+        self, tmp_path: Path
+    ) -> None:
+        """Edge < 0 alone must never be reported as below no-skill.
+
+        Live Omen factual_research: Brier 0.2234 vs base 0.2330 (above the
+        floor) with Edge -0.0266 (below the market). Reporting that as
+        "below no-skill" repeats the mislabel this module exists to prevent.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        stats = _stats(brier=0.2234, baseline_brier=0.2330, edge=-0.0266)
+        _write(results, "scores_polymarket.json", {"alpha": stats})
+        _write(results, "rolling_scores_polymarket.json", {"alpha": stats})
+        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": stats})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "platform below market" in body
+        assert "platform below no-skill" not in body
+
+
+class TestVisibility:
+    """A tool that ran and failed must not vanish from the digest."""
+
+    def test_all_malformed_tool_is_still_listed(self, tmp_path: Path) -> None:
+        """valid_n=0 means no Brier, which must not mean no row.
+
+        Live Omen carries a deployed tool with n=684, valid_n=0 and 0%
+        reliability. Filtering rows on "has a Brier" hides exactly the tool
+        most in need of attention.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        broken = _stats(n=684, valid_n=0, reliability=0.0, brier=None, edge=None)
+        _write(results, "scores_polymarket.json", {"broken": broken})
+        _write(results, "rolling_scores_polymarket.json", {"broken": broken})
+        _write(results, "prev_rolling_scores_polymarket.json", {"broken": broken})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "broken" in body
+        assert "reliability breach" in body
+
+
+class TestThirdParty:
+    """Third-party tools are never ranked, compared or recommended on."""
+
+    def test_allowlist_filters_unregistered_tools(self, results: Path) -> None:
+        """A tool outside the registry does not reach Slack.
+
+        :param results: results-directory fixture.
+        """
+        _write(
+            results,
+            "scores_polymarket.json",
+            {"alpha": _stats(), "someone-elses-tool": _stats()},
+        )
+        body = "\n\n".join(
+            build_digest_messages(results, "polymarket", allowed_tools={"alpha"})
+        )
+        assert "alpha" in body
+        assert "someone-elses-tool" not in body
+
+
+class TestLoudDegradation:
+    """A window that did not run says so; it does not read as unchanged."""
+
+    def test_missing_rolling_window_is_announced(self, tmp_path: Path) -> None:
+        """Absent rolling files produce a warning, not a silent wall of n/a.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        _write(results, "scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "unavailable" in body
+        assert "unmeasured" in body
+
+
+class TestOrderStability:
+    """Row order must be reproducible across processes, not just calls."""
+
+    def test_order_is_identical_under_different_hash_seeds(
+        self, tmp_path: Path
+    ) -> None:
+        """Rendering under several PYTHONHASHSEEDs yields identical bytes.
+
+        The tool names arrive as a set, so Edge-less rows previously came out
+        in set-iteration order -- which is stable WITHIN one process and
+        differs BETWEEN them. An in-process assertion cannot catch that, so
+        this spawns subprocesses with distinct hash seeds and compares.
+
+        Two redundant guards provide the property (``_ordered`` sorts its
+        input, and ``_sort_key`` breaks ties on the name). This asserts the
+        PROPERTY, so it fails only when both are removed -- verified by
+        mutation.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        names = ["echo", "alpha", "delta", "bravo", "charlie"]
+        edgeless = {n: _stats(edge=None, brier=0.3) for n in names}
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, edgeless)
+        _write(results, "scores_tournament_polymarket.json", {})
+
+        script = (
+            "import sys;"
+            "from pathlib import Path;"
+            "from benchmark.digest_tables import build_digest_messages;"
+            f"print(chr(10).join(build_digest_messages(Path({str(results)!r}),"
+            "'polymarket')))"
+        )
+        renders = set()
+        for seed in ("0", "1", "17", "12345"):
+            env = {**os.environ, "PYTHONHASHSEED": seed}
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=str(Path(__file__).resolve().parents[2]),
+                check=True,
+            )
+            renders.add(proc.stdout)
+        assert len(renders) == 1, f"{len(renders)} distinct renders across seeds"
+        body = renders.pop()
+        order = [
+            line.split(" ")[0]
+            for line in body.splitlines()
+            if line.split(" ")[0] in names
+        ]
+        assert order[: len(names)] == sorted(names), order

@@ -527,7 +527,12 @@ def main() -> None:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
                 table_messages = build_digest_messages(
-                    args.report.parent, platform_key, args.roi_results
+                    args.report.parent,
+                    platform_key,
+                    args.roi_results,
+                    # Third-party tools must never be ranked, compared, or
+                    # recommended on; the registry is the allowlist.
+                    allowed_tools=TOOL_REGISTRY,
                 )
         except Exception:  # pylint: disable=broad-except
             log.warning(

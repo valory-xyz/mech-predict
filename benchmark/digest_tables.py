@@ -69,7 +69,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Collection, Iterable, Sequence
 
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
@@ -138,13 +138,35 @@ def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return {}
+    # roi_sim groups by (platform, tool, mode, MODEL), so several groups share
+    # a (tool, mode) key -- 14 of them in a live file. Last-wins would drop a
+    # real number: omen factual_research has a gpt-4.1 group at +15.8% plus two
+    # model-less groups whose roi_mid is None, and the None one sorts last.
+    # Keep the best-evidenced group instead: a real roi_mid beats None, then
+    # the larger bet count.
     indexed: dict[tuple[str, str], dict[str, Any]] = {}
     for group in groups:
         if not isinstance(group, dict) or group.get("platform") != platform:
             continue
         key = (str(group.get("tool_name") or ""), str(group.get("mode") or ""))
-        indexed[key] = group
+        incumbent = indexed.get(key)
+        if incumbent is None or _roi_rank(group) > _roi_rank(incumbent):
+            indexed[key] = group
     return indexed
+
+
+def _roi_rank(group: dict[str, Any]) -> tuple[int, int]:
+    """Rank competing ROI groups that share a (tool, mode) key.
+
+    :param group: ROI group dict.
+    :return: sort key; higher wins. A usable roi_mid dominates bet count.
+    """
+    has_roi = 1 if _is_number(group.get("roi_mid")) else 0
+    n_bets = group.get("n_bets")
+    # isinstance rather than _is_number: the narrowing has to be visible to
+    # the type checker for the int() call.
+    bets = int(n_bets) if isinstance(n_bets, (int, float)) else 0
+    return (has_roi, bets)
 
 
 # ---------------------------------------------------------------------------
@@ -308,17 +330,24 @@ _AT_COLUMNS = (
 )
 
 
-def _sort_key(entry: tuple[str, dict[str, Any] | None, dict[str, Any] | None]) -> tuple:
+def _sort_key(
+    entry: tuple[str, dict[str, Any] | None, dict[str, Any] | None],
+) -> tuple[int, float, str]:
     """Order rows by the decision metric, best first, unscored last.
 
     :param entry: (tool name, current stats, reference stats).
     :return: sort key placing higher Edge first and None-Edge rows last.
     """
-    _, current, reference = entry
+    name, current, reference = entry
     for stats in (current, reference):
         if stats and _is_number(stats.get("edge")):
-            return (0, -float(stats["edge"]))
-    return (1, 0.0)
+            return (0, -float(stats["edge"]), name)
+    # Tool name breaks the tie: without it, Edge-less rows come out in set
+    # iteration order, which differs between processes and makes the posted
+    # table undiffable day over day. _ordered() also sorts its input, so this
+    # is belt-and-braces -- deliberately. Removing EITHER is safe; removing
+    # BOTH reintroduces the bug, which is what TestOrderStability asserts.
+    return (1, 0.0, name)
 
 
 def _rows_w2(
@@ -401,12 +430,23 @@ def _rows_at(
 
 
 def _scored(by_tool: dict[str, dict[str, Any]]) -> set[str]:
-    """Return tools that produced a Brier in this window.
+    """Return tools that this window has something to say about.
+
+    A tool with rows but NO valid prediction has no Brier, and filtering on
+    Brier alone makes it disappear from the digest entirely -- which is the
+    opposite of what should happen. Live Omen carries exactly this case: a
+    deployed tool with n=684, valid_n=0, reliability 0%. Keep any tool that
+    either scored, or ran and failed to parse.
 
     :param by_tool: by_tool mapping from a scores file.
-    :return: set of tool names with a numeric Brier.
+    :return: set of tool names to render.
     """
-    return {t for t, s in by_tool.items() if _is_number(s.get("brier"))}
+    return {
+        tool
+        for tool, stats in by_tool.items()
+        if _is_number(stats.get("brier"))
+        or (_is_number(stats.get("n")) and int(stats["n"]) > 0)
+    }
 
 
 def _ordered(
@@ -421,7 +461,7 @@ def _ordered(
     :param reference: stats for the reference window.
     :return: tool names, best Edge first.
     """
-    entries = [(n, current.get(n), reference.get(n)) for n in names]
+    entries = [(n, current.get(n), reference.get(n)) for n in sorted(names)]
     return [name for name, _, _ in sorted(entries, key=_sort_key)]
 
 
@@ -490,15 +530,40 @@ def _alert_rows(
                 )
             )
 
-    scored = [at[t] for t in tools if at.get(t) and _is_number(at[t].get("edge"))]
-    if scored and all(s["edge"] < 0 for s in scored):
-        worst = max(s["edge"] for s in scored)
+    # Two DIFFERENT conditions, against two different baselines. Collapsing
+    # them is the same mistake that produced "BSS vs mkt": Edge is measured
+    # against the MARKET, and a tool can lose to the market while still
+    # beating its own no-skill floor (live: factual_research on Omen, Brier
+    # 0.2234 vs base 0.2330 -- above no-skill -- with Edge -0.0266).
+    below_market = [at[t] for t in tools if at.get(t) and _is_number(at[t].get("edge"))]
+    if below_market and all(s["edge"] < 0 for s in below_market):
+        best = max(s["edge"] for s in below_market)
+        rows.append(
+            (
+                "platform below market",
+                f"ALL ({len(below_market)} tools)",
+                f"every all-time Edge < 0; best is {best:+.4f}",
+                "upstream calibration, not a tool swap",
+            )
+        )
+
+    below_floor = [
+        t
+        for t in tools
+        if at.get(t)
+        and _is_number(at[t].get("brier"))
+        and _is_number(at[t].get("baseline_brier"))
+        and at[t]["brier"] > at[t]["baseline_brier"]
+    ]
+    if below_floor and len(below_floor) == len(
+        [t for t in tools if at.get(t) and _is_number(at[t].get("brier"))]
+    ):
         rows.append(
             (
                 "platform below no-skill",
-                f"ALL ({len(scored)} tools)",
-                f"every all-time Edge < 0; best is {worst:+.4f}",
-                "upstream calibration, not a tool swap",
+                f"ALL ({len(below_floor)} tools)",
+                "every all-time Brier exceeds its own base-rate floor",
+                "the fleet is worse than predicting the base rate",
             )
         )
 
@@ -514,6 +579,7 @@ def build_digest_messages(
     results_dir: Path,
     platform: str,
     roi_results: Path | None = None,
+    allowed_tools: Collection[str] | None = None,
 ) -> list[str]:
     """Build the benchmark digest as one Slack message per table.
 
@@ -524,6 +590,10 @@ def build_digest_messages(
     :param platform: platform key, e.g. "polymarket" or "omen".
     :param roi_results: path to roi_results.json; defaults to
         ``results_dir/roi_results.json``.
+    :param allowed_tools: when given, only these tools are rendered. Callers
+        pass the tool registry so third-party tools -- which the digest must
+        never rank, compare or recommend on -- cannot appear. Injected rather
+        than imported to keep this module stdlib-only and unit-testable.
     :return: ordered Slack mrkdwn messages; empty when there is nothing to post.
     """
     windows = {
@@ -534,11 +604,30 @@ def build_digest_messages(
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])
+    if allowed_tools is not None:
+        permitted = set(allowed_tools)
+        prod_tools &= permitted
+        tourn_tools &= permitted
     if not prod_tools and not tourn_tools:
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
 
     messages: list[str] = []
+
+    # Degrade LOUDLY. Both rolling files come from separate --period-days
+    # scorer invocations that can fail independently of the all-time rebuild.
+    # Without this the W-1/W-2 columns silently fill with n/a and the digest
+    # reads as "no change this week" rather than "this week was not scored".
+    missing = [
+        label for key, label in (("w1", "W-1"), ("w2", "W-2")) if not windows[key]
+    ]
+    if missing:
+        messages.append(
+            f":warning: *{' and '.join(missing)} unavailable* - the rolling "
+            "scorer step produced no scores for this platform, so those "
+            "columns read `n/a` below. They are NOT unchanged; they are "
+            "unmeasured."
+        )
 
     if prod_tools:
         order_w2 = _ordered(prod_tools, windows["w1"], windows["w2"])

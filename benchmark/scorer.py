@@ -1228,7 +1228,12 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         restored["outcome_yes_count"] = g.get("outcome_yes_count", 0)
         restored["log_loss_sum"] = g.get("log_loss_sum", 0.0)
         restored["edge_sum"] = g.get("edge_sum", 0.0)
-        restored["market_brier_sum"] = g.get("market_brier_sum", 0.0)
+        # None, NOT 0.0, when resuming from a scores.json written before this
+        # field existed: edge_n is restored in full, so a 0.0 sum would derive
+        # market_brier ~= 0 and read as "the market is nearly perfect" forever
+        # (the incremental path is the normal daily path; --rebuild is the
+        # exception). None makes _derive_group emit no value until a rebuild.
+        restored["market_brier_sum"] = g.get("market_brier_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores

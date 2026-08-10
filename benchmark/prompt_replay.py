@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
+import pydantic
 import requests
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
@@ -663,6 +664,7 @@ def _render_tournament_evidence(tool_name: str, source_content: Any) -> Optional
             "cannot render tournament evidence for %r the way the tool does; "
             "row dropped",
             tool_name,
+            exc_info=True,
         )
         return None
     return rendered or None
@@ -683,6 +685,31 @@ def _write_replay_rows(output: Path, rows: list[dict[str, Any]]) -> None:
     with open(output, "w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row) + "\n")
+
+
+def _drop_reason_detail(dropped: dict[str, int]) -> str:
+    """Explain a tournament shortfall from its per-reason drop counts.
+
+    The failure message is the only artifact a human sees when both arms come
+    up empty, and "the tournament arm has none either" gives them nowhere to
+    start: a roster/name mismatch (every row ``wrong_tool``) and a genuinely
+    absent tool (no rows at all) read identically. Naming the dominant reasons
+    turns that into a next step.
+
+    :param dropped: per-reason drop counts from :func:`_load_tournament_rows`.
+    :return: a parenthesised detail clause, or "" when ``dropped`` is empty
+        because the tournament files were absent -- the caller's own text
+        already conveys that state. (An all-zero ``dropped`` cannot reach a
+        caller: :func:`_load_tournament_rows` returns a bare ``{}`` for the
+        missing-files case and otherwise only omits counts it never saw.)
+    """
+    hit = sorted(
+        ((k, v) for k, v in dropped.items() if v), key=lambda kv: (-kv[1], kv[0])
+    )
+    if not hit:
+        return ""
+    shown = ", ".join(f"{k}={v}" for k, v in hit)
+    return f" ({sum(v for _, v in hit)} tournament row(s) dropped: {shown})"
 
 
 def _load_tournament_rows(
@@ -908,21 +935,21 @@ def enrich(
     # an invisible assumption.
     stats_path = output.with_name(output.name + ".filter_stats.json")
     stats_path.parent.mkdir(parents=True, exist_ok=True)
-    stats_path.write_text(
-        json.dumps(
-            {
-                "source": "production",
-                "accepted": len(rows),
-                "rejected": rejected,
-                "no_row_id": no_row_id,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    # Kept in memory so the post-enrichment update below can rewrite the file
+    # from this dict rather than reading its own output back.
+    production_stats: dict[str, Any] = {
+        "source": "production",
+        "accepted": len(rows),
+        "rejected": rejected,
+        "no_row_id": no_row_id,
+    }
+    stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
     log.info("Wrote filter stats: %s", stats_path)
 
     scope = f" [platform={platform_filter}]" if platform_filter else ""
+    # Captured out of the closure so the failure paths below can say WHY the
+    # tournament arm produced nothing, rather than only that it did.
+    fallback_dropped: dict[str, int] = {}
 
     def _tournament_fallback(why: str) -> bool:
         """Write tournament-sourced rows to ``output``; True when it produced any.
@@ -930,6 +957,7 @@ def enrich(
         :param why: what made the production path unusable (for the log).
         :return: whether replayable rows were written.
         """
+        nonlocal fallback_dropped
         log.warning("%s for %r%s; trying the tournament arm", why, tool_filter, scope)
         fallback_rows, fallback_dropped = _load_tournament_rows(
             tool_filter, platform_filter, tournament_scored, tournament_predictions
@@ -951,7 +979,12 @@ def enrich(
                     "source": "tournament",
                     "accepted": len(fallback_rows),
                     "rejected": {k: v for k, v in fallback_dropped.items() if v},
-                    "no_row_id": fallback_dropped.get("no_row_id", 0),
+                    # The tournament arm DROPS rows that lack a row_id, so that
+                    # count belongs in `rejected` above. This top-level key
+                    # means "rows we KEPT despite having no row_id" (production
+                    # semantics -- they bypass dedup), which is 0 by
+                    # construction here.
+                    "no_row_id": 0,
                     "production_attempt": {
                         "accepted": production_accepted,
                         "rejected": rejected,
@@ -974,7 +1007,7 @@ def enrich(
             return
         raise SystemExit(
             f"0 rows for baseline {tool_filter!r}{scope} in production or "
-            "the tournament arm"
+            f"the tournament arm{_drop_reason_detail(fallback_dropped)}"
         )
 
     # Stratified sample BEFORE IPFS fetch to avoid unnecessary downloads.
@@ -1016,23 +1049,43 @@ def enrich(
         # delivery hash, unfetchable prompt, unparseable components). Writing
         # an empty file here would hand the replay stage a silently zero-row
         # benchmark -- worse than #416's loud failure. Try the tournament arm.
+        # `len(rows)`, not `production_accepted`: the sample above already
+        # narrowed the pool, so only these rows were ever handed to IPFS.
+        # Reporting the pre-sample count read as "500 rows all failed" when 50
+        # were attempted -- and this string is surfaced verbatim in the PR
+        # comment via the sidecar's `fallback_reason`. The pre-sample total
+        # stays available under `production_attempt.accepted`.
         if _tournament_fallback(
-            f"{production_accepted} production rows but 0 survived IPFS " "enrichment"
+            f"{len(rows)} production rows but 0 survived IPFS enrichment"
         ):
             return
         raise SystemExit(
             f"0 replayable rows for baseline {tool_filter!r}{scope}: "
             f"{len(rows)} production rows yielded no usable prompt and the "
-            "tournament arm has none either"
+            f"tournament arm has none either{_drop_reason_detail(fallback_dropped)}"
         )
     _log_platform_breakdown(enriched)
 
-    # Write
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        for row in enriched:
-            f.write(json.dumps(row) + "\n")
+    # Rows lost between the sample and here (no delivery hash, unfetchable
+    # prompt, unparseable components) leave on bare `continue`s with no bucket,
+    # so they are the one shortfall a reader cannot attribute when reconciling
+    # the pool size against the scored count. The sidecar was written before
+    # the fetch ran, so record the loss now rather than leaving it only in a
+    # log line the PR comment never sees.
+    if len(enriched) < len(rows):
+        # Rebuilt from the in-memory dict, not read back from disk: a deleted
+        # or truncated sidecar would otherwise raise here and throw away rows
+        # that were already fetched and enriched.
+        production_stats["enrichment_failed"] = len(rows) - len(enriched)
+        stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
+        log.info(
+            "%d row(s) lost during IPFS enrichment; recorded in %s",
+            len(rows) - len(enriched),
+            stats_path,
+        )
 
+    # Write
+    _write_replay_rows(output, enriched)
     log.info("Written to %s", output)
 
 
@@ -1123,7 +1176,6 @@ def stratified_sample(
             for key in non_empty:
                 allocations[key] = min(allocations[key], len(non_empty[key]))
 
-            # Ensure total matches budget (distribute remainder largest-first)
             allocated = sum(allocations.values())
             deficit = budget - allocated
             if deficit > 0:
@@ -1135,6 +1187,26 @@ def stratified_sample(
                     deficit -= add
                     if deficit == 0:
                         break
+
+        # Ensure total matches budget. The round() above can push the total
+        # OVER, which is why `--sample 300` returned 301 and `--sample 10`
+        # returned 12; only the deficit direction was corrected.
+        allocated = sum(allocations.values())
+        surplus = allocated - budget
+        if surplus > 0:
+            # Trim largest-first, NEVER below one row per stratum. When there
+            # are more non-empty strata than budget the floor is allowed to
+            # win -- covering every (outcome, brier-bucket) stratum matters
+            # more than the exact count there, because dropping strata biases
+            # the sample. That is the only case permitted to exceed N;
+            # rounding is not.
+            for key in sorted(non_empty, key=lambda k: allocations[k], reverse=True):
+                if surplus <= 0:
+                    break
+                take = min(surplus, allocations[key] - 1)
+                if take > 0:
+                    allocations[key] -= take
+                    surplus -= take
 
         # Sample from each stratum
         platform_sampled = 0
@@ -1278,12 +1350,7 @@ def _call_openai_structured(
             )
             return None
         return json.dumps(
-            {
-                "p_yes": parsed.p_yes,
-                "p_no": parsed.p_no,
-                "confidence": parsed.confidence,
-                "info_utility": parsed.info_utility,
-            }
+            {name: getattr(parsed, name) for name in STRUCTURED_OUTPUT_FIELDS}
         )
     except Exception as e:
         log.warning("Structured LLM call failed: %s", e)
@@ -1292,36 +1359,111 @@ def _call_openai_structured(
         client.close()
 
 
-# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
-# Map: tool_name → (tool_module_import_path, schema_class_name).
-_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
-    "superforcaster": (
-        "packages.valory.customs.superforcaster.superforcaster",
-        "PredictionResult",
-    ),
-    "superforcaster-polymarket-v4": (
-        "packages.valory.customs.superforcaster_polymarket_v4."
-        "superforcaster_polymarket_v4",
-        "PredictionResult",
-    ),
-    "factual_research": (
-        "packages.valory.customs.factual_research.factual_research",
-        "PredictionResult",
-    ),
-}
+# Name of the Pydantic schema every structured-output tool exposes. Tools that
+# call ``client.beta.chat.completions.parse`` in their own ``run()`` define it;
+# tools that put format directives in the prompt do not.
+STRUCTURED_OUTPUT_SCHEMA_ATTR = "PredictionResult"
+
+# The on-chain contract fields, in delivery order. Single source for the three
+# places that must agree on them: the resolver's schema validation, the fields
+# ``_call_openai_structured`` extracts from the parsed response, and the test
+# suite's AST discovery (which imports this rather than re-declaring it).
+STRUCTURED_OUTPUT_FIELDS: tuple[str, ...] = (
+    "p_yes",
+    "p_no",
+    "confidence",
+    "info_utility",
+)
+
+# Model IDs the OpenAI structured-outputs client can drive. This is the ONE
+# definition of "structured-capable" -- deliberately NARROWER than call_llm's
+# routing (negative `"claude" in model`), because the failure modes are
+# asymmetric: an unknown ID on the plain path still gets a well-formed
+# prompt-directive call, while an unknown ID sent to
+# ``beta.chat.completions.parse`` fails per-row inside a broad except and
+# scores 0% with a green exit. `chatgpt-` and `ft:gpt-` are documented OpenAI
+# shapes that a bare `gpt-` prefix misses.
+_OPENAI_STRUCTURED_PREFIXES = ("gpt-", "chatgpt-", "ft:gpt-", "o1", "o3", "o4")
+
+
+def _is_openai_structured_model(model: str) -> bool:
+    """Whether ``model`` can be driven through the OpenAI structured client.
+
+    :param model: model identifier from --model / DEFAULT_MODEL.
+    :return: True only for known-OpenAI ID shapes; unknown IDs take the
+        plain-prompt path, which any backend can accept (fidelity for
+        Anthropic-branch structured tools is a separate, known gap -- see
+        :func:`_get_structured_output_schema`).
+    """
+    return model.startswith(_OPENAI_STRUCTURED_PREFIXES)
 
 
 def _get_structured_output_schema(tool_name: str) -> Optional[type]:
-    """Return the Pydantic schema class for a structured-output tool, or None."""
-    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
-    if entry is None:
-        return None
-    module_path, class_name = entry
-    # pylint: disable=import-outside-toplevel
-    from importlib import import_module
+    """Return the Pydantic schema class for a structured-output tool, or None.
 
-    module = import_module(module_path)
-    return getattr(module, class_name)
+    Read off the tool's own module rather than a hand-maintained name->schema
+    map. That map carried no information: every entry repeated the module path
+    already in ``TOOL_REGISTRY`` and named the same class. What it did carry
+    was an obligation to remember, and the record on that was 0 for 6 --
+    ``factual_research-v1``/``-v2``/``-v3`` were never added and were being
+    replayed unstructured, and ``superforcaster-polymarket-v4`` was missing for
+    22 days. The symptom is silent: replay falls back to a plain call, the
+    model answers in prose, and every row scores as malformed while the run
+    still reports success.
+
+    A tool defines this attribute exactly when its ``run()`` uses structured
+    outputs, so asking the module keeps replay faithful to production by
+    construction -- for the OPENAI branch. An Anthropic-branch structured tool
+    (``factual_research-v3``: schema appended to the system prompt via
+    ``_JSON_RESPONSE_INSTRUCTION``, response validated with
+    ``model_validate_json``) cannot currently be replayed faithfully: at a
+    claude model the gate discards the schema this resolver returns, and the
+    prompt-directive block is not reproduced. Known gap, tracked for a
+    follow-up Anthropic structured path.
+
+    Scope of the wrong-module guarantee: a wrong-but-importable module fails
+    here only when it defines a MALFORMED ``PredictionResult``. A module that
+    simply lacks the attribute returns ``None`` -- indistinguishable from a
+    legitimate plain-prompt tool at this layer; the AST discovery test is the
+    backstop for that case.
+
+    ``import_module`` can additionally propagate ``ImportError`` for an
+    unimportable module -- unreachable at the production call site
+    (``replay()`` imports the candidate module unconditionally before the
+    per-row loop, so this always hits ``sys.modules``) but reachable for
+    direct callers such as tests.
+
+    :param tool_name: registry key for the tool being replayed.
+    :return: the Pydantic schema class, or ``None`` when the tool is not a
+        structured-output tool (or is not registered).
+    :raises ValueError: when the attribute exists but is not a usable
+        prediction schema (not a Pydantic model, or missing one of the four
+        fields ``_call_openai_structured`` reads). A renamed base class or a
+        ``spec.module`` pointing at the wrong-but-importable module must fail
+        HERE, by name, not as an opaque OpenAI 400 per row.
+    """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    module = importlib.import_module(spec.module)
+    schema = getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
+    if schema is None:
+        return None
+    required = set(STRUCTURED_OUTPUT_FIELDS)
+    # ``getattr`` at the read, not attribute access: pydantic resolves untyped
+    # in the lint env, so ``issubclass`` narrows to nothing and every direct
+    # ``schema.model_fields`` spelling fails mypy. Runtime-identical -- the
+    # attribute is guaranteed present once ``issubclass`` has passed.
+    if isinstance(schema, type) and issubclass(schema, pydantic.BaseModel):
+        if required <= set(getattr(schema, "model_fields", {})):
+            return schema
+    raise ValueError(
+        f"{tool_name}: {STRUCTURED_OUTPUT_SCHEMA_ATTR} in {spec.module} is "
+        "not a usable prediction schema (must be a Pydantic model with "
+        f"fields {sorted(required)}). Refusing to replay it structured -- "
+        "a bad schema would fail per-row inside a broad except and score "
+        "0% while the run reports success."
+    )
 
 
 def _call_anthropic(
@@ -1553,16 +1695,26 @@ def _log_replay_summary(
             )
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
-        # Scoping buckets + not_valid_parse make up the full rejected total;
-        # iterate SCOPING_BUCKETS so this can't drift out of sync.
-        breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+        if filter_stats.get("source") == "tournament":
+            # The tournament arm drops rows for its OWN reasons (bad_json,
+            # no_question, no_evidence, unrenderable, ...), none of which are
+            # scoping buckets. Enumerating SCOPING_BUCKETS here printed six
+            # production buckets at zero beside a non-zero total -- a line
+            # that contradicted itself. Render the counts actually recorded.
+            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(r.items()) if v)
+        else:
+            # Production: scoping buckets + not_valid_parse account for the
+            # whole total, so enumerate them even at zero (a bucket that stops
+            # appearing is itself the signal) rather than printing only what
+            # happens to be non-zero.
+            breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+            breakdown += f", not_valid_parse={r.get('not_valid_parse', 0)}"
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (%s, not_valid_parse=%d)  no_row_id=%d",
+            "    Accepted: %d   Rejected: %d (%s)  no_row_id=%d",
             filter_stats.get("accepted", 0),
             total_rej,
-            breakdown,
-            r.get("not_valid_parse", 0),
+            breakdown or "none",
             filter_stats.get("no_row_id", 0),
         )
 
@@ -1906,6 +2058,18 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         W-2 rows. The candidate must share the baseline's prompt-attribute
         schema (PREDICTION_PROMPT / ESTIMATE_USER / etc.) and be registered in
         benchmark.tools.TOOL_REGISTRY.
+    :raises ValueError: when the pairing cannot be replayed — the baseline
+        tool named by the enriched rows is not in
+        ``benchmark.tools.TOOL_REGISTRY``; ``--candidate-tool`` names a tool
+        that is not either; a vLLM candidate is paired with a non-superforcaster
+        baseline (it renders its prompt from that family's extracted sources);
+        the candidate is a two-stage reasoning tool while the rows carry no
+        ``extracted_reasoning`` (tournament-sourced rows never do); or the
+        candidate's template asks for a placeholder the enriched rows do not
+        carry (via :func:`_assert_prompt_is_replayable`, which names the
+        missing field -- the most useful of the five when a schema regression
+        is the cause). Raised rather than returned so a mis-specified benchmark
+        fails the job instead of publishing a verdict computed from nothing.
     """
     # Load enriched dataset first to detect tool
     sampled: list[dict[str, Any]] = load_jsonl(dataset)
@@ -2054,6 +2218,36 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         phase,
     )
 
+    # Structured-output resolution, hoisted: candidate_tool_name and model are
+    # loop-invariant, so resolving per row logged ~N identical lines, re-ran
+    # the validation N times, and -- worst -- raised the startup-knowable
+    # config ValueError at row 1, AFTER the first baseline line was flushed,
+    # leaving a partial baseline.jsonl beside an empty candidate.jsonl.
+    # vLLM and reasoning candidates never read the schema and must not fail
+    # on a validation irrelevant to them.
+    #
+    # Keyed on the CANDIDATE tool, not the baseline: for an in-place edit the
+    # two names match, but a new-version candidate may be structured while
+    # the baseline is not. Gated on a positive OpenAI-model match, not
+    # `"claude" not in model`: the structured path is hardwired to
+    # `beta.chat.completions.parse`, and an unknown model routed there fails
+    # per-row inside the broad except and scores 0% while the run reports
+    # success. Unknown models take the plain-prompt path -- which any backend
+    # ACCEPTS, though not always faithfully: an Anthropic-branch structured
+    # tool (factual_research-v3 at claude) appends its schema to the system
+    # prompt in production, which replay does not reproduce (known gap, see
+    # _get_structured_output_schema).
+    structured_schema: Optional[type] = None
+    if not is_vllm_candidate and not is_reasoning_tool:
+        if _is_openai_structured_model(model):
+            structured_schema = _get_structured_output_schema(candidate_tool_name)
+        log.info(
+            "candidate=%s model=%s structured=%s",
+            candidate_tool_name,
+            model,
+            structured_schema is not None,
+        )
+
     # Prepare output
     _prepare_output_dir(output_dir)
     baseline_path = output_dir / "baseline.jsonl"
@@ -2158,15 +2352,6 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
-                # Key the structured-output lookup on the CANDIDATE tool, not the
-                # baseline: for an in-place edit the two names match, but for a
-                # new-version candidate (e.g. superforcaster-polymarket-v1 ->
-                # -v4) the candidate may be structured while the baseline is not.
-                structured_schema = (
-                    _get_structured_output_schema(candidate_tool_name)
-                    if "claude" not in model
-                    else None
-                )
                 if structured_schema is not None:
                     response_text = _call_openai_structured(
                         model=model,

@@ -162,6 +162,37 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # F14: fail in seconds on a config the replay step would only reject
+      # minutes later. Registration is knowable the moment the command parses;
+      # the 2026-08-04 full_search run spent 6m32s and 301 IPFS fetches
+      # discovering an unregistered baseline at the replay step (302 identical
+      # warnings in between). Schema resolution raises here too, by name, so a
+      # present-but-unusable PredictionResult is caught before any download.
+      - name: Preflight tool registration
+        env:
+          TOOL: ${{ steps.parse.outputs.tool }}
+          CANDIDATE_TOOL: ${{ steps.parse.outputs.candidate_tool }}
+        run: |
+          uv run python -c '
+          import sys
+          from benchmark.tools import TOOL_REGISTRY
+          from benchmark.prompt_replay import _get_structured_output_schema
+
+          tool, candidate = sys.argv[1], sys.argv[2] or sys.argv[1]
+          missing = sorted({n for n in (tool, candidate) if n not in TOOL_REGISTRY})
+          if missing:
+              print(
+                  f"::error::not registered in benchmark/tools.py "
+                  f"TOOL_REGISTRY: {missing}. Add a ToolSpec entry (same "
+                  f"family as the parent). Registered: {sorted(TOOL_REGISTRY)}"
+              )
+              sys.exit(1)
+          # Raises ValueError naming tool+module on a present-but-unusable
+          # schema; returns None for plain-prompt tools, which is fine.
+          _get_structured_output_schema(candidate)
+          print(f"preflight ok: tool={tool} candidate={candidate}")
+          ' "$TOOL" "$CANDIDATE_TOOL"
+
       # Download latest production log from flywheel
       - name: Download production log
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3

@@ -654,6 +654,26 @@ def main() -> None:
     # deleting the signal the health block exists to carry.
     candidate_metrics["parse_reliability"] = _compute_parse_reliability(candidate_rows)
 
+    # A run that scored nothing is a FAILURE, not a result. Keyed on the
+    # PAIRED count, not on row counts: a tournament-fallback run legitimately
+    # has zero production rows and still scores, while the 2026-08-04 v5 run
+    # had 300 candidate rows -- all malformed -- and exited green with a
+    # published verdict. #420 made the rendering honest ("Computed on 0
+    # markets"); this makes the exit code honest too, so the run goes red,
+    # the incomplete-benchmark notice fires, and no verdict is published.
+    if candidate_metrics["n"] == 0:
+        rel = candidate_metrics["parse_reliability"]
+        breakdown = ", ".join(
+            f"{k}={rel['breakdown'][k]}" for k in PARSE_STATUS_BUCKETS
+        )
+        print(
+            f"ERROR: 0 of {rel['total']} candidate responses were usable "
+            f"({breakdown}); refusing to publish a verdict computed on "
+            "nothing.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # Infer tool from data
     tool = baseline_rows[0].get("tool_name", "unknown")
 

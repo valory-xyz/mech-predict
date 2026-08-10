@@ -788,6 +788,42 @@ class TestMainRowGuards:
         assert code == 1
         assert "No candidate rows" in capsys.readouterr().err
 
+    def test_all_malformed_candidate_fails_the_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """A run that scored nothing must exit nonzero, not publish a verdict.
+
+        The 2026-08-04 v5 run had 300 candidate rows -- every one malformed --
+        and exited green with a posted report. The rendering was already made
+        honest ("Computed on 0 markets"); this pins the exit code, which is
+        what makes the run go red and the incomplete-benchmark notice fire.
+        Keyed on the PAIRED count so a tournament-fallback run (zero
+        production rows, real scored pairs) is untouched.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        code = self._run(
+            tmp_path,
+            monkeypatch,
+            [
+                {
+                    **_row("malformed", p_yes=None),
+                    "question_text": f"Q{i}?",
+                }
+                for i in range(3)
+            ],
+        )
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "0 of 3 candidate responses were usable" in err
+        assert "malformed=3" in err
+        assert "refusing to publish" in err.lower()
+
     def test_populated_candidate_renders(
         self,
         tmp_path: Path,

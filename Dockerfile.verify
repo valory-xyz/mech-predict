@@ -1,0 +1,86 @@
+# syntax=docker/dockerfile:1
+#
+# Image for the mech-predict / mech-analytics parity verification script
+# (scripts/verify_migration_swap.py). Used by infra as a K8s Job during
+# consumer-migration rollouts to prove the mech-analytics lake covers
+# every on-chain request the marketplace subgraph knows about and the
+# per-tool numbers agree.
+#
+# Published on tag as valory/mech-predict-verify:<version> via
+# .github/workflows/publish-verify-image.yaml.
+#
+# Runtime deps come from uv.lock so the image is reproducible from any
+# commit. The image ships benchmark/ (the module the script imports
+# transitively) and scripts/verify_migration_swap.py; ``benchmark/tests``
+# is excluded via .dockerignore so pytest fixtures don't ride along.
+#
+# Runtime contract:
+#   * env: MECH_ANALYTICS_URL, plus subgraph URLs (see script docstring).
+#     Optional PREDICT_API_POSTGRES_URL: predict-api DSN. When mounted
+#     as a secret env var at run time, the coverage check queries
+#     ``mech_migration_failures`` and excludes rows the IPFS ingestor
+#     marks as unparseable-upstream (parsed_request_null,
+#     parsed_delivery_null, unhandled_type_prompt) from the missing-
+#     from-lake set before computing the verdict. Without it the
+#     verdict is raw coverage and can fail exit 4 on a known-loss
+#     population the pipeline can't ingest (~510K rows in production
+#     as of 2026-08). Pass at runtime only, never as a build-arg —
+#     the DSN embeds credentials.
+#   * mount: /reports for --output-dir report artifacts
+#   * exit codes: 0 pass, 2 min-row, 3 parity divergence, 4 coverage gap
+
+FROM python:3.13-slim AS base
+
+# Bake the source commit into the image at build time. The verify script
+# reads GIT_SHA from the env; without this the ``git rev-parse`` fallback
+# fires and every artifact attributes the run to ``unknown`` since the
+# image ships without a git binary and without a .git directory.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
+
+# uv comes from its official static-linked distroless image. Must be
+# >= 0.6 because pyproject.toml uses the ``default-groups = "all"``
+# string shorthand (the older list form landed in uv 0.4; the string
+# shorthand only in 0.6). 0.5.14 fails at ``uv sync`` parse time with
+# "invalid type: string \"all\", expected a sequence".
+COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /uvx /usr/local/bin/
+
+WORKDIR /app
+
+# The verify script imports ``from benchmark.datasets import ...``, so
+# the repo root must be on sys.path. ``--no-install-project`` below
+# means the ``benchmark`` package is copied in but not installed as a
+# wheel, so nothing else adds /app to sys.path. Setting PYTHONPATH
+# here fixes ``ModuleNotFoundError: No module named 'benchmark'`` when
+# the entrypoint runs and puts /app/scripts on sys.path[0].
+ENV PYTHONPATH=/app
+
+# Non-root runtime — image writes to /reports which infra mounts,
+# never to /app. Create the user BEFORE ``uv sync`` so the virtualenv
+# and every file layered on top are owned by ``verifier`` at build
+# time, avoiding a redundant recursive chown of the (large) .venv tree
+# at the end of the build.
+RUN useradd --system --create-home --uid 1001 verifier \
+    && chown verifier:verifier /app
+USER verifier
+
+# Layer dep install ahead of source copy so a script edit doesn't
+# invalidate the (slow) dependency layer.
+COPY --chown=verifier:verifier pyproject.toml uv.lock ./
+
+# --no-dev: the verifier doesn't need pytest, black, mypy, etc.
+# --no-install-project: the ``benchmark`` package is copied in below
+# rather than installed as a wheel (mech-predict's pyproject only
+# packages ``packages/`` anyway, so a full install wouldn't help).
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Copy only what the script imports. benchmark/ is the transitive
+# dep footprint; scripts/verify_migration_swap.py is the entry point.
+COPY --chown=verifier:verifier benchmark/ ./benchmark/
+COPY --chown=verifier:verifier \
+    scripts/verify_migration_swap.py \
+    ./scripts/verify_migration_swap.py
+
+# uv.venv sits at /app/.venv; using `uv run` keeps env + interpreter
+# discovery consistent with local invocations.
+ENTRYPOINT ["uv", "run", "--no-sync", "python", "scripts/verify_migration_swap.py"]

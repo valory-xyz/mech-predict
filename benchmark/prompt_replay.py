@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
+import pydantic
 import requests
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
@@ -1349,12 +1350,7 @@ def _call_openai_structured(
             )
             return None
         return json.dumps(
-            {
-                "p_yes": parsed.p_yes,
-                "p_no": parsed.p_no,
-                "confidence": parsed.confidence,
-                "info_utility": parsed.info_utility,
-            }
+            {name: getattr(parsed, name) for name in STRUCTURED_OUTPUT_FIELDS}
         )
     except Exception as e:
         log.warning("Structured LLM call failed: %s", e)
@@ -1363,36 +1359,111 @@ def _call_openai_structured(
         client.close()
 
 
-# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
-# Map: tool_name → (tool_module_import_path, schema_class_name).
-_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
-    "superforcaster": (
-        "packages.valory.customs.superforcaster.superforcaster",
-        "PredictionResult",
-    ),
-    "superforcaster-polymarket-v4": (
-        "packages.valory.customs.superforcaster_polymarket_v4."
-        "superforcaster_polymarket_v4",
-        "PredictionResult",
-    ),
-    "factual_research": (
-        "packages.valory.customs.factual_research.factual_research",
-        "PredictionResult",
-    ),
-}
+# Name of the Pydantic schema every structured-output tool exposes. Tools that
+# call ``client.beta.chat.completions.parse`` in their own ``run()`` define it;
+# tools that put format directives in the prompt do not.
+STRUCTURED_OUTPUT_SCHEMA_ATTR = "PredictionResult"
+
+# The on-chain contract fields, in delivery order. Single source for the three
+# places that must agree on them: the resolver's schema validation, the fields
+# ``_call_openai_structured`` extracts from the parsed response, and the test
+# suite's AST discovery (which imports this rather than re-declaring it).
+STRUCTURED_OUTPUT_FIELDS: tuple[str, ...] = (
+    "p_yes",
+    "p_no",
+    "confidence",
+    "info_utility",
+)
+
+# Model IDs the OpenAI structured-outputs client can drive. This is the ONE
+# definition of "structured-capable" -- deliberately NARROWER than call_llm's
+# routing (negative `"claude" in model`), because the failure modes are
+# asymmetric: an unknown ID on the plain path still gets a well-formed
+# prompt-directive call, while an unknown ID sent to
+# ``beta.chat.completions.parse`` fails per-row inside a broad except and
+# scores 0% with a green exit. `chatgpt-` and `ft:gpt-` are documented OpenAI
+# shapes that a bare `gpt-` prefix misses.
+_OPENAI_STRUCTURED_PREFIXES = ("gpt-", "chatgpt-", "ft:gpt-", "o1", "o3", "o4")
+
+
+def _is_openai_structured_model(model: str) -> bool:
+    """Whether ``model`` can be driven through the OpenAI structured client.
+
+    :param model: model identifier from --model / DEFAULT_MODEL.
+    :return: True only for known-OpenAI ID shapes; unknown IDs take the
+        plain-prompt path, which any backend can accept (fidelity for
+        Anthropic-branch structured tools is a separate, known gap -- see
+        :func:`_get_structured_output_schema`).
+    """
+    return model.startswith(_OPENAI_STRUCTURED_PREFIXES)
 
 
 def _get_structured_output_schema(tool_name: str) -> Optional[type]:
-    """Return the Pydantic schema class for a structured-output tool, or None."""
-    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
-    if entry is None:
-        return None
-    module_path, class_name = entry
-    # pylint: disable=import-outside-toplevel
-    from importlib import import_module
+    """Return the Pydantic schema class for a structured-output tool, or None.
 
-    module = import_module(module_path)
-    return getattr(module, class_name)
+    Read off the tool's own module rather than a hand-maintained name->schema
+    map. That map carried no information: every entry repeated the module path
+    already in ``TOOL_REGISTRY`` and named the same class. What it did carry
+    was an obligation to remember, and the record on that was 0 for 6 --
+    ``factual_research-v1``/``-v2``/``-v3`` were never added and were being
+    replayed unstructured, and ``superforcaster-polymarket-v4`` was missing for
+    22 days. The symptom is silent: replay falls back to a plain call, the
+    model answers in prose, and every row scores as malformed while the run
+    still reports success.
+
+    A tool defines this attribute exactly when its ``run()`` uses structured
+    outputs, so asking the module keeps replay faithful to production by
+    construction -- for the OPENAI branch. An Anthropic-branch structured tool
+    (``factual_research-v3``: schema appended to the system prompt via
+    ``_JSON_RESPONSE_INSTRUCTION``, response validated with
+    ``model_validate_json``) cannot currently be replayed faithfully: at a
+    claude model the gate discards the schema this resolver returns, and the
+    prompt-directive block is not reproduced. Known gap, tracked for a
+    follow-up Anthropic structured path.
+
+    Scope of the wrong-module guarantee: a wrong-but-importable module fails
+    here only when it defines a MALFORMED ``PredictionResult``. A module that
+    simply lacks the attribute returns ``None`` -- indistinguishable from a
+    legitimate plain-prompt tool at this layer; the AST discovery test is the
+    backstop for that case.
+
+    ``import_module`` can additionally propagate ``ImportError`` for an
+    unimportable module -- unreachable at the production call site
+    (``replay()`` imports the candidate module unconditionally before the
+    per-row loop, so this always hits ``sys.modules``) but reachable for
+    direct callers such as tests.
+
+    :param tool_name: registry key for the tool being replayed.
+    :return: the Pydantic schema class, or ``None`` when the tool is not a
+        structured-output tool (or is not registered).
+    :raises ValueError: when the attribute exists but is not a usable
+        prediction schema (not a Pydantic model, or missing one of the four
+        fields ``_call_openai_structured`` reads). A renamed base class or a
+        ``spec.module`` pointing at the wrong-but-importable module must fail
+        HERE, by name, not as an opaque OpenAI 400 per row.
+    """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    module = importlib.import_module(spec.module)
+    schema = getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
+    if schema is None:
+        return None
+    required = set(STRUCTURED_OUTPUT_FIELDS)
+    # ``getattr`` at the read, not attribute access: pydantic resolves untyped
+    # in the lint env, so ``issubclass`` narrows to nothing and every direct
+    # ``schema.model_fields`` spelling fails mypy. Runtime-identical -- the
+    # attribute is guaranteed present once ``issubclass`` has passed.
+    if isinstance(schema, type) and issubclass(schema, pydantic.BaseModel):
+        if required <= set(getattr(schema, "model_fields", {})):
+            return schema
+    raise ValueError(
+        f"{tool_name}: {STRUCTURED_OUTPUT_SCHEMA_ATTR} in {spec.module} is "
+        "not a usable prediction schema (must be a Pydantic model with "
+        f"fields {sorted(required)}). Refusing to replay it structured -- "
+        "a bad schema would fail per-row inside a broad except and score "
+        "0% while the run reports success."
+    )
 
 
 def _call_anthropic(
@@ -2147,6 +2218,36 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         phase,
     )
 
+    # Structured-output resolution, hoisted: candidate_tool_name and model are
+    # loop-invariant, so resolving per row logged ~N identical lines, re-ran
+    # the validation N times, and -- worst -- raised the startup-knowable
+    # config ValueError at row 1, AFTER the first baseline line was flushed,
+    # leaving a partial baseline.jsonl beside an empty candidate.jsonl.
+    # vLLM and reasoning candidates never read the schema and must not fail
+    # on a validation irrelevant to them.
+    #
+    # Keyed on the CANDIDATE tool, not the baseline: for an in-place edit the
+    # two names match, but a new-version candidate may be structured while
+    # the baseline is not. Gated on a positive OpenAI-model match, not
+    # `"claude" not in model`: the structured path is hardwired to
+    # `beta.chat.completions.parse`, and an unknown model routed there fails
+    # per-row inside the broad except and scores 0% while the run reports
+    # success. Unknown models take the plain-prompt path -- which any backend
+    # ACCEPTS, though not always faithfully: an Anthropic-branch structured
+    # tool (factual_research-v3 at claude) appends its schema to the system
+    # prompt in production, which replay does not reproduce (known gap, see
+    # _get_structured_output_schema).
+    structured_schema: Optional[type] = None
+    if not is_vllm_candidate and not is_reasoning_tool:
+        if _is_openai_structured_model(model):
+            structured_schema = _get_structured_output_schema(candidate_tool_name)
+        log.info(
+            "candidate=%s model=%s structured=%s",
+            candidate_tool_name,
+            model,
+            structured_schema is not None,
+        )
+
     # Prepare output
     _prepare_output_dir(output_dir)
     baseline_path = output_dir / "baseline.jsonl"
@@ -2251,15 +2352,6 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
-                # Key the structured-output lookup on the CANDIDATE tool, not the
-                # baseline: for an in-place edit the two names match, but for a
-                # new-version candidate (e.g. superforcaster-polymarket-v1 ->
-                # -v4) the candidate may be structured while the baseline is not.
-                structured_schema = (
-                    _get_structured_output_schema(candidate_tool_name)
-                    if "claude" not in model
-                    else None
-                )
                 if structured_schema is not None:
                     response_text = _call_openai_structured(
                         model=model,

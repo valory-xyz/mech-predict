@@ -91,6 +91,13 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
             brier = brier_score(p_yes, outcome)
             edge = edge_score(p_yes, market_prob, outcome)
             group["edge_sum"] += edge
+            # The market's own Brier on this row. Accumulated separately
+            # rather than derived as ``brier + edge`` at read time: ``brier``
+            # averages over ALL valid rows while ``edge`` averages over the
+            # edge-eligible subset, so that identity only holds when the two
+            # pools coincide. Storing the market's error over its own pool
+            # keeps the reported figure exact.
+            group["market_brier_sum"] += (market_prob - (1.0 if outcome else 0.0)) ** 2
             group["edge_n"] += 1
             if edge > 0:
                 group["edge_positive_count"] += 1
@@ -176,9 +183,11 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     result["edge_n"] = edge_n
     if edge_n > 0:
         result["edge"] = round(group["edge_sum"] / edge_n, 4)
+        result["market_brier"] = round(group.get("market_brier_sum", 0.0) / edge_n, 4)
         result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
     else:
         result["edge"] = None
+        result["market_brier"] = None
         result["edge_positive_rate"] = None
 
     # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias

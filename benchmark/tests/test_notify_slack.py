@@ -33,6 +33,7 @@ from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
     _build_system_prompt,
     _compute_top_k,
+    _computed_tables_enabled,
     _configure_logging,
     _count_eligible_tools,
     _infer_platform_label,
@@ -521,3 +522,39 @@ class TestPostToSlack:
         monkeypatch.setattr("benchmark.notify_slack.urlopen", _fake_urlopen)
         with pytest.raises(RuntimeError, match="invalid_payload"):
             post_to_slack(self._WEBHOOK, "hello")
+
+
+class TestComputedTablesFlag:
+    """The computed tables are opt-in while the redesign is validated."""
+
+    def test_disabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset variable keeps the existing digest untouched."""
+        monkeypatch.delenv("BENCHMARK_COMPUTED_TABLES", raising=False)
+        assert _computed_tables_enabled() is False
+
+    @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on", " true "])
+    def test_truthy_values_enable(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Common truthy spellings all turn the tables on.
+
+        The flywheel sets this from a repo variable, where "true" and "1" are
+        both idiomatic; a strict == "true" check would silently no-op.
+
+        :param monkeypatch: pytest fixture.
+        :param value: environment value under test.
+        """
+        monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", value)
+        assert _computed_tables_enabled() is True
+
+    @pytest.mark.parametrize("value", ["false", "0", "off", ""])
+    def test_falsy_values_stay_off(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Anything else leaves the digest exactly as it is today.
+
+        :param monkeypatch: pytest fixture.
+        :param value: environment value under test.
+        """
+        monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", value)
+        assert _computed_tables_enabled() is False

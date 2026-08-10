@@ -33,6 +33,7 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
+from benchmark.digest_tables import build_digest_messages
 from benchmark.roi_slack import build_roi_section
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
@@ -396,6 +397,23 @@ _PLATFORM_KEY_BY_LABEL: Mapping[str, str] = MappingProxyType(
 )
 
 
+def _computed_tables_enabled() -> bool:
+    """Check whether the computed-table messages should be posted.
+
+    Opt-in while the redesign is validated: the existing LLM digest keeps
+    posting unchanged, and the tables are appended as extra messages. Once the
+    tables are trusted they replace the transcription prompt entirely.
+
+    :return: True when BENCHMARK_COMPUTED_TABLES is set to a truthy value.
+    """
+    return os.environ.get("BENCHMARK_COMPUTED_TABLES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _infer_platform_label(report_path: Path) -> str | None:
     """Derive the deployment label from the report filename.
 
@@ -497,14 +515,41 @@ def main() -> None:
                 exc_info=True,
             )
 
+    # Computed tables: every cell is read from a scorer artifact, so nothing
+    # here can be mistranscribed or dropped the way an LLM rendering of the
+    # markdown report can. Each table is its OWN message -- Slack splits at
+    # ~3000 characters and a split breaks the code fence, destroying the
+    # alignment the table depends on. Off by default; flip
+    # BENCHMARK_COMPUTED_TABLES=true to post them.
+    table_messages: list[str] = []
+    if _computed_tables_enabled():
+        try:
+            platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
+            if platform_key is not None:
+                table_messages = build_digest_messages(
+                    args.report.parent, platform_key, args.roi_results
+                )
+        except Exception:  # pylint: disable=broad-except
+            log.warning(
+                "Computed tables build failed; posting digest without them.",
+                exc_info=True,
+            )
+
     if args.dry_run:
         print(summary)
+        for message in table_messages:
+            print(f"\n\n{message}")
         if roi_section:
             print(f"\n\n{roi_section}")
         return
 
     log.info("Posting to Slack...")
     post_to_slack(webhook_url, summary)
+    for message in table_messages:
+        try:
+            post_to_slack(webhook_url, message)
+        except Exception:  # pylint: disable=broad-except
+            log.warning("Posting a computed table failed; continuing.", exc_info=True)
     if roi_section:
         try:
             post_to_slack(webhook_url, roi_section)

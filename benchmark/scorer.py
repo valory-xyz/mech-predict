@@ -177,6 +177,7 @@ _ACCUM_KEYS = (
     "outcome_yes_count",
     "log_loss_sum",
     "edge_sum",
+    "market_brier_sum",
     "edge_n",
     "edge_positive_count",
     # Diagnostic edge metrics (PROPOSAL.md Stage 4)
@@ -237,6 +238,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 
 _DIAGNOSTIC_NONE: dict[str, Any] = {
     "edge": None,
+    "market_brier": None,
     "edge_n": 0,
     "edge_positive_rate": None,
     "conditional_accuracy_rate": None,
@@ -269,6 +271,14 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     edge_avg = round(sum(edges) / len(edges), 4)
+    # See grouping.accumulate_row: the market's Brier is averaged over the
+    # edge-eligible rows, NOT reconstructed from the tool's all-valid-row
+    # ``brier`` plus ``edge`` -- those two average over different pools.
+    market_briers = [
+        (r["market_prob_at_prediction"] - (1.0 if r["final_outcome"] else 0.0)) ** 2
+        for r in edge_rows
+    ]
+    market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -306,6 +316,7 @@ def _compute_edge_diagnostics(
 
     diag: dict[str, Any] = {
         "edge": edge_avg,
+        "market_brier": market_brier_avg,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,
@@ -1217,6 +1228,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         restored["outcome_yes_count"] = g.get("outcome_yes_count", 0)
         restored["log_loss_sum"] = g.get("log_loss_sum", 0.0)
         restored["edge_sum"] = g.get("edge_sum", 0.0)
+        restored["market_brier_sum"] = g.get("market_brier_sum", 0.0)
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores

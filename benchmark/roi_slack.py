@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.roi_sim import MODEL_DISPLAY, _is_number, roi_display_sort_key
+from benchmark.slack_tables import Column, ELLIPSIS, render_table
 
 log = logging.getLogger(__name__)
 
@@ -110,15 +111,18 @@ _FLAG_SHORT = {
     "no eligible rows in window": "no eligible",
 }
 _PARSE_RELIABILITY_RE = re.compile(r"(\d+)% parse reliability")
-_SEP = " | "
-
-_ELLIPSIS = "…"
+# Reused for the "+N more rows" continuation line below the table.
+_ELLIPSIS = ELLIPSIS
 
 # _HEADERS, _CAPS, and _row_cells() are parallel per-column tuples that
 # _render_table zips together; a length mismatch would silently drop a
 # column. Pin the header/cap coupling at import time; _render_table pins the
 # row arity at render time.
 assert len(_HEADERS) == len(_CAPS), "_HEADERS and _CAPS must stay the same length"
+
+# The shared renderer takes (header, cap) pairs; _HEADERS/_CAPS stay as the
+# declaration surface because _row_cells() is written against their order.
+_COLUMNS = tuple(Column(header, cap) for header, cap in zip(_HEADERS, _CAPS))
 
 
 def _as_int(value: object) -> int:
@@ -228,65 +232,26 @@ def _compact_flags(flags: object) -> str:
     return ", ".join(parts)
 
 
-def _fit(text: str, width: int) -> str:
-    """Truncate *text* to *width* characters, marking cuts with an ellipsis.
-
-    :param text: cell text.
-    :param width: maximum width in characters.
-    :return: text of length <= width.
-    """
-    if len(text) <= width:
-        return text
-    if width <= 1:
-        return text[:width]
-    return text[: width - 1] + _ELLIPSIS
-
-
-def _format_line(cells: tuple[str, ...], widths: list[int]) -> str:
-    """Render one table line: fitted, padded cells joined by the separator.
-
-    :param cells: one string per column.
-    :param widths: column widths (same length as cells).
-    :return: single table line (trailing whitespace stripped).
-    """
-    padded = [_fit(cell, width).ljust(width) for cell, width in zip(cells, widths)]
-    return _SEP.join(padded).rstrip()
-
-
 def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
-    """Render header + divider + data lines.
+    """Render header + divider + data lines for the ROI table.
 
-    Each column width is content-driven: max(header, widest cell). The only
-    bound is the per-column ``_FLAGS_CAP`` on the free-form flags text; the tool
-    name and every numeric column render in full (Slack code blocks scroll
-    horizontally). There is NO whole-line backstop: with the tool column
-    uncapped a line-width guarantee is not achievable, and every case where
-    clipping flags could still restore MAX_LINE_WIDTH is one where a long tool
-    name -- not the flags text -- caused the overflow, so clipping would destroy
-    useful text to pay for a column that is uncapped by design.
+    Thin wrapper over :func:`benchmark.slack_tables.render_table`, which is
+    shared with the benchmark digest so both sections render identically.
+    Column widths are content-driven: only the free-form flags column carries
+    a cap (``_FLAGS_CAP``); the tool name and every numeric column render in
+    full, since Slack code blocks scroll horizontally. There is NO whole-line
+    backstop -- with the tool column uncapped a line-width guarantee is not
+    achievable, and every case where clipping flags could still restore
+    MAX_LINE_WIDTH is one where a long tool name, not the flags text, caused
+    the overflow, so clipping would destroy useful text to pay for a column
+    that is uncapped by design.
 
     :param rows: pre-formatted cell tuples, one per table row. Each tuple
         MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
         lines (callers only render the block when there are bet rows).
     :return: table lines (no code-block fences).
     """
-    if not rows:
-        return []
-    for row in rows:
-        assert len(row) == len(_HEADERS), (
-            f"row has {len(row)} cells, expected {len(_HEADERS)} "
-            "(_HEADERS / _CAPS / _row_cells out of sync)"
-        )
-    widths = []
-    for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
-        content = max(len(header), *(len(row[i]) for row in rows))
-        widths.append(content if cap is None else min(cap, content))
-    lines = [
-        _format_line(_HEADERS, widths),
-        _format_line(tuple("-" * width for width in widths), widths),
-    ]
-    lines.extend(_format_line(row, widths) for row in rows)
-    return lines
+    return render_table(_COLUMNS, rows)
 
 
 def _model_cell(group: dict[str, Any]) -> str:

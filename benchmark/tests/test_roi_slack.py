@@ -1269,7 +1269,7 @@ class TestRoiSectionFreshness:
         )
         with caplog.at_level(logging.WARNING):
             assert build_roi_section(path, "omen") is None
-        assert "none are objects" in caplog.text
+        assert "2 of 2 ROI 'groups' entries are not objects" in caplog.text
 
         # Contrast: a well-formed group for ANOTHER platform is the legitimate
         # quiet case -- same None, no warning.
@@ -1281,6 +1281,35 @@ class TestRoiSectionFreshness:
         with caplog.at_level(logging.WARNING):
             assert build_roi_section(path, "omen") is None
         assert not caplog.records
+
+    def test_mixed_corruption_warns_and_still_renders(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Garbage beside valid groups warns; the valid rows still render.
+
+        The realistic corruption shape: a write killed part-way leaves valid
+        entries next to placeholders. The table then looks normal with rows
+        silently missing, which an all-or-nothing check cannot see.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param caplog: pytest caplog fixture.
+        """
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "as_of": datetime.now(timezone.utc).date().isoformat(),
+                    "window_days": 90,
+                    "groups": [_group(tool="alpha"), "truncated-entry", None],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.WARNING):
+            section = build_roi_section(path, "omen")
+        assert section is not None
+        assert "alpha" in section
+        assert "2 of 3" in caplog.text
 
     def test_absent_timestamp_is_quiet(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

@@ -31,12 +31,17 @@ Inputs, all written by ``benchmark.scorer`` into the same results directory:
 ===========================================  ==============================
 file                                          window
 ===========================================  ==============================
-``scores_<platform>.json``                    all-time (since the cutoff)
+``scores_<platform>.json``                    MONTH TO DATE -- resets on the 1st
 ``rolling_scores_<platform>.json``            W-1, the last 7 days
 ``prev_rolling_scores_<platform>.json``       W-2, the 7 days before that
 ``scores_tournament_<platform>.json``         tournament, all-time only
 ``roi_results.json``                          90-day ROI simulation
 ===========================================  ==============================
+
+``scores_<platform>.json`` is NOT all-time. It carries a ``current_month`` key
+and the scorer snapshots and resets it on calendar rollover, so early in a month
+the "longer baseline" is genuinely shorter than W-1. The column is labelled
+``MTD`` and the month is stamped in the section line for that reason.
 
 Tournament rows have no W-1/W-2 because rolling scorer invocations pass
 ``--skip-tournament-output``; those cells render the literal ``n/a`` rather
@@ -66,6 +71,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Collection, Iterable, Sequence
 
@@ -119,6 +125,25 @@ def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
         log.warning("digest: %s has no by_tool mapping", path)
         return {}
     return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
+
+
+def _load_month(path: Path) -> str | None:
+    """Read the accumulator's month stamp.
+
+    ``scores_<platform>.json`` is a month-to-date accumulator that resets on
+    the 1st, so the month it covers belongs in the section line -- otherwise
+    "the longer baseline" silently becomes shorter than W-1 early in a month
+    and nothing in the message says so.
+
+    :param path: path to a scores json file.
+    :return: e.g. "2026-08", or None when unavailable.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    month = payload.get("current_month")
+    return str(month) if month else None
 
 
 def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -181,6 +206,21 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _num(value: object) -> float | None:
+    """Return *value* as a float when it is a real number, else None.
+
+    A single narrowing helper: ``_is_number`` answers the question but the type
+    checker cannot see through it, so every caller was repeating an isinstance
+    guard to satisfy mypy.
+
+    :param value: candidate value.
+    :return: the value as a float, or None.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _score(value: object) -> str:
     """Format a Brier-unit score to 4 decimals.
 
@@ -202,14 +242,29 @@ def _signed(value: object) -> str:
 def _count(stats: dict[str, Any] | None) -> str:
     """Format a window's scored-row count, marking under-floor samples.
 
+    Renders ``valid_n/edge_n`` when the two pools differ. Brier averages over
+    every valid row; Edge and mkt average over the subset that carried a market
+    price. Printing only ``valid_n`` let an Edge computed on 11 rows sit
+    unstarred beside ``n = 40``, so the marker keys off whichever pool is
+    smaller.
+
     :param stats: per-tool stats dict for that window, or None.
-    :return: count cell, e.g. ``301`` or ``19 *``, or ``n/a``.
+    :return: count cell, e.g. ``301``, ``40/11`` or ``19 *``, or ``n/a``.
     """
-    if not stats or not _is_number(stats.get("valid_n")):
+    valid = _num((stats or {}).get("valid_n"))
+    if valid is None:
         return NA
-    valid_n = int(stats["valid_n"])
-    mark = f" {LOW_SAMPLE_MARK}" if valid_n < MIN_SAMPLE_SIZE else ""
-    return f"{valid_n}{mark}"
+    valid_n = int(valid)
+    edge = _num((stats or {}).get("edge_n"))
+    edge_n = None if edge is None else int(edge)
+    both = (
+        f"{valid_n}/{edge_n}"
+        if edge_n is not None and edge_n != valid_n
+        else str(valid_n)
+    )
+    floor = min(valid_n, edge_n) if edge_n is not None else valid_n
+    mark = f" {LOW_SAMPLE_MARK}" if floor < MIN_SAMPLE_SIZE else ""
+    return f"{both}{mark}"
 
 
 def _reliability(stats: dict[str, Any] | None) -> str:
@@ -228,17 +283,19 @@ def _reliability(stats: dict[str, Any] | None) -> str:
     return f"{stats['reliability'] * 100:.0f}%"
 
 
-def _has_floor(stats: dict[str, Any] | None) -> bool:
-    """Check whether a window has enough scored rows to support a delta.
+def _has_floor(stats: dict[str, Any] | None, field: str = "valid_n") -> bool:
+    """Check whether a window has enough rows to support a delta.
+
+    Takes the count field so an Edge delta is floored on ``edge_n`` while a
+    Brier delta stays on ``valid_n`` -- the two average over different pools,
+    and gating both on the larger one suppresses nothing.
 
     :param stats: per-tool stats dict for that window, or None.
+    :param field: the count to gate on.
     :return: True when the window cleared MIN_SAMPLE_SIZE.
     """
-    return bool(
-        stats
-        and _is_number(stats.get("valid_n"))
-        and int(stats["valid_n"]) >= MIN_SAMPLE_SIZE
-    )
+    count = _num((stats or {}).get(field))
+    return count is not None and int(count) >= MIN_SAMPLE_SIZE
 
 
 def _delta(
@@ -269,7 +326,9 @@ def _delta(
         return NA
     if isinstance(b, bool) or not isinstance(b, (int, float)):
         return NA
-    if not (_has_floor(current) and _has_floor(reference)):
+    # Edge and mkt live on the edge-eligible pool; everything else on valid_n.
+    count_field = "edge_n" if field in ("edge", "market_brier") else "valid_n"
+    if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
         return INSUFFICIENT
     diff = a - b
     improved = diff < 0 if lower_is_better else diff > 0
@@ -304,6 +363,105 @@ def _roi_haircut(group: dict[str, Any] | None) -> str:
     return f"{float(group['roi_haircut']):+.1f}%"
 
 
+# Promote margin and floor from PROMOTE_DEMOTE_POLICY.md: promote only when the
+# one-sided 95% lower bound on the paired edge clears delta, with n >= 30.
+PROMOTE_DELTA = 0.04
+# One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
+# at n >= 30 on a mean this is the same call to well inside the margin, and it
+# is computable from the stored sum/sum-of-squares without per-row data.
+Z_ONE_SIDED_95 = 1.645
+
+# A tool that wins fewer than half the markets where it DISAGREED with the price
+# has no tradable edge, whatever its headline accuracy looks like.
+COIN_FLIP = 0.50
+
+
+def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
+    """One-sided 95% lower bound on the tool's mean edge over the market.
+
+    :param stats: per-tool stats for a window.
+    :return: the lower bound, or None when it cannot be computed.
+    """
+    edge = _num((stats or {}).get("edge"))
+    sd = _num((stats or {}).get("edge_sd"))
+    count = _num((stats or {}).get("edge_n"))
+    if edge is None or sd is None or count is None or count < 2:
+        return None
+    return edge - Z_ONE_SIDED_95 * sd / math.sqrt(count)
+
+
+def _verdict(stats: dict[str, Any] | None, deployed: bool) -> str:
+    """Apply the promote/demote gate to one tool.
+
+    The rule is the policy's, stated once and used for both rosters:
+    promote only when the lower bound on the edge clears the margin; demote on
+    a sustained below-no-skill signal; otherwise keep. Anything the sample
+    cannot support says so rather than guessing -- "not enough data yet" is a
+    different answer from "no improvement", and the policy is explicit that
+    conflating them is the failure to avoid.
+
+    :param stats: per-tool stats for the decision window.
+    :param deployed: True for a production tool, False for a candidate.
+    :return: a short verdict string for the ``rec`` cell.
+    """
+    brier = _num((stats or {}).get("brier"))
+    if brier is None:
+        return "no data"
+    edge_n = _num((stats or {}).get("edge_n"))
+    if edge_n is None or edge_n < MIN_SAMPLE_SIZE:
+        shown = NA if edge_n is None else int(edge_n)
+        return f"insufficient (n={shown} < {MIN_SAMPLE_SIZE})"
+
+    lower = _edge_lower_bound(stats)
+    if lower is None:
+        return "insufficient (no spread)"
+
+    conditional = _num((stats or {}).get("conditional_accuracy_rate"))
+    if conditional is not None and conditional < COIN_FLIP:
+        loses = f"loses its disagreements ({conditional:.0%})"
+        return f"demote: {loses}" if deployed else f"no: {loses}"
+
+    if lower > PROMOTE_DELTA:
+        return "keep (clears margin)" if deployed else "PROMOTE"
+
+    base = _num((stats or {}).get("baseline_brier"))
+    if base is not None and brier > base:
+        return "demote: below no-skill" if deployed else "no: below no-skill"
+
+    return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
+
+
+def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
+    """Never let the report recommend emptying a platform.
+
+    A demote means stop serving that tool. If EVERY deployed tool on a platform
+    demotes, acting on all of them leaves the platform with no forecaster at
+    all, which is worse than keeping the least-bad one. The policy anticipates
+    this case and marks it rather than hiding it, so the verdicts survive and
+    the consequence is stated beside them.
+
+    :param verdicts: mapping of tool name to verdict, for ONE platform cohort.
+    :return: the same mapping, annotated when every tool would be demoted.
+    """
+    demotes = [t for t, v in verdicts.items() if v.startswith("demote")]
+    if not verdicts or len(demotes) < len(verdicts):
+        return verdicts
+    return {
+        tool: f"{verdict} - NO REPLACEMENT, do not act alone"
+        for tool, verdict in verdicts.items()
+    }
+
+
+def _conditional(stats: dict[str, Any] | None) -> str:
+    """Format the win rate on markets where the tool disagreed with the price.
+
+    :param stats: per-tool stats for that window.
+    :return: e.g. ``64%``, or ``n/a``.
+    """
+    rate = _num((stats or {}).get("conditional_accuracy_rate"))
+    return NA if rate is None else f"{rate * 100:.0f}%"
+
+
 # ---------------------------------------------------------------------------
 # Table construction
 # ---------------------------------------------------------------------------
@@ -328,19 +486,21 @@ _W2_COLUMNS = (
 _AT_COLUMNS = (
     Col("tool"),
     Col("n W-1", align="right"),
-    Col("n AT", align="right"),
+    Col("n MTD", align="right"),
     Col("rel W-1", align="right"),
     Col("Brier W-1", align="right"),
-    Col("Brier AT", align="right"),
+    Col("Brier MTD", align="right"),
     Col("Δ Brier", align="right"),
-    Col("base AT", align="right"),
+    Col("base MTD", align="right"),
     Col("mkt W-1", align="right"),
-    Col("mkt AT", align="right"),
+    Col("mkt MTD", align="right"),
     Col("Edge W-1", align="right"),
-    Col("Edge AT", align="right"),
+    Col("Edge MTD", align="right"),
     Col("Δ Edge", align="right"),
+    Col("condAcc", align="right"),
     Col("ROI 90d", align="right"),
     Col("w/costs", align="right"),
+    Col("rec", wrap=True),
 )
 
 
@@ -420,6 +580,11 @@ def _rows_at(
     :param mode: "production" or "tournament", for the ROI lookup.
     :return: one cell tuple per tool.
     """
+    deployed = mode == "production"
+    verdicts = {t: _verdict(at.get(t), deployed=deployed) for t in tools}
+    if deployed:
+        verdicts = _guard_last_tools(verdicts)
+
     rows: list[tuple[str, ...]] = []
     for tool in tools:
         a, b = w1.get(tool), at.get(tool)
@@ -438,8 +603,10 @@ def _rows_at(
                 _signed((a or {}).get("edge")),
                 _signed((b or {}).get("edge")),
                 _delta(a, b, "edge", lower_is_better=False),
+                _conditional(b),
                 _roi(roi.get((tool, mode))),
                 _roi_haircut(roi.get((tool, mode))),
+                verdicts[tool],
             )
         )
     return rows
@@ -568,34 +735,42 @@ def _alert_rows(
     # against the MARKET, and a tool can lose to the market while still
     # beating its own no-skill floor (live: factual_research on Omen, Brier
     # 0.2234 vs base 0.2330 -- above no-skill -- with Edge -0.0266).
-    below_market = [at[t] for t in tools if at.get(t) and _is_number(at[t].get("edge"))]
-    if below_market and all(s["edge"] < 0 for s in below_market):
+    # Floored, like every other claim in the message. Without this the digest
+    # marked a tool "insufficient" in the table and then counted that same
+    # window toward "the fleet is worse than the market" in the alerts.
+    below_market = [
+        at[t]
+        for t in tools
+        if at.get(t) and _is_number(at[t].get("edge")) and _has_floor(at[t], "edge_n")
+    ]
+    if len(below_market) >= 2 and all(s["edge"] < 0 for s in below_market):
         best = max(s["edge"] for s in below_market)
         rows.append(
             (
                 "platform below market",
-                f"ALL ({len(below_market)} tools)",
-                f"every all-time Edge < 0; best is {best:+.4f}",
+                f"ALL ({len(below_market)} tools over the floor)",
+                f"every MTD Edge < 0; best is {best:+.4f}",
                 "upstream calibration, not a tool swap",
             )
         )
 
-    below_floor = [
+    scored = [
         t
         for t in tools
-        if at.get(t)
-        and _is_number(at[t].get("brier"))
-        and _is_number(at[t].get("baseline_brier"))
+        if at.get(t) and _is_number(at[t].get("brier")) and _has_floor(at[t])
+    ]
+    below_floor = [
+        t
+        for t in scored
+        if _is_number(at[t].get("baseline_brier"))
         and at[t]["brier"] > at[t]["baseline_brier"]
     ]
-    if below_floor and len(below_floor) == len(
-        [t for t in tools if at.get(t) and _is_number(at[t].get("brier"))]
-    ):
+    if len(scored) >= 2 and below_floor and len(below_floor) == len(scored):
         rows.append(
             (
                 "platform below no-skill",
-                f"ALL ({len(below_floor)} tools)",
-                "every all-time Brier exceeds its own base-rate floor",
+                f"ALL ({len(below_floor)} tools over the floor)",
+                "every MTD Brier exceeds its own base-rate floor",
                 "the fleet is worse than predicting the base rate",
             )
         )
@@ -631,6 +806,11 @@ def build_digest_messages(
         for key, name in WINDOW_FILES.items()
     }
     roi = _load_roi(roi_results or results_dir / "roi_results.json", platform)
+    month = _load_month(results_dir / WINDOW_FILES["at"].format(platform=platform))
+    # MTD, not all-time: the accumulator resets on the 1st, so early in a month
+    # this "longer baseline" is genuinely shorter than W-1. Naming the month
+    # is what stops a reader treating it as a stable long-run reference.
+    month_label = f"month to date ({month})" if month else "month to date"
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])
@@ -684,11 +864,11 @@ def build_digest_messages(
         )
         messages.append(
             message(
-                "1b. Production - W-1 vs all-time",
+                "1b. Production - W-1 vs month to date",
                 [
                     section(
-                        "*1b. PRODUCTION - W-1 vs AT*  _this week against the "
-                        "longer baseline_"
+                        f"*1b. PRODUCTION - W-1 vs MTD*  _this week against "
+                        f"{month_label}_"
                     ),
                     table_block(
                         _AT_COLUMNS,
@@ -707,8 +887,8 @@ def build_digest_messages(
                 "2. Tournament - all-time pool",
                 [
                     section(
-                        "*2. TOURNAMENT - all-time pool*  _no weekly comparison "
-                        "available_"
+                        "*2. TOURNAMENT - all-time pool*  _candidates; no weekly "
+                        "comparison available_"
                     ),
                     table_block(
                         _AT_COLUMNS,

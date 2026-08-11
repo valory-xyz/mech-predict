@@ -277,6 +277,7 @@ def _empty_group() -> dict[str, Any]:
         "log_loss_sum": 0.0,
         "edge_sum": 0.0,
         "market_brier_sum": 0.0,
+        "edge_sq_sum": 0.0,
         "edge_n": 0,
         "edge_positive_count": 0,
         # Diagnostic edge metrics

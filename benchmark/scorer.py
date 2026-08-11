@@ -17,6 +17,7 @@ import argparse
 import glob as glob_mod
 import json
 import logging
+import math
 import os
 import re
 from collections import defaultdict
@@ -178,6 +179,7 @@ _ACCUM_KEYS = (
     "log_loss_sum",
     "edge_sum",
     "market_brier_sum",
+    "edge_sq_sum",
     "edge_n",
     "edge_positive_count",
     # Diagnostic edge metrics (PROPOSAL.md Stage 4)
@@ -239,6 +241,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 _DIAGNOSTIC_NONE: dict[str, Any] = {
     "edge": None,
     "market_brier": None,
+    "edge_sd": None,
     "edge_n": 0,
     "edge_positive_rate": None,
     "conditional_accuracy_rate": None,
@@ -279,6 +282,9 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
+    mean_edge = sum(edges) / len(edges)
+    variance = sum(e * e for e in edges) / len(edges) - mean_edge * mean_edge
+    edge_sd = round(math.sqrt(variance), 6) if variance > 0 else 0.0
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -317,6 +323,7 @@ def _compute_edge_diagnostics(
     diag: dict[str, Any] = {
         "edge": edge_avg,
         "market_brier": market_brier_avg,
+        "edge_sd": edge_sd if len(edges) >= 2 else None,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,
@@ -1234,6 +1241,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         # (the incremental path is the normal daily path; --rebuild is the
         # exception). None makes _derive_group emit no value until a rebuild.
         restored["market_brier_sum"] = g.get("market_brier_sum")
+        restored["edge_sq_sum"] = g.get("edge_sq_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores

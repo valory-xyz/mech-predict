@@ -31,7 +31,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from benchmark.digest_tables import build_digest_messages
+from benchmark.digest_tables import (
+    _guard_last_tools,
+    _verdict,
+    build_digest_messages,
+)
 
 
 def _stats(**overrides: Any) -> dict[str, Any]:
@@ -213,8 +217,8 @@ class TestNoSkillScore:
     def test_base_is_rendered_instead(self, results: Path) -> None:
         """The no-skill floor is shown in Brier units, as a column."""
         body = _body(results)
-        assert "base AT" in body
-        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION - W-1 vs AT")
+        assert "base MTD" in body
+        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION - W-1 vs MTD")
 
 
 class TestDeltas:
@@ -231,13 +235,10 @@ class TestDeltas:
         """A window under the floor renders `insufficient`, not a number."""
         results = tmp_path / "r"
         results.mkdir()
-        _write(results, "scores_polymarket.json", {"alpha": _stats(valid_n=10)})
-        _write(results, "rolling_scores_polymarket.json", {"alpha": _stats(valid_n=10)})
-        _write(
-            results,
-            "prev_rolling_scores_polymarket.json",
-            {"alpha": _stats(valid_n=10)},
-        )
+        thin = _stats(valid_n=10, edge_n=10)
+        _write(results, "scores_polymarket.json", {"alpha": thin})
+        _write(results, "rolling_scores_polymarket.json", {"alpha": thin})
+        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": thin})
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
         cells = _cells(body, "alpha")
@@ -403,10 +404,12 @@ class TestAlertComparators:
         """
         results = tmp_path / "r"
         results.mkdir()
+        # Two tools: a platform-wide claim needs more than one.
         stats = _stats(brier=0.2234, baseline_brier=0.2330, edge=-0.0266)
-        _write(results, "scores_polymarket.json", {"alpha": stats})
-        _write(results, "rolling_scores_polymarket.json", {"alpha": stats})
-        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": stats})
+        both = {"alpha": stats, "beta": stats}
+        _write(results, "scores_polymarket.json", both)
+        _write(results, "rolling_scores_polymarket.json", both)
+        _write(results, "prev_rolling_scores_polymarket.json", both)
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
         assert "platform below market" in body
@@ -598,3 +601,142 @@ class TestRoiHaircut:
         body = _body(results)
         assert "+0.0%" not in _cells(body, "alpha")
         assert "n/a" in _cells(body, "alpha")
+
+
+class TestPromoteDemoteGate:
+    """The verdict is the policy's gate, applied once for both rosters."""
+
+    def test_promote_needs_the_lower_bound_to_clear_the_margin(self) -> None:
+        """A big edge with a big spread is NOT a promote."""
+        wide = _stats(edge=0.08, edge_sd=1.0, edge_n=100, conditional_accuracy_rate=0.6)
+        tight = _stats(
+            edge=0.08, edge_sd=0.1, edge_n=100, conditional_accuracy_rate=0.6
+        )
+        assert _verdict(wide, deployed=False).startswith("no:")
+        assert _verdict(tight, deployed=False) == "PROMOTE"
+
+    def test_losing_your_disagreements_is_decisive(self) -> None:
+        """A coin-flip conditional accuracy blocks a promote outright.
+
+        A tool can post a large headline edge by reading almost-resolved
+        prices. What it does when it disagrees with the price is the only
+        thing a bet depends on.
+        """
+        row = _stats(
+            edge=0.20, edge_sd=0.05, edge_n=100, conditional_accuracy_rate=0.47
+        )
+        assert "loses its disagreements" in _verdict(row, deployed=False)
+        assert _verdict(row, deployed=True).startswith("demote")
+
+    def test_thin_sample_says_so_rather_than_guessing(self) -> None:
+        """Below the floor the answer is "not enough data", not "no improvement"."""
+        row = _stats(edge=0.09, edge_sd=0.1, edge_n=12)
+        assert _verdict(row, deployed=False).startswith("insufficient")
+
+    def test_below_no_skill_demotes_a_deployed_tool(self) -> None:
+        """A Brier worse than its own base rate is a demote signal."""
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        assert _verdict(row, deployed=True) == "demote: below no-skill"
+
+
+class TestPoolAwareGating:
+    """Edge lives on a different pool than Brier; the floor must follow it."""
+
+    def test_count_shows_both_pools_when_they_differ(self, tmp_path: Path) -> None:
+        """An Edge computed on 11 rows cannot print unstarred beside n=40.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        split = _stats(valid_n=40, edge_n=11)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": split})
+        _write(results, "scores_tournament_polymarket.json", {})
+        cells = _cells(_body(results), "alpha")
+        assert "40/11 *" in cells, cells
+
+    def test_edge_delta_is_floored_on_edge_n(self, tmp_path: Path) -> None:
+        """A 40-row Brier delta renders while an 11-row Edge delta does not.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        current = _stats(valid_n=40, edge_n=11, brier=0.35, edge=-0.17)
+        prior = _stats(valid_n=40, edge_n=11, brier=0.30, edge=-0.03)
+        _write(results, "scores_polymarket.json", {"alpha": prior})
+        _write(results, "rolling_scores_polymarket.json", {"alpha": current})
+        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": prior})
+        _write(results, "scores_tournament_polymarket.json", {})
+        cells = _cells(_body(results), "alpha")
+        assert "+0.0500 worse" in cells, cells
+        assert cells.count("insufficient") >= 1, cells
+
+
+class TestPlatformAlertFloor:
+    """A fleet-wide claim needs tools that clear the floor, and more than one."""
+
+    def test_thin_window_cannot_assert_a_platform_claim(self, tmp_path: Path) -> None:
+        """The same window marked insufficient cannot condemn the fleet.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        thin = _stats(valid_n=2, edge_n=2, edge=-0.10, brier=0.31, baseline_brier=0.24)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": thin, "beta": thin})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "platform below market" not in body
+        assert "platform below no-skill" not in body
+
+    def test_single_tool_is_not_a_platform(self, tmp_path: Path) -> None:
+        """One tool cannot support a claim about the whole fleet.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        lone = _stats(edge=-0.10, brier=0.31, baseline_brier=0.24)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": lone})
+        _write(results, "scores_tournament_polymarket.json", {})
+        assert "platform below" not in _body(results)
+
+
+class TestNoReplacementGuard:
+    """The report must never recommend leaving a platform with no tool."""
+
+    def test_all_demote_becomes_a_flagged_call(self) -> None:
+        """When every tool demotes, each verdict carries the consequence."""
+        guarded = _guard_last_tools(
+            {"a": "demote: below no-skill", "b": "demote: loses its disagreements"}
+        )
+        assert all("NO REPLACEMENT" in v for v in guarded.values())
+
+    def test_a_survivor_leaves_the_demotes_alone(self) -> None:
+        """One tool worth keeping means the demotes are actionable as written."""
+        guarded = _guard_last_tools({"a": "demote: below no-skill", "b": "keep"})
+        assert guarded["a"] == "demote: below no-skill"
+        assert "NO REPLACEMENT" not in guarded["b"]

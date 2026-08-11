@@ -380,7 +380,9 @@ class TestCoverageGate:
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
         # Absolute tolerance is 100; anything strictly above trips fail-close.
-        drops_above_tolerance = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE + 1
+        drops_above_tolerance = (
+            vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE + 1
+        )  # pylint: disable=protected-access
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int
@@ -410,12 +412,19 @@ class TestCoverageGate:
         not fail the run. Verifies the tolerance is applied AND a
         warning is emitted so operators can see the drop count in the
         logs.
+
+        :param monkeypatch: pytest fixture used to swap the subgraph +
+            lake helpers with in-memory stubs.
+        :param caplog: pytest fixture capturing log records so the
+            warning can be asserted.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
-        drops_within_tolerance = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE
+        drops_within_tolerance = (
+            vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE
+        )  # pylint: disable=protected-access
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int

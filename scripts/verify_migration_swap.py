@@ -578,9 +578,7 @@ def _pull_undelivered_pending(
             ),
         )
     for platform, ids in by_platform.items():
-        log.info(
-            "undelivered-pending: platform=%s count=%d", platform, len(ids)
-        )
+        log.info("undelivered-pending: platform=%s count=%d", platform, len(ids))
     return by_platform
 
 
@@ -999,7 +997,7 @@ class _CoverageResult:
     undelivered_pending_applied: bool
 
 
-def _report_coverage_check(
+def _report_coverage_check(  # pylint: disable=too-many-locals
     marketplace_ids_by_platform: dict[str, set[str]],
     dropped_by_platform: dict[str, int],
     lake_ids: set[str],
@@ -1136,9 +1134,8 @@ def _report_coverage_check(
             "✓" if not adjusted_missing_set and dropped == 0 and not vacuous else "✗"
         )
         vacuous_note = f" (below floor {min_marketplace_rows})" if vacuous else ""
-        adjustments_applied = (
-            (known_loss_applied and len(excluded_set) > 0)
-            or (undelivered_applied and len(excluded_undelivered_set) > 0)
+        adjustments_applied = (known_loss_applied and len(excluded_set) > 0) or (
+            undelivered_applied and len(excluded_undelivered_set) > 0
         )
         if adjustments_applied:
             print(

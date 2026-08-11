@@ -41,6 +41,15 @@ MAX_FAILURE_BODIES_IN_COMMENT = 5
 MAX_FAILURE_BODY_CHARS = 600
 
 
+def _format_breakdown(breakdown: dict[str, int]) -> str:
+    """Render the parse-status buckets in their fixed, diffable order.
+
+    :param breakdown: counts per ``PARSE_STATUS_BUCKETS`` entry.
+    :return: ``"valid=3, missing_fields=0, ..."``.
+    """
+    return ", ".join(f"{k}={breakdown[k]}" for k in PARSE_STATUS_BUCKETS)
+
+
 def _compute_parse_reliability(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarise parse reliability from ``prediction_parse_status`` values.
 
@@ -338,7 +347,7 @@ def _format_reliability_block(
     # line count short.
     if c_valid < c_total:
         bd = c_rel["breakdown"]
-        breakdown_str = ", ".join(f"{k}={bd[k]}" for k in PARSE_STATUS_BUCKETS)
+        breakdown_str = _format_breakdown(bd)
         lines.append(f"  - Breakdown: {breakdown_str}")
 
     if filter_stats is not None and filter_stats.get("source") == "tournament":
@@ -654,22 +663,20 @@ def main() -> None:
     # deleting the signal the health block exists to carry.
     candidate_metrics["parse_reliability"] = _compute_parse_reliability(candidate_rows)
 
-    # A run that scored nothing is a FAILURE, not a result. Keyed on the
-    # PAIRED count, not on row counts: a tournament-fallback run legitimately
-    # has zero production rows and still scores, while the 2026-08-04 v5 run
-    # had 300 candidate rows -- all malformed -- and exited green with a
-    # published verdict. #420 made the rendering honest ("Computed on 0
-    # markets"); this makes the exit code honest too, so the run goes red,
-    # the incomplete-benchmark notice fires, and no verdict is published.
+    # n==0 scored pairs = nothing to verdict; exit nonzero so no report is
+    # published and the incomplete-benchmark notice fires. Keyed on the PAIRED
+    # count because it is the one number that means "scorable": zero can come
+    # from candidate parse failures OR from null p_yes on either arm.
+    # Tournament-fallback runs arrive here with a synthesized NON-empty
+    # baseline arm (the tournament p_yes is copied per market upstream in
+    # replay()), so they pass because they genuinely have pairs -- the
+    # empty-baseline exit above never sees them empty.
     if candidate_metrics["n"] == 0:
         rel = candidate_metrics["parse_reliability"]
-        breakdown = ", ".join(
-            f"{k}={rel['breakdown'][k]}" for k in PARSE_STATUS_BUCKETS
-        )
         print(
-            f"ERROR: 0 of {rel['total']} candidate responses were usable "
-            f"({breakdown}); refusing to publish a verdict computed on "
-            "nothing.",
+            f"ERROR: 0 scored pairs from {rel['total']} candidate rows "
+            f"(candidate parse: {_format_breakdown(rel['breakdown'])}); "
+            "refusing to publish a verdict computed on nothing.",
             file=sys.stderr,
         )
         sys.exit(1)

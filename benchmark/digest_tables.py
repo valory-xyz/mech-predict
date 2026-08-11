@@ -387,6 +387,14 @@ Z_ONE_SIDED_95 = 1.645
 # has no tradable edge, whatever its headline accuracy looks like.
 COIN_FLIP = 0.50
 
+# A row exists only once its market has RESOLVED, so the newest window always
+# holds fewer rows than an older one of equal length -- it has had less time to
+# fill. Measured on live data the most recent week ran 23-28% the size of the
+# week before it on one platform while the other was essentially complete, and
+# a delta computed across that gap flipped sign on the tool the report was
+# calling most improved. Below this ratio the week is treated as incomplete.
+COMPLETENESS_RATIO = 0.70
+
 
 def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
     """One-sided 95% lower bound on the tool's mean edge over the market.
@@ -790,6 +798,7 @@ def _alert_rows(
     w1: dict[str, dict[str, Any]],
     at: dict[str, dict[str, Any]],
     tools: Sequence[str],
+    at_w2: dict[str, dict[str, Any]] | None = None,
 ) -> list[tuple[str, ...]]:
     """Build the alerts table: conditions that block a call, not calls.
 
@@ -809,8 +818,10 @@ def _alert_rows(
     :param w1: by_tool stats for the last 7 days.
     :param at: by_tool stats for the all-time window.
     :param tools: tool names under consideration.
+    :param at_w2: the prior week, used to detect a still-filling W-1.
     :return: alert rows, empty when nothing fires.
     """
+    at_w2 = at_w2 or {}
     rows: list[tuple[str, ...]] = []
 
     starved = [t for t in tools if w1.get(t) and not _has_floor(w1[t])]
@@ -859,10 +870,29 @@ def _alert_rows(
                 "platform below market",
                 f"ALL ({len(below_market)} tools over the floor)",
                 f"every cumulative Edge < 0; best is {best:+.4f}",
-                "check the price band first: a trader-side bet "
-                "filter can confine the prices this platform ever "
-                "records, which pushes Edge negative for every tool "
-                "regardless of quality",
+                "upstream calibration, not a tool swap. Check the "
+                "recorded price band too: a trader-side bet filter "
+                "can confine which markets this platform ever "
+                "records, which changes what Edge is measured over",
+            )
+        )
+
+    # Resolution censoring: W-1 cannot be compared with W-2 until it has had
+    # time to fill. This is the one alert that fires on an ABSENCE, so it has
+    # to be computed here rather than inferred from any single row.
+    w1_rows = sum(int(_num(w1[t].get("valid_n")) or 0) for t in tools if w1.get(t))
+    w2_rows = sum(
+        int(_num(at_w2[t].get("valid_n")) or 0) for t in tools if at_w2.get(t)
+    )
+    if w2_rows and w1_rows / w2_rows < COMPLETENESS_RATIO:
+        rows.append(
+            (
+                "week still filling",
+                f"ALL ({len(tools)} tools)",
+                f"W-1 holds {w1_rows} scored rows against W-2's {w2_rows} "
+                f"({w1_rows / w2_rows:.0%}); a row appears only once its market "
+                "resolves, so the newest week is not yet comparable",
+                "read the cumulative column, not the weekly deltas",
             )
         )
 
@@ -1025,7 +1055,9 @@ def build_digest_messages(
             )
         )
 
-    alerts = _alert_rows(windows["w1"], windows["at"], sorted(prod_tools))
+    alerts = _alert_rows(
+        windows["w1"], windows["at"], sorted(prod_tools), windows["w2"]
+    )
     if alerts:
         messages.append(
             message(

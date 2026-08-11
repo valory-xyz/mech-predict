@@ -827,3 +827,39 @@ class TestWindowLabel:
         body = _body(results)
         assert "UNSTATED" in body
         assert "2026-08" not in body
+
+
+class TestCensoringAlert:
+    """A week that has not finished filling must not read as good news."""
+
+    def test_thin_recent_week_is_flagged(self, tmp_path: Path) -> None:
+        """W-1 far smaller than W-2 raises the still-filling alert.
+
+        A row exists only once its market resolves, so the newest window is
+        always behind. Measured live at 23-28% on one platform, where the gap
+        flipped the sign of the delta on the tool being called most improved.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        _write(results, "scores_polymarket.json", {"alpha": _stats(valid_n=3000)})
+        _write(
+            results, "rolling_scores_polymarket.json", {"alpha": _stats(valid_n=600)}
+        )
+        _write(
+            results,
+            "prev_rolling_scores_polymarket.json",
+            {"alpha": _stats(valid_n=2700)},
+        )
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "week still filling" in body
+        assert "22%" in body
+
+    def test_complete_week_is_not_flagged(self, results: Path) -> None:
+        """Comparable windows raise nothing.
+
+        :param results: results-directory fixture.
+        """
+        assert "week still filling" not in _body(results)

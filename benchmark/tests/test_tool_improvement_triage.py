@@ -2692,13 +2692,22 @@ class TestMainWidenSampleDispatch:
             json.dumps(prev)
         )
         (results_dir / "scores_polymarket.json").write_text(json.dumps(cur))
+        # Dates are relative to now, NOT hard-coded: the count window applies
+        # a rolling COUNT_WINDOW_MAX_AGE_DAYS cap measured from the current
+        # time, so fixed 2026-06-* rows silently aged out of it and this test
+        # began failing on a date with no code change (2026-08-11).
+        newest = datetime.now(timezone.utc) - timedelta(days=8)
         rows = [
-            _cw_row(f"2026-06-{d:02d}T00:00:00Z", 0.5, True, row_id=f"r{d}")
-            for d in range(20, 28)
+            _cw_row(
+                (newest - timedelta(days=offset)).strftime("%Y-%m-%dT00:00:00Z"),
+                0.5,
+                True,
+                row_id=f"r{offset}",
+            )
+            for offset in range(8)
         ]
-        (logs_dir / "production_log_2026_06_28.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows)
-        )
+        log_name = f"production_log_{newest:%Y_%m_%d}.jsonl"
+        (logs_dir / log_name).write_text("\n".join(json.dumps(r) for r in rows))
 
     def _run(
         self,

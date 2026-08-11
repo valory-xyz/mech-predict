@@ -162,6 +162,14 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      # Preflight: catch unregistered tools / bad schemas before any IPFS
+      # fetches. Lives in benchmark/preflight.py so lint + tests cover it.
+      - name: Preflight tool registration
+        env:
+          TOOL: ${{ steps.parse.outputs.tool }}
+          CANDIDATE_TOOL: ${{ steps.parse.outputs.candidate_tool }}
+        run: uv run python -m benchmark.preflight "$TOOL" "$CANDIDATE_TOOL"
+
       # Download latest production log from flywheel
       - name: Download production log
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3

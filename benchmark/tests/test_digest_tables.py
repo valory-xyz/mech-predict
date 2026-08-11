@@ -393,27 +393,56 @@ class TestAlertComparators:
 
 
 class TestVisibility:
-    """A tool that ran and failed must not vanish from the digest."""
+    """Only PREDICTION tools appear -- but a failed one must not vanish."""
 
-    def test_all_malformed_tool_is_still_listed(self, tmp_path: Path) -> None:
-        """valid_n=0 means no Brier, which must not mean no row.
+    def test_permitted_tool_that_scored_nothing_is_listed(self, tmp_path: Path) -> None:
+        """A prediction tool at 100% parse failure stays visible.
 
-        Live Omen carries a deployed tool with n=684, valid_n=0 and 0%
-        reliability. Filtering rows on "has a Brier" hides exactly the tool
-        most in need of attention.
+        No Brier means selecting on Brier alone would hide the tool most in
+        need of attention.
 
         :param tmp_path: pytest temp dir.
         """
         results = tmp_path / "r"
         results.mkdir()
         broken = _stats(n=684, valid_n=0, reliability=0.0, brier=None, edge=None)
-        _write(results, "scores_polymarket.json", {"broken": broken})
-        _write(results, "rolling_scores_polymarket.json", {"broken": broken})
-        _write(results, "prev_rolling_scores_polymarket.json", {"broken": broken})
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"broken": broken})
         _write(results, "scores_tournament_polymarket.json", {})
-        body = _body(results)
+        body = "\n\n".join(
+            build_digest_messages(results, "polymarket", allowed_tools={"broken"})
+        )
         assert "broken" in body
         assert "reliability breach" in body
+
+    def test_non_prediction_tool_is_never_listed(self, tmp_path: Path) -> None:
+        """A tool outside the allowlist stays out, however many rows it has.
+
+        A question-proposing tool emits no p_yes, so valid_n=0 is its correct
+        reading, not a failure. Surfacing it would fabricate an alarm about a
+        tool this report has no opinion on.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        proposer = _stats(n=684, valid_n=0, reliability=0.0, brier=None, edge=None)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"propose-question": proposer, "alpha": _stats()})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = "\n\n".join(
+            build_digest_messages(results, "polymarket", allowed_tools={"alpha"})
+        )
+        assert "alpha" in body
+        assert "propose-question" not in body
 
 
 class TestThirdParty:

@@ -448,22 +448,38 @@ def _rows_at(
 
 
 def _scored(by_tool: dict[str, dict[str, Any]]) -> set[str]:
-    """Return tools that this window has something to say about.
-
-    A tool with rows but NO valid prediction has no Brier, and filtering on
-    Brier alone makes it disappear from the digest entirely -- which is the
-    opposite of what should happen. Live Omen carries exactly this case: a
-    deployed tool with n=684, valid_n=0, reliability 0%. Keep any tool that
-    either scored, or ran and failed to parse.
+    """Return tools that produced a Brier in this window.
 
     :param by_tool: by_tool mapping from a scores file.
-    :return: set of tool names to render.
+    :return: set of tool names with a numeric Brier.
+    """
+    return {t for t, s in by_tool.items() if _is_number(s.get("brier"))}
+
+
+def _ran_but_unscored(
+    by_tool: dict[str, dict[str, Any]], permitted: Collection[str]
+) -> set[str]:
+    """Return PREDICTION tools that ran but produced no usable prediction.
+
+    A prediction tool at 100% parse failure has rows but no Brier, and
+    selecting on Brier alone would hide exactly the tool most in need of
+    attention. The allowlist is what makes this safe: the benchmark also sees
+    tools that are not forecasters at all -- a question-proposing tool, for
+    instance, never emits a ``p_yes``, so ``valid_n=0`` is its correct and
+    unremarkable reading, not a failure. Admitting those would manufacture an
+    alarm about a tool this report has no opinion on.
+
+    :param by_tool: by_tool mapping from a scores file.
+    :param permitted: prediction-tool allowlist.
+    :return: names of permitted tools that ran without scoring.
     """
     return {
         tool
         for tool, stats in by_tool.items()
-        if _is_number(stats.get("brier"))
-        or (_is_number(stats.get("n")) and int(stats["n"]) > 0)
+        if tool in permitted
+        and not _is_number(stats.get("brier"))
+        and _is_number(stats.get("n"))
+        and int(stats["n"]) > 0
     }
 
 
@@ -626,6 +642,9 @@ def build_digest_messages(
         permitted = set(allowed_tools)
         prod_tools &= permitted
         tourn_tools &= permitted
+        # A permitted tool that ran and scored nothing still belongs here.
+        prod_tools |= _ran_but_unscored(windows["at"], permitted)
+        prod_tools |= _ran_but_unscored(windows["w1"], permitted)
     if not prod_tools and not tourn_tools:
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []

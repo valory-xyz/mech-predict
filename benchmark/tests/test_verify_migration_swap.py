@@ -380,9 +380,8 @@ class TestCoverageGate:
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
         # Absolute tolerance is 100; anything strictly above trips fail-close.
-        drops_above_tolerance = (
-            vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE + 1
-        )  # pylint: disable=protected-access
+        tol = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE  # pylint: disable=protected-access
+        drops_above_tolerance = tol + 1
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int
@@ -422,9 +421,8 @@ class TestCoverageGate:
         lake = [_lake_row(f"r{i}") for i in range(10)]
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
-        drops_within_tolerance = (
-            vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE
-        )  # pylint: disable=protected-access
+        tol = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE  # pylint: disable=protected-access
+        drops_within_tolerance = tol
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int

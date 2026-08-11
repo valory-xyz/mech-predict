@@ -59,6 +59,16 @@ beside the tool's Brier so the reader subtracts by eye. A skill-score ratio is
 deliberately NOT rendered: its denominator sits off-screen, which is precisely
 how a wrong denominator went unnoticed.
 
+``base`` is per TOOL and per WINDOW, not a constant, and it is shown in both
+tables for that reason. An earlier version omitted it from the weekly table on
+the grounds that it barely moves; the data says otherwise. One live tool ran
+``base`` 0.1438 in W-1 against 0.2270 in W-2 -- a 37% swing, driven by its
+``yes_rate`` falling to 0.1741 from 0.2708 when 34 of 37 markets resolving on
+one day were near-identical weather questions that all settled No. A moving
+``base`` also moves the no-skill bar the demote rule reads, so a swing between
+adjacent weeks is a red flag worth seeing on the face of the report rather than
+something an audit has to find.
+
 One table per Slack message
 ---------------------------
 Each message carries one native Block Kit ``table`` block, so Slack lays the
@@ -597,6 +607,8 @@ _W2_COLUMNS = (
     Col("Brier W-1", align="right"),
     Col("Brier W-2", align="right"),
     Col("Δ Brier", align="right"),
+    Col("base W-1", align="right"),
+    Col("base W-2", align="right"),
     Col("mkt W-1", align="right"),
     Col("mkt W-2", align="right"),
     Col("Edge W-1", align="right"),
@@ -675,6 +687,8 @@ def _rows_w2(
                 _score((a or {}).get("brier")),
                 _score((b or {}).get("brier")),
                 _delta(a, b, "brier", lower_is_better=True),
+                _score((a or {}).get("baseline_brier")),
+                _score((b or {}).get("baseline_brier")),
                 _score((a or {}).get("market_brier")),
                 _score((b or {}).get("market_brier")),
                 _signed((a or {}).get("edge")),

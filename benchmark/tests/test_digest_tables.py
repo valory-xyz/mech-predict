@@ -917,3 +917,38 @@ class TestMigrationState:
             }
         )
         assert all("NO REPLACEMENT" in v for v in guarded.values())
+
+
+class TestBaseInBothTables:
+    """The no-skill floor moves per window, so both tables carry it."""
+
+    def test_weekly_table_shows_base_for_both_weeks(self, tmp_path: Path) -> None:
+        """Both weekly base columns render, not just the cumulative one.
+
+        base is `yes_rate x (1 - yes_rate)` on that tool's own resolved
+        markets in that window, so it is per-window. Live data: one tool ran
+        0.1438 in W-1 against 0.2270 in W-2, a 37% swing driven by a single
+        day of near-identical weather markets all settling No. It also moves
+        the bar the demote rule reads, so it belongs where a reader can see it
+        move.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        _write(results, "scores_polymarket.json", {"alpha": _stats()})
+        _write(
+            results,
+            "rolling_scores_polymarket.json",
+            {"alpha": _stats(baseline_brier=0.1438)},
+        )
+        _write(
+            results,
+            "prev_rolling_scores_polymarket.json",
+            {"alpha": _stats(baseline_brier=0.2270)},
+        )
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "base W-1" in body and "base W-2" in body
+        cells = _cells(body, "alpha")
+        assert "0.1438" in cells and "0.2270" in cells

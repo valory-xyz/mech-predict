@@ -585,6 +585,16 @@ def _headline(
     )
 
 
+def _rank(tool: str, ranked: Sequence[str]) -> str:
+    """Position in the best-to-worst ordering, or a dash when unranked.
+
+    :param tool: tool name.
+    :param ranked: the judged tools, already in order.
+    :return: "1", "2", ... or "-" for a tool the gate could not judge.
+    """
+    return str(ranked.index(tool) + 1) if tool in ranked else "-"
+
+
 def _conditional(stats: dict[str, Any] | None) -> str:
     """Format the win rate on markets where the tool disagreed with the price.
 
@@ -619,6 +629,7 @@ _W2_COLUMNS = (
 )
 
 _AT_COLUMNS = (
+    Col("#", align="right"),
     Col("tool"),
     Col("n W-1", align="right"),
     Col("n cum", align="right"),
@@ -642,16 +653,29 @@ _AT_COLUMNS = (
 def _sort_key(
     entry: tuple[str, dict[str, Any] | None, dict[str, Any] | None],
 ) -> tuple[int, float, str]:
-    """Order rows by the decision metric, best first, unscored last.
+    """Order rows BEST first on the same quantity the gate decides on.
+
+    Ranking on raw Edge would put a tool with a big but unreliable edge above
+    one with a smaller, solid edge -- and the gate would then disagree with the
+    order the reader just read. Sorting on the lower bound instead makes the
+    table directly actionable: the top row is the closest to promotable and the
+    bottom row is the closest to demotable, by the same arithmetic that writes
+    the ``rec`` cell.
+
+    Tools the gate cannot judge sort last. They are not "worst"; they are
+    unranked, and putting them at the bottom of a best-to-worst list without
+    that distinction would invite demoting whatever happens to sit there.
 
     :param entry: (tool name, current stats, reference stats).
-    :return: sort key placing higher Edge first and None-Edge rows last.
+    :return: sort key; judged rows first by descending lower bound, then
+        unjudged rows, with the tool name breaking every tie.
     """
     name, current, reference = entry
     for stats in (current, reference):
-        if stats and _is_number(stats.get("edge")):
-            return (0, -float(stats["edge"]), name)
-    # Tool name breaks the tie: without it, Edge-less rows come out in set
+        lower = _edge_lower_bound(stats)
+        if lower is not None:
+            return (0, -lower, name)
+    # Tool name breaks the tie: without it, unranked rows come out in set
     # iteration order, which differs between processes and makes the posted
     # table undiffable day over day. _ordered() also sorts its input, so this
     # is belt-and-braces -- deliberately. Removing EITHER is safe; removing
@@ -740,12 +764,14 @@ def _rows_at(
     """
     deployed = mode == "production"
     verdicts = _verdicts_for(tools, at, deployed, w1)
+    ranked = [t for t in tools if _edge_lower_bound(at.get(t)) is not None]
 
     rows: list[tuple[str, ...]] = []
     for tool in tools:
         a, b = w1.get(tool), at.get(tool)
         rows.append(
             (
+                _rank(tool, ranked),
                 tool,
                 _count(a),
                 _count(b),
@@ -1053,8 +1079,8 @@ def build_digest_messages(
                 "1b. Production - W-1 vs cumulative",
                 [
                     section(
-                        f"*1b. PRODUCTION - W-1 vs CUMULATIVE*  _this week against "
-                        f"{month_label}_"
+                        f"*1b. PRODUCTION - BEST to WORST*  _ranked by the gate's own "
+                        f"lower bound; this week against {month_label}_"
                     ),
                     table_block(
                         _AT_COLUMNS,
@@ -1073,8 +1099,8 @@ def build_digest_messages(
                 "2. Tournament - all-time pool",
                 [
                     section(
-                        "*2. TOURNAMENT - all-time pool*  _candidates; no weekly "
-                        "comparison available_"
+                        "*2. TOURNAMENT - BEST to WORST*  _candidates ranked by "
+                        "the same bound; no weekly comparison available_"
                     ),
                     table_block(
                         _AT_COLUMNS,

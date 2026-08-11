@@ -151,8 +151,11 @@ def _cells(body: str, tool: str, after: str = "") -> list[str]:
     """
     text = body.split(after, 1)[-1] if after else body
     for line in text.splitlines():
-        if line.startswith(tool):
-            return [c.strip() for c in line.split("|")]
+        cells = [c.strip() for c in line.split("|")]
+        # The decision tables lead with a rank cell, so the tool is not always
+        # the first column.
+        if cells and cells[0] == tool or (len(cells) > 1 and cells[1] == tool):
+            return cells
     raise AssertionError(f"no row for {tool} after {after!r} in:\n{body}")
 
 
@@ -952,3 +955,86 @@ class TestBaseInBothTables:
         assert "base W-1" in body and "base W-2" in body
         cells = _cells(body, "alpha")
         assert "0.1438" in cells and "0.2270" in cells
+
+
+class TestBestToWorstOrdering:
+    """The order must agree with the verdict, so the table is actionable."""
+
+    def _three(self, tmp_path: Path) -> Path:
+        """Build a cohort where raw Edge and the gate's bound disagree.
+
+        `wide` has the biggest raw Edge but a spread so large its bound is the
+        worst of the three; `solid` has a smaller Edge and the best bound.
+
+        :param tmp_path: pytest temp dir.
+        :return: the results directory.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        cohort = {
+            "wide": _stats(edge=0.30, edge_sd=3.0, edge_n=100),
+            "solid": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
+            "middling": _stats(edge=0.12, edge_sd=0.60, edge_n=100),
+        }
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", {})
+        return results
+
+    def test_ranked_on_the_bound_not_raw_edge(self, tmp_path: Path) -> None:
+        """The tool with the biggest Edge is not automatically rank 1.
+
+        Ranking on raw Edge would put `wide` first while the gate refuses to
+        promote it -- the order and the verdict would contradict each other.
+
+        :param tmp_path: pytest temp dir.
+        """
+        body = _body(self._three(tmp_path))
+        section = body.split("1b. PRODUCTION", 1)[-1]
+        order = [
+            c[1]
+            for c in (
+                [x.strip() for x in line.split("|")] for line in section.splitlines()
+            )
+            if len(c) > 2 and c[0] in {"1", "2", "3"}
+        ][:3]
+        assert order == ["solid", "middling", "wide"], order
+
+    def test_rank_one_is_the_tool_the_gate_likes_best(self, tmp_path: Path) -> None:
+        """Rank 1 carries the strongest verdict in the cohort.
+
+        :param tmp_path: pytest temp dir.
+        """
+        body = _body(self._three(tmp_path))
+        top = _cells(body, "solid", after="1b. PRODUCTION")
+        assert top[0] == "1"
+        assert "clears margin" in top[-1]
+
+    def test_unjudged_tools_are_dashed_not_ranked_last(self, tmp_path: Path) -> None:
+        """A tool the gate cannot judge is unranked, not "worst".
+
+        Numbering it would invite demoting whatever happens to sit at the
+        bottom of a best-to-worst list.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        cohort = {
+            "judged": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
+            "thin": _stats(edge=0.09, edge_sd=None, edge_n=5),
+        }
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert _cells(body, "judged", after="1b. PRODUCTION")[0] == "1"
+        assert _cells(body, "thin", after="1b. PRODUCTION")[0] == "-"

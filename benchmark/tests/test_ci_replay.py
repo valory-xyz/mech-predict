@@ -788,6 +788,83 @@ class TestMainRowGuards:
         assert code == 1
         assert "No candidate rows" in capsys.readouterr().err
 
+    def test_all_malformed_candidate_fails_the_run(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """A run that scored nothing must exit nonzero, not publish a verdict.
+
+        The 2026-08-04 v5 run had 300 candidate rows -- every one malformed --
+        and exited green with a posted report. The rendering was already made
+        honest ("Computed on 0 markets"); this pins the exit code, which is
+        what makes the run go red and the incomplete-benchmark notice fire.
+        Keyed on the PAIRED count so a tournament-fallback run (zero
+        production rows, real scored pairs) is untouched.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        code = self._run(
+            tmp_path,
+            monkeypatch,
+            [
+                {
+                    **_row("malformed", p_yes=None),
+                    "question_text": f"Q{i}?",
+                }
+                for i in range(3)
+            ],
+        )
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "0 scored pairs from 3 candidate rows" in captured.err
+        assert "malformed=3" in captured.err
+        assert "refusing to publish" in captured.err.lower()
+        # The harm on 2026-08-04 was a PUBLISHED verdict, not the exit code:
+        # main() renders the report to stdout before posting, so an empty
+        # stdout is what pins "no verdict escaped". A refactor moving the
+        # guard below the render would fail here.
+        assert captured.out == "", "a verdict was published despite the guard"
+
+    def test_tournament_fallback_shape_still_exits_zero(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """The guard's exemption for tournament-fallback runs is executable.
+
+        The fallback synthesizes a NON-empty baseline arm (tournament p_yes
+        per market) and candidate rows that pair normally; keying the guard
+        on the paired count is what lets those runs pass. If pair_arms or the
+        fallback shape ever drifts and zeroes n on tournament data, this
+        flips green runs red -- this test makes that loud.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        cand = [{**_row("valid"), "question_text": f"Q{i}?"} for i in range(3)]
+        # Tournament flavour: the sidecar next to candidate.jsonl marks the
+        # rows as tournament-sourced, which the report renders as
+        # "Baseline (tourn)".
+        stats = {
+            "source": "tournament",
+            "accepted": 3,
+            "rejected": {},
+            "no_row_id": 0,
+            "production_attempt": {"accepted": 0, "rejected": {}},
+            "fallback_reason": "0 production rows",
+        }
+        (tmp_path / "filter_stats.json").write_text(json.dumps(stats), encoding="utf-8")
+        code = self._run(tmp_path, monkeypatch, cand)
+        out = capsys.readouterr().out
+        assert code == 0, "tournament-shaped run went red"
+        assert "tourn" in out, "report did not render the tournament label"
+
     def test_populated_candidate_renders(
         self,
         tmp_path: Path,

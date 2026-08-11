@@ -957,14 +957,16 @@ class TestBaseInBothTables:
         assert "0.1438" in cells and "0.2270" in cells
 
 
-class TestBestToWorstOrdering:
-    """The order must agree with the verdict, so the table is actionable."""
+class TestEdgeOrdering:
+    """Rows are ordered by Edge -- how good -- not by how sure we are."""
 
-    def _three(self, tmp_path: Path) -> Path:
-        """Build a cohort where raw Edge and the gate's bound disagree.
+    def _cohort(self, tmp_path: Path) -> Path:
+        """Build a cohort where Edge and the promote bound disagree.
 
-        `wide` has the biggest raw Edge but a spread so large its bound is the
-        worst of the three; `solid` has a smaller Edge and the best bound.
+        `thin` has the BEST edge on few markets; `broad` a slightly worse edge
+        on many. Ranking on the bound would put `thin` last purely for being
+        less measured, which is what live data did: the tool with the best
+        edge (-0.1551) sorted last on 31 markets against another's 421.
 
         :param tmp_path: pytest temp dir.
         :return: the results directory.
@@ -972,9 +974,8 @@ class TestBestToWorstOrdering:
         results = tmp_path / "r"
         results.mkdir()
         cohort = {
-            "wide": _stats(edge=0.30, edge_sd=3.0, edge_n=100),
-            "solid": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
-            "middling": _stats(edge=0.12, edge_sd=0.60, edge_n=100),
+            "thin": _stats(edge=-0.15, edge_sd=0.38, edge_n=31),
+            "broad": _stats(edge=-0.17, edge_sd=0.34, edge_n=421),
         }
         for name in (
             "scores_polymarket.json",
@@ -985,48 +986,41 @@ class TestBestToWorstOrdering:
         _write(results, "scores_tournament_polymarket.json", {})
         return results
 
-    def test_ranked_on_the_bound_not_raw_edge(self, tmp_path: Path) -> None:
-        """The tool with the biggest Edge is not automatically rank 1.
+    def test_best_edge_ranks_first_even_on_a_small_sample(self, tmp_path: Path) -> None:
+        """The better tool leads, regardless of how much data backs it.
 
-        Ranking on raw Edge would put `wide` first while the gate refuses to
-        promote it -- the order and the verdict would contradict each other.
-
-        :param tmp_path: pytest temp dir.
-        """
-        body = _body(self._three(tmp_path))
-        section = body.split("1b. PRODUCTION", 1)[-1]
-        order = [
-            c[1]
-            for c in (
-                [x.strip() for x in line.split("|")] for line in section.splitlines()
-            )
-            if len(c) > 2 and c[0] in {"1", "2", "3"}
-        ][:3]
-        assert order == ["solid", "middling", "wide"], order
-
-    def test_rank_one_is_the_tool_the_gate_likes_best(self, tmp_path: Path) -> None:
-        """Rank 1 carries the strongest verdict in the cohort.
+        Otherwise "demote the worst" points at the least-measured tool rather
+        than the worst one. A lower bound is the conservative test for
+        PROMOTING and is backwards for demoting.
 
         :param tmp_path: pytest temp dir.
         """
-        body = _body(self._three(tmp_path))
-        top = _cells(body, "solid", after="1b. PRODUCTION")
+        body = _body(self._cohort(tmp_path))
+        assert _cells(body, "thin", after="1b. PRODUCTION")[0] == "1"
+        assert _cells(body, "broad", after="1b. PRODUCTION")[0] == "2"
+
+    def test_rank_one_need_not_be_promotable(self, tmp_path: Path) -> None:
+        """Order answers "how good"; rec answers "what can we act on".
+
+        They are allowed to disagree -- a leading tool the gate cannot yet
+        confirm is informative, not a contradiction.
+
+        :param tmp_path: pytest temp dir.
+        """
+        top = _cells(_body(self._cohort(tmp_path)), "thin", after="1b. PRODUCTION")
         assert top[0] == "1"
-        assert "clears margin" in top[-1]
+        assert not top[-1].startswith("PROMOTE")
 
     def test_unjudged_tools_are_dashed_not_ranked_last(self, tmp_path: Path) -> None:
-        """A tool the gate cannot judge is unranked, not "worst".
-
-        Numbering it would invite demoting whatever happens to sit at the
-        bottom of a best-to-worst list.
+        """A tool with no Edge at all is unranked, not "worst".
 
         :param tmp_path: pytest temp dir.
         """
         results = tmp_path / "r"
         results.mkdir()
         cohort = {
-            "judged": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
-            "thin": _stats(edge=0.09, edge_sd=None, edge_n=5),
+            "scored": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
+            "unscored": _stats(edge=None, edge_sd=None, edge_n=0),
         }
         for name in (
             "scores_polymarket.json",
@@ -1036,5 +1030,61 @@ class TestBestToWorstOrdering:
             _write(results, name, cohort)
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
-        assert _cells(body, "judged", after="1b. PRODUCTION")[0] == "1"
-        assert _cells(body, "thin", after="1b. PRODUCTION")[0] == "-"
+        assert _cells(body, "scored", after="1b. PRODUCTION")[0] == "1"
+        assert _cells(body, "unscored", after="1b. PRODUCTION")[0] == "-"
+
+
+class TestFloorIsVisible:
+    """The number that decides the ranking and the verdict must be on screen."""
+
+    def test_floor_column_renders_the_bound(self, tmp_path: Path) -> None:
+        """The rendered value equals the bound the gate tests.
+
+        Ranking on a quantity the reader cannot see is the same defect as a
+        skill score whose denominator sits off-screen -- the order looks to
+        contradict the Edge column with no visible reason.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        row = _stats(edge=0.09, edge_sd=0.10, edge_n=100)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": row})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "floor" in body
+        expected = f"{_edge_lower_bound(row):+.4f}"
+        assert expected in _cells(body, "alpha", after="1b. PRODUCTION"), expected
+
+    def test_floor_is_shown_beside_the_edge_it_qualifies(self, tmp_path: Path) -> None:
+        """A leading Edge with a negative floor renders both, side by side.
+
+        The order says which tool is best; the floor says whether we can act
+        on it. Showing only one of the two is what makes an order look
+        arbitrary.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        cohort = {
+            "wide": _stats(edge=0.30, edge_sd=3.0, edge_n=100),
+            "solid": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
+        }
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        top = _cells(body, "wide", after="1b. PRODUCTION")
+        assert top[0] == "1", "best Edge leads"
+        assert "-0.1935" in top, "and its floor shows why it is not promotable"
+        assert not top[-1].startswith("PROMOTE")

@@ -575,8 +575,9 @@ def _headline(
         [
             section(f"*TOOL VERDICT - {platform.upper()}*\n" + "\n".join(lines)),
             context(
-                "Gate: promote needs the one-sided 95% lower bound on edge vs "
-                f"the market to clear +{PROMOTE_DELTA} with n >= "
+                "Tables are RANKED BY `Edge` -- how far the tool beat the "
+                "market. Promotion is a different test: `floor` (Edge minus a "
+                f"penalty for uncertainty) must clear +{PROMOTE_DELTA} with n >= "
                 f"{MIN_SAMPLE_SIZE}. A tool winning under half the markets where "
                 "it disagreed with the price cannot be promoted whatever its "
                 "headline accuracy says. Evidence in the tables below."
@@ -593,6 +594,22 @@ def _rank(tool: str, ranked: Sequence[str]) -> str:
     :return: "1", "2", ... or "-" for a tool the gate could not judge.
     """
     return str(ranked.index(tool) + 1) if tool in ranked else "-"
+
+
+def _floor(stats: dict[str, Any] | None) -> str:
+    """Format the lower bound the ranking and the promote rule both use.
+
+    Shown because it decides things. The report ranks on it and the gate tests
+    it, so leaving it off-screen would repeat exactly the failure this module
+    was written to stop: a number that drives a verdict while the reader can
+    only see a different number beside it. It also explains an order that
+    ``Edge`` alone appears to contradict.
+
+    :param stats: per-tool stats for the decision window.
+    :return: signed bound to 4 decimals, or ``n/a``.
+    """
+    lower = _edge_lower_bound(stats)
+    return NA if lower is None else f"{lower:+.4f}"
 
 
 def _conditional(stats: dict[str, Any] | None) -> str:
@@ -642,6 +659,7 @@ _AT_COLUMNS = (
     Col("mkt cum", align="right"),
     Col("Edge W-1", align="right"),
     Col("Edge cum", align="right"),
+    Col("floor", align="right"),
     Col("Δ Edge", align="right"),
     Col("condAcc", align="right"),
     Col("ROI 90d", align="right"),
@@ -653,28 +671,29 @@ _AT_COLUMNS = (
 def _sort_key(
     entry: tuple[str, dict[str, Any] | None, dict[str, Any] | None],
 ) -> tuple[int, float, str]:
-    """Order rows BEST first on the same quantity the gate decides on.
+    """Order rows BEST first on Edge -- how far the tool beat the market.
 
-    Ranking on raw Edge would put a tool with a big but unreliable edge above
-    one with a smaller, solid edge -- and the gate would then disagree with the
-    order the reader just read. Sorting on the lower bound instead makes the
-    table directly actionable: the top row is the closest to promotable and the
-    bottom row is the closest to demotable, by the same arithmetic that writes
-    the ``rec`` cell.
+    Edge, not the promote bound. The bound subtracts a penalty for
+    uncertainty, so ranking on it partly ranks HOW WELL MEASURED a tool is
+    rather than how good it is: on live data the tool with the BEST edge
+    (-0.1551) sorted last purely because it had 31 markets against another's
+    421. "Demote the worst" would then point at the least-measured tool, not
+    the worst one -- a lower bound is the conservative test for PROMOTING, and
+    backwards for demoting.
 
-    Tools the gate cannot judge sort last. They are not "worst"; they are
-    unranked, and putting them at the bottom of a best-to-worst list without
-    that distinction would invite demoting whatever happens to sit there.
+    So the order answers "how good", the ``floor`` column answers "how sure",
+    and ``rec`` answers "what can we act on". They are allowed to disagree, and
+    a rank-1 tool that is not promotable is informative rather than wrong.
 
     :param entry: (tool name, current stats, reference stats).
-    :return: sort key; judged rows first by descending lower bound, then
-        unjudged rows, with the tool name breaking every tie.
+    :return: sort key; scored rows first by descending Edge, then unscored,
+        with the tool name breaking every tie.
     """
     name, current, reference = entry
     for stats in (current, reference):
-        lower = _edge_lower_bound(stats)
-        if lower is not None:
-            return (0, -lower, name)
+        edge = _num((stats or {}).get("edge"))
+        if edge is not None:
+            return (0, -edge, name)
     # Tool name breaks the tie: without it, unranked rows come out in set
     # iteration order, which differs between processes and makes the posted
     # table undiffable day over day. _ordered() also sorts its input, so this
@@ -764,7 +783,7 @@ def _rows_at(
     """
     deployed = mode == "production"
     verdicts = _verdicts_for(tools, at, deployed, w1)
-    ranked = [t for t in tools if _edge_lower_bound(at.get(t)) is not None]
+    ranked = [t for t in tools if _num((at.get(t) or {}).get("edge")) is not None]
 
     rows: list[tuple[str, ...]] = []
     for tool in tools:
@@ -784,6 +803,7 @@ def _rows_at(
                 _score((b or {}).get("market_brier")),
                 _signed((a or {}).get("edge")),
                 _signed((b or {}).get("edge")),
+                _floor(b),
                 _delta(a, b, "edge", lower_is_better=False),
                 _conditional(b),
                 _roi(roi.get((tool, mode))),
@@ -1079,8 +1099,9 @@ def build_digest_messages(
                 "1b. Production - W-1 vs cumulative",
                 [
                     section(
-                        f"*1b. PRODUCTION - BEST to WORST*  _ranked by the gate's own "
-                        f"lower bound; this week against {month_label}_"
+                        f"*1b. PRODUCTION - RANKED BY `Edge cum`, best first*  "
+                        f"_how far each tool beat the market; this week "
+                        f"against {month_label}_"
                     ),
                     table_block(
                         _AT_COLUMNS,
@@ -1099,8 +1120,8 @@ def build_digest_messages(
                 "2. Tournament - all-time pool",
                 [
                     section(
-                        "*2. TOURNAMENT - BEST to WORST*  _candidates ranked by "
-                        "the same bound; no weekly comparison available_"
+                        "*2. TOURNAMENT - RANKED BY `Edge cum`, best first*  "
+                        "_candidates; no weekly comparison available_"
                     ),
                     table_block(
                         _AT_COLUMNS,

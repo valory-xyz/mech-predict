@@ -644,7 +644,8 @@ class TestPromoteDemoteGate:
             edge_n=100,
             conditional_accuracy_rate=0.45,
         )
-        assert _edge_lower_bound(row) > 0.04
+        lower = _edge_lower_bound(row)
+        assert lower is not None and lower > 0.04
         verdict = _verdict(row, deployed=False)
         assert verdict.startswith("review")
         assert "45%" in verdict

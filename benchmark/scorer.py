@@ -165,6 +165,13 @@ def _partition_rows_by_platform(
 
 
 RELIABILITY_GATE = 0.80
+
+# Bumped whenever a NEW accumulator field is added. A restored accumulator that
+# predates the bump cannot back-fill the missing sums from its own totals, so
+# the derived metric stays None forever on the incremental path -- which is the
+# daily path. The flywheel compares this against the restored file and forces
+# one rebuild rather than silently rendering a dead column.
+SCORES_SCHEMA_VERSION = 2
 MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
@@ -947,6 +954,7 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
     stamps = sorted(r["predicted_at"] for r in rows if r.get("predicted_at"))
 
     return {
+        "schema_version": SCORES_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "window_start": stamps[0] if stamps else None,
         "window_end": stamps[-1] if stamps else None,
@@ -1031,6 +1039,7 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     :return: finalized dict with derived stats.
     """
     result: dict[str, Any] = {
+        "schema_version": SCORES_SCHEMA_VERSION,
         "current_month": scores["current_month"],
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }

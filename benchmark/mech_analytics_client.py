@@ -340,3 +340,113 @@ def iter_scored_rows(
         pages,
         _to_iso_z(since),
     )
+
+
+def iter_unscored_row_ids(
+    since: datetime,
+    until: Optional[datetime] = None,
+    *,
+    chain_id: Optional[int] = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    max_pages: int = DEFAULT_MAX_PAGES,
+) -> Iterator[str]:
+    """Page through ``/v1/data/unscored-rows`` and yield ``request_id`` values.
+
+    Shell rows (predict-api's ``resolution_status='unparseable'`` writes)
+    are partitioned onto ``/v1/data/unscored-rows`` — the scored endpoint
+    excludes them because every score column is NULL. The coverage check
+    needs the union of both endpoints so a shell row present in the lake
+    is not reported as "missing from lake". This helper is intentionally
+    request-id-only: the coverage check keys on request_id set membership
+    and never reads the score columns from an unscored row.
+
+    :param since: timezone-aware datetime for the ``since`` filter (inclusive).
+    :param until: optional timezone-aware datetime for the ``until`` filter
+        (exclusive; endpoint semantics).
+    :param chain_id: optional chain filter (100 for Gnosis, 137 for Polygon).
+    :param page_size: batch size per HTTP call.
+    :param timeout_s: per-request timeout in seconds.
+    :param max_pages: runaway guard.
+    :yield: one request_id per yielded value.
+    :raises MechAnalyticsError: if the endpoint is unreachable, the config
+        (``MECH_ANALYTICS_URL``) is missing, or the paginator hits ``max_pages``.
+    """
+    base = _base_url()
+
+    params: dict[str, Any] = {
+        "since": _to_iso_z(since),
+        "limit": page_size,
+    }
+    if until is not None:
+        params["until"] = _to_iso_z(until)
+    if chain_id is not None:
+        params["chain_id"] = chain_id
+
+    url = f"{base}/v1/data/unscored-rows"
+    pages = 0
+    total_rows = 0
+    cursor: str | None = None
+    from requests.adapters import HTTPAdapter  # pylint: disable=import-outside-toplevel
+    from urllib3.util.retry import Retry  # pylint: disable=import-outside-toplevel
+
+    retry = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=(502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    with requests.Session() as session:
+        session.mount(base, HTTPAdapter(max_retries=retry))
+        while pages < max_pages:
+            pages += 1
+            try:
+                resp = session.get(url, params=params, timeout=timeout_s)
+                resp.raise_for_status()
+                payload = resp.json()
+            except requests.RequestException as exc:
+                raise MechAnalyticsError(
+                    f"mech-analytics unscored-rows fetch failed (page {pages}): {exc}"
+                ) from exc
+
+            if not isinstance(payload, dict):
+                raise MechAnalyticsError(
+                    f"mech-analytics unscored-rows page {pages}: "
+                    f"payload is {type(payload).__name__}, expected dict"
+                )
+            if "rows" not in payload:
+                raise MechAnalyticsError(
+                    f"mech-analytics unscored-rows page {pages}: "
+                    f"payload missing 'rows' key (got keys: {sorted(payload)})"
+                )
+            rows = payload["rows"]
+            if not isinstance(rows, list):
+                raise MechAnalyticsError(
+                    f"mech-analytics unscored-rows page {pages}: "
+                    f"'rows' has unexpected type {type(rows).__name__}"
+                )
+            for api_row in rows:
+                rid = api_row.get("request_id")
+                if rid:
+                    yield rid
+            total_rows += len(rows)
+
+            cursor = payload.get("next_cursor")
+            if not cursor:
+                break
+            params.pop("since", None)
+            params["cursor"] = cursor
+        else:
+            if cursor:
+                raise MechAnalyticsError(
+                    f"mech-analytics unscored-rows paginator hit max_pages={max_pages} "
+                    f"with cursor still pending; likely a cursor cycle or "
+                    f"unexpectedly large window (fetched {total_rows} rows so far)"
+                )
+
+    log.info(
+        "mech-analytics: fetched %d unscored request_id(s) across %d page(s) since=%s",
+        total_rows,
+        pages,
+        _to_iso_z(since),
+    )

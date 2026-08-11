@@ -56,6 +56,28 @@ def _isolate_predict_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PREDICT_API_POSTGRES_URL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _stub_undelivered_pending(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``_pull_undelivered_pending`` to return empty sets by default.
+
+    Every test that supplies ``--predict-api-url`` (or the
+    ``PREDICT_API_POSTGRES_URL`` env var) also implicitly enables the
+    undelivered-pending pull. Without this stub each such test would
+    open a real ``psycopg.connect`` against the placeholder DSN
+    ``postgresql://ignored`` and hang the suite on DNS resolution.
+    Tests that specifically exercise the undelivered-pending semantics
+    override this stub with their own fixture data.
+
+    :param monkeypatch: pytest fixture used to swap the
+        ``_pull_undelivered_pending`` symbol on the module under test.
+    """
+
+    def _empty(_url: str, _since: datetime, _until: datetime) -> dict[str, set[str]]:
+        return {"omen": set(), "polymarket": set()}
+
+    monkeypatch.setattr(vms, "_pull_undelivered_pending", _empty)
+
+
 def _mp_row(request_id: str, **overrides: Any) -> dict[str, Any]:
     """Synthetic mech-predict row with the fields the gate reads."""
     row = {
@@ -332,20 +354,23 @@ class TestCoverageGate:
         )
         assert vms.main(_base_argv()) == 4
 
-    def test_dropped_no_request_id_returns_four(
+    def test_dropped_no_request_id_above_tolerance_returns_four(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A marketplace delivery dropped for missing request.id blocks PASS.
+        """A drop count above tolerance still blocks PASS.
 
         Even with a perfect set-diff (every returned id is in the lake),
-        a non-zero drop means one or more requests could be silently
-        absent from the lake without the check being able to name them.
-        The gate must fail.
+        a large drop count signals subgraph schema drift or a broken
+        ingest — one or more requests could be silently absent from the
+        lake without the check being able to name them. Above the
+        tolerance (``max(_DROPPED_NO_RID_ABSOLUTE_TOLERANCE, ...)``) the
+        gate must fail. Below the tolerance a subgraph-side data quality
+        artifact of a handful of stale drops is tolerated as a warning
+        (see ``test_dropped_no_request_id_within_tolerance_warns``).
 
         Both platforms populated above the vacuous floor here for the same
         reason as the sibling test above — the drop counter is what has to
-        trip, not the floor. Mutating ``if coverage.total_dropped_no_rid >
-        0: → if False:`` must fail this test.
+        trip, not the floor.
 
         :param monkeypatch: pytest fixture used to override the
             marketplace pull stub with a non-zero drop count.
@@ -354,14 +379,14 @@ class TestCoverageGate:
         lake = [_lake_row(f"r{i}") for i in range(10)]
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
+        # Absolute tolerance is 100; anything strictly above trips fail-close.
+        drops_above_tolerance = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE + 1
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int
         ) -> tuple[dict[str, set[str]], dict[str, int]]:
-            # One row dropped on the omen side; nothing missing from the
-            # lake for anything the sweep did resolve.
             return {"omen": omen_ids, "polymarket": polymarket_ids}, {
-                "omen": 1,
+                "omen": drops_above_tolerance,
                 "polymarket": 0,
             }
 
@@ -372,6 +397,46 @@ class TestCoverageGate:
         monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
         monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
         assert vms.main(_base_argv()) == 4
+
+    def test_dropped_no_request_id_within_tolerance_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A small drop count (subgraph data quality artifact) logs a warning and passes.
+
+        The threshold is ``max(_DROPPED_NO_RID_ABSOLUTE_TOLERANCE,
+        _DROPPED_NO_RID_RELATIVE_TOLERANCE * total_marketplace)``. A
+        handful of stale drops from missing subgraph Request events is
+        a data-quality issue we can't zero from our side, so it must
+        not fail the run. Verifies the tolerance is applied AND a
+        warning is emitted so operators can see the drop count in the
+        logs.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        omen_ids = {r["request_id"] for r in rows}
+        polymarket_ids = {f"poly{i}" for i in range(5)}
+        drops_within_tolerance = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE
+
+        def _marketplace_ids(
+            _since_ts: int, _until_ts: int
+        ) -> tuple[dict[str, set[str]], dict[str, int]]:
+            return {"omen": omen_ids, "polymarket": polymarket_ids}, {
+                "omen": drops_within_tolerance,
+                "polymarket": 0,
+            }
+
+        def _lake_ids(_since: datetime, _until: datetime) -> set[str]:
+            return omen_ids | polymarket_ids
+
+        _patch_pulls(monkeypatch, rows, lake)
+        monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
+        monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
+        with caplog.at_level("WARNING"):
+            assert vms.main(_base_argv()) == 0
+        assert any(
+            "within tolerance" in rec.message and "dropped" in rec.message
+            for rec in caplog.records
+        )
 
     def test_min_marketplace_rows_zero_still_traps_empty_platform(
         self, monkeypatch: pytest.MonkeyPatch

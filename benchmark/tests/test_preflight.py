@@ -26,6 +26,7 @@ extraction: every branch of the module is pinned.
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 from benchmark import preflight
@@ -102,6 +103,61 @@ class TestPreflight:
         out = capsys.readouterr().out
         assert out.startswith("::error::")
         assert "preflight-bad-tool" in out
+
+    def test_import_crashing_module_annotates_not_tracebacks(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        """A tool whose module raises at import must annotate, not traceback.
+
+        A module broken by a bad merge raises whatever its top-level code
+        hits (RuntimeError, NameError, SyntaxError) -- none of which the old
+        (ValueError, ImportError) tuple covered, so exactly the
+        misconfiguration class this preflight exists for escaped as the bare
+        traceback the docstring promises it prevents.
+
+        :param tmp_path: pytest tmp_path fixture.
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        crasher = "preflight_import_crasher"
+        (tmp_path / f"{crasher}.py").write_text(
+            'raise RuntimeError("module-level explosion")\n', encoding="utf-8"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setitem(
+            TOOL_REGISTRY,
+            "preflight-crash-tool",
+            type(TOOL_REGISTRY["superforcaster"])(
+                module=crasher, family="superforcaster"
+            ),
+        )
+        assert main(["superforcaster", "preflight-crash-tool"]) == 1
+        out = capsys.readouterr().out
+        assert out.startswith("::error::"), f"escaped bare: {out[:80]!r}"
+        assert "RuntimeError" in out and "module-level explosion" in out
+
+    def test_import_error_annotates(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """The plain-ImportError branch (missing dependency) is pinned too.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param capsys: pytest capsys fixture.
+        """
+        monkeypatch.setitem(
+            TOOL_REGISTRY,
+            "preflight-missing-dep-tool",
+            type(TOOL_REGISTRY["superforcaster"])(
+                module="no_such_module_anywhere_xyz", family="superforcaster"
+            ),
+        )
+        assert main(["superforcaster", "preflight-missing-dep-tool"]) == 1
+        out = capsys.readouterr().out
+        assert out.startswith("::error::")
+        assert "ModuleNotFoundError" in out or "ImportError" in out
 
     def test_module_entrypoint_matches_workflow_invocation(self) -> None:
         """Pin the ``python -m benchmark.preflight`` contract the workflow uses."""

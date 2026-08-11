@@ -63,8 +63,12 @@ def main(argv: list[str]) -> int:
         # Raises ValueError naming tool+module on a present-but-unusable
         # schema; returns None for plain-prompt tools, which is fine.
         _get_structured_output_schema(candidate)
-    except (ValueError, ImportError) as exc:
-        print(f"::error::{exc}")
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        # Deliberately broad: import_module propagates WHATEVER the tool's
+        # top-level code raises (RuntimeError, NameError, SyntaxError from a
+        # bad merge), and this module's entire contract is "annotate, never
+        # traceback". A narrow tuple here let exactly those escape bare.
+        print(f"::error::{type(exc).__name__}: {exc}")
         return 1
 
     print(f"preflight ok: tool={tool} candidate={candidate}")

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.roi_sim import MODEL_DISPLAY, _is_number, roi_display_sort_key
+from benchmark.slack_blocks import Col, context, message, section, table_block
 from benchmark.slack_tables import Column, ELLIPSIS, render_table
 
 log = logging.getLogger(__name__)
@@ -508,3 +509,78 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
     if inactive_tools:
         lines.append(f"not deployed/active: {len(inactive_tools)} tools")
     return "\n".join(lines)
+
+
+# Native Block Kit column spec, parallel to _HEADERS/_row_cells. Slack lays the
+# columns out, so the flags column needs no cap here -- it is allowed to wrap
+# instead of being ellipsized, which is strictly more information.
+_BLOCK_COLUMNS = (
+    Col("tool"),
+    Col("mode"),
+    Col("model"),
+    Col("preds", align="right"),
+    Col("bets", align="right"),
+    Col("Brier all", align="right"),
+    Col("Brier bets", align="right"),
+    Col("staked", align="right"),
+    Col("ROI (95% CI)", align="right"),
+    Col("w/costs", align="right"),
+    Col("flags", wrap=True),
+)
+
+
+def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | None:
+    """Build the ROI companion as a native Slack ``table`` block payload.
+
+    Same data and same row selection as :func:`build_roi_section`; only the
+    rendering differs. Slack lays out the columns, so nothing is padded and the
+    free-form flags column wraps rather than being cut at ``_FLAGS_CAP``.
+
+    :param results_path: path to roi_results.json (from benchmark.roi_sim).
+    :param platform: platform key ("omen" / "polymarket").
+    :return: a webhook payload, or None when there is nothing to post.
+    """
+    text = build_roi_section(results_path, platform)
+    if text is None:
+        return None
+
+    payload = _load_results(results_path)
+    groups = (payload or {}).get("groups") or []
+    platform_groups = [
+        g
+        for g in groups
+        if isinstance(g, dict)
+        and g.get("platform") == platform
+        and g.get("active") is not False
+    ]
+    prediction_groups = [g for g in platform_groups if g.get("is_prediction_tool")]
+    bet_groups = [g for g in prediction_groups if _as_int(g.get("n_bets")) > 0]
+    if not bet_groups:
+        return None
+
+    extra = 0
+    if len(bet_groups) > MAX_TABLE_ROWS:
+        extra = len(bet_groups) - MAX_TABLE_ROWS
+        bet_groups = sorted(bet_groups, key=lambda g: -_as_float(g.get("staked")))[
+            :MAX_TABLE_ROWS
+        ]
+    bet_groups.sort(key=_display_sort_key)
+
+    blocks: list[dict[str, Any]] = [
+        section(
+            "*ROI COMPANION*  _simulated trader ROI, trailing 90d, same "
+            "decision rules for every tool_"
+        ),
+        table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]),
+    ]
+
+    # The prose tails from the text section carry real information (idle tools,
+    # excluded non-prediction tools, truncated rows); keep them as context.
+    notes = [line for line in text.split("\n") if line and not line.startswith("`")]
+    tail = [n for n in notes[1:] if not n.startswith("tool ") and "|" not in n]
+    if extra:
+        tail.append(f"+{extra} more rows in the full report")
+    if tail:
+        blocks.append(context(" · ".join(tail)))
+
+    return message(f"ROI companion ({platform})", blocks)

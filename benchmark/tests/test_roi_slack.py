@@ -36,6 +36,7 @@ from benchmark.roi_slack import (
     _HEADERS,
     _load_results,
     _render_table,
+    build_roi_message,
     build_roi_section,
 )
 
@@ -1350,3 +1351,55 @@ class TestRoiSectionFreshness:
         )
         assert at_section is not None and "stale" not in at_section
         assert over_section is not None and "stale" in over_section
+
+
+class TestRoiBlockMessage:
+    """The ROI companion renders as a native table block under the flag."""
+
+    def test_columns_match_the_text_table(self, tmp_path: Path) -> None:
+        """The block table carries the same columns as the fixed-width one.
+
+        :param tmp_path: pytest temp dir.
+        """
+        path = tmp_path / "roi.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "as_of": "2026-08-11",
+                    "groups": [
+                        {
+                            "platform": "polymarket",
+                            "tool_name": "alpha",
+                            "mode": "production",
+                            "model": "gpt-4.1",
+                            "is_prediction_tool": True,
+                            "n_eligible": 200,
+                            "n_bets": 31,
+                            "staked": 77.5,
+                            "roi_mid": 16.3,
+                            "roi_ci": [-7.4, 38.5],
+                            "roi_haircut": 7.0,
+                            "brier_all": 0.273,
+                            "brier_bets": 0.135,
+                            "parse_reliability": 100.0,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = build_roi_message(path, "polymarket")
+        assert payload is not None
+        table = [b for b in payload["blocks"] if b["type"] == "table"][0]
+        assert [c["text"] for c in table["rows"][0]] == list(_HEADERS)
+
+    def test_no_bets_yields_no_message(self, tmp_path: Path) -> None:
+        """A platform with no betting rows posts nothing rather than an empty table.
+
+        :param tmp_path: pytest temp dir.
+        """
+        path = tmp_path / "roi.json"
+        path.write_text(
+            json.dumps({"as_of": "2026-08-11", "groups": []}), encoding="utf-8"
+        )
+        assert build_roi_message(path, "polymarket") is None

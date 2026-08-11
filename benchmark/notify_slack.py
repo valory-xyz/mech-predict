@@ -34,7 +34,7 @@ from benchmark.analyze import (
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
 from benchmark.digest_tables import build_digest_messages
-from benchmark.roi_slack import build_roi_section
+from benchmark.roi_slack import build_roi_message, build_roi_section
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
 
@@ -517,7 +517,14 @@ def main() -> None:
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
-                roi_section = build_roi_section(args.roi_results, platform_key)
+                # With the computed tables on, the ROI companion renders as a
+                # native table block too, so both halves of the digest look
+                # the same; otherwise it keeps its fixed-width form.
+                roi_section = (
+                    build_roi_message(args.roi_results, platform_key)
+                    if _computed_tables_enabled()
+                    else build_roi_section(args.roi_results, platform_key)
+                )
         except Exception:  # pylint: disable=broad-except
             log.warning(
                 "ROI section build failed; posting digest without it.",

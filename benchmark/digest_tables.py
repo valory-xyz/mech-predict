@@ -859,7 +859,10 @@ def _alert_rows(
                 "platform below market",
                 f"ALL ({len(below_market)} tools over the floor)",
                 f"every cumulative Edge < 0; best is {best:+.4f}",
-                "upstream calibration, not a tool swap",
+                "check the price band first: a trader-side bet "
+                "filter can confine the prices this platform ever "
+                "records, which pushes Edge negative for every tool "
+                "regardless of quality",
             )
         )
 

@@ -75,8 +75,8 @@ class PredictionResult(BaseModel):
             "reason on a scale of 1-10."
         ),
     )
-    word_mention_check: str = Field(
-        ...,
+    word_mention_check: Optional[str] = Field(
+        default=None,
         description=(
             "WORD-MENTION MARKET SCREEN. Write 'Not applicable.' if the question "
             "does not ask whether a specific person will say/use a specific "
@@ -84,7 +84,8 @@ class PredictionResult(BaseModel):
             "word-mention market: (a) identify and exclude circular prediction-market "
             "evidence; (b) flag whether evidence is event-specific or from a past "
             "occasion; (c) apply event-specific base rates; (d) check for event "
-            "disruption signals. Synthesise into an adjusted probability estimate."
+            "disruption signals. Synthesise into an adjusted probability estimate. "
+            "Set to null / omit for non-word-mention markets."
         ),
     )
     aggregation: str = Field(
@@ -137,96 +138,6 @@ class PredictionResult(BaseModel):
 
     @model_validator(mode="after")
     def _check_p_yes_p_no_sum(self) -> "PredictionResult":
-        """Validate that p_yes + p_no == 1."""
-        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
-            raise ValueError(
-                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
-                f"{self.p_yes + self.p_no})"
-            )
-        return self
-
-
-class StandardPredictionResult(BaseModel):
-    """Superforecaster structured output for non-word-mention markets.
-
-    Used when the market question does NOT ask whether a specific person will
-    say/use a specific word or phrase during a named event. Identical to
-    PredictionResult but without the word_mention_check field, so the model
-    is not forced to apply a WM screen that is inapplicable and suppresses
-    p_yes on ordinary markets.
-    """
-
-    facts: str = Field(
-        ...,
-        description=(
-            "Core factual points compiled from the sources and relevant "
-            "background. Specific, relevant, no conclusions about how a "
-            "fact influences the forecast."
-        ),
-    )
-    reasons_no: str = Field(
-        ...,
-        description=(
-            "Reasons why the answer might be NO. Rate the strength of each "
-            "reason on a scale of 1-10."
-        ),
-    )
-    reasons_yes: str = Field(
-        ...,
-        description=(
-            "Reasons why the answer might be YES. Rate the strength of each "
-            "reason on a scale of 1-10."
-        ),
-    )
-    aggregation: str = Field(
-        ...,
-        description=(
-            "Aggregate considerations. Weigh competing factors, apply the "
-            "CALIBRATION block (state a base rate, adjust using specific evidence, "
-            "treat missing confirmation as NO), adjust for news negativity and "
-            "sensationalism bias. End by stating a tentative probability in [0,1]."
-        ),
-    )
-    reflection: str = Field(
-        ...,
-        description=(
-            "Sanity checks and finalisation. Apply: EVIDENCE BAR (p_yes > 0.80 "
-            "needs strong specific evidence; plans/proposals are not actions), "
-            "MARKET CIRCULARITY (prediction-market prices are circular; form your "
-            "own view), COUNT THRESHOLDS (for N+ requirements, apply count-specific "
-            "base rates). Check for over/underconfidence; highlight key factors."
-        ),
-    )
-    p_yes: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Estimated probability that the event in the Question occurs.",
-    )
-    p_no: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Estimated probability that the event does NOT occur.",
-    )
-    confidence: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description="Confidence in the prediction (0 = lowest, 1 = highest).",
-    )
-    info_utility: float = Field(
-        ...,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Utility of the information in the sources to inform the prediction "
-            "(0 = lowest, 1 = highest)."
-        ),
-    )
-
-    @model_validator(mode="after")
-    def _check_p_yes_p_no_sum(self) -> "StandardPredictionResult":
         """Validate that p_yes + p_no == 1."""
         if abs(self.p_yes + self.p_no - 1.0) > 0.01:
             raise ValueError(
@@ -370,8 +281,8 @@ MAX_EVIDENCE_TOKENS = 4000
 
 # Word-mention market detection: matches questions asking whether a specific
 # person will say/use/mention a specific quoted word or phrase at an event.
-# Used to dispatch between PredictionResult (WM screen included) and
-# StandardPredictionResult (WM screen omitted).
+# Used to decide whether word_mention_check in PredictionResult is relevant;
+# WM markets prompt the model to complete the screen, non-WM markets omit it.
 _WM_PATTERN = re.compile(
     r"""
     (?:
@@ -927,19 +838,20 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print("Formatting sources...")
             sources = _cap_evidence_block(organic_data, misc_data, model)
 
-        # Dispatch: word-mention markets get the WM screen (PredictionResult);
-        # all other markets use the leaner schema (StandardPredictionResult).
+        # Dispatch: word-mention markets use a prompt that instructs the model
+        # to complete the word_mention_check field in PredictionResult before
+        # committing to p_yes. Non-WM markets use a prompt that omits that
+        # field so the model leaves word_mention_check as null.
         is_wm_market = _is_word_mention_market(question)
         if is_wm_market:
             prediction_prompt = PREDICTION_PROMPT.format(
                 question=question, today=d, sources=sources
             )
-            response_format: Any = PredictionResult
         else:
             prediction_prompt = STANDARD_PREDICTION_PROMPT.format(
                 question=question, today=d, sources=sources
             )
-            response_format = StandardPredictionResult
+        response_format: Any = PredictionResult
 
         print(
             f"[superforcaster_full_search_v2] market_type={'wm' if is_wm_market else 'standard'}"
@@ -950,7 +862,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting structured prediction response...")
-        prediction: Union[PredictionResult, StandardPredictionResult]
+        prediction: PredictionResult
         prediction, counter_callback = _parse_completion(
             client=llm_client.client,
             model=model,
@@ -966,8 +878,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"p_no={prediction.p_no}, confidence={prediction.confidence}, "
             f"info_utility={prediction.info_utility}"
         )
-        if is_wm_market and hasattr(prediction, "word_mention_check"):
-            wm_preview = prediction.word_mention_check[:120]  # type: ignore[union-attr]
+        if is_wm_market and prediction.word_mention_check is not None:
+            wm_preview = prediction.word_mention_check[:120]
             print(f"[superforcaster_full_search_v2] word_mention_check={wm_preview}")
 
         result = json.dumps(

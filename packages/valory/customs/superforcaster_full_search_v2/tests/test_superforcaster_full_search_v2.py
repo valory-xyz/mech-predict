@@ -29,7 +29,6 @@ from pydantic import ValidationError
 
 from packages.valory.customs.superforcaster_full_search_v2.superforcaster_full_search_v2 import (
     PredictionResult,
-    StandardPredictionResult,
     _is_word_mention_market,
     _parse_completion,
     run,
@@ -58,10 +57,11 @@ FAKE_PREDICTION = PredictionResult(
     info_utility=0.4,
 )
 
-FAKE_STANDARD_PREDICTION = StandardPredictionResult(
+FAKE_STANDARD_PREDICTION = PredictionResult(
     facts="Fact 1. Fact 2.",
     reasons_no="No 1 (strength 6).",
     reasons_yes="Yes 1 (strength 5).",
+    word_mention_check=None,
     aggregation="Base rate 0.5. Tentative: 0.32.",
     reflection="Passes the sanity checks.",
     p_yes=0.32,
@@ -96,7 +96,7 @@ def _mock_parse_response() -> MagicMock:
 
 
 def _mock_standard_parse_response() -> MagicMock:
-    """Fake response for non-WM markets (StandardPredictionResult)."""
+    """Fake response for non-WM markets (PredictionResult with word_mention_check=None)."""
     return MagicMock(
         choices=[
             MagicMock(message=MagicMock(parsed=FAKE_STANDARD_PREDICTION, refusal=None))
@@ -137,10 +137,10 @@ class TestStructuredOutputContract:
 
     @patch(f"{V2_MODULE}.fetch_additional_sources")
     @patch(f"{V2_MODULE}.OpenAIClientManager")
-    def test_non_wm_market_uses_standard_prediction_result(
+    def test_non_wm_market_uses_prediction_result(
         self, mock_client_mgr: MagicMock, mock_fetch: MagicMock
     ) -> None:
-        """Non-WM market: run() calls parse with response_format=StandardPredictionResult."""
+        """Non-WM market: run() calls parse with response_format=PredictionResult."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
         mock_client = MagicMock()
         mock_client.client.beta.chat.completions.parse.return_value = (
@@ -159,7 +159,7 @@ class TestStructuredOutputContract:
 
         parse = mock_client.client.beta.chat.completions.parse
         parse.assert_called_once()
-        assert parse.call_args.kwargs["response_format"] is StandardPredictionResult
+        assert parse.call_args.kwargs["response_format"] is PredictionResult
         mock_client.client.chat.completions.create.assert_not_called()
 
     @patch(f"{V2_MODULE}.fetch_additional_sources")
@@ -258,13 +258,14 @@ class TestPredictionResultSchema:
                 info_utility=0.5,
             )
 
-    def test_standard_validator_rejects_mismatched_sum(self) -> None:
-        """Validates that StandardPredictionResult enforces p_yes + p_no == 1."""
+    def test_non_wm_validator_rejects_mismatched_sum(self) -> None:
+        """Validates that PredictionResult enforces p_yes + p_no == 1 for non-WM market."""
         with pytest.raises(ValidationError):
-            StandardPredictionResult(
+            PredictionResult(
                 facts="f",
                 reasons_no="n",
                 reasons_yes="y",
+                word_mention_check=None,
                 aggregation="a",
                 reflection="r",
                 p_yes=0.7,
@@ -273,10 +274,11 @@ class TestPredictionResultSchema:
                 info_utility=0.5,
             )
 
-    def test_word_mention_check_field_present_in_wm_schema(self) -> None:
-        """Checks that word_mention_check is in PredictionResult but not StandardPredictionResult."""
+    def test_word_mention_check_field_present_in_prediction_result(self) -> None:
+        """Checks that word_mention_check is Optional in PredictionResult."""
         assert "word_mention_check" in PredictionResult.model_fields
-        assert "word_mention_check" not in StandardPredictionResult.model_fields
+        field = PredictionResult.model_fields["word_mention_check"]
+        assert field.default is None, "word_mention_check must default to None (optional)"
 
     def test_parse_completion_takes_client_and_schema(self) -> None:
         """_parse_completion takes the client and a response_format schema."""
@@ -284,19 +286,18 @@ class TestPredictionResultSchema:
         assert "client" in params and "response_format" in params
 
     def test_numeric_fields_are_declared_last(self) -> None:
-        """The four numeric fields stay last in both schemas.
+        """The four numeric fields stay last in PredictionResult.
 
         Structured outputs emit fields in declaration order, so keeping the
         numbers after the reasoning chain is what preserves calibration.
         A future reorder that breaks this must fail here.
         """
-        for schema in (PredictionResult, StandardPredictionResult):
-            assert list(schema.model_fields)[-4:] == [
-                "p_yes",
-                "p_no",
-                "confidence",
-                "info_utility",
-            ], f"Numeric fields not last in {schema.__name__}"
+        assert list(PredictionResult.model_fields)[-4:] == [
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+        ], "Numeric fields not last in PredictionResult"
 
     def test_word_mention_check_is_before_numeric_fields(self) -> None:
         """word_mention_check must precede the four numeric fields in declaration order.

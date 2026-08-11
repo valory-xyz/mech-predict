@@ -103,16 +103,37 @@ def _results(tmp_path: Path) -> Path:
     return results
 
 
-def _body(results: Path) -> str:
-    """Join the per-table messages into one searchable body.
+def _body(results: Path, **kwargs: Any) -> str:
+    """Flatten every message's cells and prose into one searchable string.
 
-    The builder returns one message per table so Slack cannot split a fenced
-    block; tests assert over the concatenation.
+    The builder returns Block Kit payloads, one per table; tests assert over
+    the flattened text so they stay readable.
 
     :param results: results directory.
-    :return: all messages joined, or an empty string when there are none.
+    :param kwargs: forwarded to build_digest_messages.
+    :return: all cell and prose text, newline-joined.
     """
-    return "\n\n".join(build_digest_messages(results, "polymarket"))
+    return "\n".join(
+        _flatten(m) for m in build_digest_messages(results, "polymarket", **kwargs)
+    )
+
+
+def _flatten(payload: dict[str, Any]) -> str:
+    """Render one payload's text content as lines, one table row per line.
+
+    :param payload: a webhook payload from the builder.
+    :return: the payload's readable text.
+    """
+    lines = []
+    for block in payload["blocks"]:
+        if block["type"] == "table":
+            for row in block["rows"]:
+                lines.append(" | ".join(c["text"] for c in row))
+        elif block["type"] == "section":
+            lines.append(block["text"]["text"])
+        elif block["type"] == "context":
+            lines.extend(e["text"] for e in block["elements"])
+    return "\n".join(lines)
 
 
 def _cells(body: str, tool: str, after: str = "") -> list[str]:
@@ -413,9 +434,7 @@ class TestVisibility:
         ):
             _write(results, name, {"broken": broken})
         _write(results, "scores_tournament_polymarket.json", {})
-        body = "\n\n".join(
-            build_digest_messages(results, "polymarket", allowed_tools={"broken"})
-        )
+        body = _body(results, allowed_tools={"broken"})
         assert "broken" in body
         assert "reliability breach" in body
 
@@ -438,9 +457,7 @@ class TestVisibility:
         ):
             _write(results, name, {"propose-question": proposer, "alpha": _stats()})
         _write(results, "scores_tournament_polymarket.json", {})
-        body = "\n\n".join(
-            build_digest_messages(results, "polymarket", allowed_tools={"alpha"})
-        )
+        body = _body(results, allowed_tools={"alpha"})
         assert "alpha" in body
         assert "propose-question" not in body
 
@@ -458,9 +475,7 @@ class TestThirdParty:
             "scores_polymarket.json",
             {"alpha": _stats(), "someone-elses-tool": _stats()},
         )
-        body = "\n\n".join(
-            build_digest_messages(results, "polymarket", allowed_tools={"alpha"})
-        )
+        body = _body(results, allowed_tools={"alpha"})
         assert "alpha" in body
         assert "someone-elses-tool" not in body
 
@@ -515,10 +530,10 @@ class TestOrderStability:
         _write(results, "scores_tournament_polymarket.json", {})
 
         script = (
-            "import sys;"
+            "import json, sys;"
             "from pathlib import Path;"
             "from benchmark.digest_tables import build_digest_messages;"
-            f"print(chr(10).join(build_digest_messages(Path({str(results)!r}),"
+            f"print(json.dumps(build_digest_messages(Path({str(results)!r}),"
             "'polymarket')))"
         )
         renders = set()
@@ -534,11 +549,14 @@ class TestOrderStability:
             )
             renders.add(proc.stdout)
         assert len(renders) == 1, f"{len(renders)} distinct renders across seeds"
-        body = renders.pop()
+        payloads = json.loads(renders.pop())
         order = [
-            line.split(" ")[0]
-            for line in body.splitlines()
-            if line.split(" ")[0] in names
+            row[0]["text"]
+            for payload in payloads
+            for block in payload["blocks"]
+            if block["type"] == "table"
+            for row in block["rows"]
+            if row[0]["text"] in names
         ]
         assert order[: len(names)] == sorted(names), order
 

@@ -52,12 +52,10 @@ how a wrong denominator went unnoticed.
 
 One table per Slack message
 ---------------------------
-Slack renders roughly 3000 characters per message and splits longer text
-mid-block, which breaks the code fence and destroys the alignment the whole
-table depends on. :func:`build_digest_messages` therefore returns a LIST of
-messages, each carrying at most one fenced table, for the caller to post in
-order. This is the same reason the ROI companion is already posted as its own
-message rather than appended to the digest.
+Each message carries one native Block Kit ``table`` block, so Slack lays the
+columns out itself -- nothing here pads or measures a cell. Messages stay
+separate anyway: it keeps each table under Slack's per-message cell-character
+cap and lets a reader thread a reply to one table rather than to all of them.
 
 Pure builder, stdlib only: no network, no LLM, no clock. A broken digest must
 never break the daily post, so the entry point returns an empty list instead of
@@ -73,7 +71,7 @@ from typing import Any, Collection, Iterable, Sequence
 
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
-from benchmark.slack_tables import Column, code_block, render_table
+from benchmark.slack_blocks import Col, context, message, section, table_block
 
 log = logging.getLogger(__name__)
 
@@ -311,38 +309,38 @@ def _roi_haircut(group: dict[str, Any] | None) -> str:
 # ---------------------------------------------------------------------------
 
 _W2_COLUMNS = (
-    Column("tool"),
-    Column("n W-1"),
-    Column("n W-2"),
-    Column("rel W-1"),
-    Column("Brier W-1"),
-    Column("Brier W-2"),
-    Column("Δ Brier"),
-    Column("mkt W-1"),
-    Column("mkt W-2"),
-    Column("Edge W-1"),
-    Column("Edge W-2"),
-    Column("Δ Edge"),
-    Column("ROI 90d"),
-    Column("w/costs"),
+    Col("tool"),
+    Col("n W-1", align="right"),
+    Col("n W-2", align="right"),
+    Col("rel W-1", align="right"),
+    Col("Brier W-1", align="right"),
+    Col("Brier W-2", align="right"),
+    Col("Δ Brier", align="right"),
+    Col("mkt W-1", align="right"),
+    Col("mkt W-2", align="right"),
+    Col("Edge W-1", align="right"),
+    Col("Edge W-2", align="right"),
+    Col("Δ Edge", align="right"),
+    Col("ROI 90d", align="right"),
+    Col("w/costs", align="right"),
 )
 
 _AT_COLUMNS = (
-    Column("tool"),
-    Column("n W-1"),
-    Column("n AT"),
-    Column("rel W-1"),
-    Column("Brier W-1"),
-    Column("Brier AT"),
-    Column("Δ Brier"),
-    Column("base AT"),
-    Column("mkt W-1"),
-    Column("mkt AT"),
-    Column("Edge W-1"),
-    Column("Edge AT"),
-    Column("Δ Edge"),
-    Column("ROI 90d"),
-    Column("w/costs"),
+    Col("tool"),
+    Col("n W-1", align="right"),
+    Col("n AT", align="right"),
+    Col("rel W-1", align="right"),
+    Col("Brier W-1", align="right"),
+    Col("Brier AT", align="right"),
+    Col("Δ Brier", align="right"),
+    Col("base AT", align="right"),
+    Col("mkt W-1", align="right"),
+    Col("mkt AT", align="right"),
+    Col("Edge W-1", align="right"),
+    Col("Edge AT", align="right"),
+    Col("Δ Edge", align="right"),
+    Col("ROI 90d", align="right"),
+    Col("w/costs", align="right"),
 )
 
 
@@ -504,10 +502,11 @@ def _ordered(
 # ---------------------------------------------------------------------------
 
 _ALERT_COLUMNS = (
-    Column("what"),
-    Column("tool"),
-    Column("evidence"),
-    Column("action"),
+    Col("what"),
+    Col("tool"),
+    # Free-form prose, so Slack is allowed to wrap these two.
+    Col("evidence", wrap=True),
+    Col("action", wrap=True),
 )
 
 
@@ -614,21 +613,18 @@ def build_digest_messages(
     platform: str,
     roi_results: Path | None = None,
     allowed_tools: Collection[str] | None = None,
-) -> list[str]:
-    """Build the benchmark digest as one Slack message per table.
-
-    Each returned message carries at most one fenced code block so Slack's
-    per-message length limit can never split a table and break its fence.
+) -> list[dict[str, Any]]:
+    """Build the benchmark digest as one webhook payload per table.
 
     :param results_dir: directory holding the scorer output files.
     :param platform: platform key, e.g. "polymarket" or "omen".
     :param roi_results: path to roi_results.json; defaults to
         ``results_dir/roi_results.json``.
     :param allowed_tools: when given, only these tools are rendered. Callers
-        pass the tool registry so third-party tools -- which the digest must
-        never rank, compare or recommend on -- cannot appear. Injected rather
-        than imported to keep this module stdlib-only and unit-testable.
-    :return: ordered Slack mrkdwn messages; empty when there is nothing to post.
+        pass the prediction-tool registry, so tools that are not forecasters --
+        a question-proposing tool never emits a ``p_yes`` -- cannot appear.
+        Injected rather than imported to keep this module stdlib-only.
+    :return: ordered webhook payloads; empty when there is nothing to post.
     """
     windows = {
         key: _load_by_tool(results_dir / name.format(platform=platform))
@@ -649,7 +645,7 @@ def build_digest_messages(
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
 
-    messages: list[str] = []
+    messages: list[dict[str, Any]] = []
 
     # Degrade LOUDLY. Both rolling files come from separate --period-days
     # scorer invocations that can fail independently of the all-time rebuild.
@@ -659,54 +655,85 @@ def build_digest_messages(
         label for key, label in (("w1", "W-1"), ("w2", "W-2")) if not windows[key]
     ]
     if missing:
-        messages.append(
+        warning = (
             f":warning: *{' and '.join(missing)} unavailable* - the rolling "
             "scorer step produced no scores for this platform, so those "
             "columns read `n/a` below. They are NOT unchanged; they are "
             "unmeasured."
+        )
+        messages.append(
+            message(f"{' and '.join(missing)} unavailable", [section(warning)])
         )
 
     if prod_tools:
         order_w2 = _ordered(prod_tools, windows["w1"], windows["w2"])
         order_at = _ordered(prod_tools, windows["w1"], windows["at"])
         messages.append(
-            "*1a. PRODUCTION - W-1 vs W-2* (what changed this week)\n"
-            + code_block(
-                render_table(
-                    _W2_COLUMNS,
-                    _rows_w2(order_w2, windows["w1"], windows["w2"], roi, "production"),
-                )
+            message(
+                "1a. Production - W-1 vs W-2",
+                [
+                    section("*1a. PRODUCTION - W-1 vs W-2*  _what changed this week_"),
+                    table_block(
+                        _W2_COLUMNS,
+                        _rows_w2(
+                            order_w2, windows["w1"], windows["w2"], roi, "production"
+                        ),
+                    ),
+                ],
             )
         )
         messages.append(
-            "*1b. PRODUCTION - W-1 vs AT* (this week against the longer baseline)\n"
-            + code_block(
-                render_table(
-                    _AT_COLUMNS,
-                    _rows_at(order_at, windows["w1"], windows["at"], roi, "production"),
-                )
+            message(
+                "1b. Production - W-1 vs all-time",
+                [
+                    section(
+                        "*1b. PRODUCTION - W-1 vs AT*  _this week against the "
+                        "longer baseline_"
+                    ),
+                    table_block(
+                        _AT_COLUMNS,
+                        _rows_at(
+                            order_at, windows["w1"], windows["at"], roi, "production"
+                        ),
+                    ),
+                ],
             )
         )
 
     if tourn_tools:
         order = _ordered(tourn_tools, {}, windows["tournament"])
         messages.append(
-            "*2. TOURNAMENT - all-time pool* (no weekly comparison available)\n"
-            + code_block(
-                render_table(
-                    _AT_COLUMNS,
-                    _rows_at(order, {}, windows["tournament"], roi, "tournament"),
-                )
+            message(
+                "2. Tournament - all-time pool",
+                [
+                    section(
+                        "*2. TOURNAMENT - all-time pool*  _no weekly comparison "
+                        "available_"
+                    ),
+                    table_block(
+                        _AT_COLUMNS,
+                        _rows_at(order, {}, windows["tournament"], roi, "tournament"),
+                    ),
+                    context(
+                        "Tournament rows carry no W-1/W-2: rolling scorer runs pass "
+                        "`--skip-tournament-output`, so no weekly aggregate is "
+                        "written for a candidate. Its `AT` is also a different span "
+                        "than production's."
+                    ),
+                ],
             )
-            + "\n>Tournament rows carry no W-1/W-2: rolling scorer runs pass "
-            "`--skip-tournament-output`, so no weekly aggregate is written for "
-            "a candidate. Its `AT` is also a different span than production's."
         )
 
     alerts = _alert_rows(windows["w1"], windows["at"], sorted(prod_tools))
     if alerts:
         messages.append(
-            "*3. Alerts*\n" + code_block(render_table(_ALERT_COLUMNS, alerts))
+            message(
+                f"3. Alerts ({len(alerts)})",
+                [
+                    section("*3. ALERTS*  _conditions that block a call_"),
+                    table_block(_ALERT_COLUMNS, alerts),
+                ],
+            )
         )
 
     return messages

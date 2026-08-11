@@ -24,7 +24,7 @@ import re
 import sys
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -349,8 +349,12 @@ def _build_report_url() -> str | None:
     return None
 
 
-def post_to_slack(webhook_url: str, summary: str) -> None:
+def post_to_slack(webhook_url: str, summary: str | dict[str, Any]) -> None:
     """POST a message to a Slack incoming webhook.
+
+    Accepts either plain text or a full payload. The digest sends Block Kit
+    ``table`` blocks, which an incoming webhook accepts with no bot token; the
+    LLM prose and the ROI companion still send text.
 
     On rejection Slack returns the reason as a short plaintext body
     (e.g. ``invalid_payload``, ``no_text``, ``too_many_attachments``).
@@ -359,10 +363,15 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
     an opaque ``HTTP Error 400: Bad Request`` with no actionable detail.
 
     :param webhook_url: Slack incoming-webhook URL (from a secret).
-    :param summary: message text to post.
+    :param summary: message text, or a payload dict with ``text``/``blocks``.
     :raises RuntimeError: if Slack rejects the payload, with its reason.
+
+        Over-long TEXT is truncated by Slack, but over-long BLOCKS are
+        REJECTED -- so a blocks payload fails loudly here rather than posting
+        a silently shortened table.
     """
-    payload = json.dumps({"text": summary}).encode()
+    body = summary if isinstance(summary, dict) else {"text": summary}
+    payload = json.dumps(body).encode()
     req = Request(
         webhook_url,
         data=payload,
@@ -521,7 +530,7 @@ def main() -> None:
     # ~3000 characters and a split breaks the code fence, destroying the
     # alignment the table depends on. Off by default; flip
     # BENCHMARK_COMPUTED_TABLES=true to post them.
-    table_messages: list[str] = []
+    table_messages: list[dict[str, Any]] = []
     if _computed_tables_enabled():
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)

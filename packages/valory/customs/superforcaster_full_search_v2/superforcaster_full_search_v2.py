@@ -146,6 +146,96 @@ class PredictionResult(BaseModel):
         return self
 
 
+class StandardPredictionResult(BaseModel):
+    """Superforecaster structured output for non-word-mention markets.
+
+    Used when the market question does NOT ask whether a specific person will
+    say/use a specific word or phrase during a named event. Identical to
+    PredictionResult but without the word_mention_check field, so the model
+    is not forced to apply a WM screen that is inapplicable and suppresses
+    p_yes on ordinary markets.
+    """
+
+    facts: str = Field(
+        ...,
+        description=(
+            "Core factual points compiled from the sources and relevant "
+            "background. Specific, relevant, no conclusions about how a "
+            "fact influences the forecast."
+        ),
+    )
+    reasons_no: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be NO. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    reasons_yes: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be YES. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    aggregation: str = Field(
+        ...,
+        description=(
+            "Aggregate considerations. Weigh competing factors, apply the "
+            "CALIBRATION block (state a base rate, adjust using specific evidence, "
+            "treat missing confirmation as NO), adjust for news negativity and "
+            "sensationalism bias. End by stating a tentative probability in [0,1]."
+        ),
+    )
+    reflection: str = Field(
+        ...,
+        description=(
+            "Sanity checks and finalisation. Apply: EVIDENCE BAR (p_yes > 0.80 "
+            "needs strong specific evidence; plans/proposals are not actions), "
+            "MARKET CIRCULARITY (prediction-market prices are circular; form your "
+            "own view), COUNT THRESHOLDS (for N+ requirements, apply count-specific "
+            "base rates). Check for over/underconfidence; highlight key factors."
+        ),
+    )
+    p_yes: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event in the Question occurs.",
+    )
+    p_no: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event does NOT occur.",
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the prediction (0 = lowest, 1 = highest).",
+    )
+    info_utility: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Utility of the information in the sources to inform the prediction "
+            "(0 = lowest, 1 = highest)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_p_yes_p_no_sum(self) -> "StandardPredictionResult":
+        """Validate that p_yes + p_no == 1."""
+        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
+            raise ValueError(
+                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
+                f"{self.p_yes + self.p_no})"
+            )
+        return self
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -278,6 +368,40 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # Cap on the rendered <background> evidence block to bound prompt size.
 MAX_EVIDENCE_TOKENS = 4000
 
+# Word-mention market detection: matches questions asking whether a specific
+# person will say/use/mention a specific quoted word or phrase at an event.
+# Used to dispatch between PredictionResult (WM screen included) and
+# StandardPredictionResult (WM screen omitted).
+_WM_PATTERN = re.compile(
+    r"""
+    (?:
+        # Explicit "the word/phrase/term" language
+        \b(?:say|use|mention|utter)s?\s+(?:the\s+)?(?:word|phrase|term)s?\b
+        |
+        # Quoted word/phrase directly after say/mention/use/utter
+        \b(?:say|says|mention|mentions|use|uses|utter|utters)\s+['"][^'"]{1,80}['"]
+        |
+        # "N times" pattern with a specific word: "say X at least N times"
+        \b(?:say|mention|use|utter)\s+\S+\s+(?:at\s+least\s+)?\d+\s+times?
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_word_mention_market(question: str) -> bool:
+    """Return True if the question is a word-mention market.
+
+    Word-mention markets ask whether a specific person will say, use, or
+    mention a specific quoted word or phrase during a named event or time
+    window (e.g. "Will X say 'tariff' at the debate?"). These require a
+    dedicated base-rate reasoning step; regular markets do not.
+
+    :param question: the market question string.
+    :return: True if the question matches the word-mention pattern.
+    """
+    return bool(_WM_PATTERN.search(question))
+
 
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
@@ -362,6 +486,73 @@ End the `aggregation` field by stating an initial tentative probability (a singl
 between 0 and 1).
 
 6. `reflection` - Reflect on your tentative answer, performing sanity checks. Check for
+over/underconfidence, improper treatment of conjunctive or disjunctive conditions, and other
+forecasting biases. Be precise with tail probabilities.
+
+BEFORE FINAL ANSWER -- apply all three checks:
+
+1. EVIDENCE BAR: If sources confirm the event already occurred, high p_yes is fine.
+   If not: p_yes > 0.90 needs verified commitment (signed, awarded, published, confirmed).
+   p_yes > 0.80 needs strong specific evidence, not plausibility or reputation alone.
+   Plans, proposals, and intentions are not completed actions.
+
+2. MARKET CIRCULARITY: If your best independent evidence is actually a prediction-market
+   price (Polymarket, Kalshi, etc.), do not let it anchor your p_yes. Those prices embed
+   others' estimates; form your own view from the underlying evidence.
+
+3. COUNT THRESHOLDS: For "N+ times" requirements, verify that the speaker routinely reaches
+   that count at this type of event. A large gap between typical frequency and N overrides
+   general sentiment-based forecasts.
+
+Highlight the key factors that inform the final forecast.
+"""
+
+
+STANDARD_PREDICTION_PROMPT = """
+You are an advanced AI system which has been finetuned to provide calibrated probabilistic
+forecasts under uncertainty, with your performance evaluated according to the Brier score. When
+forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly "small" probabilities,
+or 90% (9:1) and 99% (99:1) as similarly "high" probabilities. As the odds show, they are
+markedly different, so output your probabilities accordingly.
+
+Question:
+{question}
+
+Today's date: {today}
+Your pretraining knowledge cutoff: October 2023
+
+We have retrieved the following information for this question:
+<background>{sources}</background>
+
+Recall the question you are forecasting:
+{question}
+
+Return a structured response whose fields capture the following reasoning chain:
+
+1. `facts` - Compress key factual information from the sources, as well as useful background
+information which may not be in the sources, into a list of core factual points. Aim for
+information which is specific, relevant, and covers the core considerations for your forecast.
+For this step, do not draw any conclusions about how a fact will influence your forecast.
+
+2. `reasons_no` - Provide a few reasons why the answer might be no. Rate the strength of each
+reason on a scale of 1-10.
+
+3. `reasons_yes` - Provide a few reasons why the answer might be yes. Rate the strength of each
+reason on a scale of 1-10.
+
+4. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
+instead, investigate how the competing factors and mechanisms interact and weigh against each
+other. Adjust for news negativity bias and sensationalism bias.
+
+CALIBRATION (mandatory before stating a tentative probability):
+- State a base-rate probability for this event category and justify it.
+- Adjust from the base rate using specific evidence only.
+- Missing expected evidence (no announcement found, no confirmation found) is a NO signal.
+
+End the `aggregation` field by stating an initial tentative probability (a single number
+between 0 and 1).
+
+5. `reflection` - Reflect on your tentative answer, performing sanity checks. Check for
 over/underconfidence, improper treatment of conjunctive or disjunctive conditions, and other
 forecasting biases. Be precise with tail probabilities.
 
@@ -736,9 +927,22 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print("Formatting sources...")
             sources = _cap_evidence_block(organic_data, misc_data, model)
 
-        print("Updating prompt...")
-        prediction_prompt = PREDICTION_PROMPT.format(
-            question=question, today=d, sources=sources
+        # Dispatch: word-mention markets get the WM screen (PredictionResult);
+        # all other markets use the leaner schema (StandardPredictionResult).
+        is_wm_market = _is_word_mention_market(question)
+        if is_wm_market:
+            prediction_prompt = PREDICTION_PROMPT.format(
+                question=question, today=d, sources=sources
+            )
+            response_format: Any = PredictionResult
+        else:
+            prediction_prompt = STANDARD_PREDICTION_PROMPT.format(
+                question=question, today=d, sources=sources
+            )
+            response_format = StandardPredictionResult
+
+        print(
+            f"[superforcaster_full_search_v2] market_type={'wm' if is_wm_market else 'standard'}"
         )
         print(f"\n{prediction_prompt=}\n")
         messages = [
@@ -746,12 +950,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting structured prediction response...")
-        prediction: PredictionResult
+        prediction: Union[PredictionResult, StandardPredictionResult]
         prediction, counter_callback = _parse_completion(
             client=llm_client.client,
             model=model,
             messages=messages,
-            response_format=PredictionResult,
+            response_format=response_format,
             temperature=temperature,
             max_tokens=max_tokens,
             counter_callback=counter_callback,
@@ -762,8 +966,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"p_no={prediction.p_no}, confidence={prediction.confidence}, "
             f"info_utility={prediction.info_utility}"
         )
-        wm_preview = prediction.word_mention_check[:120]
-        print(f"[superforcaster_full_search_v2] word_mention_check={wm_preview}")
+        if is_wm_market and hasattr(prediction, "word_mention_check"):
+            wm_preview = prediction.word_mention_check[:120]  # type: ignore[union-attr]
+            print(f"[superforcaster_full_search_v2] word_mention_check={wm_preview}")
 
         result = json.dumps(
             {

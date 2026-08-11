@@ -25,13 +25,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-from pydantic import ValidationError
-
 from packages.valory.customs.superforcaster_full_search_v2.superforcaster_full_search_v2 import (
     PredictionResult,
+    StandardPredictionResult,
+    _is_word_mention_market,
     _parse_completion,
     run,
 )
+from pydantic import ValidationError
 
 V2_MODULE = (
     "packages.valory.customs.superforcaster_full_search_v2."
@@ -47,7 +48,19 @@ FAKE_PREDICTION = PredictionResult(
     facts="Fact 1. Fact 2.",
     reasons_no="No 1 (strength 6).",
     reasons_yes="Yes 1 (strength 5).",
-    word_mention_check="Not applicable.",
+    word_mention_check="Polymarket odds excluded (circular). Base rate ~40%. Adjusted: 0.38.",
+    aggregation="Base rate 0.4. Tentative: 0.38.",
+    reflection="Passes the sanity checks.",
+    p_yes=0.38,
+    p_no=0.62,
+    confidence=0.7,
+    info_utility=0.4,
+)
+
+FAKE_STANDARD_PREDICTION = StandardPredictionResult(
+    facts="Fact 1. Fact 2.",
+    reasons_no="No 1 (strength 6).",
+    reasons_yes="Yes 1 (strength 5).",
     aggregation="Base rate 0.5. Tentative: 0.32.",
     reflection="Passes the sanity checks.",
     p_yes=0.32,
@@ -56,7 +69,12 @@ FAKE_PREDICTION = PredictionResult(
     info_utility=0.4,
 )
 
-PROMPT = "Will X happen? p_yes and p_no?"
+# A non-WM market question (no quoted word or "the word/phrase" language).
+NON_WM_PROMPT = "Will X happen? p_yes and p_no?"
+# A WM market question: speaker + quoted word + event.
+WM_PROMPT = "Will the Fed chair say 'pivot' during the press conference?"
+
+PROMPT = NON_WM_PROMPT
 
 
 def _make_mock_api_keys() -> MagicMock:
@@ -69,9 +87,19 @@ def _make_mock_api_keys() -> MagicMock:
 
 
 def _mock_parse_response() -> MagicMock:
-    """Fake response matching the beta.chat.completions.parse shape."""
+    """Fake response matching the beta.chat.completions.parse shape (WM market)."""
     return MagicMock(
         choices=[MagicMock(message=MagicMock(parsed=FAKE_PREDICTION, refusal=None))],
+        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+    )
+
+
+def _mock_standard_parse_response() -> MagicMock:
+    """Fake response for non-WM markets (StandardPredictionResult)."""
+    return MagicMock(
+        choices=[
+            MagicMock(message=MagicMock(parsed=FAKE_STANDARD_PREDICTION, refusal=None))
+        ],
         usage=MagicMock(prompt_tokens=10, completion_tokens=5),
     )
 
@@ -81,10 +109,10 @@ class TestStructuredOutputContract:
 
     @patch(f"{V2_MODULE}.fetch_additional_sources")
     @patch(f"{V2_MODULE}.OpenAIClientManager")
-    def test_uses_structured_parse_not_raw_create(
+    def test_wm_market_uses_prediction_result(
         self, mock_client_mgr: MagicMock, mock_fetch: MagicMock
     ) -> None:
-        """run() calls beta.chat.completions.parse with response_format=PredictionResult."""
+        """WM market: run() calls parse with response_format=PredictionResult."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
         mock_client = MagicMock()
         mock_client.client.beta.chat.completions.parse.return_value = (
@@ -96,7 +124,7 @@ class TestStructuredOutputContract:
         run(
             tool="superforcaster_full_search_v2",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=WM_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -104,7 +132,33 @@ class TestStructuredOutputContract:
         parse = mock_client.client.beta.chat.completions.parse
         parse.assert_called_once()
         assert parse.call_args.kwargs["response_format"] is PredictionResult
-        # The raw (prose-leaking) completion path must NOT be used.
+        mock_client.client.chat.completions.create.assert_not_called()
+
+    @patch(f"{V2_MODULE}.fetch_additional_sources")
+    @patch(f"{V2_MODULE}.OpenAIClientManager")
+    def test_non_wm_market_uses_standard_prediction_result(
+        self, mock_client_mgr: MagicMock, mock_fetch: MagicMock
+    ) -> None:
+        """Non-WM market: run() calls parse with response_format=StandardPredictionResult."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_standard_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster_full_search_v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=NON_WM_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parse = mock_client.client.beta.chat.completions.parse
+        parse.assert_called_once()
+        assert parse.call_args.kwargs["response_format"] is StandardPredictionResult
         mock_client.client.chat.completions.create.assert_not_called()
 
     @patch(f"{V2_MODULE}.fetch_additional_sources")
@@ -116,7 +170,7 @@ class TestStructuredOutputContract:
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
         mock_client = MagicMock()
         mock_client.client.beta.chat.completions.parse.return_value = (
-            _mock_parse_response()
+            _mock_standard_parse_response()
         )
         mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
@@ -124,7 +178,7 @@ class TestStructuredOutputContract:
         result = run(
             tool="superforcaster_full_search_v2",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=NON_WM_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -139,13 +193,53 @@ class TestStructuredOutputContract:
         assert parsed["p_yes"] == 0.32 and parsed["p_no"] == 0.68
 
 
+class TestIsWordMentionMarket:
+    """_is_word_mention_market correctly classifies WM and non-WM questions."""
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Will the Fed chair say 'pivot' during the press conference?",
+            "Will Trump say the word tariff at the debate?",
+            "Will Biden use the phrase 'Build Back Better' in his speech?",
+            "Will Elon Musk mention the word 'Tesla' at the event?",
+            'Will the CEO say "restructuring" on the earnings call?',
+            "Will X say tariff at least 3 times?",
+            "Will the speaker utter the phrase 'zero-sum' tonight?",
+        ],
+    )
+    def test_detects_wm_questions(self, question: str) -> None:
+        """Questions asking about a specific word/phrase being said are WM markets."""
+        assert _is_word_mention_market(question), f"Expected WM: {question}"
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Will Bitcoin exceed $100k by end of 2026?",
+            "Will the US enter a recession in 2026?",
+            "Will Apple release a new iPhone in September?",
+            "Will the Fed raise rates in Q3 2026?",
+            "Will SpaceX successfully land on Mars?",
+            "Will X happen? p_yes and p_no?",
+        ],
+    )
+    def test_does_not_flag_regular_questions(self, question: str) -> None:
+        """Regular prediction market questions are not classified as WM markets."""
+        assert not _is_word_mention_market(question), f"Unexpected WM: {question}"
+
+
 class TestPredictionResultSchema:
-    """The Pydantic schema enforces the mech numeric contract."""
+    """The Pydantic schemas enforce the mech numeric contract."""
 
     def test_valid_prediction_carries_the_numbers(self) -> None:
-        """A well-formed prediction constructs and carries the four numbers."""
-        assert FAKE_PREDICTION.p_yes == 0.32
-        assert FAKE_PREDICTION.p_no == 0.68
+        """A well-formed WM prediction constructs and carries the four numbers."""
+        assert FAKE_PREDICTION.p_yes == 0.38
+        assert FAKE_PREDICTION.p_no == 0.62
+
+    def test_standard_prediction_carries_the_numbers(self) -> None:
+        """A well-formed standard prediction constructs and carries the four numbers."""
+        assert FAKE_STANDARD_PREDICTION.p_yes == 0.32
+        assert FAKE_STANDARD_PREDICTION.p_no == 0.68
 
     def test_validator_rejects_mismatched_sum(self) -> None:
         """p_yes + p_no must equal 1 (guards against an inconsistent forecast)."""
@@ -163,9 +257,25 @@ class TestPredictionResultSchema:
                 info_utility=0.5,
             )
 
-    def test_word_mention_check_field_present(self) -> None:
-        """Verify PredictionResult has a word_mention_check field (the structural fix)."""
+    def test_standard_validator_rejects_mismatched_sum(self) -> None:
+        """StandardPredictionResult also enforces p_yes + p_no == 1."""
+        with pytest.raises(ValidationError):
+            StandardPredictionResult(
+                facts="f",
+                reasons_no="n",
+                reasons_yes="y",
+                aggregation="a",
+                reflection="r",
+                p_yes=0.7,
+                p_no=0.7,
+                confidence=0.5,
+                info_utility=0.5,
+            )
+
+    def test_word_mention_check_field_present_in_wm_schema(self) -> None:
+        """PredictionResult has word_mention_check; StandardPredictionResult does not."""
         assert "word_mention_check" in PredictionResult.model_fields
+        assert "word_mention_check" not in StandardPredictionResult.model_fields
 
     def test_parse_completion_takes_client_and_schema(self) -> None:
         """_parse_completion takes the client and a response_format schema."""
@@ -173,18 +283,19 @@ class TestPredictionResultSchema:
         assert "client" in params and "response_format" in params
 
     def test_numeric_fields_are_declared_last(self) -> None:
-        """The four numeric fields stay last in the schema.
+        """The four numeric fields stay last in both schemas.
 
         Structured outputs emit fields in declaration order, so keeping the
         numbers after the reasoning chain is what preserves calibration.
         A future reorder that breaks this must fail here.
         """
-        assert list(PredictionResult.model_fields)[-4:] == [
-            "p_yes",
-            "p_no",
-            "confidence",
-            "info_utility",
-        ]
+        for schema in (PredictionResult, StandardPredictionResult):
+            assert list(schema.model_fields)[-4:] == [
+                "p_yes",
+                "p_no",
+                "confidence",
+                "info_utility",
+            ], f"Numeric fields not last in {schema.__name__}"
 
     def test_word_mention_check_is_before_numeric_fields(self) -> None:
         """word_mention_check must precede the four numeric fields in declaration order.

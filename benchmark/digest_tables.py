@@ -1000,10 +1000,14 @@ def build_digest_messages(
                         _rows_at(order, {}, windows["tournament"], roi, "tournament"),
                     ),
                     context(
-                        "Tournament rows carry no W-1/W-2: rolling scorer runs pass "
-                        "`--skip-tournament-output`, so no weekly aggregate is "
-                        "written for a candidate. Its `AT` is also a different span "
-                        "than production's."
+                        "Two caveats. Tournament rows carry no W-1/W-2: rolling "
+                        "scorer runs pass `--skip-tournament-output`, so no "
+                        "weekly aggregate is written for a candidate. And the "
+                        "columns headed `MTD` hold the candidate's ALL-TIME "
+                        "pool here, not a month -- a different span, over much "
+                        "easier markets (`mkt` ~0.07 against ~0.18 in "
+                        "production). Candidate and incumbent numbers are NOT "
+                        "comparable row to row."
                     ),
                 ],
             )

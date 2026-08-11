@@ -942,8 +942,14 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
     latency_reservoir = _score_latency_reservoir(rows)
     worst_10, best_10 = _score_extreme_predictions(rows)
 
+    # Observed bounds, so the rendered report can name the span it is showing
+    # instead of inferring one from a filename or a stale month stamp.
+    stamps = sorted(r["predicted_at"] for r in rows if r.get("predicted_at"))
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_start": stamps[0] if stamps else None,
+        "window_end": stamps[-1] if stamps else None,
         "total_rows": total,
         "valid_rows": overall["valid_n"],
         "overall": overall,
@@ -1030,6 +1036,10 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     }
     result["overall"] = _derive_group(scores["overall"])
     result["total_rows"] = scores["overall"]["n"]
+    # Carried through so the rendered report can name the span it is showing.
+    for bound in ("window_start", "window_end"):
+        if scores.get(bound):
+            result[bound] = scores[bound]
     result["valid_rows"] = scores["overall"]["valid_n"]
 
     for dim in (

@@ -316,6 +316,20 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     :param scores: the full scores dict with accumulators.
     :param row: a production log row dict.
     """
+    # Observed window bounds. The accumulator's span is NOT what its
+    # `current_month` key suggests: on live data that field read 2026-08 while
+    # the file held every row since 2026-07-01, because the month rollover
+    # snapshots history without fully resetting the live file. Recording the
+    # real first and last row is the only way a reader -- or the digest -- can
+    # state the window it is looking at.
+    stamp = row.get("predicted_at")
+    if stamp:
+        first = scores.get("window_start")
+        if first is None or stamp < first:
+            scores["window_start"] = stamp
+        last = scores.get("window_end")
+        if last is None or stamp > last:
+            scores["window_end"] = stamp
     _accumulate_group(scores["overall"], row)
 
     tool = row.get("tool_name") or "unknown"

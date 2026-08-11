@@ -217,8 +217,10 @@ class TestNoSkillScore:
     def test_base_is_rendered_instead(self, results: Path) -> None:
         """The no-skill floor is shown in Brier units, as a column."""
         body = _body(results)
-        assert "base MTD" in body
-        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION - W-1 vs MTD")
+        assert "base cum" in body
+        assert "0.2400" in _cells(
+            body, "alpha", after="1b. PRODUCTION - W-1 vs CUMULATIVE"
+        )
 
 
 class TestDeltas:
@@ -785,3 +787,43 @@ class TestSustainedDemote:
         )
         good = _stats(brier=0.22, baseline_brier=0.24)
         assert _verdict(bad, deployed=True, recent=good) == "keep"
+
+
+class TestWindowLabel:
+    """The report names the span it shows, or says it cannot."""
+
+    def test_observed_bounds_are_rendered(self, tmp_path: Path) -> None:
+        """window_start/window_end reach the section line.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        (results / "scores_polymarket.json").write_text(
+            json.dumps(
+                {
+                    "current_month": "2026-08",
+                    "window_start": "2026-07-01T00:00:00Z",
+                    "window_end": "2026-08-11T09:00:00Z",
+                    "by_tool": {"alpha": _stats()},
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write(results, "rolling_scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "scores_tournament_polymarket.json", {})
+        assert "2026-07-01..2026-08-11" in _body(results)
+
+    def test_missing_bounds_say_so_rather_than_guess(self, results: Path) -> None:
+        """Without bounds the label admits the span is unstated.
+
+        The file's own `current_month` key does NOT describe its span -- on
+        live data it read 2026-08 over a file holding rows back to 2026-07-01
+        -- so it must never be used as a stand-in.
+
+        :param results: results-directory fixture.
+        """
+        body = _body(results)
+        assert "UNSTATED" in body
+        assert "2026-08" not in body

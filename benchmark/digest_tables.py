@@ -31,17 +31,21 @@ Inputs, all written by ``benchmark.scorer`` into the same results directory:
 ===========================================  ==============================
 file                                          window
 ===========================================  ==============================
-``scores_<platform>.json``                    MONTH TO DATE -- resets on the 1st
+``scores_<platform>.json``                    cumulative; span is NOT fixed
 ``rolling_scores_<platform>.json``            W-1, the last 7 days
 ``prev_rolling_scores_<platform>.json``       W-2, the 7 days before that
 ``scores_tournament_<platform>.json``         tournament, all-time only
 ``roi_results.json``                          90-day ROI simulation
 ===========================================  ==============================
 
-``scores_<platform>.json`` is NOT all-time. It carries a ``current_month`` key
-and the scorer snapshots and resets it on calendar rollover, so early in a month
-the "longer baseline" is genuinely shorter than W-1. The column is labelled
-``MTD`` and the month is stamped in the section line for that reason.
+``scores_<platform>.json`` is a cumulative accumulator whose span is neither
+all-time nor a calendar month, and its own ``current_month`` key does not
+describe it: on the live artifact that key read ``2026-08`` while the file held
+every row back to ``2026-07-01``, because the rollover snapshots history without
+fully resetting the live file. A ``--rebuild`` writes only the newest month, so
+the same filename can mean either span. The columns are therefore labelled
+``cum`` and the section line prints the observed ``window_start..window_end``
+rather than asserting a window nobody recorded.
 
 Tournament rows have no W-1/W-2 because rolling scorer invocations pass
 ``--skip-tournament-output``; those cells render the literal ``n/a`` rather
@@ -127,23 +131,29 @@ def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
 
 
-def _load_month(path: Path) -> str | None:
-    """Read the accumulator's month stamp.
+def _load_window(path: Path) -> str | None:
+    """Describe the span the accumulator actually covers.
 
-    ``scores_<platform>.json`` is a month-to-date accumulator that resets on
-    the 1st, so the month it covers belongs in the section line -- otherwise
-    "the longer baseline" silently becomes shorter than W-1 early in a month
-    and nothing in the message says so.
+    Do NOT trust ``current_month`` for this. On the live artifact that field
+    read ``2026-08`` while the file held every row back to ``2026-07-01`` --
+    the month rollover snapshots history without fully resetting the live
+    accumulator, so the stamp names the month it was last written in, not the
+    window it covers. A ``--rebuild`` writes only the newest month, so the same
+    filename means different spans depending on which path last touched it.
+    ``window_start``/``window_end`` are the observed bounds and are the only
+    honest source; without them the label says so rather than inventing one.
 
     :param path: path to a scores json file.
-    :return: e.g. "2026-08", or None when unavailable.
+    :return: e.g. "2026-07-01..2026-08-11", or None when unavailable.
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    month = payload.get("current_month")
-    return str(month) if month else None
+    start, end = payload.get("window_start"), payload.get("window_end")
+    if not start or not end:
+        return None
+    return f"{str(start)[:10]}..{str(end)[:10]}"
 
 
 def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -566,16 +576,16 @@ _W2_COLUMNS = (
 _AT_COLUMNS = (
     Col("tool"),
     Col("n W-1", align="right"),
-    Col("n MTD", align="right"),
+    Col("n cum", align="right"),
     Col("rel W-1", align="right"),
     Col("Brier W-1", align="right"),
-    Col("Brier MTD", align="right"),
+    Col("Brier cum", align="right"),
     Col("Δ Brier", align="right"),
-    Col("base MTD", align="right"),
+    Col("base cum", align="right"),
     Col("mkt W-1", align="right"),
-    Col("mkt MTD", align="right"),
+    Col("mkt cum", align="right"),
     Col("Edge W-1", align="right"),
-    Col("Edge MTD", align="right"),
+    Col("Edge cum", align="right"),
     Col("Δ Edge", align="right"),
     Col("condAcc", align="right"),
     Col("ROI 90d", align="right"),
@@ -848,7 +858,7 @@ def _alert_rows(
             (
                 "platform below market",
                 f"ALL ({len(below_market)} tools over the floor)",
-                f"every MTD Edge < 0; best is {best:+.4f}",
+                f"every cumulative Edge < 0; best is {best:+.4f}",
                 "upstream calibration, not a tool swap",
             )
         )
@@ -869,7 +879,7 @@ def _alert_rows(
             (
                 "platform below no-skill",
                 f"ALL ({len(below_floor)} tools over the floor)",
-                "every MTD Brier exceeds its own base-rate floor",
+                "every cumulative Brier exceeds its own base-rate floor",
                 "the fleet is worse than predicting the base rate",
             )
         )
@@ -905,11 +915,10 @@ def build_digest_messages(
         for key, name in WINDOW_FILES.items()
     }
     roi = _load_roi(roi_results or results_dir / "roi_results.json", platform)
-    month = _load_month(results_dir / WINDOW_FILES["at"].format(platform=platform))
-    # MTD, not all-time: the accumulator resets on the 1st, so early in a month
-    # this "longer baseline" is genuinely shorter than W-1. Naming the month
-    # is what stops a reader treating it as a stable long-run reference.
-    month_label = f"month to date ({month})" if month else "month to date"
+    # The accumulator's span is not fixed and not stated by its own
+    # `current_month` key, so the section line carries the observed bounds.
+    span = _load_window(results_dir / WINDOW_FILES["at"].format(platform=platform))
+    month_label = span if span else "an UNSTATED span - see the docstring"
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])
@@ -969,10 +978,10 @@ def build_digest_messages(
         )
         messages.append(
             message(
-                "1b. Production - W-1 vs month to date",
+                "1b. Production - W-1 vs cumulative",
                 [
                     section(
-                        f"*1b. PRODUCTION - W-1 vs MTD*  _this week against "
+                        f"*1b. PRODUCTION - W-1 vs CUMULATIVE*  _this week against "
                         f"{month_label}_"
                     ),
                     table_block(
@@ -1003,7 +1012,7 @@ def build_digest_messages(
                         "Two caveats. Tournament rows carry no W-1/W-2: rolling "
                         "scorer runs pass `--skip-tournament-output`, so no "
                         "weekly aggregate is written for a candidate. And the "
-                        "columns headed `MTD` hold the candidate's ALL-TIME "
+                        "columns headed `cum` hold the candidate's ALL-TIME "
                         "pool here, not a month -- a different span, over much "
                         "easier markets (`mkt` ~0.07 against ~0.18 in "
                         "production). Candidate and incumbent numbers are NOT "

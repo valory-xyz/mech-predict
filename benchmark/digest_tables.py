@@ -366,6 +366,8 @@ def _roi_haircut(group: dict[str, Any] | None) -> str:
 # Promote margin and floor from PROMOTE_DEMOTE_POLICY.md: promote only when the
 # one-sided 95% lower bound on the paired edge clears delta, with n >= 30.
 PROMOTE_DELTA = 0.04
+# A Brier this far above its own base-rate floor is a signal; less is noise.
+NO_SKILL_MARGIN = 0.01
 # One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
 # at n >= 30 on a mean this is the same call to well inside the margin, and it
 # is computable from the stored sum/sum-of-squares without per-row data.
@@ -390,7 +392,27 @@ def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
     return edge - Z_ONE_SIDED_95 * sd / math.sqrt(count)
 
 
-def _verdict(stats: dict[str, Any] | None, deployed: bool) -> str:
+def _below_no_skill(stats: dict[str, Any] | None) -> bool:
+    """Is this window's Brier materially worse than its own base-rate floor?
+
+    "Materially" matters: a live tool sat 0.0003 above its floor on 2,055
+    markets while winning 65% of the 1,968 markets where it disagreed with the
+    price. A hairline gap is noise, and the policy is explicit that a demote
+    needs a sustained signal rather than a one-off reading.
+
+    :param stats: per-tool stats for one window.
+    :return: True when the tool is below no-skill by more than the margin.
+    """
+    brier = _num((stats or {}).get("brier"))
+    base = _num((stats or {}).get("baseline_brier"))
+    return brier is not None and base is not None and brier - base >= NO_SKILL_MARGIN
+
+
+def _verdict(
+    stats: dict[str, Any] | None,
+    deployed: bool,
+    recent: dict[str, Any] | None = None,
+) -> str:
     """Apply the promote/demote gate to one tool.
 
     The rule is the policy's, stated once and used for both rosters:
@@ -402,6 +424,8 @@ def _verdict(stats: dict[str, Any] | None, deployed: bool) -> str:
 
     :param stats: per-tool stats for the decision window.
     :param deployed: True for a production tool, False for a candidate.
+    :param recent: stats for the most recent week, used to confirm that a
+        below-no-skill reading is sustained rather than a single window.
     :return: a short verdict string for the ``rec`` cell.
     """
     brier = _num((stats or {}).get("brier"))
@@ -424,8 +448,8 @@ def _verdict(stats: dict[str, Any] | None, deployed: bool) -> str:
     if lower > PROMOTE_DELTA:
         return "keep (clears margin)" if deployed else "PROMOTE"
 
-    base = _num((stats or {}).get("baseline_brier"))
-    if base is not None and brier > base:
+    # Sustained, not a one-off: both the month and the latest week must agree.
+    if _below_no_skill(stats) and (recent is None or _below_no_skill(recent)):
         return "demote: below no-skill" if deployed else "no: below no-skill"
 
     return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
@@ -450,6 +474,62 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
         tool: f"{verdict} - NO REPLACEMENT, do not act alone"
         for tool, verdict in verdicts.items()
     }
+
+
+def _headline(
+    prod: dict[str, str], tourn: dict[str, str], platform: str
+) -> dict[str, Any]:
+    """Build the one-message answer: what to promote, what to demote.
+
+    The tables carry the evidence; this carries the decision. A reader who
+    stops after the first message must still leave with the right action, and
+    with an honest count of how many tools the data could not judge.
+
+    :param prod: verdicts for the deployed tools.
+    :param tourn: verdicts for the candidates.
+    :param platform: platform key, for the heading.
+    :return: a webhook payload.
+    """
+    promote = sorted(t for t, v in tourn.items() if v == "PROMOTE")
+    demote = sorted(t for t, v in prod.items() if v.startswith("demote"))
+    unjudged = sorted(
+        t for t, v in {**prod, **tourn}.items() if v.startswith("insufficient")
+    )
+    blocked = any("NO REPLACEMENT" in v for v in prod.values())
+
+    if promote:
+        verdict = f"PROMOTE {len(promote)}: " + ", ".join(f"`{t}`" for t in promote)
+    elif demote and not blocked:
+        verdict = f"DEMOTE {len(demote)}: " + ", ".join(f"`{t}`" for t in demote)
+    elif demote:
+        verdict = (
+            f"NO ACTION - all {len(demote)} deployed tools fail the gate, so "
+            "demoting them would leave this platform with no forecaster. "
+            "Treat as a platform-level problem, not a tool swap."
+        )
+    else:
+        verdict = "NO CHANGE - no candidate clears the promote margin."
+
+    lines = [f"*{verdict}*"]
+    if unjudged:
+        lines.append(
+            f"_{len(unjudged)} tool(s) had too little data to judge: "
+            + ", ".join(f"`{t}`" for t in unjudged)
+            + "._"
+        )
+    return message(
+        f"Verdict ({platform})",
+        [
+            section(f"*TOOL VERDICT - {platform.upper()}*\n" + "\n".join(lines)),
+            context(
+                "Gate: promote needs the one-sided 95% lower bound on edge vs "
+                f"the market to clear +{PROMOTE_DELTA} with n >= "
+                f"{MIN_SAMPLE_SIZE}. A tool winning under half the markets where "
+                "it disagreed with the price cannot be promoted whatever its "
+                "headline accuracy says. Evidence in the tables below."
+            ),
+        ],
+    )
 
 
 def _conditional(stats: dict[str, Any] | None) -> str:
@@ -564,6 +644,27 @@ def _rows_w2(
     return rows
 
 
+def _verdicts_for(
+    tools: Sequence[str],
+    at: dict[str, dict[str, Any]],
+    deployed: bool,
+    w1: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Apply the gate to a cohort, with the no-replacement guard.
+
+    :param tools: tool names in the cohort.
+    :param at: by_tool stats for the decision window.
+    :param deployed: True for production tools.
+    :param w1: last week's stats, used to confirm a sustained demote signal.
+    :return: mapping of tool name to verdict.
+    """
+    verdicts = {
+        t: _verdict(at.get(t), deployed=deployed, recent=(w1 or {}).get(t))
+        for t in tools
+    }
+    return _guard_last_tools(verdicts) if deployed else verdicts
+
+
 def _rows_at(
     tools: Sequence[str],
     w1: dict[str, dict[str, Any]],
@@ -581,9 +682,7 @@ def _rows_at(
     :return: one cell tuple per tool.
     """
     deployed = mode == "production"
-    verdicts = {t: _verdict(at.get(t), deployed=deployed) for t in tools}
-    if deployed:
-        verdicts = _guard_last_tools(verdicts)
+    verdicts = _verdicts_for(tools, at, deployed, w1)
 
     rows: list[tuple[str, ...]] = []
     for tool in tools:
@@ -825,7 +924,13 @@ def build_digest_messages(
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
 
-    messages: list[dict[str, Any]] = []
+    messages: list[dict[str, Any]] = [
+        _headline(
+            _verdicts_for(sorted(prod_tools), windows["at"], True, windows["w1"]),
+            _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
+            platform,
+        )
+    ]
 
     # Degrade LOUDLY. Both rolling files come from separate --period-days
     # scorer invocations that can fail independently of the all-time rebuild.

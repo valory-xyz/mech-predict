@@ -740,3 +740,48 @@ class TestNoReplacementGuard:
         guarded = _guard_last_tools({"a": "demote: below no-skill", "b": "keep"})
         assert guarded["a"] == "demote: below no-skill"
         assert "NO REPLACEMENT" not in guarded["b"]
+
+
+class TestSustainedDemote:
+    """A demote needs a sustained signal, not one hairline reading."""
+
+    def test_hairline_gap_is_not_a_demote(self) -> None:
+        """0.0003 above the floor is noise, whatever the sample size.
+
+        Taken from live data: a tool sat 0.2478 against a 0.2475 floor on
+        2,055 markets while winning 65% of its 1,968 disagreements.
+        """
+        hairline = _stats(
+            brier=0.2478,
+            baseline_brier=0.2475,
+            edge=-0.046,
+            edge_sd=0.29,
+            edge_n=2055,
+            conditional_accuracy_rate=0.6524,
+        )
+        assert _verdict(hairline, deployed=True) == "keep"
+
+    def test_material_gap_in_both_windows_demotes(self) -> None:
+        """Below the floor by a real margin, in the month AND the week."""
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.55,
+        )
+        assert _verdict(bad, deployed=True, recent=bad) == "demote: below no-skill"
+
+    def test_one_bad_window_alone_does_not_demote(self) -> None:
+        """The month is bad but the week has recovered: not sustained."""
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.55,
+        )
+        good = _stats(brier=0.22, baseline_brier=0.24)
+        assert _verdict(bad, deployed=True, recent=good) == "keep"

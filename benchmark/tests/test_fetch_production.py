@@ -19,10 +19,11 @@
 """Tests for benchmark/datasets/fetch_production.py"""
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 import requests
@@ -2110,7 +2111,9 @@ class TestUnparsedRequestCursorCap:
         )
         lagging_cap = now - 600
         monkeypatch.setattr(
-            fp, "fetch_deliveries", lambda url, ts: ([matched], lagging_cap)
+            fp,
+            "fetch_deliveries",
+            lambda url, ts, **_kwargs: ([matched], lagging_cap),
         )
         monkeypatch.setattr(
             fp, "_enrich_rows_with_ipfs_metadata", lambda rows, url: None
@@ -2162,7 +2165,9 @@ class TestPendingSurvivesQuietRun:
             "parsed_missing": False,
         }
         monkeypatch.setattr(
-            fp, "fetch_deliveries", lambda url, ts: ([new_delivery], None)
+            fp,
+            "fetch_deliveries",
+            lambda url, ts, **_kwargs: ([new_delivery], None),
         )
 
         rows, all_pending, _, _ = fp.process_platform(
@@ -2197,3 +2202,385 @@ class TestEnrichmentSkipsPrefilled:
             rows, "http://gnosis"
         )
         assert rows[0]["tool_version"] == "bafyexact"
+
+
+class TestInjectTimestampLt:
+    """_inject_timestamp_lt splices an upper bound into a delivers query.
+
+    Still used by :func:`fetch_deliveries` on the ``DELIVERS_QUERY`` /
+    ``DELIVERS_QUERY_LEGACY`` templates (the ParsedDelivery ingest
+    path).  :func:`fetch_all_delivery_request_ids` now parameterises
+    ``blockTimestamp_lt`` directly in ``DELIVER_REQUEST_IDS_QUERY``
+    and does not go through this helper.
+    """
+
+    def test_inserts_upper_bound_alongside_lower(self) -> None:
+        """Both bounds land in the same ``where`` clause."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        result = fp._inject_timestamp_lt(  # pylint: disable=protected-access
+            fp.DELIVERS_QUERY, 1700000000, "DELIVERS_QUERY"
+        )
+        assert (
+            "where: { blockTimestamp_gt: %(timestamp_gt)s, "
+            "blockTimestamp_lt: 1700000000 }"
+        ) in result
+
+    def test_raises_valueerror_when_target_absent(self) -> None:
+        """Silent-no-op protection: a drifted literal raises, not returns."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        # ``str.replace`` on a missing target returns the source unchanged.
+        # The guard has to raise so a future reformat of the query literal
+        # is caught at run time and can't silently revert the delivery-time
+        # bound to ``since → now`` (which would break coverage on any
+        # window not ending at "now").
+        drifted = "{ delivers( where: { blockTimestamp_gte: 0 } ) { id } }"
+        with pytest.raises(ValueError, match="literal drifted"):
+            fp._inject_timestamp_lt(  # pylint: disable=protected-access
+                drifted, 1700000000, "custom_test_query"
+            )
+
+
+class _FakeMarketplaceSubgraph:
+    """Fake ``_post_graphql`` that honours the where-clause bounds.
+
+    Parses ``blockTimestamp_gt``, ``blockTimestamp_lt`` and ``first``
+    out of the query the caller sends and returns only the matching
+    rows, ordered ``blockTimestamp`` descending. Optionally clamps
+    ``first`` below the requested value to model graph-node's
+    server-side page cap — the whole point of the cursor pagination
+    fix is that this doesn't lose rows.
+    """
+
+    _TS_GT_RE = re.compile(r"blockTimestamp_gt:\s*(\d+)")
+    _TS_LT_RE = re.compile(r"blockTimestamp_lt:\s*(\d+)")
+    _FIRST_RE = re.compile(r"first:\s*(\d+)")
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        first_clamp: Optional[int] = None,
+    ) -> None:
+        self.rows = rows
+        self.first_clamp = first_clamp
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, _url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        query = payload["query"]
+        ts_gt = int(self._TS_GT_RE.search(query).group(1))  # type: ignore[union-attr]
+        ts_lt = int(self._TS_LT_RE.search(query).group(1))  # type: ignore[union-attr]
+        first = int(self._FIRST_RE.search(query).group(1))  # type: ignore[union-attr]
+        if self.first_clamp is not None:
+            first = min(first, self.first_clamp)
+        matching = [r for r in self.rows if ts_gt < int(r["blockTimestamp"]) < ts_lt]
+        matching.sort(key=lambda r: -int(r["blockTimestamp"]))
+        page = matching[:first]
+        self.calls.append(
+            {
+                "ts_gt": ts_gt,
+                "ts_lt": ts_lt,
+                "first": first,
+                "returned": len(page),
+            }
+        )
+        return {"delivers": page}
+
+
+class TestFetchAllDeliveryRequestIds:
+    """Coverage-side enumeration with cursor pagination.
+
+    Every test drives the real ``fetch_all_delivery_request_ids`` end
+    to end through the real query template, the real cursor advance
+    loop, and the real request-time filter — only ``_post_graphql`` is
+    stubbed at the HTTP boundary. The previous suite stubbed
+    ``_paginated_fetch``, which was exactly the seam under test.
+    """
+
+    @staticmethod
+    def _deliver(
+        deliver_id: str,
+        delivery_ts: int,
+        request_id: Optional[str],
+        request_ts: Optional[int],
+    ) -> dict[str, Any]:
+        """Build one raw delivers-row shape as the subgraph returns it."""
+        request: dict[str, Any] = {}
+        if request_id is not None:
+            request["id"] = request_id
+        if request_ts is not None:
+            request["blockTimestamp"] = str(request_ts)
+        return {
+            "id": deliver_id,
+            "blockTimestamp": str(delivery_ts),
+            "request": request,
+        }
+
+    def test_single_page_sweep_filters_client_side_on_request_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Client-side request-time filter narrows the widened envelope."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        rows = [
+            # in-window (request time strictly inside the parity window)
+            self._deliver(
+                "0xd1",
+                delivery_ts=request_ts_gt + 500,
+                request_id="0xreq_in",
+                request_ts=request_ts_gt + 100,
+            ),
+            # delivery inside envelope but request AT the exclusive lower
+            # bound — must be filtered client-side
+            self._deliver(
+                "0xd2",
+                delivery_ts=request_ts_gt + 200,
+                request_id="0xreq_below",
+                request_ts=request_ts_gt,
+            ),
+            # request past window upper bound (delivered inside envelope
+            # because envelope is widened by _DELIVERY_LAG_ENVELOPE_S)
+            self._deliver(
+                "0xd3",
+                delivery_ts=request_ts_lt + 3600,
+                request_id="0xreq_above",
+                request_ts=request_ts_lt,
+            ),
+        ]
+        fake = _FakeMarketplaceSubgraph(rows)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+        )
+
+        assert ids == {"0xreq_in"}
+        assert dropped == 0
+        # The subgraph was asked for the widened envelope, not the raw
+        # parity window — the whole point of the widening.
+        # pylint: disable-next=protected-access
+        expected_upper = request_ts_lt + fp._DELIVERY_LAG_ENVELOPE_S
+        assert fake.calls[0]["ts_gt"] == request_ts_gt
+        assert fake.calls[0]["ts_lt"] == expected_upper
+
+    def test_multi_page_cursor_walks_down_to_lower_bound(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Batch size smaller than dataset must not lose rows.
+
+        Fifteen deliveries all inside the window, ``batch_size=5`` — the
+        cursor must issue three pages plus a final empty one and return
+        every request_id.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        rows = [
+            self._deliver(
+                f"0xd{i}",
+                delivery_ts=request_ts_gt + i * 100,
+                request_id=f"0xreq_{i}",
+                request_ts=request_ts_gt + i * 100 - 1,
+            )
+            for i in range(1, 16)
+        ]
+        fake = _FakeMarketplaceSubgraph(rows)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+            batch_size=5,
+        )
+
+        assert ids == {f"0xreq_{i}" for i in range(1, 16)}
+        assert dropped == 0
+        # ceil(15/5) = 3 full pages + one empty terminator.
+        assert len(fake.calls) == 4
+        assert fake.calls[-1]["returned"] == 0
+
+    def test_clamped_batch_size_still_covers_all_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """graph-node clamping ``first`` below the request must not lose rows.
+
+        This is the failure mode the previous truncation guard was meant
+        to catch, and the reason the guard shipped as unconditionally
+        true: with skip-based ``len(page) < first → EOF`` a clamp is
+        silently treated as EOF and shrinks the coverage denominator.
+        With the cursor loop, a clamp just means more iterations. A
+        regression that reintroduces the ``< first`` short-page break
+        would fail this test.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        rows = [
+            self._deliver(
+                f"0xd{i}",
+                delivery_ts=request_ts_gt + i * 10,
+                request_id=f"0xreq_{i}",
+                request_ts=request_ts_gt + i * 10 - 1,
+            )
+            for i in range(1, 21)
+        ]
+        # batch_size requests 100, subgraph returns at most 3 per page.
+        fake = _FakeMarketplaceSubgraph(rows, first_clamp=3)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+            batch_size=100,
+        )
+
+        assert ids == {f"0xreq_{i}" for i in range(1, 21)}
+        assert dropped == 0
+        # ceil(20/3) = 7 full pages + one empty terminator.
+        assert len(fake.calls) == 8
+        assert all(c["returned"] <= 3 for c in fake.calls[:-1])
+
+    def test_same_timestamp_page_at_batch_size_logs_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Exclusive cursor advance skips ties past batch_size — must warn.
+
+        Because ``cursor_ts_lt = page_oldest_ts`` is exclusive, if a
+        single blockTimestamp holds more than ``batch_size``
+        deliveries, the next page's ``blockTimestamp_lt`` filter
+        excludes rows AT that timestamp and any not yet seen are
+        silently lost. This is deliberate — the fallback would be
+        to implement a composite (blockTimestamp, id) cursor, which
+        is a lot of code for a case that basically doesn't occur
+        with seconds-scale deliveries. What the function DOES do is
+        surface the case as a warning so an operator can bump
+        ``batch_size`` and rerun rather than trust a shrunken
+        coverage denominator.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param caplog: pytest log-capture fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        # Four deliveries at the SAME blockTimestamp, batch_size=3.
+        # First page returns three of them, the warning fires, and the
+        # fourth is silently skipped by the exclusive cursor.
+        rows = [
+            self._deliver(
+                f"0xd_{i}",
+                delivery_ts=request_ts_gt + 500,
+                request_id=f"0xreq_{i}",
+                request_ts=request_ts_gt + 100,
+            )
+            for i in range(1, 5)
+        ]
+        fake = _FakeMarketplaceSubgraph(rows)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        with caplog.at_level("WARNING", logger="benchmark.datasets.fetch_production"):
+            ids, _dropped = fp.fetch_all_delivery_request_ids(
+                "http://marketplace",
+                request_ts_gt=request_ts_gt,
+                request_ts_lt=request_ts_lt,
+                batch_size=3,
+            )
+
+        assert any(
+            "all share blockTimestamp" in rec.message for rec in caplog.records
+        ), "the operator-facing warning must fire when a page is entirely at one ts"
+        # Three of the four survive; the batch_size < ties case is
+        # exactly what the warning is telling the operator to escalate.
+        assert len(ids) == 3
+
+    def test_drops_rows_missing_request_id_or_ts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Rows without a resolvable ``request.id`` or ``blockTimestamp`` drop."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        rows: list[dict[str, Any]] = [
+            self._deliver(
+                "0xok",
+                delivery_ts=request_ts_gt + 100,
+                request_id="0xreq_ok",
+                request_ts=request_ts_gt + 50,
+            ),
+            self._deliver(
+                "0xno_id",
+                delivery_ts=request_ts_gt + 200,
+                request_id=None,
+                request_ts=request_ts_gt + 60,
+            ),
+            self._deliver(
+                "0xno_ts",
+                delivery_ts=request_ts_gt + 300,
+                request_id="0xreq_no_ts",
+                request_ts=None,
+            ),
+            {
+                "id": "0xbad_ts",
+                "blockTimestamp": str(request_ts_gt + 400),
+                "request": {
+                    "id": "0xreq_bad_ts",
+                    "blockTimestamp": "not-an-int",
+                },
+            },
+        ]
+        fake = _FakeMarketplaceSubgraph(rows)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+        )
+
+        assert ids == {"0xreq_ok"}
+        # Three unresolvable rows: no id, no ts, bad ts.
+        assert dropped == 3
+
+    def test_empty_sweep_returns_empty_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Zero deliveries returned exits cleanly (no exception)."""
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        fake = _FakeMarketplaceSubgraph(rows=[])
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=1_700_000_000,
+            request_ts_lt=1_700_100_000,
+        )
+
+        assert ids == set()
+        assert dropped == 0
+        # One call — the initial page came back empty and terminated.
+        assert len(fake.calls) == 1

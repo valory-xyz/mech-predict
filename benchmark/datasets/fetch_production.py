@@ -1110,6 +1110,7 @@ def _parse_request_context(content_str: str) -> dict[str, Any]:
 def fetch_deliveries(
     marketplace_url: str,
     timestamp_gt: int,
+    timestamp_lt: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], Optional[int]]:
     """Bulk fetch all recent deliveries with prediction data.
 
@@ -1128,12 +1129,27 @@ def fetch_deliveries(
 
     :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
     :param timestamp_gt: only fetch deliveries after this UNIX timestamp.
+    :param timestamp_lt: optional UNIX timestamp; when set, cap the
+        fetch strictly below this value. Used by the parity verifier
+        to bound enumeration to a specific window instead of
+        ``since → now``.
     :return: tuple of (delivery dicts, delivery-cursor cap or None).
     """
     schema = detect_delivers_schema(marketplace_url)
     query_template = (
         DELIVERS_QUERY if schema == DELIVERS_SCHEMA_PARSED else DELIVERS_QUERY_LEGACY
     )
+    if timestamp_lt is not None:
+        # Both DELIVERS_QUERY and DELIVERS_QUERY_LEGACY carry the same
+        # ``where: { blockTimestamp_gt: %(timestamp_gt)s }`` literal, so
+        # reformatting one but not the other would silently strip the
+        # upper bound only for that schema variant.
+        variant = (
+            "DELIVERS_QUERY"
+            if schema == DELIVERS_SCHEMA_PARSED
+            else "DELIVERS_QUERY_LEGACY"
+        )
+        query_template = _inject_timestamp_lt(query_template, timestamp_lt, variant)
     raw = _paginated_fetch(
         marketplace_url,
         query_template,
@@ -1214,6 +1230,251 @@ def fetch_deliveries(
         log.info("  %d/%d deliveries have market_id", has_market_id, len(deliveries))
 
     return deliveries, unparsed_request_cap
+
+
+# Coverage-check query: only the request.id, no parsedRequest gate. Used
+# by the mech-analytics parity verifier to prove every on-chain request
+# in a window is present in the lake, regardless of whether mech-predict
+# would currently use it. Selecting a smaller field set keeps
+# marketplace-subgraph load lower during coverage sweeps than the full
+# DELIVERS_QUERY would. Selects ``request.blockTimestamp`` because the
+# parity verifier needs to filter on REQUEST time (matches the lake side's
+# ``requested_at`` semantics), not delivery time — see the comment on
+# ``fetch_all_delivery_request_ids``.
+DELIVER_REQUEST_IDS_QUERY = """
+{
+  delivers(
+    first: %(first)s
+    orderBy: blockTimestamp
+    orderDirection: desc
+    where: { blockTimestamp_gt: %(timestamp_gt)s, blockTimestamp_lt: %(timestamp_lt)s }
+  ) {
+    id
+    blockTimestamp
+    request { id blockTimestamp }
+  }
+}
+"""
+
+# Envelope around the request window on the delivery-time bound sent to
+# the subgraph. A request submitted just before ``request_ts_until`` may
+# be delivered after it, so the delivery-time upper bound has to be
+# widened by an assumed maximum request→delivery lag; a request
+# submitted just after ``request_ts_gt`` cannot be delivered before it,
+# so the lower bound uses the raw request window boundary. 7 days is a
+# generous upper bound relative to normal mech latency (seconds to
+# minutes) and catches operator-side stalls without inflating the sweep
+# more than 1-2× on a typical 3-day parity window.
+_DELIVERY_LAG_ENVELOPE_S = 7 * 24 * 60 * 60
+
+
+def fetch_all_delivery_request_ids(
+    marketplace_url: str,
+    request_ts_gt: int,
+    request_ts_lt: int,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> tuple[set[str], int]:
+    """Return every request_id delivered in the window, per the marketplace subgraph.
+
+    The coverage check compares this set against the mech-analytics
+    lake's set for the same window. Both sides must be bounded on the
+    same clock or the diff produces false alarms:
+
+    * The lake's ``/v1/data/scored-rows`` endpoint filters on
+      ``requested_at`` (verified in mech-analytics
+      ``etl/api/routes/data.py``).
+    * The marketplace subgraph's ``Deliver`` entity carries a
+      ``blockTimestamp`` (delivery time) and a nested
+      ``request { blockTimestamp }`` (request time).
+
+    Bounding the marketplace sweep on delivery time and comparing to a
+    lake set bounded on request time creates two systematic errors:
+    leading-edge requests (submitted just before ``since``, delivered
+    inside the window) show up as "missing from lake" false alarms, and
+    trailing-edge requests (submitted just before ``until``, delivered
+    after it) are permanently invisible to any window's check. Both
+    happen without any real coverage gap and both are the wrong signal
+    at a cutover gate.
+
+    Fix: enumerate deliveries within a widened delivery-time envelope
+    ``(request_ts_gt, request_ts_lt + _DELIVERY_LAG_ENVELOPE_S)`` — which
+    catches every delivery whose request could fall inside the window
+    — then filter client-side to
+    ``request.blockTimestamp in (request_ts_gt, request_ts_lt)``.
+    Bounds are exclusive on both sides to mirror the marketplace
+    subgraph's ``blockTimestamp_gt`` / ``blockTimestamp_lt`` semantics.
+
+    Unlike :func:`fetch_deliveries`, this does not skip deliveries with
+    a null ``parsedRequest`` — the point of the coverage check is to
+    prove every delivered request is in the lake, including ones
+    mech-predict currently discards because their IPFS payload didn't
+    parse. The set is the "delivered in the window" universe. A
+    ``Request`` that was never answered (or answered more than
+    ``_DELIVERY_LAG_ENVELOPE_S`` after the window closed) is not in
+    the denominator; consumers that need request-level completeness
+    would need a separate ``requests`` sweep, deliberately out of
+    scope for the migration cutover gate.
+
+    The second return value is the count of deliveries that came back
+    without a resolvable ``request.id`` (or without a
+    ``request.blockTimestamp`` we could bucket on) and were therefore
+    dropped from the coverage denominator. Callers surface this so a
+    non-zero drop can't be hidden inside a "no missing IDs" PASS verdict
+    — every dropped row is a request that could genuinely be absent
+    from the lake but that we can never report as absent.
+
+    Pagination uses a descending timestamp cursor rather than
+    ``skip``: each page rolls ``blockTimestamp_lt`` down to the
+    oldest ``blockTimestamp`` returned in that page (exclusive), and
+    the loop terminates when the subgraph returns an empty page. This
+    side-steps two failure modes of the skip-based
+    ``len(page) < first → EOF`` pattern that the previous
+    implementation used:
+
+    * A graph-node ``first`` clamp (returning fewer rows than
+      requested even when more exist) is silently treated as EOF and
+      shrinks the coverage denominator. With the cursor approach a
+      clamp just means more iterations — no lost rows.
+    * ``skip`` has a deep-scan cap on graph-node, which the 7-day
+      envelope routinely crosses.
+
+    Edge case: because the cursor advance is exclusive, a single
+    second holding more than ``batch_size`` deliveries would have
+    the "extra" rows skipped on the next page. In practice mech
+    deliveries are seconds-scale so this doesn't happen, but the
+    function emits a warning when a page's rows all share one
+    ``blockTimestamp`` so the operator can bump ``batch_size``
+    rather than silently ship a shrunken denominator.
+
+    :param marketplace_url: GraphQL endpoint for the marketplace subgraph.
+    :param request_ts_gt: unix seconds, exclusive lower bound on
+        request time (matches the lake's ``since``).
+    :param request_ts_lt: unix seconds, exclusive upper bound on
+        request time (matches the lake's ``until``).
+    :param batch_size: page size sent as ``first``. graph-node may
+        clamp; the cursor loop handles that transparently. Default
+        matches the module-wide ``DEFAULT_BATCH_SIZE``.
+    :return: tuple of (request_ids set, dropped_no_rid_count).
+    """
+    delivery_ts_lt = request_ts_lt + _DELIVERY_LAG_ENVELOPE_S
+
+    request_ids: set[str] = set()
+    dropped_no_rid = 0
+    cursor_ts_lt = delivery_ts_lt
+
+    while True:
+        query = DELIVER_REQUEST_IDS_QUERY % {
+            "first": batch_size,
+            "timestamp_gt": request_ts_gt,
+            "timestamp_lt": cursor_ts_lt,
+        }
+        data = _post_graphql(marketplace_url, {"query": query})
+        page = data.get("delivers", [])
+        if not page:
+            break
+
+        page_oldest_ts: Optional[int] = None
+        page_newest_ts: Optional[int] = None
+        for d in page:
+            try:
+                delivery_ts = int(d["blockTimestamp"])
+            except (KeyError, TypeError, ValueError):
+                dropped_no_rid += 1
+                continue
+            if page_oldest_ts is None or delivery_ts < page_oldest_ts:
+                page_oldest_ts = delivery_ts
+            if page_newest_ts is None or delivery_ts > page_newest_ts:
+                page_newest_ts = delivery_ts
+            request = d.get("request") or {}
+            rid = request.get("id")
+            req_ts_raw = request.get("blockTimestamp")
+            if not rid or req_ts_raw is None:
+                dropped_no_rid += 1
+                continue
+            try:
+                req_ts = int(req_ts_raw)
+            except (TypeError, ValueError):
+                dropped_no_rid += 1
+                continue
+            if request_ts_gt < req_ts < request_ts_lt:
+                request_ids.add(rid)
+
+        log.info(
+            "  fetched %d delivers (running set size %d)", len(page), len(request_ids)
+        )
+
+        if page_oldest_ts is None:
+            # No usable blockTimestamps in the page → no way to advance
+            # the cursor. Refuse to loop and let the caller see the
+            # drop count as evidence of a schema drift or a broken page.
+            log.warning(
+                "fetch_all_delivery_request_ids: page of %d rows had no "
+                "usable blockTimestamp; halting to avoid an infinite loop.",
+                len(page),
+            )
+            break
+
+        # Cursor advance is exclusive: the next page's
+        # ``blockTimestamp_lt`` skips rows AT ``page_oldest_ts``. That's
+        # only lossy if a single second held more than ``batch_size``
+        # deliveries; the paginator surfaces that as a warning so an
+        # operator can bump ``--batch-size`` rather than silently ship
+        # an under-counted denominator.
+        if page_newest_ts == page_oldest_ts and len(page) >= batch_size:
+            log.warning(
+                "fetch_all_delivery_request_ids: page of %d rows all share "
+                "blockTimestamp=%d; the next page's exclusive cursor advance "
+                "may skip further deliveries at this timestamp. Rerun with "
+                "a larger batch_size if the coverage denominator looks low.",
+                len(page),
+                page_oldest_ts,
+            )
+        cursor_ts_lt = page_oldest_ts
+
+    if dropped_no_rid:
+        log.warning(
+            "fetch_all_delivery_request_ids: dropped %d delivery/deliveries "
+            "with missing/unparseable request.id or blockTimestamp from "
+            "coverage denominator",
+            dropped_no_rid,
+        )
+    return request_ids, dropped_no_rid
+
+
+def _inject_timestamp_lt(query: str, timestamp_lt: int, query_name: str) -> str:
+    """Insert a ``blockTimestamp_lt`` bound into a delivers query.
+
+    ``str.replace`` returns the source unchanged when the target isn't
+    found — a silent no-op that would revert the query back to the
+    unbounded ``since → now`` shape and hide it behind a successful
+    pagination. Raising when the substitution didn't land catches a
+    future reformat of the query literal at run time instead of at
+    review time. ``raise`` (rather than ``assert``) is deliberate: this
+    guard has to survive ``python -O`` / ``PYTHONOPTIMIZE=1``, which
+    strip ``assert`` statements and would silently disable the check
+    exactly when the image is slim-optimised for deployment.
+
+    :param query: the raw GraphQL query text with a
+        ``where: { blockTimestamp_gt: %(timestamp_gt)s }`` clause.
+    :param timestamp_lt: the exclusive upper bound to insert.
+    :param query_name: source name for the error message.
+    :return: the query with both ``blockTimestamp_gt`` and
+        ``blockTimestamp_lt`` in the ``where`` clause.
+    :raises ValueError: if the target substring is not present in the
+        query (literal drifted between reformat and this call).
+    """
+    target = "where: { blockTimestamp_gt: %(timestamp_gt)s }"
+    replacement = (
+        f"where: {{ blockTimestamp_gt: %(timestamp_gt)s, "
+        f"blockTimestamp_lt: {int(timestamp_lt)} }}"
+    )
+    new_query = query.replace(target, replacement)
+    if new_query == query:
+        raise ValueError(
+            f"_inject_timestamp_lt: bound did not apply to {query_name} — "
+            f"literal drifted from expected substring {target!r}"
+        )
+    return new_query
 
 
 # ---------------------------------------------------------------------------
@@ -2280,6 +2541,7 @@ def process_platform(
     delivery_ts_gt: int,
     existing_ids: set[str],
     pending_deliveries: list[dict[str, Any]],
+    delivery_ts_lt: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
     """Process one platform: fetch deliveries, match to resolved markets, build rows.
 
@@ -2293,6 +2555,10 @@ def process_platform(
     :param delivery_ts_gt: only fetch deliveries after this UNIX timestamp.
     :param existing_ids: row IDs already written, for deduplication.
     :param pending_deliveries: unmatched deliveries from previous runs.
+    :param delivery_ts_lt: optional UNIX timestamp forwarded to
+        ``fetch_deliveries`` as ``timestamp_lt``. When set, deliveries
+        are capped strictly below this value. Used by the parity
+        verifier to bound the window.
     :return: tuple of (rows, still_pending, max_delivery_timestamp,
         max_resolved_timestamp).
     """
@@ -2326,7 +2592,7 @@ def process_platform(
     # 2. Fetch and process new deliveries
     log.info("%s: fetching deliveries...", platform)
     new_deliveries, unparsed_request_cap = fetch_deliveries(
-        marketplace_url, delivery_ts_gt
+        marketplace_url, delivery_ts_gt, timestamp_lt=delivery_ts_lt
     )
     log.info(
         "%s: %d new deliveries, %d resolved markets, %d pending from before",

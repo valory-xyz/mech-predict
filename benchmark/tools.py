@@ -78,6 +78,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         module="packages.valory.customs.superforcaster.superforcaster",
         family="superforcaster",
     ),
+    # valory/superforcaster_full_search -- shipped and serving Polymarket
+    # traffic, but unregistered until now, so `replay` raised on it and the
+    # improvement loop could not validate any fix for it. Underscore spelling
+    # matches how the production rows name it.
+    "superforcaster_full_search": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_full_search"
+            ".superforcaster_full_search"
+        ),
+        family="superforcaster",
+    ),
+    # valory/superforcaster_calibrated_full_search -- the other shipped
+    # superforcaster the benchmark could not reach. Unlike its sibling this one
+    # DOES use structured outputs, so the derived lookup picks up its
+    # PredictionResult automatically; under the old hand-maintained map it
+    # would have replayed unstructured and scored 0%.
+    "superforcaster_calibrated_full_search": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_calibrated_full_search"
+            ".superforcaster_calibrated_full_search"
+        ),
+        family="superforcaster",
+    ),
     # valory/superforcaster_polymarket_v1
     "superforcaster-polymarket-v1": ToolSpec(
         module=(

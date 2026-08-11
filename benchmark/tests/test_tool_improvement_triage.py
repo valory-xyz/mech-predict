@@ -1412,6 +1412,12 @@ class TestMainExitCode:
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
         )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
+        )
 
         # gh issue list succeeds with no open issues; gh issue create fails.
         call_count = {"n": 0}
@@ -1454,6 +1460,12 @@ class TestMainExitCode:
         (results_dir / "scores_polymarket.json").write_text(json.dumps(empty))
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         # Pre-existing state should NOT be overwritten.
         state_path = tmp_path / "state.json"
@@ -1845,6 +1857,12 @@ class TestMainPromotionDispatch:
         self._write_firing_scores(results_dir)
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage._load_lineage_children",
@@ -2674,13 +2692,22 @@ class TestMainWidenSampleDispatch:
             json.dumps(prev)
         )
         (results_dir / "scores_polymarket.json").write_text(json.dumps(cur))
+        # Dates are relative to now, NOT hard-coded: the count window applies
+        # a rolling COUNT_WINDOW_MAX_AGE_DAYS cap measured from the current
+        # time, so fixed 2026-06-* rows silently aged out of it and this test
+        # began failing on a date with no code change (2026-08-11).
+        newest = datetime.now(timezone.utc) - timedelta(days=8)
         rows = [
-            _cw_row(f"2026-06-{d:02d}T00:00:00Z", 0.5, True, row_id=f"r{d}")
-            for d in range(20, 28)
+            _cw_row(
+                (newest - timedelta(days=offset)).strftime("%Y-%m-%dT00:00:00Z"),
+                0.5,
+                True,
+                row_id=f"r{offset}",
+            )
+            for offset in range(8)
         ]
-        (logs_dir / "production_log_2026_06_28.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in rows)
-        )
+        log_name = f"production_log_{newest:%Y_%m_%d}.jsonl"
+        (logs_dir / log_name).write_text("\n".join(json.dumps(r) for r in rows))
 
     def _run(
         self,
@@ -2692,6 +2719,12 @@ class TestMainWidenSampleDispatch:
         self._write_thin_scores(results_dir, tmp_path / "datasets" / "logs")
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",
@@ -2765,6 +2798,12 @@ class TestMainWidenSampleDispatch:
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.RESULTS_DIR", results_dir
+        )
+        # Discovery is network-bound and these fixtures use synthetic tool
+        # names; None = "assess everything" (the fail-open path).
+        monkeypatch.setattr(
+            "benchmark.tool_improvement_triage.actionable_tools",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
             "benchmark.tool_improvement_triage.TOURNAMENT_TOOLS_PATH",

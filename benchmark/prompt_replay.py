@@ -38,6 +38,7 @@ import logging
 import os
 import random
 import re
+import string
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
 
 import openai
+import pydantic
 import requests
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
@@ -594,6 +596,283 @@ def _prepare_output_dir(output_dir: Path) -> None:
         (output_dir / stale).unlink(missing_ok=True)
 
 
+DEFAULT_TOURNAMENT_SCORED = (
+    Path(__file__).parent / "results" / "tournament_scored.jsonl"
+)
+DEFAULT_TOURNAMENT_PREDICTIONS = (
+    Path(__file__).parent / "results" / "tournament_predictions.jsonl"
+)
+
+
+def _tournament_today(row: dict[str, Any]) -> str:
+    """The date the tournament row was predicted on, as the tool would say it.
+
+    :param row: a tournament scored row.
+    :return: ISO date string, or empty when the timestamp is unusable.
+    """
+    stamp = row.get("predicted_at") or ""
+    return stamp[:10] if len(stamp) >= 10 else ""
+
+
+def _render_tournament_evidence(tool_name: str, source_content: Any) -> Optional[str]:
+    """Render a tournament row's captured evidence as the TOOL rendered it.
+
+    The tournament arm stores ``used_params["source_content"]``, which every
+    capturing tool writes as ``{"mode": ..., "serper_response": <raw Serper
+    JSON>}`` -- the payload BEFORE formatting. The production path stores the
+    already-rendered ``<background>`` text, i.e. the output of the tool's own
+    ``format_sources_data(organic[:MAX_SOURCES], peopleAlsoAsk)``.
+
+    Passing the dict through would put a Python dict repr into the prompt --
+    valid Python, unusable evidence -- while the baseline's ``p_yes`` came
+    from clean formatted sources. The head-to-head Brier delta would then
+    measure evidence-format drift rather than the change under test, with no
+    error anywhere.
+
+    :param tool_name: baseline tool whose module owns the formatter.
+    :param source_content: the captured value from the tournament row.
+    :return: rendered evidence, or ``None`` when it cannot be rendered
+        faithfully (the row must then be dropped, never replayed as-is).
+    """
+    if isinstance(source_content, str):
+        return source_content or None  # already rendered
+    if not isinstance(source_content, dict):
+        return None
+    serper = source_content.get("serper_response")
+    if not isinstance(serper, dict):
+        return None
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    try:
+        module = importlib.import_module(spec.module)
+        formatter = module.format_sources_data
+        max_sources = getattr(module, "MAX_SOURCES", 5)
+        # The formatter call belongs INSIDE the guard: a captured payload can
+        # be structurally wrong in ways that raise rather than return
+        # nothing -- `{"organic": null}` makes `.get("organic", [])` return
+        # None (the default only applies to a MISSING key), and a list of
+        # strings breaks `item.get(...)` inside the formatter. Left outside,
+        # each of those took down the whole enrich run instead of dropping
+        # one row, which is what the `unrenderable` counter exists for.
+        rendered = formatter(
+            (serper.get("organic") or [])[:max_sources],
+            serper.get("peopleAlsoAsk") or [],
+        )
+    except (ImportError, AttributeError, TypeError, KeyError, IndexError):
+        log.warning(
+            "cannot render tournament evidence for %r the way the tool does; "
+            "row dropped",
+            tool_name,
+            exc_info=True,
+        )
+        return None
+    return rendered or None
+
+
+def _write_replay_rows(output: Path, rows: list[dict[str, Any]]) -> None:
+    """Write enriched rows as JSONL.
+
+    Both the production and tournament paths end by writing the same shape;
+    a shared writer keeps their on-disk bytes from drifting. Deliberately not
+    ``benchmark.io.write_jsonl``: that uses ``ensure_ascii=False``, which
+    would change the encoding of non-ASCII question text.
+
+    :param output: destination path.
+    :param rows: rows to write.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _drop_reason_detail(dropped: dict[str, int]) -> str:
+    """Explain a tournament shortfall from its per-reason drop counts.
+
+    The failure message is the only artifact a human sees when both arms come
+    up empty, and "the tournament arm has none either" gives them nowhere to
+    start: a roster/name mismatch (every row ``wrong_tool``) and a genuinely
+    absent tool (no rows at all) read identically. Naming the dominant reasons
+    turns that into a next step.
+
+    :param dropped: per-reason drop counts from :func:`_load_tournament_rows`.
+    :return: a parenthesised detail clause, or "" when ``dropped`` is empty
+        because the tournament files were absent -- the caller's own text
+        already conveys that state. (An all-zero ``dropped`` cannot reach a
+        caller: :func:`_load_tournament_rows` returns a bare ``{}`` for the
+        missing-files case and otherwise only omits counts it never saw.)
+    """
+    hit = sorted(
+        ((k, v) for k, v in dropped.items() if v), key=lambda kv: (-kv[1], kv[0])
+    )
+    if not hit:
+        return ""
+    shown = ", ".join(f"{k}={v}" for k, v in hit)
+    return f" ({sum(v for _, v in hit)} tournament row(s) dropped: {shown})"
+
+
+def _load_tournament_rows(
+    tool_filter: str,
+    platform_filter: Optional[str],
+    scored_path: Optional[Path] = None,
+    predictions_path: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Build replay-ready rows for a tool from the tournament arm.
+
+    A tournament-only tool has no production deliveries, so the usual
+    deliver_id -> marketplace -> IPFS enrichment cannot run (mech-predict
+    #416: five identical ``0 rows for baseline`` failures). The tournament
+    arm already stores what that enrichment would recover: the question and
+    the ``source_content`` the tool was fed. ``tournament_scored.jsonl``
+    carries the resolved outcomes but drops ``source_content``, while
+    ``tournament_predictions.jsonl`` keeps it -- so the two are joined by
+    ``row_id`` and emitted in the same shape ``_fetch_and_extract_prompts``
+    produces.
+
+    :param tool_filter: tool name to keep.
+    :param platform_filter: platform to keep, or ``None`` for all.
+    :param scored_path: path to ``tournament_scored.jsonl``; the module
+        default is read at CALL time (not bound at import) so a Python
+        caller can override it. NOTE: ``enrich`` exposes no CLI flag for
+        this, so the workflow relies on the artifact landing at the module
+        default (``benchmark/results/``).
+    :param predictions_path: path to ``tournament_predictions.jsonl``,
+        same resolution rule.
+    :return: ``(rows, dropped)`` -- replayable rows plus per-reason drop
+        counts, so the sidecar can report why a pool shrank instead of
+        asserting it did not.
+    """
+    scored_path = DEFAULT_TOURNAMENT_SCORED if scored_path is None else scored_path
+    predictions_path = (
+        DEFAULT_TOURNAMENT_PREDICTIONS if predictions_path is None else predictions_path
+    )
+    if not scored_path.is_file() or not predictions_path.is_file():
+        log.warning(
+            "tournament fallback unavailable: %s / %s",
+            scored_path,
+            predictions_path,
+        )
+        return [], {}
+
+    evidence: dict[str, str] = {}
+    with open(predictions_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            row_id = row.get("row_id")
+            content = row.get("source_content")
+            if row_id and content:
+                evidence[row_id] = content
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    # Per-reason drop counts, mirroring the production loader. Reporting
+    # `rejected: {}` while silently dropping through bare `continue`s would
+    # let a schema regression (e.g. the flywheel ceasing to write `p_no`)
+    # discard 95% of a pool and still render as a clean sample.
+    dropped: dict[str, int] = {
+        "bad_json": 0,
+        "wrong_tool": 0,
+        "wrong_platform": 0,
+        "no_outcome_or_probs": 0,
+        "no_row_id": 0,
+        "duplicate": 0,
+        "no_question": 0,
+        "no_evidence": 0,
+        "unrenderable": 0,
+    }
+    with open(scored_path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                dropped["bad_json"] += 1
+                continue
+            if row.get("tool") != tool_filter and row.get("tool_name") != tool_filter:
+                dropped["wrong_tool"] += 1
+                continue
+            if platform_filter and row.get("platform") != platform_filter:
+                dropped["wrong_platform"] += 1
+                continue
+            # p_no as well as p_yes: replay's baseline arm copies both
+            # verbatim, so a row missing either KeyErrors mid-run -- after
+            # the earlier rows have already been paid for.
+            if (
+                row.get("final_outcome") is None
+                or row.get("p_yes") is None
+                or row.get("p_no") is None
+            ):
+                dropped["no_outcome_or_probs"] += 1
+                continue
+            row_id = row.get("row_id")
+            if not row_id:
+                dropped["no_row_id"] += 1
+                continue
+            if row_id in seen:
+                dropped["duplicate"] += 1
+                continue
+            raw_content = evidence.get(row_id)
+            if not row.get("question_text"):
+                # Its three siblings above get explicit drops; without this a
+                # row replays with an empty {question}, the model still
+                # returns a parseable p_yes, and it scores as normal data.
+                dropped["no_question"] += 1
+                continue
+            if not raw_content:
+                dropped["no_evidence"] += 1
+                continue  # nothing to replay against
+            content = _render_tournament_evidence(tool_filter, raw_content)
+            if not content:
+                # Unrenderable evidence is dropped rather than replayed: a
+                # dict repr in the prompt would score, silently, as if it
+                # were the sources the baseline saw.
+                dropped["unrenderable"] += 1
+                continue
+            seen.add(row_id)
+            rows.append(
+                {
+                    **row,
+                    # replay() and the scorers key on ``tool_name``; tournament
+                    # rows written before that spelling settled use ``tool``.
+                    # Normalize here so the fallback's output honours the same
+                    # contract as the production path -- an un-normalized row
+                    # KeyErrors in replay() at ``sampled[0]["tool_name"]``.
+                    "tool_name": row.get("tool_name") or row.get("tool"),
+                    "extracted_user_prompt": row.get("question_text", ""),
+                    "extracted_additional_information": content,
+                    # The superforcaster template has a literal `Today's
+                    # date: {today}`; without this it renders empty while the
+                    # tournament baseline had a real date. Prediction markets
+                    # are time-sensitive, so an empty date is not cosmetic.
+                    "extracted_today": _tournament_today(row),
+                }
+            )
+    if any(dropped.values()):
+        log.warning(
+            "Tournament fallback: dropped %d row(s) for %s (%s)",
+            sum(dropped.values()),
+            tool_filter,
+            ", ".join(f"{k}={v}" for k, v in dropped.items() if v),
+        )
+    log.info(
+        "Tournament fallback: %d replay rows for %s (evidence available for "
+        "%d predictions)",
+        len(rows),
+        tool_filter,
+        len(evidence),
+    )
+    return rows, dropped
+
+
 def enrich(
     production_log: Path,
     tool_filter: str,
@@ -602,6 +881,8 @@ def enrich(
     sample_per_platform: Optional[int] = None,
     seed: int = 42,
     platform_filter: Optional[Literal["omen", "polymarket"]] = None,
+    tournament_scored: Optional[Path] = None,
+    tournament_predictions: Optional[Path] = None,
 ) -> None:
     """Fetch IPFS prompts and extract components for replay.
 
@@ -615,10 +896,22 @@ def enrich(
     :param sample_per_platform: stratified sample N per platform before IPFS fetch.
     :param seed: random seed for sampling.
     :param platform_filter: only include rows from this platform (default: all).
+    :param tournament_scored: override for ``tournament_scored.jsonl`` (the
+        tournament fallback source).
+    :param tournament_predictions: override for
+        ``tournament_predictions.jsonl`` (carries the captured evidence).
+    :raises SystemExit: when neither production nor the tournament arm yields
+        any replayable row for ``tool_filter``.
     """
     rows, rejected, no_row_id = _load_and_filter_rows(
         production_log, tool_filter, last_days, platform_filter
     )
+    # Snapshot BEFORE stratified_sample reassigns `rows`. The fallback closure
+    # reads this for the sidecar's production_attempt; using `rows` there
+    # reported the post-sample count, so a 500-row pool sampled to 50 was
+    # rendered as "the production pool yielded 50" -- the same provenance
+    # dishonesty this PR exists to remove, one layer in.
+    production_accepted = len(rows)
     log.info(
         "Loaded %d %s rows with deliver_id + valid predictions + known outcome",
         len(rows),
@@ -642,18 +935,80 @@ def enrich(
     # an invisible assumption.
     stats_path = output.with_name(output.name + ".filter_stats.json")
     stats_path.parent.mkdir(parents=True, exist_ok=True)
-    stats_path.write_text(
-        json.dumps(
-            {"accepted": len(rows), "rejected": rejected, "no_row_id": no_row_id},
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    # Kept in memory so the post-enrichment update below can rewrite the file
+    # from this dict rather than reading its own output back.
+    production_stats: dict[str, Any] = {
+        "source": "production",
+        "accepted": len(rows),
+        "rejected": rejected,
+        "no_row_id": no_row_id,
+    }
+    stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
     log.info("Wrote filter stats: %s", stats_path)
 
+    scope = f" [platform={platform_filter}]" if platform_filter else ""
+    # Captured out of the closure so the failure paths below can say WHY the
+    # tournament arm produced nothing, rather than only that it did.
+    fallback_dropped: dict[str, int] = {}
+
+    def _tournament_fallback(why: str) -> bool:
+        """Write tournament-sourced rows to ``output``; True when it produced any.
+
+        :param why: what made the production path unusable (for the log).
+        :return: whether replayable rows were written.
+        """
+        nonlocal fallback_dropped
+        log.warning("%s for %r%s; trying the tournament arm", why, tool_filter, scope)
+        fallback_rows, fallback_dropped = _load_tournament_rows(
+            tool_filter, platform_filter, tournament_scored, tournament_predictions
+        )
+        if not fallback_rows:
+            return False
+        if sample_per_platform is not None:
+            fallback_rows = stratified_sample(fallback_rows, sample_per_platform, seed)
+        _log_platform_breakdown(fallback_rows)
+        _write_replay_rows(output, fallback_rows)
+        # Rewrite the sidecar: it was written from the PRODUCTION pool above,
+        # but the dataset now holds tournament rows. Leaving it would caption
+        # the human-facing verdict with rejection counts for a population that
+        # was not benchmarked. The production counts are kept under
+        # `production_attempt` so the reason for the fallback stays diagnosable.
+        stats_path.write_text(
+            json.dumps(
+                {
+                    "source": "tournament",
+                    "accepted": len(fallback_rows),
+                    "rejected": {k: v for k, v in fallback_dropped.items() if v},
+                    # The tournament arm DROPS rows that lack a row_id, so that
+                    # count belongs in `rejected` above. This top-level key
+                    # means "rows we KEPT despite having no row_id" (production
+                    # semantics -- they bypass dedup), which is 0 by
+                    # construction here.
+                    "no_row_id": 0,
+                    "production_attempt": {
+                        "accepted": production_accepted,
+                        "rejected": rejected,
+                        "no_row_id": no_row_id,
+                    },
+                    "fallback_reason": why,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        log.info("Written %d tournament rows to %s", len(fallback_rows), output)
+        return True
+
     if not rows:
-        scope = f" [platform={platform_filter}]" if platform_filter else ""
-        raise SystemExit(f"0 rows for baseline {tool_filter!r}{scope} across the pool")
+        # No production deliveries for this tool: it may be tournament-only
+        # (mech-predict#416). The tournament arm carries the same question
+        # and captured evidence, so replay from there.
+        if _tournament_fallback("0 production rows"):
+            return
+        raise SystemExit(
+            f"0 rows for baseline {tool_filter!r}{scope} in production or "
+            f"the tournament arm{_drop_reason_detail(fallback_dropped)}"
+        )
 
     # Stratified sample BEFORE IPFS fetch to avoid unnecessary downloads.
     if sample_per_platform is not None:
@@ -689,14 +1044,48 @@ def enrich(
     log.info("%d/%d deliveries have IPFS hashes", has_hash, len(ipfs_hashes))
 
     enriched = _fetch_and_extract_prompts(rows, ipfs_hashes, tool_name=tool_filter)
+    if not enriched:
+        # Production rows existed but none survived IPFS enrichment (no
+        # delivery hash, unfetchable prompt, unparseable components). Writing
+        # an empty file here would hand the replay stage a silently zero-row
+        # benchmark -- worse than #416's loud failure. Try the tournament arm.
+        # `len(rows)`, not `production_accepted`: the sample above already
+        # narrowed the pool, so only these rows were ever handed to IPFS.
+        # Reporting the pre-sample count read as "500 rows all failed" when 50
+        # were attempted -- and this string is surfaced verbatim in the PR
+        # comment via the sidecar's `fallback_reason`. The pre-sample total
+        # stays available under `production_attempt.accepted`.
+        if _tournament_fallback(
+            f"{len(rows)} production rows but 0 survived IPFS enrichment"
+        ):
+            return
+        raise SystemExit(
+            f"0 replayable rows for baseline {tool_filter!r}{scope}: "
+            f"{len(rows)} production rows yielded no usable prompt and the "
+            f"tournament arm has none either{_drop_reason_detail(fallback_dropped)}"
+        )
     _log_platform_breakdown(enriched)
 
-    # Write
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        for row in enriched:
-            f.write(json.dumps(row) + "\n")
+    # Rows lost between the sample and here (no delivery hash, unfetchable
+    # prompt, unparseable components) leave on bare `continue`s with no bucket,
+    # so they are the one shortfall a reader cannot attribute when reconciling
+    # the pool size against the scored count. The sidecar was written before
+    # the fetch ran, so record the loss now rather than leaving it only in a
+    # log line the PR comment never sees.
+    if len(enriched) < len(rows):
+        # Rebuilt from the in-memory dict, not read back from disk: a deleted
+        # or truncated sidecar would otherwise raise here and throw away rows
+        # that were already fetched and enriched.
+        production_stats["enrichment_failed"] = len(rows) - len(enriched)
+        stats_path.write_text(json.dumps(production_stats, indent=2), encoding="utf-8")
+        log.info(
+            "%d row(s) lost during IPFS enrichment; recorded in %s",
+            len(rows) - len(enriched),
+            stats_path,
+        )
 
+    # Write
+    _write_replay_rows(output, enriched)
     log.info("Written to %s", output)
 
 
@@ -787,7 +1176,6 @@ def stratified_sample(
             for key in non_empty:
                 allocations[key] = min(allocations[key], len(non_empty[key]))
 
-            # Ensure total matches budget (distribute remainder largest-first)
             allocated = sum(allocations.values())
             deficit = budget - allocated
             if deficit > 0:
@@ -799,6 +1187,26 @@ def stratified_sample(
                     deficit -= add
                     if deficit == 0:
                         break
+
+        # Ensure total matches budget. The round() above can push the total
+        # OVER, which is why `--sample 300` returned 301 and `--sample 10`
+        # returned 12; only the deficit direction was corrected.
+        allocated = sum(allocations.values())
+        surplus = allocated - budget
+        if surplus > 0:
+            # Trim largest-first, NEVER below one row per stratum. When there
+            # are more non-empty strata than budget the floor is allowed to
+            # win -- covering every (outcome, brier-bucket) stratum matters
+            # more than the exact count there, because dropping strata biases
+            # the sample. That is the only case permitted to exceed N;
+            # rounding is not.
+            for key in sorted(non_empty, key=lambda k: allocations[k], reverse=True):
+                if surplus <= 0:
+                    break
+                take = min(surplus, allocations[key] - 1)
+                if take > 0:
+                    allocations[key] -= take
+                    surplus -= take
 
         # Sample from each stratum
         platform_sampled = 0
@@ -942,12 +1350,7 @@ def _call_openai_structured(
             )
             return None
         return json.dumps(
-            {
-                "p_yes": parsed.p_yes,
-                "p_no": parsed.p_no,
-                "confidence": parsed.confidence,
-                "info_utility": parsed.info_utility,
-            }
+            {name: getattr(parsed, name) for name in STRUCTURED_OUTPUT_FIELDS}
         )
     except Exception as e:
         log.warning("Structured LLM call failed: %s", e)
@@ -956,36 +1359,111 @@ def _call_openai_structured(
         client.close()
 
 
-# Tools that use OpenAI Structured Outputs instead of plain JSON-in-prompt.
-# Map: tool_name → (tool_module_import_path, schema_class_name).
-_STRUCTURED_OUTPUT_SCHEMAS: Dict[str, Tuple[str, str]] = {
-    "superforcaster": (
-        "packages.valory.customs.superforcaster.superforcaster",
-        "PredictionResult",
-    ),
-    "superforcaster-polymarket-v4": (
-        "packages.valory.customs.superforcaster_polymarket_v4."
-        "superforcaster_polymarket_v4",
-        "PredictionResult",
-    ),
-    "factual_research": (
-        "packages.valory.customs.factual_research.factual_research",
-        "PredictionResult",
-    ),
-}
+# Name of the Pydantic schema every structured-output tool exposes. Tools that
+# call ``client.beta.chat.completions.parse`` in their own ``run()`` define it;
+# tools that put format directives in the prompt do not.
+STRUCTURED_OUTPUT_SCHEMA_ATTR = "PredictionResult"
+
+# The on-chain contract fields, in delivery order. Single source for the three
+# places that must agree on them: the resolver's schema validation, the fields
+# ``_call_openai_structured`` extracts from the parsed response, and the test
+# suite's AST discovery (which imports this rather than re-declaring it).
+STRUCTURED_OUTPUT_FIELDS: tuple[str, ...] = (
+    "p_yes",
+    "p_no",
+    "confidence",
+    "info_utility",
+)
+
+# Model IDs the OpenAI structured-outputs client can drive. This is the ONE
+# definition of "structured-capable" -- deliberately NARROWER than call_llm's
+# routing (negative `"claude" in model`), because the failure modes are
+# asymmetric: an unknown ID on the plain path still gets a well-formed
+# prompt-directive call, while an unknown ID sent to
+# ``beta.chat.completions.parse`` fails per-row inside a broad except and
+# scores 0% with a green exit. `chatgpt-` and `ft:gpt-` are documented OpenAI
+# shapes that a bare `gpt-` prefix misses.
+_OPENAI_STRUCTURED_PREFIXES = ("gpt-", "chatgpt-", "ft:gpt-", "o1", "o3", "o4")
+
+
+def _is_openai_structured_model(model: str) -> bool:
+    """Whether ``model`` can be driven through the OpenAI structured client.
+
+    :param model: model identifier from --model / DEFAULT_MODEL.
+    :return: True only for known-OpenAI ID shapes; unknown IDs take the
+        plain-prompt path, which any backend can accept (fidelity for
+        Anthropic-branch structured tools is a separate, known gap -- see
+        :func:`_get_structured_output_schema`).
+    """
+    return model.startswith(_OPENAI_STRUCTURED_PREFIXES)
 
 
 def _get_structured_output_schema(tool_name: str) -> Optional[type]:
-    """Return the Pydantic schema class for a structured-output tool, or None."""
-    entry = _STRUCTURED_OUTPUT_SCHEMAS.get(tool_name)
-    if entry is None:
-        return None
-    module_path, class_name = entry
-    # pylint: disable=import-outside-toplevel
-    from importlib import import_module
+    """Return the Pydantic schema class for a structured-output tool, or None.
 
-    module = import_module(module_path)
-    return getattr(module, class_name)
+    Read off the tool's own module rather than a hand-maintained name->schema
+    map. That map carried no information: every entry repeated the module path
+    already in ``TOOL_REGISTRY`` and named the same class. What it did carry
+    was an obligation to remember, and the record on that was 0 for 6 --
+    ``factual_research-v1``/``-v2``/``-v3`` were never added and were being
+    replayed unstructured, and ``superforcaster-polymarket-v4`` was missing for
+    22 days. The symptom is silent: replay falls back to a plain call, the
+    model answers in prose, and every row scores as malformed while the run
+    still reports success.
+
+    A tool defines this attribute exactly when its ``run()`` uses structured
+    outputs, so asking the module keeps replay faithful to production by
+    construction -- for the OPENAI branch. An Anthropic-branch structured tool
+    (``factual_research-v3``: schema appended to the system prompt via
+    ``_JSON_RESPONSE_INSTRUCTION``, response validated with
+    ``model_validate_json``) cannot currently be replayed faithfully: at a
+    claude model the gate discards the schema this resolver returns, and the
+    prompt-directive block is not reproduced. Known gap, tracked for a
+    follow-up Anthropic structured path.
+
+    Scope of the wrong-module guarantee: a wrong-but-importable module fails
+    here only when it defines a MALFORMED ``PredictionResult``. A module that
+    simply lacks the attribute returns ``None`` -- indistinguishable from a
+    legitimate plain-prompt tool at this layer; the AST discovery test is the
+    backstop for that case.
+
+    ``import_module`` can additionally propagate ``ImportError`` for an
+    unimportable module -- unreachable at the production call site
+    (``replay()`` imports the candidate module unconditionally before the
+    per-row loop, so this always hits ``sys.modules``) but reachable for
+    direct callers such as tests.
+
+    :param tool_name: registry key for the tool being replayed.
+    :return: the Pydantic schema class, or ``None`` when the tool is not a
+        structured-output tool (or is not registered).
+    :raises ValueError: when the attribute exists but is not a usable
+        prediction schema (not a Pydantic model, or missing one of the four
+        fields ``_call_openai_structured`` reads). A renamed base class or a
+        ``spec.module`` pointing at the wrong-but-importable module must fail
+        HERE, by name, not as an opaque OpenAI 400 per row.
+    """
+    spec = TOOL_REGISTRY.get(tool_name)
+    if spec is None:
+        return None
+    module = importlib.import_module(spec.module)
+    schema = getattr(module, STRUCTURED_OUTPUT_SCHEMA_ATTR, None)
+    if schema is None:
+        return None
+    required = set(STRUCTURED_OUTPUT_FIELDS)
+    # ``getattr`` at the read, not attribute access: pydantic resolves untyped
+    # in the lint env, so ``issubclass`` narrows to nothing and every direct
+    # ``schema.model_fields`` spelling fails mypy. Runtime-identical -- the
+    # attribute is guaranteed present once ``issubclass`` has passed.
+    if isinstance(schema, type) and issubclass(schema, pydantic.BaseModel):
+        if required <= set(getattr(schema, "model_fields", {})):
+            return schema
+    raise ValueError(
+        f"{tool_name}: {STRUCTURED_OUTPUT_SCHEMA_ATTR} in {spec.module} is "
+        "not a usable prediction schema (must be a Pydantic model with "
+        f"fields {sorted(required)}). Refusing to replay it structured -- "
+        "a bad schema would fail per-row inside a broad except and score "
+        "0% while the run reports success."
+    )
 
 
 def _call_anthropic(
@@ -1204,18 +1682,39 @@ def _log_replay_summary(
     log.info("    Parse delta: %+.1f%% — %s", parse_delta_pct, parse_verdict)
 
     if filter_stats is not None:
+        if filter_stats.get("source") == "tournament":
+            # Say so loudly: these rows are tournament predictions replayed
+            # from captured evidence, not production deliveries. A reader who
+            # assumes production would over-read the verdict.
+            attempt = filter_stats.get("production_attempt") or {}
+            log.info("  Row source: TOURNAMENT ARM (no replayable production rows)")
+            log.info(
+                "    Reason: %s   (production pool accepted %d)",
+                filter_stats.get("fallback_reason", "unknown"),
+                attempt.get("accepted", 0),
+            )
         r = filter_stats.get("rejected", {})
         total_rej = sum(r.values()) if r else 0
-        # Scoping buckets + not_valid_parse make up the full rejected total;
-        # iterate SCOPING_BUCKETS so this can't drift out of sync.
-        breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+        if filter_stats.get("source") == "tournament":
+            # The tournament arm drops rows for its OWN reasons (bad_json,
+            # no_question, no_evidence, unrenderable, ...), none of which are
+            # scoping buckets. Enumerating SCOPING_BUCKETS here printed six
+            # production buckets at zero beside a non-zero total -- a line
+            # that contradicted itself. Render the counts actually recorded.
+            breakdown = ", ".join(f"{k}={v}" for k, v in sorted(r.items()) if v)
+        else:
+            # Production: scoping buckets + not_valid_parse account for the
+            # whole total, so enumerate them even at zero (a bucket that stops
+            # appearing is itself the signal) rather than printing only what
+            # happens to be non-zero.
+            breakdown = ", ".join(f"{k}={r.get(k, 0)}" for k in SCOPING_BUCKETS)
+            breakdown += f", not_valid_parse={r.get('not_valid_parse', 0)}"
         log.info("  Pre-filter (from enrich):")
         log.info(
-            "    Accepted: %d   Rejected: %d (%s, not_valid_parse=%d)  no_row_id=%d",
+            "    Accepted: %d   Rejected: %d (%s)  no_row_id=%d",
             filter_stats.get("accepted", 0),
             total_rej,
-            breakdown,
-            r.get("not_valid_parse", 0),
+            breakdown or "none",
             filter_stats.get("no_row_id", 0),
         )
 
@@ -1507,6 +2006,35 @@ def _parse_vllm_candidate(
     }
 
 
+def _assert_prompt_is_replayable(
+    template: str, supplied: set[str], tool_name: str
+) -> None:
+    """Fail before the loop if the template needs data replay cannot supply.
+
+    Replay fills a fixed set of placeholders per family. A template that
+    asks for anything else raises ``KeyError`` inside the per-row loop --
+    after the earlier rows have already been paid for, with a message that
+    names only the missing key. ``factual_research_v2``'s ``ESTIMATE_USER``
+    wants ``resolution_rules``, which comes from market metadata the enriched
+    row does not carry, so it cannot be reconstructed at replay time at all.
+
+    :param template: the prompt template about to be replayed.
+    :param supplied: placeholder names replay will provide.
+    :param tool_name: candidate tool, for the message.
+    :raises ValueError: when the template needs an unsupplied placeholder.
+    """
+    required = {name for _, name, _, _ in string.Formatter().parse(template) if name}
+    missing = required - supplied
+    if missing:
+        raise ValueError(
+            f"cannot replay {tool_name!r}: its prompt template needs "
+            f"{sorted(missing)}, which the enriched rows do not carry "
+            f"(replay supplies {sorted(supplied)}). Thread the field through "
+            f"enrich before benchmarking this tool, rather than replaying it "
+            f"against a partial prompt."
+        )
+
+
 def replay(  # pylint: disable=too-many-statements,too-many-locals
     dataset: Path,
     output_dir: Path,
@@ -1530,6 +2058,18 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         W-2 rows. The candidate must share the baseline's prompt-attribute
         schema (PREDICTION_PROMPT / ESTIMATE_USER / etc.) and be registered in
         benchmark.tools.TOOL_REGISTRY.
+    :raises ValueError: when the pairing cannot be replayed — the baseline
+        tool named by the enriched rows is not in
+        ``benchmark.tools.TOOL_REGISTRY``; ``--candidate-tool`` names a tool
+        that is not either; a vLLM candidate is paired with a non-superforcaster
+        baseline (it renders its prompt from that family's extracted sources);
+        the candidate is a two-stage reasoning tool while the rows carry no
+        ``extracted_reasoning`` (tournament-sourced rows never do); or the
+        candidate's template asks for a placeholder the enriched rows do not
+        carry (via :func:`_assert_prompt_is_replayable`, which names the
+        missing field -- the most useful of the five when a schema regression
+        is the cause). Raised rather than returned so a mis-specified benchmark
+        fails the job instead of publishing a verdict computed from nothing.
     """
     # Load enriched dataset first to detect tool
     sampled: list[dict[str, Any]] = load_jsonl(dataset)
@@ -1611,6 +2151,21 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         PREDICTION_PROMPT = ""
         system_prompt = ""
     elif is_reasoning_tool:
+        # Same class as the factual_research guard below: the two-stage family
+        # reads row["extracted_reasoning"] unguarded in prediction-only phase,
+        # and the tournament loader never emits that key -- so a
+        # tournament-sourced dataset would KeyError mid-loop, after earlier
+        # rows had been paid for. Latent today (no reasoning tool is on the
+        # roster) but reachable, since the widen-sample note's first suggested
+        # action is to add a tool to the tournament.
+        if sampled and "extracted_reasoning" not in sampled[0]:
+            raise ValueError(
+                f"cannot replay {candidate_tool_name!r}: it is a two-stage "
+                "(reasoning) tool, but the enriched rows carry no "
+                "'extracted_reasoning' -- tournament-sourced rows never do. "
+                "Replay this family from production rows, or thread the "
+                "field through the tournament loader first."
+            )
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         REASONING_PROMPT = candidate_module.REASONING_PROMPT
         parser_reasoning_response = candidate_module.parser_reasoning_response
@@ -1626,6 +2181,9 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         # use cached evidence. ESTIMATE_USER takes (question, today, briefing).
         PREDICTION_PROMPT = candidate_module.ESTIMATE_USER
         system_prompt = candidate_module.ESTIMATE_SYSTEM
+        _assert_prompt_is_replayable(
+            PREDICTION_PROMPT, {"question", "today", "briefing"}, candidate_tool_name
+        )
     else:
         PREDICTION_PROMPT = candidate_module.PREDICTION_PROMPT
         system_prompt = _default_family_system_prompt(candidate_module)
@@ -1659,6 +2217,36 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
         tool_name,
         phase,
     )
+
+    # Structured-output resolution, hoisted: candidate_tool_name and model are
+    # loop-invariant, so resolving per row logged ~N identical lines, re-ran
+    # the validation N times, and -- worst -- raised the startup-knowable
+    # config ValueError at row 1, AFTER the first baseline line was flushed,
+    # leaving a partial baseline.jsonl beside an empty candidate.jsonl.
+    # vLLM and reasoning candidates never read the schema and must not fail
+    # on a validation irrelevant to them.
+    #
+    # Keyed on the CANDIDATE tool, not the baseline: for an in-place edit the
+    # two names match, but a new-version candidate may be structured while
+    # the baseline is not. Gated on a positive OpenAI-model match, not
+    # `"claude" not in model`: the structured path is hardwired to
+    # `beta.chat.completions.parse`, and an unknown model routed there fails
+    # per-row inside the broad except and scores 0% while the run reports
+    # success. Unknown models take the plain-prompt path -- which any backend
+    # ACCEPTS, though not always faithfully: an Anthropic-branch structured
+    # tool (factual_research-v3 at claude) appends its schema to the system
+    # prompt in production, which replay does not reproduce (known gap, see
+    # _get_structured_output_schema).
+    structured_schema: Optional[type] = None
+    if not is_vllm_candidate and not is_reasoning_tool:
+        if _is_openai_structured_model(model):
+            structured_schema = _get_structured_output_schema(candidate_tool_name)
+        log.info(
+            "candidate=%s model=%s structured=%s",
+            candidate_tool_name,
+            model,
+            structured_schema is not None,
+        )
 
     # Prepare output
     _prepare_output_dir(output_dir)
@@ -1764,15 +2352,6 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                         user_prompt=row["extracted_user_prompt"],
                         additional_information=row["extracted_additional_information"],
                     )
-                # Key the structured-output lookup on the CANDIDATE tool, not the
-                # baseline: for an in-place edit the two names match, but for a
-                # new-version candidate (e.g. superforcaster-polymarket-v1 ->
-                # -v4) the candidate may be structured while the baseline is not.
-                structured_schema = (
-                    _get_structured_output_schema(candidate_tool_name)
-                    if "claude" not in model
-                    else None
-                )
                 if structured_schema is not None:
                     response_text = _call_openai_structured(
                         model=model,

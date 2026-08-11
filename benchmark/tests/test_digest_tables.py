@@ -512,3 +512,42 @@ class TestOrderStability:
             if line.split(" ")[0] in names
         ]
         assert order[: len(names)] == sorted(names), order
+
+
+class TestRoiHaircut:
+    """`w/costs` is the execution-cost-adjusted ROI, not a rescale of roi_mid."""
+
+    def test_haircut_renders_beside_roi(self, results: Path) -> None:
+        """Both ROI columns appear, with their own values.
+
+        :param results: results-directory fixture.
+        """
+        (results / "roi_results.json").write_text(
+            json.dumps(
+                {
+                    "groups": [
+                        {
+                            "tool_name": "alpha",
+                            "mode": "production",
+                            "platform": "polymarket",
+                            "roi_mid": 27.9,
+                            "roi_haircut": 14.5,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        body = _body(results)
+        assert "w/costs" in body
+        cells = _cells(body, "alpha")
+        assert "+27.9%" in cells and "+14.5%" in cells
+
+    def test_missing_haircut_is_na_not_zero(self, results: Path) -> None:
+        """A group without roi_haircut renders n/a, never +0.0%.
+
+        :param results: results-directory fixture.
+        """
+        body = _body(results)
+        assert "+0.0%" not in _cells(body, "alpha")
+        assert "n/a" in _cells(body, "alpha")

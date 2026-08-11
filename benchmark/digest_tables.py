@@ -292,6 +292,20 @@ def _roi(group: dict[str, Any] | None) -> str:
     return f"{float(group['roi_mid']):+.1f}%"
 
 
+def _roi_haircut(group: dict[str, Any] | None) -> str:
+    """Format the simulated 90-day ROI net of execution costs.
+
+    Point estimate only -- ``roi_sim`` publishes no CI for the haircut figure.
+    Already in percent, like ``roi_mid``, so it is formatted, never rescaled.
+
+    :param group: ROI group dict for this (tool, mode), or None.
+    :return: percentage cell, e.g. ``+14.5%``, or ``n/a``.
+    """
+    if not group or not _is_number(group.get("roi_haircut")):
+        return NA
+    return f"{float(group['roi_haircut']):+.1f}%"
+
+
 # ---------------------------------------------------------------------------
 # Table construction
 # ---------------------------------------------------------------------------
@@ -310,6 +324,7 @@ _W2_COLUMNS = (
     Column("Edge W-2"),
     Column("Δ Edge"),
     Column("ROI 90d"),
+    Column("w/costs"),
 )
 
 _AT_COLUMNS = (
@@ -327,6 +342,7 @@ _AT_COLUMNS = (
     Column("Edge AT"),
     Column("Δ Edge"),
     Column("ROI 90d"),
+    Column("w/costs"),
 )
 
 
@@ -384,6 +400,7 @@ def _rows_w2(
                 _signed((b or {}).get("edge")),
                 _delta(a, b, "edge", lower_is_better=False),
                 _roi(roi.get((tool, mode))),
+                _roi_haircut(roi.get((tool, mode))),
             )
         )
     return rows
@@ -424,6 +441,7 @@ def _rows_at(
                 _signed((b or {}).get("edge")),
                 _delta(a, b, "edge", lower_is_better=False),
                 _roi(roi.get((tool, mode))),
+                _roi_haircut(roi.get((tool, mode))),
             )
         )
     return rows

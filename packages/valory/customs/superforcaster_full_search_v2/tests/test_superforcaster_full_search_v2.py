@@ -25,6 +25,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from pydantic import ValidationError
+
 from packages.valory.customs.superforcaster_full_search_v2.superforcaster_full_search_v2 import (
     PredictionResult,
     StandardPredictionResult,
@@ -32,7 +34,6 @@ from packages.valory.customs.superforcaster_full_search_v2.superforcaster_full_s
     _parse_completion,
     run,
 )
-from pydantic import ValidationError
 
 V2_MODULE = (
     "packages.valory.customs.superforcaster_full_search_v2."
@@ -258,7 +259,7 @@ class TestPredictionResultSchema:
             )
 
     def test_standard_validator_rejects_mismatched_sum(self) -> None:
-        """StandardPredictionResult also enforces p_yes + p_no == 1."""
+        """Validates that StandardPredictionResult enforces p_yes + p_no == 1."""
         with pytest.raises(ValidationError):
             StandardPredictionResult(
                 facts="f",
@@ -273,7 +274,7 @@ class TestPredictionResultSchema:
             )
 
     def test_word_mention_check_field_present_in_wm_schema(self) -> None:
-        """PredictionResult has word_mention_check; StandardPredictionResult does not."""
+        """Checks that word_mention_check is in PredictionResult but not StandardPredictionResult."""
         assert "word_mention_check" in PredictionResult.model_fields
         assert "word_mention_check" not in StandardPredictionResult.model_fields
 

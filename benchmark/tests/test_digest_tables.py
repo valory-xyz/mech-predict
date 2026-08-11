@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 from benchmark.digest_tables import (
+    _edge_lower_bound,
     _guard_last_tools,
     _verdict,
     build_digest_messages,
@@ -617,18 +618,36 @@ class TestPromoteDemoteGate:
         assert _verdict(wide, deployed=False).startswith("no:")
         assert _verdict(tight, deployed=False) == "PROMOTE"
 
-    def test_losing_your_disagreements_is_decisive(self) -> None:
-        """A coin-flip conditional accuracy blocks a promote outright.
-
-        A tool can post a large headline edge by reading almost-resolved
-        prices. What it does when it disagrees with the price is the only
-        thing a bet depends on.
-        """
+    def test_losing_disagreements_blocks_a_tool_that_missed_the_margin(
+        self,
+    ) -> None:
+        """Below the margin AND losing its disagreements is a demote."""
         row = _stats(
-            edge=0.20, edge_sd=0.05, edge_n=100, conditional_accuracy_rate=0.47
+            edge=0.01, edge_sd=0.05, edge_n=100, conditional_accuracy_rate=0.47
         )
         assert "loses its disagreements" in _verdict(row, deployed=False)
         assert _verdict(row, deployed=True).startswith("demote")
+
+    def test_conditional_accuracy_qualifies_a_promote_but_cannot_veto_it(
+        self,
+    ) -> None:
+        """A cleared bound is the policy's condition; condAcc annotates it.
+
+        condAcc appears nowhere in PROMOTE_DEMOTE_POLICY.md and its 0.50 line
+        carries no interval -- on live data every value straddles 0.50 on a
+        Wilson 95%. Letting it silently veto a bound that cleared the margin
+        would be a stricter gate than the policy, applied invisibly.
+        """
+        row = _stats(
+            edge=0.0825,
+            edge_sd=0.149248,
+            edge_n=100,
+            conditional_accuracy_rate=0.45,
+        )
+        assert _edge_lower_bound(row) > 0.04
+        verdict = _verdict(row, deployed=False)
+        assert verdict.startswith("review")
+        assert "45%" in verdict
 
     def test_thin_sample_says_so_rather_than_guessing(self) -> None:
         """Below the floor the answer is "not enough data", not "no improvement"."""
@@ -863,3 +882,37 @@ class TestCensoringAlert:
         :param results: results-directory fixture.
         """
         assert "week still filling" not in _body(results)
+
+
+class TestMigrationState:
+    """An accumulator predating this PR must say so, not read as thin data."""
+
+    def test_missing_edge_sd_asks_for_a_rebuild(self) -> None:
+        """None edge_sd means the field was never accumulated, not no spread.
+
+        `_restore_group` restores it as None from a pre-PR scores.json and
+        `_accumulate_group` skips a None accumulator, so it never re-arms on
+        the incremental path -- which IS the daily production path. Reproduced
+        against the real CI artifact: all four Polymarket tools carry
+        edge_sd=None and market_brier=None.
+        """
+        stale = _stats(edge_sd=None)
+        assert (
+            _verdict(stale, deployed=True) == "needs --rebuild (no edge spread stored)"
+        )
+
+    def test_unjudgeable_tool_is_not_a_replacement(self) -> None:
+        """Three demotes plus one unjudgeable is still no replacement.
+
+        Otherwise the report can recommend retiring every tool it could assess
+        and leave the platform holding only the one it just said it cannot.
+        """
+        guarded = _guard_last_tools(
+            {
+                "a": "demote: below no-skill",
+                "b": "demote: below no-skill",
+                "c": "demote: below no-skill",
+                "d": "insufficient (n=12 < 30)",
+            }
+        )
+        assert all("NO REPLACEMENT" in v for v in guarded.values())

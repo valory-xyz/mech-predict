@@ -456,15 +456,30 @@ def _verdict(
 
     lower = _edge_lower_bound(stats)
     if lower is None:
+        # An accumulator written before `edge_sd` existed restores the field as
+        # None and never re-arms on the incremental path, which is the daily
+        # path in production. That is a MIGRATION state, not a thin sample, and
+        # saying so is the difference between "run a rebuild" and "this tool
+        # has no data".
+        if (stats or {}).get("edge_sd", "missing") is None:
+            return "needs --rebuild (no edge spread stored)"
         return "insufficient (no spread)"
 
+    # A cleared bound is the policy's promote condition and nothing below may
+    # silently override it. Conditional accuracy is a strong diagnostic but it
+    # is NOT in the policy, its 0.50 line carries no interval (today's live
+    # values all straddle it on a Wilson 95%), so it qualifies a promote rather
+    # than vetoing one.
     conditional = _num((stats or {}).get("conditional_accuracy_rate"))
+    if lower > PROMOTE_DELTA:
+        if conditional is not None and conditional < COIN_FLIP:
+            note = f"clears margin BUT wins only {conditional:.0%} of disagreements"
+            return f"keep ({note})" if deployed else f"review: {note}"
+        return "keep (clears margin)" if deployed else "PROMOTE"
+
     if conditional is not None and conditional < COIN_FLIP:
         loses = f"loses its disagreements ({conditional:.0%})"
         return f"demote: {loses}" if deployed else f"no: {loses}"
-
-    if lower > PROMOTE_DELTA:
-        return "keep (clears margin)" if deployed else "PROMOTE"
 
     # Sustained, not a one-off: both the month and the latest week must agree.
     if _below_no_skill(stats) and (recent is None or _below_no_skill(recent)):
@@ -485,8 +500,18 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
     :param verdicts: mapping of tool name to verdict, for ONE platform cohort.
     :return: the same mapping, annotated when every tool would be demoted.
     """
-    demotes = [t for t, v in verdicts.items() if v.startswith("demote")]
-    if not verdicts or len(demotes) < len(verdicts):
+    # A tool the report could not judge is NOT a replacement. Counting it as
+    # one lets the digest recommend retiring every tool it could assess while
+    # leaving the platform holding only the one it just said it cannot.
+    survivors = [
+        t
+        for t, v in verdicts.items()
+        if not v.startswith("demote")
+        and not v.startswith("insufficient")
+        and not v.startswith("needs --rebuild")
+        and v != "no data"
+    ]
+    if not verdicts or survivors:
         return verdicts
     return {
         tool: f"{verdict} - NO REPLACEMENT, do not act alone"

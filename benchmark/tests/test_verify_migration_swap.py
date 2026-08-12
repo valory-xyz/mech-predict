@@ -56,28 +56,6 @@ def _isolate_predict_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PREDICT_API_POSTGRES_URL", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _stub_undelivered_pending(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub ``_pull_undelivered_pending`` to return empty sets by default.
-
-    Every test that supplies ``--predict-api-url`` (or the
-    ``PREDICT_API_POSTGRES_URL`` env var) also implicitly enables the
-    undelivered-pending pull. Without this stub each such test would
-    open a real ``psycopg.connect`` against the placeholder DSN
-    ``postgresql://ignored`` and hang the suite on DNS resolution.
-    Tests that specifically exercise the undelivered-pending semantics
-    override this stub with their own fixture data.
-
-    :param monkeypatch: pytest fixture used to swap the
-        ``_pull_undelivered_pending`` symbol on the module under test.
-    """
-
-    def _empty(_url: str, _since: datetime, _until: datetime) -> dict[str, set[str]]:
-        return {"omen": set(), "polymarket": set()}
-
-    monkeypatch.setattr(vms, "_pull_undelivered_pending", _empty)
-
-
 def _mp_row(request_id: str, **overrides: Any) -> dict[str, Any]:
     """Synthetic mech-predict row with the fields the gate reads."""
     row = {
@@ -399,23 +377,25 @@ class TestCoverageGate:
         monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
         assert vms.main(_base_argv()) == 4
 
-    def test_dropped_no_request_id_within_tolerance_warns(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    def test_dropped_no_request_id_within_tolerance_lands_in_artifact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A small drop count (subgraph data quality artifact) logs a warning and passes.
+        """A tolerated drop count records the tolerance decision in the .md and .json artifacts.
 
         The threshold is ``max(_DROPPED_NO_RID_ABSOLUTE_TOLERANCE,
         _DROPPED_NO_RID_RELATIVE_TOLERANCE * total_marketplace)``. A
         handful of stale drops from missing subgraph Request events is
         a data-quality issue we can't zero from our side, so it must
-        not fail the run. Verifies the tolerance is applied AND a
-        warning is emitted so operators can see the drop count in the
-        logs.
+        not fail the run. The tolerance decision has to reach the
+        persisted artifact (the .md report body and the .json
+        coverage_summary) rather than only stderr — otherwise a reader
+        of the artifact sees ``dropped_no_request_id > 0`` alongside
+        ``verdict: PASS`` and cannot reconcile the two from the file
+        alone.
 
         :param monkeypatch: pytest fixture used to swap the subgraph +
             lake helpers with in-memory stubs.
-        :param caplog: pytest fixture capturing log records so the
-            warning can be asserted.
+        :param tmp_path: pytest fixture giving a per-test writable dir.
         """
         rows = [_mp_row(f"r{i}") for i in range(10)]
         lake = [_lake_row(f"r{i}") for i in range(10)]
@@ -438,12 +418,24 @@ class TestCoverageGate:
         _patch_pulls(monkeypatch, rows, lake)
         monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
         monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
-        with caplog.at_level("WARNING"):
-            assert vms.main(_base_argv()) == 0
-        assert any(
-            "within tolerance" in rec.message and "dropped" in rec.message
-            for rec in caplog.records
-        )
+        argv = _base_argv() + ["--output-dir", str(tmp_path)]
+        assert vms.main(argv) == 0
+
+        json_artifacts = sorted(tmp_path.glob("*.json"))
+        md_artifacts = sorted(tmp_path.glob("*.md"))
+        assert len(json_artifacts) == 1
+        assert len(md_artifacts) == 1
+        data = json.loads(json_artifacts[0].read_text())
+        # The JSON side has to name the tolerance and the verdict.
+        assert data["coverage"]["total_dropped_no_request_id"] == drops_within_tolerance
+        assert data["coverage"]["dropped_no_request_id_tolerance"] == tol
+        assert data["coverage"]["dropped_no_request_id_within_tolerance"] is True
+        assert data["verdict"] == "PASS"
+        # The .md side has to explain WHY the run passed with a non-zero
+        # drop count, so a reviewer reading only the report understands.
+        md_body = md_artifacts[0].read_text()
+        assert "within tolerance" in md_body
+        assert "not fail the run" in md_body
 
     def test_min_marketplace_rows_zero_still_traps_empty_platform(
         self, monkeypatch: pytest.MonkeyPatch
@@ -638,6 +630,12 @@ class TestArtifact:
         assert data["verdict"] == "PASS"
         assert data["exit_code"] == 0
         assert data["coverage"]["total_missing"] == 0
+        # Tolerance decision is persisted so the artifact is self-describing.
+        # A future PASS run whose absolute tolerance changed silently would
+        # otherwise show the same "verdict: PASS" with no way to see the
+        # numeric bound the run was compared against.
+        assert data["coverage"]["dropped_no_request_id_tolerance"] > 0
+        assert data["coverage"]["dropped_no_request_id_within_tolerance"] is True
 
     def test_exception_in_flight_writes_error_not_false_pass(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

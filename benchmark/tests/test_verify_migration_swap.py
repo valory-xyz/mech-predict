@@ -28,8 +28,10 @@ the artifact contract.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -332,20 +334,23 @@ class TestCoverageGate:
         )
         assert vms.main(_base_argv()) == 4
 
-    def test_dropped_no_request_id_returns_four(
+    def test_dropped_no_request_id_above_tolerance_returns_four(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A marketplace delivery dropped for missing request.id blocks PASS.
+        """A drop count above tolerance still blocks PASS.
 
         Even with a perfect set-diff (every returned id is in the lake),
-        a non-zero drop means one or more requests could be silently
-        absent from the lake without the check being able to name them.
-        The gate must fail.
+        a large drop count signals subgraph schema drift or a broken
+        ingest — one or more requests could be silently absent from the
+        lake without the check being able to name them. Above the
+        tolerance (``max(_DROPPED_NO_RID_ABSOLUTE_TOLERANCE, ...)``) the
+        gate must fail. Below the tolerance a subgraph-side data quality
+        artifact of a handful of stale drops is tolerated as a warning
+        (see ``test_dropped_no_request_id_within_tolerance_warns``).
 
         Both platforms populated above the vacuous floor here for the same
         reason as the sibling test above — the drop counter is what has to
-        trip, not the floor. Mutating ``if coverage.total_dropped_no_rid >
-        0: → if False:`` must fail this test.
+        trip, not the floor.
 
         :param monkeypatch: pytest fixture used to override the
             marketplace pull stub with a non-zero drop count.
@@ -354,14 +359,15 @@ class TestCoverageGate:
         lake = [_lake_row(f"r{i}") for i in range(10)]
         omen_ids = {r["request_id"] for r in rows}
         polymarket_ids = {f"poly{i}" for i in range(5)}
+        # Absolute tolerance is 100; anything strictly above trips fail-close.
+        tol = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE  # pylint: disable=protected-access
+        drops_above_tolerance = tol + 1
 
         def _marketplace_ids(
             _since_ts: int, _until_ts: int
         ) -> tuple[dict[str, set[str]], dict[str, int]]:
-            # One row dropped on the omen side; nothing missing from the
-            # lake for anything the sweep did resolve.
             return {"omen": omen_ids, "polymarket": polymarket_ids}, {
-                "omen": 1,
+                "omen": drops_above_tolerance,
                 "polymarket": 0,
             }
 
@@ -372,6 +378,66 @@ class TestCoverageGate:
         monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
         monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
         assert vms.main(_base_argv()) == 4
+
+    def test_dropped_no_request_id_within_tolerance_lands_in_artifact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A tolerated drop count records the tolerance decision in the .md and .json artifacts.
+
+        The threshold is ``max(_DROPPED_NO_RID_ABSOLUTE_TOLERANCE,
+        _DROPPED_NO_RID_RELATIVE_TOLERANCE * total_marketplace)``. A
+        handful of stale drops from missing subgraph Request events is
+        a data-quality issue we can't zero from our side, so it must
+        not fail the run. The tolerance decision has to reach the
+        persisted artifact (the .md report body and the .json
+        coverage_summary) rather than only stderr — otherwise a reader
+        of the artifact sees ``dropped_no_request_id > 0`` alongside
+        ``verdict: PASS`` and cannot reconcile the two from the file
+        alone.
+
+        :param monkeypatch: pytest fixture used to swap the subgraph +
+            lake helpers with in-memory stubs.
+        :param tmp_path: pytest fixture giving a per-test writable dir.
+        """
+        rows = [_mp_row(f"r{i}") for i in range(10)]
+        lake = [_lake_row(f"r{i}") for i in range(10)]
+        omen_ids = {r["request_id"] for r in rows}
+        polymarket_ids = {f"poly{i}" for i in range(5)}
+        tol = vms._DROPPED_NO_RID_ABSOLUTE_TOLERANCE  # pylint: disable=protected-access
+        drops_within_tolerance = tol
+
+        def _marketplace_ids(
+            _since_ts: int, _until_ts: int
+        ) -> tuple[dict[str, set[str]], dict[str, int]]:
+            return {"omen": omen_ids, "polymarket": polymarket_ids}, {
+                "omen": drops_within_tolerance,
+                "polymarket": 0,
+            }
+
+        def _lake_ids(_since: datetime, _until: datetime) -> set[str]:
+            return omen_ids | polymarket_ids
+
+        _patch_pulls(monkeypatch, rows, lake)
+        monkeypatch.setattr(vms, "_pull_marketplace_request_ids", _marketplace_ids)
+        monkeypatch.setattr(vms, "_pull_lake_request_ids_unfiltered", _lake_ids)
+        argv = _base_argv() + ["--output-dir", str(tmp_path)]
+        assert vms.main(argv) == 0
+
+        json_artifacts = sorted(tmp_path.glob("*.json"))
+        md_artifacts = sorted(tmp_path.glob("*.md"))
+        assert len(json_artifacts) == 1
+        assert len(md_artifacts) == 1
+        data = json.loads(json_artifacts[0].read_text())
+        # The JSON side has to name the tolerance and the verdict.
+        assert data["coverage"]["total_dropped_no_request_id"] == drops_within_tolerance
+        assert data["coverage"]["dropped_no_request_id_tolerance"] == tol
+        assert data["coverage"]["dropped_no_request_id_within_tolerance"] is True
+        assert data["verdict"] == "PASS"
+        # The .md side has to explain WHY the run passed with a non-zero
+        # drop count, so a reviewer reading only the report understands.
+        md_body = md_artifacts[0].read_text()
+        assert "within tolerance" in md_body
+        assert "not fail the run" in md_body
 
     def test_min_marketplace_rows_zero_still_traps_empty_platform(
         self, monkeypatch: pytest.MonkeyPatch
@@ -566,6 +632,12 @@ class TestArtifact:
         assert data["verdict"] == "PASS"
         assert data["exit_code"] == 0
         assert data["coverage"]["total_missing"] == 0
+        # Tolerance decision is persisted so the artifact is self-describing.
+        # A future PASS run whose absolute tolerance changed silently would
+        # otherwise show the same "verdict: PASS" with no way to see the
+        # numeric bound the run was compared against.
+        assert data["coverage"]["dropped_no_request_id_tolerance"] > 0
+        assert data["coverage"]["dropped_no_request_id_within_tolerance"] is True
 
     def test_exception_in_flight_writes_error_not_false_pass(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -1071,3 +1143,134 @@ class TestReportCoverageCheckDirect:
         data = json.loads(artifacts[0].read_text())
         assert data["verdict"] == "ERROR"
         assert data["exit_code"] != 0
+
+
+class TestKnownLossSqlContract:
+    """Pin the SQL text of ``_pull_known_loss_failures``.
+
+    The prior column-name bug (predict-api's schema is ``error``, not
+    ``reason``) only surfaced at runtime as ``UndefinedColumn`` because
+    every other test in ``TestKnownLossAdjustment`` wholesale-monkeypatches
+    ``_pull_known_loss_failures`` and so never touches the query. This
+    class stubs ``psycopg`` at ``sys.modules`` and calls the real
+    function, capturing the SQL string the cursor sees so a future rename
+    (or a regression back to ``reason``) fails CI here instead of in
+    production.
+    """
+
+    def _install_capturing_psycopg(
+        self, monkeypatch: pytest.MonkeyPatch, rows: list[tuple[Any, ...]]
+    ) -> list[str]:
+        """Swap ``psycopg`` in ``sys.modules`` for a stub that captures cursor SQL.
+
+        :param monkeypatch: pytest fixture used to swap the module.
+        :param rows: rows the fake cursor iterator yields on any query.
+        :return: mutable list the fake cursor appends every executed SQL
+            string to. Assertions in each test read this list.
+        """
+        captured: list[str] = []
+
+        class _FakeCursor:
+            """Cursor that captures every executed SQL string, yields fixed rows."""
+
+            def __enter__(self) -> "_FakeCursor":
+                return self
+
+            def __exit__(self, *_a: Any) -> None:
+                return None
+
+            def execute(self, sql: str, _params: Any = None) -> None:
+                """Capture the executed SQL string for later assertion."""
+                captured.append(sql)
+
+            def __iter__(self) -> Any:
+                return iter(rows)
+
+        class _FakeConn:
+            """Connection whose ``cursor()`` returns a capturing ``_FakeCursor``."""
+
+            def __enter__(self) -> "_FakeConn":
+                return self
+
+            def __exit__(self, *_a: Any) -> None:
+                return None
+
+            def cursor(self) -> _FakeCursor:
+                """Return a fresh capturing cursor for this connection."""
+                return _FakeCursor()
+
+        fake_psycopg = SimpleNamespace(
+            connect=lambda *_a, **_kw: _FakeConn(),
+        )
+        monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+        return captured
+
+    def test_query_references_mech_migration_failures_table(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQL names the ``mech_migration_failures`` table.
+
+        A rename here (or a typo introduced in a refactor) would surface
+        as ``UndefinedTable`` in prod. Pinning the string means the
+        rename can only land alongside a test edit.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        captured = self._install_capturing_psycopg(monkeypatch, rows=[])
+        vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        assert len(captured) == 1
+        assert "mech_migration_failures" in captured[0]
+
+    def test_query_uses_error_column_not_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQL filters on the ``error`` column, not the pre-fix ``reason``.
+
+        This is the concrete regression guard for the fix. Predict-api's
+        ``mech_migration_failures`` schema (server/alembic/versions/006_...)
+        has ``error TEXT NOT NULL`` and no ``reason`` column, so a
+        regression back to ``reason`` would fail at runtime with
+        ``UndefinedColumn``. This test catches it in CI instead.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        captured = self._install_capturing_psycopg(monkeypatch, rows=[])
+        vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        sql = captured[0]
+        assert "error" in sql
+        # A future refactor that reintroduces ``reason`` would also fail
+        # runtime; the negative assertion means CI catches it first.
+        assert "reason" not in sql
+
+    def test_query_partitions_returned_rows_by_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returned rows are partitioned by ``_CHAIN_ID_TO_PLATFORM``.
+
+        End-to-end sanity on the fake cursor: two chains, one unmapped
+        chain, and one row with ``request_id`` that's already in the
+        set-diff denominator. Confirms the function partitions by
+        platform and drops unmapped chains rather than crashing.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        fake_rows: list[tuple[Any, ...]] = [
+            (100, "r-gnosis-a"),  # omen
+            (137, "r-polymarket-a"),  # polymarket
+            (9999, "r-unmapped"),  # dropped with a log warning
+        ]
+        self._install_capturing_psycopg(monkeypatch, rows=fake_rows)
+        result = vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        assert result == {
+            "omen": {"r-gnosis-a"},
+            "polymarket": {"r-polymarket-a"},
+        }

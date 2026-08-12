@@ -74,9 +74,9 @@ Required env vars:
 Optional env vars:
     PREDICT_API_POSTGRES_URL       (predict-api DSN). When set, the
                                    coverage check excludes rows in
-                                   ``mech_migration_failures`` from the
-                                   missing-from-lake set before computing
-                                   the verdict. Falls back to the
+                                   ``mech_migration_failures`` (known-loss)
+                                   from the missing-from-lake set before
+                                   computing the verdict. Falls back to the
                                    ``--predict-api-url`` CLI flag.
 """
 
@@ -147,7 +147,7 @@ _CHAIN_ID_TO_PLATFORM: dict[int, str] = {
 # class the pre-adjustment raw check was catching. If predict-api
 # publishes a new structurally-unrecoverable reason, add it here
 # explicitly.
-_KNOWN_LOSS_REASONS: tuple[str, ...] = (
+_KNOWN_LOSS_ERROR_KINDS: tuple[str, ...] = (
     "parsed_request_null",
     "parsed_delivery_null",
     "unhandled_type_prompt",
@@ -155,13 +155,25 @@ _KNOWN_LOSS_REASONS: tuple[str, ...] = (
 
 # Per-query statement timeout for the predict-api pull. The table is
 # ~1.16M rows in prod, small in absolute terms, and the query has
-# ``WHERE request_id IS NOT NULL AND reason IN (...)`` on it — but a
+# ``WHERE request_id IS NOT NULL AND error IN (...)`` on it — but a
 # missing index, a replica lag spike, or a lock contention burst
 # turns the documented "few seconds" into an unbounded hang with
 # only K8s ``activeDeadlineSeconds`` to stop it. Bound it here so
 # the failure mode surfaces as a psycopg timeout on the K8s Job's
 # logs rather than a mysterious pod hang.
 _KNOWN_LOSS_STATEMENT_TIMEOUT_MS = 60_000
+
+# Small-drop tolerance for ``dropped_no_request_id``. The marketplace
+# subgraph occasionally emits a Deliver whose linked Request event is
+# missing on the subgraph side; the request may exist on-chain and in
+# the lake but the subgraph can't join them so we cannot name the
+# request_id. A handful of these per window is a subgraph-side data
+# quality issue we can't fix from our end. Failing the whole run on
+# ~65 stale drops out of >1M deliveries would be noise. Above the
+# threshold we still fail closed because a large drop count means the
+# subgraph schema drifted or an ingest is broken.
+_DROPPED_NO_RID_ABSOLUTE_TOLERANCE = 100
+_DROPPED_NO_RID_RELATIVE_TOLERANCE = 0.0001  # 0.01% of total marketplace
 
 
 # --------------------------------------------------------------------------- #
@@ -351,27 +363,42 @@ def _pull_lake_request_ids_unfiltered(since: datetime, until: datetime) -> set[s
     """Fetch every lake request_id in the window regardless of resolution.
 
     Coverage-check counterpart to :func:`_pull_marketplace_request_ids`.
-    Includes pending rows and off-chain rows, because the coverage
-    question is "is this delivered request in the lake at all?", not
-    "did mech-analytics finish scoring it?".
+    Includes pending rows, off-chain rows, AND shell rows because the
+    coverage question is "is this delivered request in the lake at
+    all?", not "did mech-analytics finish scoring it?".
+
+    mech-analytics partitions ``per_request_scores`` across two endpoints
+    on column presence: ``/v1/data/scored-rows`` yields rows that carry
+    ``tool`` + ``delivered_at``; ``/v1/data/unscored-rows`` yields the
+    complement (predict-api shell rows whose IPFS payload was
+    unparseable). A row is in exactly one endpoint's stream, never both.
+    The coverage set is the union.
 
     :param since: timezone-aware datetime, inclusive lower bound.
     :param until: timezone-aware datetime, exclusive upper bound.
-    :return: set of request_ids the lake has for the window.
+    :return: set of request_ids the lake has for the window (scored ∪ unscored).
     """
     # pylint: disable=import-outside-toplevel
-    from benchmark.mech_analytics_client import iter_scored_rows
+    from benchmark.mech_analytics_client import iter_scored_rows, iter_unscored_row_ids
 
     log.info(
-        "pulling lake request_ids (unfiltered) since=%s until=%s",
+        "pulling lake request_ids (scored ∪ unscored) since=%s until=%s",
         since.isoformat(),
         until.isoformat(),
     )
-    return {
+    scored_ids = {
         row["request_id"]
         for row in iter_scored_rows(since=since, until=until, resolved=None)
         if row.get("request_id")
     }
+    unscored_ids = set(iter_unscored_row_ids(since=since, until=until))
+    log.info(
+        "lake request_ids: scored=%d unscored=%d union=%d",
+        len(scored_ids),
+        len(unscored_ids),
+        len(scored_ids | unscored_ids),
+    )
+    return scored_ids | unscored_ids
 
 
 def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
@@ -418,8 +445,8 @@ def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
         ) from exc
 
     log.info(
-        "pulling known-loss failures from predict-api (reasons=%s)",
-        ", ".join(_KNOWN_LOSS_REASONS),
+        "pulling known-loss failures from predict-api (error_kinds=%s)",
+        ", ".join(_KNOWN_LOSS_ERROR_KINDS),
     )
     by_platform: dict[str, set[str]] = {
         p: set() for p in _CHAIN_ID_TO_PLATFORM.values()
@@ -439,8 +466,8 @@ def _pull_known_loss_failures(predict_api_url: str) -> dict[str, set[str]]:
             cur.execute(
                 "SELECT chain_id, request_id FROM mech_migration_failures "
                 "WHERE request_id IS NOT NULL "
-                "AND reason = ANY(%(reasons)s)",
-                {"reasons": list(_KNOWN_LOSS_REASONS)},
+                "AND error = ANY(%(error_kinds)s)",
+                {"error_kinds": list(_KNOWN_LOSS_ERROR_KINDS)},
             )
             for chain_id, request_id in cur:
                 platform = _CHAIN_ID_TO_PLATFORM.get(chain_id)
@@ -854,9 +881,9 @@ class _CoverageResult:
     ``marketplace_counts`` / ``total_marketplace`` are the *adjusted*
     values (raw minus known-loss). The raw values are also kept in
     ``raw_missing_by_platform`` / ``raw_marketplace_counts`` and the
-    excluded count in ``excluded_by_platform`` / ``total_excluded`` so
-    the artifact and human report can show both. The verdict and the
-    per-platform floor operate on the adjusted values so the gate
+    excluded counts in ``excluded_by_platform`` / ``total_excluded``
+    so the artifact and human report can show both. The verdict and
+    the per-platform floor operate on the adjusted values so the gate
     measures what the pipeline can actually ingest rather than a
     structurally-unrecoverable known-loss population. The floor can
     still trip on the adjusted count if a real subgraph outage drives
@@ -868,6 +895,8 @@ class _CoverageResult:
     missing_by_platform: dict[str, list[str]]
     total_dropped_no_rid: int
     dropped_by_platform: dict[str, int]
+    dropped_no_rid_tolerance: int
+    dropped_no_rid_within_tolerance: bool
     marketplace_counts: dict[str, int]
     total_marketplace: int
     raw_missing_by_platform: dict[str, list[str]]
@@ -877,7 +906,7 @@ class _CoverageResult:
     known_loss_applied: bool
 
 
-def _report_coverage_check(
+def _report_coverage_check(  # pylint: disable=too-many-locals
     marketplace_ids_by_platform: dict[str, set[str]],
     dropped_by_platform: dict[str, int],
     lake_ids: set[str],
@@ -899,10 +928,13 @@ def _report_coverage_check(
 
     * ``total_missing > 0`` — genuine gap, delivered requests absent
       from the lake.
-    * ``total_dropped_no_rid > 0`` — the marketplace pull returned
-      deliveries whose ``request.id`` was missing, so those requests
-      never entered the coverage denominator and could be silently
-      absent from the lake without being reported.
+    * ``total_dropped_no_rid`` above tolerance — the marketplace pull
+      returned deliveries whose ``request.id`` was missing, so those
+      requests never entered the coverage denominator and could be
+      silently absent from the lake without being reported. Small
+      residuals below the tolerance in
+      :func:`_coverage_failure_reason` are treated as subgraph data
+      quality artifacts.
     * per-platform ``marketplace_count < min_marketplace_rows`` (checked
       by caller) — an empty or near-empty coverage sweep on any single
       platform is indistinguishable from complete coverage on the
@@ -993,7 +1025,8 @@ def _report_coverage_check(
             "✓" if not adjusted_missing_set and dropped == 0 and not vacuous else "✗"
         )
         vacuous_note = f" (below floor {min_marketplace_rows})" if vacuous else ""
-        if known_loss_applied and len(excluded_set) > 0:
+        adjustments_applied = known_loss_applied and len(excluded_set) > 0
+        if adjustments_applied:
             print(
                 f"  {platform}: marketplace_raw={len(marketplace_ids):>7} "
                 f"excluded_known_loss={len(excluded_set):>7}  "
@@ -1035,18 +1068,29 @@ def _report_coverage_check(
             "  (raw coverage — --predict-api-url not set, so the verdict is "
             "NOT adjusted for known-loss upstream. See --help.)"
         )
+    dropped_tolerance = _dropped_no_rid_tolerance(total_marketplace)
+    dropped_within_tolerance = total_dropped <= dropped_tolerance
     print(
         f"  total dropped_no_request_id:        {total_dropped:>7}  "
-        f"{'✓' if total_dropped == 0 else '✗'}"
+        f"{'✓' if dropped_within_tolerance else '✗'}"
     )
+    if total_dropped > 0 and dropped_within_tolerance:
+        print(
+            f"  (within tolerance {dropped_tolerance} = "
+            f"max({_DROPPED_NO_RID_ABSOLUTE_TOLERANCE}, "
+            f"{_DROPPED_NO_RID_RELATIVE_TOLERANCE:.4f} * "
+            f"total_marketplace={total_marketplace}). "
+            f"Treated as a subgraph-side data quality artifact and does "
+            f"not fail the run.)"
+        )
     if total_missing:
         print()
         print("  These delivered request_ids are not in the mech-analytics lake.")
         if known_loss_applied:
             print(
                 "  Known-loss IDs (parsed_request_null, parsed_delivery_null, "
-                "unhandled_type_prompt) have already been excluded. The IDs below "
-                "are unexplained; investigate the lake ingest path."
+                "unhandled_type_prompt) have already been excluded. The IDs "
+                "below are unexplained; investigate the lake ingest path."
             )
         else:
             print("  Check ``mech_migration_failures`` on the predict-api DB for each")
@@ -1065,18 +1109,26 @@ def _report_coverage_check(
             print("    (full list in the .json artifact)")
     if total_dropped:
         print()
+        tolerance_note = (
+            " Within the tolerated count, so the run is not failed on "
+            "this signal alone."
+            if dropped_within_tolerance
+            else " Above the tolerated count, so the run fails on this " "signal."
+        )
         print(
             f"  {total_dropped} marketplace delivery/deliveries had a missing "
             f"``request.id`` and were dropped from the coverage denominator. "
             f"Each dropped row is a request that could genuinely be absent "
             f"from the lake but that the check cannot name. Investigate "
-            f"the marketplace subgraph schema."
+            f"the marketplace subgraph schema.{tolerance_note}"
         )
     return _CoverageResult(
         total_missing=total_missing,
         missing_by_platform=missing_by_platform,
         total_dropped_no_rid=total_dropped,
         dropped_by_platform=dropped_by_platform,
+        dropped_no_rid_tolerance=dropped_tolerance,
+        dropped_no_rid_within_tolerance=dropped_within_tolerance,
         marketplace_counts=marketplace_counts,
         total_marketplace=total_marketplace,
         raw_missing_by_platform=raw_missing_by_platform,
@@ -1256,13 +1308,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "postgres DSN for predict-api. When set, the coverage check "
             "queries ``mech_migration_failures`` and excludes rows whose "
-            "reason is in a hardcoded structurally-unrecoverable set "
-            f"({', '.join(_KNOWN_LOSS_REASONS)}) from the "
+            "``error`` column is in a hardcoded structurally-unrecoverable "
+            f"set ({', '.join(_KNOWN_LOSS_ERROR_KINDS)}) from the "
             "missing-from-lake set BEFORE the verdict is computed. Any "
-            "other reason predict-api may record in that table (e.g. a "
-            "transient network reason or a payload type it later learns "
+            "other error kind predict-api may record in that table (e.g. a "
+            "transient network error or a payload type it later learns "
             "to parse) is NOT excluded, so a coverage regression that "
-            "starts mis-tagging deliveries under a new reason still "
+            "starts mis-tagging deliveries under a new error kind still "
             "fails exit 4. Without this flag the verdict is raw "
             "coverage — every known-loss row inflates the 'missing' "
             "count and can fail exit 4 for a population the pipeline is "
@@ -1418,6 +1470,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "total_missing": coverage.total_missing,
             "dropped_no_request_id_by_platform": coverage.dropped_by_platform,
             "total_dropped_no_request_id": coverage.total_dropped_no_rid,
+            "dropped_no_request_id_tolerance": coverage.dropped_no_rid_tolerance,
+            "dropped_no_request_id_within_tolerance": (
+                coverage.dropped_no_rid_within_tolerance
+            ),
             "known_loss_applied": coverage.known_loss_applied,
             "excluded_known_loss_by_platform": coverage.excluded_by_platform,
             "total_excluded_known_loss": coverage.total_excluded,
@@ -1488,7 +1544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"dropped_no_request_id={coverage.total_dropped_no_rid} "
             f"marketplace_per_platform=[{per_platform_counts}] "
             f"total_marketplace={coverage.total_marketplace} (thresholds "
-            f"missing==0, dropped==0, "
+            f"missing==0, dropped<={coverage.dropped_no_rid_tolerance}, "
             f"per-platform marketplace>={args.min_marketplace_rows})"
         )
         print(
@@ -1558,6 +1614,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
 
+def _dropped_no_rid_tolerance(total_marketplace: int) -> int:
+    """Compute the ``dropped_no_request_id`` tolerance for the coverage denominator.
+
+    Shared between :func:`_report_coverage_check` (which prints it into
+    the report body and populates the ``_CoverageResult`` fields so the
+    artifact is self-describing) and :func:`_coverage_failure_reason`
+    (which reads the same field to decide the verdict). Keeping both
+    behind one helper prevents the printed number and the gate from
+    drifting apart.
+
+    :param total_marketplace: adjusted total marketplace-side row
+        count, i.e. ``coverage.total_marketplace``.
+    :return: tolerance count. Values ≤ this are treated as
+        subgraph-side data quality artifacts and do not fail the run.
+    """
+    return max(
+        _DROPPED_NO_RID_ABSOLUTE_TOLERANCE,
+        int(_DROPPED_NO_RID_RELATIVE_TOLERANCE * total_marketplace),
+    )
+
+
 def _coverage_failure_reason(
     coverage: "_CoverageResult", min_marketplace_rows: int
 ) -> str | None:
@@ -1576,11 +1653,15 @@ def _coverage_failure_reason(
        ``--min-marketplace-rows`` to ``0`` is opting into a weaker
        check, not out of the check — a total outage on a platform
        must still fail closed.
-    2. ``total_dropped_no_rid > 0`` — deliveries came back without a
-       resolvable ``request.id`` and were dropped from the coverage
-       denominator. Each dropped row is a request that could be absent
-       from the lake but that we can never name, so a "no missing IDs"
-       PASS would be misleading.
+    2. ``total_dropped_no_rid`` above tolerance — deliveries came back
+       without a resolvable ``request.id`` and were dropped from the
+       coverage denominator. A small residual (≤
+       ``_DROPPED_NO_RID_ABSOLUTE_TOLERANCE`` or ≤
+       ``_DROPPED_NO_RID_RELATIVE_TOLERANCE`` of ``total_marketplace``)
+       is treated as a subgraph-side data quality artifact and logged
+       as a warning; above the tolerance the run still fails because
+       the drop count signals subgraph schema drift or a broken
+       ingest that could hide a real coverage gap.
     3. ``total_missing > 0`` — a genuine coverage gap.
 
     :param coverage: the result of :func:`_report_coverage_check`.
@@ -1588,8 +1669,8 @@ def _coverage_failure_reason(
         ``total_missing``) is the *adjusted* value when
         ``--predict-api-url`` is set — known-loss IDs have already been
         removed from both the missing set and the marketplace
-        denominator, so the vacuous floor and the missing-from-lake gate
-        both operate on what's ingestible, not on the raw counts.
+        denominator, so the vacuous floor and the missing-from-lake
+        gate both operate on what's ingestible, not on the raw counts.
     :param min_marketplace_rows: floor from ``--min-marketplace-rows``,
         enforced per platform (not on the aggregate). Effective floor
         is ``max(1, min_marketplace_rows)`` — see item 1.
@@ -1615,12 +1696,20 @@ def _coverage_failure_reason(
             f"platform and would otherwise report PASS. Check the "
             f"marketplace subgraph for the affected platform(s)."
         )
-    if coverage.total_dropped_no_rid > 0:
+    if (
+        coverage.total_dropped_no_rid > 0
+        and not coverage.dropped_no_rid_within_tolerance
+    ):
         return (
             f"{coverage.total_dropped_no_rid} marketplace delivery/"
             f"deliveries dropped from the coverage denominator because "
-            f"``request.id`` was missing. Each dropped row is a request "
-            f"the check can't name — cannot confirm coverage."
+            f"``request.id`` was missing (above tolerance "
+            f"{coverage.dropped_no_rid_tolerance} = "
+            f"max({_DROPPED_NO_RID_ABSOLUTE_TOLERANCE}, "
+            f"{_DROPPED_NO_RID_RELATIVE_TOLERANCE} * "
+            f"total_marketplace={coverage.total_marketplace})). Each "
+            f"dropped row is a request the check can't name — cannot "
+            f"confirm coverage."
         )
     if coverage.total_missing > 0:
         return (

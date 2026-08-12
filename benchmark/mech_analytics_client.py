@@ -386,6 +386,8 @@ def iter_unscored_row_ids(
     url = f"{base}/v1/data/unscored-rows"
     pages = 0
     total_rows = 0
+    total_yielded = 0
+    total_skipped_falsy_rid = 0
     cursor: str | None = None
     from requests.adapters import HTTPAdapter  # pylint: disable=import-outside-toplevel
     from urllib3.util.retry import Retry  # pylint: disable=import-outside-toplevel
@@ -429,6 +431,9 @@ def iter_unscored_row_ids(
                 rid = api_row.get("request_id")
                 if rid:
                     yield rid
+                    total_yielded += 1
+                else:
+                    total_skipped_falsy_rid += 1
             total_rows += len(rows)
 
             cursor = payload.get("next_cursor")
@@ -444,9 +449,25 @@ def iter_unscored_row_ids(
                     f"unexpectedly large window (fetched {total_rows} rows so far)"
                 )
 
+    if total_skipped_falsy_rid:
+        # Mirrors the negative-latency warning in ``_map_row``: an unscored
+        # row without a request_id is a schema regression upstream (the
+        # endpoint's contract is that request_id is the PK) or an ingest
+        # bug on the lake side. Yielding it would silently thin the
+        # coverage union, so we skip it — but the schema-regression
+        # signal has to reach the operator, not just die in the loop.
+        log.warning(
+            "mech-analytics unscored-rows: skipped %d row(s) with a falsy "
+            "request_id — likely a schema regression on the endpoint or an "
+            "ingest bug on the lake",
+            total_skipped_falsy_rid,
+        )
+
     log.info(
-        "mech-analytics: fetched %d unscored request_id(s) across %d page(s) since=%s",
+        "mech-analytics: fetched %d unscored row(s) across %d page(s) since=%s "
+        "(yielded %d request_id(s))",
         total_rows,
         pages,
         _to_iso_z(since),
+        total_yielded,
     )

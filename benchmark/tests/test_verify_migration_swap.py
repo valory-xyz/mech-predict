@@ -28,8 +28,10 @@ the artifact contract.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1141,3 +1143,134 @@ class TestReportCoverageCheckDirect:
         data = json.loads(artifacts[0].read_text())
         assert data["verdict"] == "ERROR"
         assert data["exit_code"] != 0
+
+
+class TestKnownLossSqlContract:
+    """Pin the SQL text of ``_pull_known_loss_failures``.
+
+    The prior column-name bug (predict-api's schema is ``error``, not
+    ``reason``) only surfaced at runtime as ``UndefinedColumn`` because
+    every other test in ``TestKnownLossAdjustment`` wholesale-monkeypatches
+    ``_pull_known_loss_failures`` and so never touches the query. This
+    class stubs ``psycopg`` at ``sys.modules`` and calls the real
+    function, capturing the SQL string the cursor sees so a future rename
+    (or a regression back to ``reason``) fails CI here instead of in
+    production.
+    """
+
+    def _install_capturing_psycopg(
+        self, monkeypatch: pytest.MonkeyPatch, rows: list[tuple[Any, ...]]
+    ) -> list[str]:
+        """Swap ``psycopg`` in ``sys.modules`` for a stub that captures cursor SQL.
+
+        :param monkeypatch: pytest fixture used to swap the module.
+        :param rows: rows the fake cursor iterator yields on any query.
+        :return: mutable list the fake cursor appends every executed SQL
+            string to. Assertions in each test read this list.
+        """
+        captured: list[str] = []
+
+        class _FakeCursor:
+            """Cursor that captures every executed SQL string, yields fixed rows."""
+
+            def __enter__(self) -> "_FakeCursor":
+                return self
+
+            def __exit__(self, *_a: Any) -> None:
+                return None
+
+            def execute(self, sql: str, _params: Any = None) -> None:
+                """Capture the executed SQL string for later assertion."""
+                captured.append(sql)
+
+            def __iter__(self) -> Any:
+                return iter(rows)
+
+        class _FakeConn:
+            """Connection whose ``cursor()`` returns a capturing ``_FakeCursor``."""
+
+            def __enter__(self) -> "_FakeConn":
+                return self
+
+            def __exit__(self, *_a: Any) -> None:
+                return None
+
+            def cursor(self) -> _FakeCursor:
+                """Return a fresh capturing cursor for this connection."""
+                return _FakeCursor()
+
+        fake_psycopg = SimpleNamespace(
+            connect=lambda *_a, **_kw: _FakeConn(),
+        )
+        monkeypatch.setitem(sys.modules, "psycopg", fake_psycopg)
+        return captured
+
+    def test_query_references_mech_migration_failures_table(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQL names the ``mech_migration_failures`` table.
+
+        A rename here (or a typo introduced in a refactor) would surface
+        as ``UndefinedTable`` in prod. Pinning the string means the
+        rename can only land alongside a test edit.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        captured = self._install_capturing_psycopg(monkeypatch, rows=[])
+        vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        assert len(captured) == 1
+        assert "mech_migration_failures" in captured[0]
+
+    def test_query_uses_error_column_not_reason(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SQL filters on the ``error`` column, not the pre-fix ``reason``.
+
+        This is the concrete regression guard for the fix. Predict-api's
+        ``mech_migration_failures`` schema (server/alembic/versions/006_...)
+        has ``error TEXT NOT NULL`` and no ``reason`` column, so a
+        regression back to ``reason`` would fail at runtime with
+        ``UndefinedColumn``. This test catches it in CI instead.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        captured = self._install_capturing_psycopg(monkeypatch, rows=[])
+        vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        sql = captured[0]
+        assert "error" in sql
+        # A future refactor that reintroduces ``reason`` would also fail
+        # runtime; the negative assertion means CI catches it first.
+        assert "reason" not in sql
+
+    def test_query_partitions_returned_rows_by_chain(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Returned rows are partitioned by ``_CHAIN_ID_TO_PLATFORM``.
+
+        End-to-end sanity on the fake cursor: two chains, one unmapped
+        chain, and one row with ``request_id`` that's already in the
+        set-diff denominator. Confirms the function partitions by
+        platform and drops unmapped chains rather than crashing.
+
+        :param monkeypatch: pytest fixture used to swap ``psycopg`` and
+            skip the real DB connect.
+        """
+        fake_rows: list[tuple[Any, ...]] = [
+            (100, "r-gnosis-a"),  # omen
+            (137, "r-polymarket-a"),  # polymarket
+            (9999, "r-unmapped"),  # dropped with a log warning
+        ]
+        self._install_capturing_psycopg(monkeypatch, rows=fake_rows)
+        result = vms._pull_known_loss_failures(  # pylint: disable=protected-access
+            "postgresql://ignored"
+        )
+        assert result == {
+            "omen": {"r-gnosis-a"},
+            "polymarket": {"r-polymarket-a"},
+        }

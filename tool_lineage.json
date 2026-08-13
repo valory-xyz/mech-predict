@@ -197,6 +197,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster_full_search-v1": {
+      "parent": "superforcaster_full_search",
+      "reason": "Criterion-specificity screen + structured outputs to fix overconfident-YES on narrow-criterion markets; adds evidence_reliability_screen field (4a-4d from polymarket-v4) forcing TYPE A/B classification before probability formation (issue #440)."
     }
   }
 }

@@ -139,6 +139,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v5 -- derived from v2 (Issue #439); switches
+    # to OpenAI structured outputs (PredictionResult + client.beta.chat.completions.parse)
+    # so the 7-step CoT (including the criterion-specificity check added in v2's step 6)
+    # actually executes before p_yes is formed. max_tokens raised from 500 to 4096.
+    "superforcaster-polymarket-v5": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v5"
+            ".superforcaster_polymarket_v5"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

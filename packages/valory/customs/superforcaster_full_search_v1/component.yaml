@@ -1,0 +1,40 @@
+name: superforcaster_full_search_v1
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. v1 inherits full-page
+  scraping (top organic results via readability + markdownify) from superforcaster_full_search
+  and adds the evidence-reliability screen from superforcaster-polymarket-v4 as a
+  mandatory structured-output field, forcing TYPE A/B temporal classification and
+  criterion-specificity checking before probability formation. Fixes overconfident-YES
+  on narrow-criterion Polymarket questions. Uses OpenAI Structured Outputs for a parseable
+  on-chain result.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
+  superforcaster_full_search_v1.py: bafybeihtcpcrows7jvi2cdpufzfd3av3l3psw44xpvyummuek454ag2acm
+  tests/__init__.py: bafybeidfdvhz3t2rfevdyoxwiko3sdjlcy53xqnm3svqpcloearmptoqke
+  tests/test_superforcaster_full_search_v1.py: bafybeigmx46i6rtjmdxcc66a7aairpa52jx2khniymcre36xizayomwbdy
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_full_search_v1.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

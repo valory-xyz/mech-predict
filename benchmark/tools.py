@@ -89,6 +89,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_full_search_v1 -- criterion-specificity screen +
+    # structured outputs; issue #440 fix candidate (tournament evaluation).
+    "superforcaster_full_search-v1": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_full_search_v1"
+            ".superforcaster_full_search_v1"
+        ),
+        family="superforcaster",
+    ),
     # valory/superforcaster_calibrated_full_search -- the other shipped
     # superforcaster the benchmark could not reach. Unlike its sibling this one
     # DOES use structured outputs, so the derived lookup picks up its

@@ -1124,10 +1124,11 @@ class TestTitle:
         rule, title, closing = first["text"]["text"].split("\n")
         assert rule == closing == TITLE_RULE
         assert "POLYSTRAT" in title
-        # The date is not in the header -- it is in the fallback and the
-        # context line, so the title stays one scannable line.
+        # Date on the TITLE line, inside the rules, so platform, outcome and
+        # day are one block. A third header line would render it at header
+        # size, which is louder than a date deserves.
+        assert "2026-08-11" in title
         assert "2026-08-11" in payload["text"]
-        assert "2026-08-11" in payload["blocks"][2]["elements"][0]["text"]
 
 
 class TestHeadlineSafety:

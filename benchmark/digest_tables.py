@@ -616,7 +616,12 @@ def _headline(
 
     label = PLATFORM_TITLES.get(platform, platform.title())
     marker = VERDICT_MARKER[state]
-    title = f"{TITLE_RULE}\n{marker}  {label.upper()}  ·  {token}\n{TITLE_RULE}"
+    # Date on the title line, not a line of its own: a third line inside the
+    # header would render the date at header size, which is louder than a date
+    # deserves. It stays inside the rules so the whole identity of the report
+    # -- platform, outcome, day -- is one block.
+    stamp = f"  ·  {as_of}" if as_of else ""
+    title = f"{TITLE_RULE}\n{marker}  {label.upper()}  ·  {token}{stamp}\n{TITLE_RULE}"
 
     lines = [detail]
     if unjudged:
@@ -625,14 +630,13 @@ def _headline(
             + ", ".join(f"`{t}`" for t in unjudged)
             + "._"
         )
-    dated = f"{as_of}  ·  " if as_of else ""
     return message(
         f"{label} {as_of or ''}: {token}".strip(),
         [
             header(title),
             section("\n".join(lines)),
             context(
-                f"{dated}Tables are RANKED BY `Edge` -- how far the tool beat "
+                "Tables are RANKED BY `Edge` -- how far the tool beat "
                 "the market. Promotion is a different test: `floor` (Edge minus "
                 f"a penalty for uncertainty) must clear +{PROMOTE_DELTA} with "
                 f"n >= {MIN_SAMPLE_SIZE}. A tool winning under half the markets "

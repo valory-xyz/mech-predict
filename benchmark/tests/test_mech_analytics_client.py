@@ -462,3 +462,282 @@ class TestIterScoredRowsPaging:
                         max_pages=3,
                     )
                 )
+
+
+class TestIterUnscoredRowIdsPaging:
+    """Cursor-based paging through ``/v1/data/unscored-rows``, no live HTTP.
+
+    Mirrors ``TestIterScoredRowsPaging`` — the two paginators share the
+    same shape (session/retry/cursor/max_pages) but hit different
+    endpoints and yield different types. The coverage check in
+    ``verify_migration_swap.py`` unions the request_ids from both,
+    so a silent short-read here surfaces as a *coverage FAIL* the
+    reviewer would misdiagnose as a lake problem rather than a
+    client-side bug — these tests pin the client contract to keep
+    that failure mode caught here instead of downstream.
+    """
+
+    def _fake_response(
+        self, rows: list[dict[str, Any]], next_cursor: str | None
+    ) -> Any:
+        return SimpleNamespace(
+            json=lambda: {"rows": rows, "next_cursor": next_cursor},
+            raise_for_status=lambda: None,
+        )
+
+    def test_single_page_yields_all_request_ids_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A single-page response yields each request_id exactly once, then stops."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        responses = [
+            self._fake_response(
+                [{"request_id": "u-1"}, {"request_id": "u-2"}], next_cursor=None
+            )
+        ]
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: responses.pop(0)
+        ):
+            ids = list(
+                mac.iter_unscored_row_ids(
+                    since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                )
+            )
+        assert ids == ["u-1", "u-2"]
+
+    def test_multi_page_walks_cursor_until_exhausted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The paginator follows ``next_cursor`` across pages until it goes null."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        responses = [
+            self._fake_response([{"request_id": "u-1"}], next_cursor="cur-1"),
+            self._fake_response([{"request_id": "u-2"}], next_cursor="cur-2"),
+            self._fake_response([{"request_id": "u-3"}], next_cursor=None),
+        ]
+        captured_params: list[dict[str, Any]] = []
+
+        def _capturing_get(*_args: Any, **kwargs: Any) -> Any:
+            # Shallow-copy for the same reason as the scored-rows test: the
+            # client mutates ``params`` in place across pages.
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return responses.pop(0)
+
+        with patch.object(mac.requests.Session, "get", side_effect=_capturing_get):
+            ids = list(
+                mac.iter_unscored_row_ids(
+                    since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                )
+            )
+        assert ids == ["u-1", "u-2", "u-3"]
+
+        # Argument-aware plumbing check — a broken client that dropped
+        # the cursor handoff or kept ``since`` on page 2+ would still pass
+        # the rows-collected assertion above.
+        assert len(captured_params) == 3
+        assert captured_params[0].get("since") is not None
+        assert "cursor" not in captured_params[0]
+        assert captured_params[1].get("cursor") == "cur-1"
+        assert "since" not in captured_params[1]
+        assert captured_params[2].get("cursor") == "cur-2"
+        assert "since" not in captured_params[2]
+
+    def test_missing_url_raises_before_any_http(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing ``MECH_ANALYTICS_URL`` raises immediately, before any HTTP call."""
+        monkeypatch.delenv("MECH_ANALYTICS_URL", raising=False)
+        with pytest.raises(mac.MechAnalyticsError, match="MECH_ANALYTICS_URL"):
+            list(
+                mac.iter_unscored_row_ids(
+                    since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                )
+            )
+
+    def test_non_list_rows_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Endpoint schema drift on ``rows`` surfaces as MechAnalyticsError."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: {"rows": {"unexpected": "dict"}, "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="unexpected type dict"):
+                list(
+                    mac.iter_unscored_row_ids(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+    def test_non_dict_payload_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Top-level array or non-dict payload raises instead of AttributeError."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: ["unexpected", "array"],
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="expected dict"):
+                list(
+                    mac.iter_unscored_row_ids(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+    def test_missing_rows_key_raises_mech_analytics_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing 'rows' key raises (distinct from a legitimate rows=[])."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        bad_response = SimpleNamespace(
+            json=lambda: {"error": "something went wrong"},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: bad_response
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="missing 'rows' key"):
+                list(
+                    mac.iter_unscored_row_ids(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+
+    def test_empty_rows_list_ends_pagination_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Explicit rows=[] with null cursor is a valid empty last page."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        empty_response = SimpleNamespace(
+            json=lambda: {"rows": [], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: empty_response
+        ):
+            ids = list(
+                mac.iter_unscored_row_ids(
+                    since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                )
+            )
+        assert not ids
+
+    def test_falsy_request_id_is_skipped_and_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A row with a missing / falsy request_id is skipped and warns.
+
+        Yielding a falsy request_id would silently thin the coverage
+        union in verify_migration_swap. Skipping without a warning would
+        make an endpoint schema regression invisible. Test both: the ID
+        list only contains real ones, and a WARNING is emitted with the
+        skip count.
+
+        :param monkeypatch: pytest fixture used to set the endpoint URL
+            env var and patch ``requests.Session.get``.
+        :param caplog: pytest fixture capturing log records so the
+            skip warning can be asserted.
+        """
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        response = self._fake_response(
+            [{"request_id": "u-1"}, {"request_id": None}, {"request_id": ""}],
+            next_cursor=None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: response
+        ):
+            with caplog.at_level("WARNING"):
+                ids = list(
+                    mac.iter_unscored_row_ids(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc)
+                    )
+                )
+        assert ids == ["u-1"]
+        assert any(
+            "falsy request_id" in rec.message and "skipped 2" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_session_is_context_managed_and_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Session is entered as a context manager and closed after iteration."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        response = SimpleNamespace(
+            json=lambda: {"rows": [{"request_id": "u-1"}], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        closed = {"n": 0}
+        real_session_init = mac.requests.Session.__init__
+
+        def _tracking_close(self: Any) -> None:
+            closed["n"] += 1
+
+        def _tracking_init(self: Any, *a: Any, **kw: Any) -> None:
+            real_session_init(self, *a, **kw)
+
+        monkeypatch.setattr(mac.requests.Session, "__init__", _tracking_init)
+        monkeypatch.setattr(mac.requests.Session, "close", _tracking_close)
+        monkeypatch.setattr(mac.requests.Session, "get", lambda *a, **kw: response)
+        list(mac.iter_unscored_row_ids(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+        assert closed["n"] >= 1
+
+    def test_retry_adapter_mounted_on_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retry adapter is mounted for 5xx / connection resets."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        response = SimpleNamespace(
+            json=lambda: {"rows": [{"request_id": "u-1"}], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+        mounted: list[tuple[str, Any]] = []
+        real_mount = mac.requests.Session.mount
+
+        def _tracking_mount(self: Any, prefix: str, adapter: Any) -> None:
+            mounted.append((prefix, adapter))
+            real_mount(self, prefix, adapter)
+
+        monkeypatch.setattr(mac.requests.Session, "mount", _tracking_mount)
+        monkeypatch.setattr(mac.requests.Session, "get", lambda *a, **kw: response)
+        list(mac.iter_unscored_row_ids(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+        our_mounts = [m for m in mounted if m[0].startswith("http://mech-analytics")]
+        assert our_mounts, "expected a retry-configured HTTPAdapter for the base URL"
+        retry = our_mounts[0][1].max_retries
+        assert retry.total == 3
+        assert 502 in retry.status_forcelist
+        assert 503 in retry.status_forcelist
+        assert 504 in retry.status_forcelist
+
+    def test_max_pages_hit_with_cursor_pending_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Paginator raises when max_pages is hit with cursor still pending."""
+        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        always_more = SimpleNamespace(
+            json=lambda: {
+                "rows": [{"request_id": "u-1"}],
+                "next_cursor": "cur-x",
+            },
+            raise_for_status=lambda: None,
+        )
+        with patch.object(
+            mac.requests.Session, "get", side_effect=lambda *a, **kw: always_more
+        ):
+            with pytest.raises(mac.MechAnalyticsError, match="max_pages=3"):
+                list(
+                    mac.iter_unscored_row_ids(
+                        since=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                        max_pages=3,
+                    )
+                )

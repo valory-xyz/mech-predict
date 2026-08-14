@@ -1030,6 +1030,13 @@ python benchmark/compare.py results/prod_baseline.json results/candidate_eval.js
 # Soft signals (reported, not blocking):
 #   - Edge over market direction (positive = accuracy is translating to profit)
 #   - Conditional accuracy when disagreeing (high = tool's bets tend to win)
+#
+#   NOTE: the SHIPPED daily gate promotes these two from soft signals to
+#   blocking ones. Edge over market is the primary test (a one-sided 95%
+#   lower bound on the paired edge must clear 0.04 over >= 30 markets) and
+#   conditional accuracy below 50% blocks a promote. Raw Brier improvement
+#   moves with question difficulty, so it cannot rank tools on its own.
+#   See DAILY_REPORT_OPERATOR_GUIDE.md for the gate and its reasoning.
 #   - Disagreement-stratified Brier (is accuracy improving where it matters for PnL?)
 #   - Directional bias (is systematic over/underestimation improving?)
 ```

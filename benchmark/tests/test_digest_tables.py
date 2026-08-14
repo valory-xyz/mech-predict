@@ -638,7 +638,7 @@ class TestPromoteDemoteGate:
     ) -> None:
         """A cleared bound is the policy's condition; condAcc annotates it.
 
-        condAcc appears nowhere in PROMOTE_DEMOTE_POLICY.md and its 0.50 line
+        condAcc carries no confidence interval and its 0.50 line
         carries no interval -- on live data every value straddles 0.50 on a
         Wilson 95%. Letting it silently veto a bound that cleared the margin
         would be a stricter gate than the policy, applied invisibly.
@@ -1228,3 +1228,153 @@ class TestVerdictMarker:
         title = self._headline_title(tmp_path, {"live": fine}, {})
         assert VERDICT_MARKER["none"] in title
         assert "NO CHANGE" in title
+
+
+class TestRankingWindow:
+    """Table 1b must rank on the column its caption names."""
+
+    def test_1b_ranks_on_cumulative_edge_not_the_weekly_one(
+        self, tmp_path: Path
+    ) -> None:
+        """The `#` column has to agree with the `Edge cum` column beside it.
+
+        _sort_key ranks on the first window that carries an edge, so the
+        argument order at the call site IS the ranking metric. Passing W-1
+        first ordered the table by the weekly edge under a caption reading
+        "RANKED BY `Edge cum`" -- two different metrics in one column.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        # beta wins the week; alpha wins cumulatively. The caption promises
+        # cumulative, so alpha must rank first.
+        _write(
+            results,
+            "scores_polymarket.json",
+            {
+                "alpha": _stats(edge=0.3000, edge_n=500),
+                "beta": _stats(edge=0.0100, edge_n=500),
+            },
+        )
+        _write(
+            results,
+            "rolling_scores_polymarket.json",
+            {
+                "alpha": _stats(edge=-0.2000, edge_n=60),
+                "beta": _stats(edge=0.2500, edge_n=60),
+            },
+        )
+        _write(results, "prev_rolling_scores_polymarket.json", {})
+
+        body = _body(results, allowed_tools={"alpha", "beta"})
+        marker = "1b. PRODUCTION"
+        assert _cells(body, "alpha", after=marker)[0] == "1"
+        assert _cells(body, "beta", after=marker)[0] == "2"
+
+
+class TestBlockedHeadline:
+    """The NO ACTION headline must not miscount the roster."""
+
+    def test_headline_does_not_report_demotes_as_the_whole_roster(
+        self, tmp_path: Path
+    ) -> None:
+        """A blocked roster means nothing survived, not that everything demoted.
+
+        Unjudgeable tools ("n=12 < 30") are not survivors, so a roster can be
+        blocked while only one tool actually demotes. Counting the demotes
+        rendered "All 1 deployed tools fail the gate".
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        _write(
+            results,
+            "scores_polymarket.json",
+            {
+                "bad": _stats(
+                    brier=0.4000,
+                    baseline_brier=0.2400,
+                    edge=-0.1000,
+                    edge_sd=0.2,
+                    edge_n=400,
+                ),
+                "thin": _stats(edge_n=5, valid_n=5),
+            },
+        )
+        _write(
+            results,
+            "rolling_scores_polymarket.json",
+            {
+                "bad": _stats(
+                    brier=0.4000,
+                    baseline_brier=0.2400,
+                    edge=-0.1000,
+                    edge_sd=0.2,
+                    edge_n=400,
+                ),
+                "thin": _stats(edge_n=5, valid_n=5),
+            },
+        )
+        _write(results, "prev_rolling_scores_polymarket.json", {})
+
+        messages = build_digest_messages(
+            results, "polymarket", allowed_tools={"bad", "thin"}
+        )
+        title = messages[0]["blocks"][0]["text"]["text"]
+        detail = _flatten(messages[0])
+        assert "NO ACTION" in title
+        assert "All 1 deployed tools" not in detail
+        assert "No deployed tool clears the gate" in detail
+
+
+class TestReplacementAwareness:
+    """The no-replacement warning must look at the tournament."""
+
+    def test_note_points_at_a_promotable_candidate_when_one_exists(self) -> None:
+        """The no-forecaster claim is false when a candidate clears the gate.
+
+        Reading only the deployed cohort put that claim directly under a
+        headline announcing a promotable candidate.
+        """
+        prod = {"bad": "demote: no-skill"}
+        assert "NO REPLACEMENT" in (_no_replacement_note(prod, {}) or "")
+        with_candidate = _no_replacement_note(prod, {"cand": "PROMOTE"})
+        assert with_candidate is not None
+        assert "NO DEPLOYED REPLACEMENT" in with_candidate
+        assert "`cand`" in with_candidate
+        assert "no forecaster at all" not in with_candidate
+
+    def test_a_non_promotable_candidate_is_not_a_replacement(self) -> None:
+        """Only an exact PROMOTE counts; "review:" is not deployable."""
+        prod = {"bad": "demote: no-skill"}
+        note = _no_replacement_note(prod, {"cand": "review: floor ok, condAcc 45%"})
+        assert note is not None
+        assert "NO REPLACEMENT" in note
+
+
+class TestStarvedAlertRobustness:
+    """The starved-sample alert must not crash on the field it gates on."""
+
+    def test_missing_valid_n_does_not_take_down_the_digest(
+        self, tmp_path: Path
+    ) -> None:
+        """_has_floor is False when valid_n is ABSENT, not only when it is low.
+
+        The alert then subscripted the field it had just failed to find, and
+        the KeyError escaped build_digest_messages.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        starved = _stats()
+        del starved["valid_n"]
+        _write(results, "scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "rolling_scores_polymarket.json", {"alpha": starved})
+        _write(results, "prev_rolling_scores_polymarket.json", {})
+
+        body = _body(results, allowed_tools={"alpha"})
+        assert "sample starved" in body
+        assert "n/a scored rows in W-1" in body

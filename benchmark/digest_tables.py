@@ -408,8 +408,11 @@ def _roi_haircut(group: dict[str, Any] | None) -> str:
     return f"{float(group['roi_haircut']):+.1f}%"
 
 
-# Promote margin and floor from PROMOTE_DEMOTE_POLICY.md: promote only when the
-# one-sided 95% lower bound on the paired edge clears delta, with n >= 30.
+# Promote margin and floor: promote only when the one-sided 95% lower bound on
+# the paired edge clears delta, with n >= 30. Delta is a margin in Brier units,
+# not a p-value, and the bar is asymmetric on purpose -- a false promote loses
+# money while a missed one just keeps the incumbent another day. The reasoning
+# and a worked example live in DAILY_REPORT_OPERATOR_GUIDE.md.
 PROMOTE_DELTA = 0.04
 # A Brier this far above its own base-rate floor is a signal; less is noise.
 NO_SKILL_MARGIN = 0.01
@@ -527,28 +530,6 @@ def _verdict(
     return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
 
 
-def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
-    """Never let the report recommend emptying a platform.
-
-    A demote means stop serving that tool. If EVERY deployed tool on a platform
-    demotes, acting on all of them leaves the platform with no forecaster at
-    all, which is worse than keeping the least-bad one. The policy anticipates
-    this case and marks it rather than hiding it, so the verdicts survive and
-    the consequence is stated beside them.
-
-    :param verdicts: mapping of tool name to verdict, for ONE platform cohort.
-    :return: the same mapping, annotated when every tool would be demoted.
-    """
-    if not verdicts or _survivors(verdicts):
-        return verdicts
-    # The warning does NOT go in every row. It was identical on each one, 35
-    # characters long, and already stated in the headline; repeating it made
-    # the cell five times wider than its neighbours and wrapped every row to
-    # three lines. It is rendered once, as a context line under the table it
-    # qualifies -- see _no_replacement_note.
-    return dict(verdicts)
-
-
 # Drawn inside the header's own text, above and below the title, so the rule
 # and the title are ONE block. Slack pads BETWEEN blocks, so a rule in its own
 # section always sits a visible gap away from the title it belongs to.
@@ -613,10 +594,14 @@ def _headline(
         detail = "Demote " + ", ".join(f"`{t}`" for t in demote) + "."
     elif demote:
         state, token = "blocked", "NO ACTION"
+        # NOT len(demote): "blocked" means no tool SURVIVED, which includes the
+        # ones the gate could not judge at all. Counting only the demotes read
+        # "All 1 deployed tools fail the gate" on a three-tool roster.
         detail = (
-            f"All {len(demote)} deployed tools fail the gate, so demoting them "
-            "would leave this platform with no forecaster. Treat as a "
-            "platform-level problem, not a tool swap."
+            "No deployed tool clears the gate, so demoting the "
+            f"{len(demote)} that fail outright would leave this platform "
+            "with no forecaster. Treat as a platform-level problem, not a "
+            "tool swap."
         )
     else:
         state, token = "none", "NO CHANGE"
@@ -675,17 +660,22 @@ def _survivors(verdicts: dict[str, str]) -> list[str]:
     ]
 
 
-def _no_replacement_blocks(verdicts: dict[str, str]) -> list[dict[str, Any]]:
+def _no_replacement_blocks(
+    verdicts: dict[str, str], candidates: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
     """The no-replacement warning as blocks, or nothing when it does not apply.
 
     :param verdicts: mapping of tool name to verdict for one platform.
+    :param candidates: tournament verdicts, which may hold a replacement.
     :return: a single context block, or an empty list.
     """
-    note = _no_replacement_note(verdicts)
+    note = _no_replacement_note(verdicts, candidates)
     return [context(note)] if note else []
 
 
-def _no_replacement_note(verdicts: dict[str, str]) -> str | None:
+def _no_replacement_note(
+    verdicts: dict[str, str], candidates: dict[str, str] | None = None
+) -> str | None:
     """The warning that belongs under a table where every tool demotes.
 
     Rendered once, adjacent to the rows it qualifies, rather than repeated in
@@ -693,11 +683,26 @@ def _no_replacement_note(verdicts: dict[str, str]) -> str | None:
     on the platform, which is why it has to sit beside the table and not only
     in the headline message.
 
+    Checks the tournament before claiming there is no replacement. Reading only
+    the deployed cohort let the page assert "no forecaster at all" directly
+    under a headline announcing a promotable candidate -- the one case where a
+    replacement demonstrably exists and the operator should be told to reach
+    for it.
+
     :param verdicts: mapping of tool name to verdict for one platform.
+    :param candidates: tournament verdicts, which may hold a replacement.
     :return: the warning, or None when at least one tool survives.
     """
     if not verdicts or _survivors(verdicts):
         return None
+    ready = sorted(t for t, v in (candidates or {}).items() if v == "PROMOTE")
+    if ready:
+        names = ", ".join(f"`{t}`" for t in ready)
+        return (
+            f":warning: *NO DEPLOYED REPLACEMENT* - all {len(verdicts)} "
+            f"deployed tools demote, but {names} clears the promote gate in "
+            "the tournament. Promote before retiring, not after."
+        )
     return (
         f":warning: *NO REPLACEMENT* - all {len(verdicts)} deployed tools "
         "demote. Acting on these row by row would leave the platform with no "
@@ -881,7 +886,9 @@ def _verdicts_for(
         t: _verdict(at.get(t), deployed=deployed, recent=(w1 or {}).get(t))
         for t in tools
     }
-    return _guard_last_tools(verdicts) if deployed else verdicts
+    # No cohort-level rewrite: the every-tool-demotes case is stated once
+    # under the table by _no_replacement_note, not stamped into each row.
+    return verdicts
 
 
 def _rows_at(
@@ -1030,12 +1037,17 @@ def _alert_rows(
 
     starved = [t for t in tools if w1.get(t) and not _has_floor(w1[t])]
     for tool in starved:
+        # _has_floor is False when valid_n is MISSING as well as when it is
+        # merely small, so this cannot subscript the field it just failed to
+        # find -- that raised KeyError/TypeError out of build_digest_messages
+        # and took the whole digest down with it.
+        starved_n = _num(w1[tool].get("valid_n"))
+        shown = NA if starved_n is None else int(starved_n)
         rows.append(
             (
                 "sample starved",
                 tool,
-                f"{int(w1[tool]['valid_n'])} scored rows in W-1, "
-                f"floor is {MIN_SAMPLE_SIZE}",
+                f"{shown} scored rows in W-1, floor is {MIN_SAMPLE_SIZE}",
                 "widen the window before any keep/demote call",
             )
         )
@@ -1199,7 +1211,12 @@ def build_digest_messages(
 
     if prod_tools:
         order_w2 = _ordered(prod_tools, windows["w1"], windows["w2"])
-        order_at = _ordered(prod_tools, windows["w1"], windows["at"])
+        # Cumulative FIRST here, weekly first in 1a. _sort_key ranks on the
+        # earlier window that has an edge, so the argument order IS the ranking
+        # metric: passing w1 first ranked 1b by the weekly edge under a caption
+        # that says "RANKED BY Edge cum", which put the # column and the column
+        # it names in visible disagreement.
+        order_at = _ordered(prod_tools, windows["at"], windows["w1"])
         messages.append(
             message(
                 "1a. Production - W-1 vs W-2",
@@ -1233,7 +1250,8 @@ def build_digest_messages(
                 + _no_replacement_blocks(
                     _verdicts_for(
                         sorted(prod_tools), windows["at"], True, windows["w1"]
-                    )
+                    ),
+                    _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
                 ),
             )
         )

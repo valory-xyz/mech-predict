@@ -34,8 +34,7 @@ underscore-prefixed helpers used by the scorer's finalize path.
 
 from __future__ import annotations
 
-import math
-from typing import Any, Optional
+from typing import Any
 
 from benchmark.scoring_primitives import (
     CALIBRATION_BINS,
@@ -102,12 +101,6 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
                 group["market_brier_sum"] += (
                     market_prob - (1.0 if outcome else 0.0)
                 ) ** 2
-            # Squared edge, so a standard deviation can be derived without
-            # keeping per-row values. That sd turns "this tool has a positive
-            # edge" into "this tool's edge is significantly above the promote
-            # margin", which is the whole promote/demote gate.
-            if group.get("edge_sq_sum") is not None:
-                group["edge_sq_sum"] += edge * edge
             group["edge_n"] += 1
             if edge > 0:
                 group["edge_positive_count"] += 1
@@ -124,25 +117,6 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
                     else:
                         group["bias_sum"] += p_yes - (1.0 if outcome else 0.0)
                         group["n_bias_losses"] += 1
-
-
-def _edge_sd(group: dict[str, Any], edge_n: int) -> Optional[float]:
-    """Population standard deviation of the per-row edge.
-
-    Derived from the running sum and sum-of-squares so no per-row values need
-    keeping. Returns None when the accumulator predates this field or when a
-    single row makes the spread undefined.
-
-    :param group: accumulator dict.
-    :param edge_n: number of edge-eligible rows.
-    :return: standard deviation, or None when it cannot be computed.
-    """
-    sq_sum = group.get("edge_sq_sum")
-    if sq_sum is None or edge_n < 2:
-        return None
-    mean = group["edge_sum"] / edge_n
-    variance = sq_sum / edge_n - mean * mean
-    return round(math.sqrt(variance), 6) if variance > 0 else 0.0
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
@@ -216,12 +190,10 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
         result["market_brier"] = (
             None if market_sum is None else round(market_sum / edge_n, 4)
         )
-        result["edge_sd"] = _edge_sd(group, edge_n)
         result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
     else:
         result["edge"] = None
         result["market_brier"] = None
-        result["edge_sd"] = None
         result["edge_positive_rate"] = None
 
     # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias

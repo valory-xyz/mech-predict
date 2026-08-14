@@ -85,7 +85,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from pathlib import Path
 from typing import Any, Collection, Iterable, Sequence
 
@@ -413,17 +412,13 @@ def _roi_haircut(group: dict[str, Any] | None) -> str:
 # not a p-value, and the bar is asymmetric on purpose -- a false promote loses
 # money while a missed one just keeps the incumbent another day. The reasoning
 # and a worked example live in DAILY_REPORT_OPERATOR_GUIDE.md.
-PROMOTE_DELTA = 0.04
 # A Brier this far above its own base-rate floor is a signal; less is noise.
-NO_SKILL_MARGIN = 0.01
 # One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
 # at n >= 30 on a mean this is the same call to well inside the margin, and it
 # is computable from the stored sum/sum-of-squares without per-row data.
-Z_ONE_SIDED_95 = 1.645
 
 # A tool that wins fewer than half the markets where it DISAGREED with the price
 # has no tradable edge, whatever its headline accuracy looks like.
-COIN_FLIP = 0.50
 
 # A row exists only once its market has RESOLVED, so the newest window always
 # holds fewer rows than an older one of equal length -- it has had less time to
@@ -432,158 +427,6 @@ COIN_FLIP = 0.50
 # a delta computed across that gap flipped sign on the tool the report was
 # calling most improved. Below this ratio the week is treated as incomplete.
 COMPLETENESS_RATIO = 0.70
-
-
-def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
-    """One-sided 95% lower bound on the tool's mean edge over the market.
-
-    :param stats: per-tool stats for a window.
-    :return: the lower bound, or None when it cannot be computed.
-    """
-    edge = _num((stats or {}).get("edge"))
-    sd = _num((stats or {}).get("edge_sd"))
-    count = _num((stats or {}).get("edge_n"))
-    if edge is None or sd is None or count is None or count < 2:
-        return None
-    return edge - Z_ONE_SIDED_95 * sd / math.sqrt(count)
-
-
-def _below_no_skill(stats: dict[str, Any] | None) -> bool:
-    """Is this window's Brier materially worse than its own base-rate floor?
-
-    "Materially" matters: a live tool sat 0.0003 above its floor on 2,055
-    markets while winning 65% of the 1,968 markets where it disagreed with the
-    price. A hairline gap is noise, and the policy is explicit that a demote
-    needs a sustained signal rather than a one-off reading.
-
-    :param stats: per-tool stats for one window.
-    :return: True when the tool is below no-skill by more than the margin.
-    """
-    brier = _num((stats or {}).get("brier"))
-    base = _num((stats or {}).get("baseline_brier"))
-    return brier is not None and base is not None and brier - base >= NO_SKILL_MARGIN
-
-
-def _below_reliability(stats: dict[str, Any] | None) -> bool:
-    """Did this window fail to return a usable prediction often enough to matter?
-
-    Reliability is ``valid_n / n``. A tool that answers four calls in five is
-    not one the trader can lean on, whatever the four scored -- and the failures
-    are not a random sample, so the Brier computed on them is not a fair read of
-    the tool either.
-
-    :param stats: per-tool stats for one window.
-    :return: True when reliability is known and below the gate.
-    """
-    rate = _num((stats or {}).get("reliability"))
-    return rate is not None and rate < RELIABILITY_GATE
-
-
-def _verdict(
-    stats: dict[str, Any] | None,
-    deployed: bool,
-    recent: dict[str, Any] | None = None,
-) -> str:
-    """Apply the gate, then flag low reliability as a WARNING rather than a veto.
-
-    Reliability qualifies a good verdict instead of overturning it. A tool that
-    misses calls may still be the best forecaster available, and refusing to
-    promote it can leave a worse tool deployed -- so the number is surfaced on
-    the row and the human decides. Only the positive verdicts are annotated: a
-    demote needs no extra reason, and a row the gate could not judge is not
-    made clearer by a second caveat.
-
-    :param stats: per-tool stats for the decision window.
-    :param deployed: True for a production tool, False for a candidate.
-    :param recent: stats for the most recent week.
-    :return: a short verdict string for the ``rec`` cell.
-    """
-    verdict = _verdict_core(stats, deployed, recent)
-    rate = _num((stats or {}).get("reliability"))
-    if (
-        rate is not None
-        and rate < RELIABILITY_GATE
-        and verdict.startswith(("PROMOTE", "keep", "review"))
-    ):
-        return f"{verdict} (rel {rate:.0%})"
-    return verdict
-
-
-def _verdict_core(
-    stats: dict[str, Any] | None,
-    deployed: bool,
-    recent: dict[str, Any] | None = None,
-) -> str:
-    """Apply the promote/demote gate to one tool.
-
-    The rule is the policy's, stated once and used for both rosters:
-    promote only when the lower bound on the edge clears the margin; demote on
-    a sustained below-no-skill signal; otherwise keep. Anything the sample
-    cannot support says so rather than guessing -- "not enough data yet" is a
-    different answer from "no improvement", and the policy is explicit that
-    conflating them is the failure to avoid.
-
-    :param stats: per-tool stats for the decision window.
-    :param deployed: True for a production tool, False for a candidate.
-    :param recent: stats for the most recent week, used to confirm that a
-        below-no-skill reading is sustained rather than a single window.
-    :return: a short verdict string for the ``rec`` cell.
-    """
-    brier = _num((stats or {}).get("brier"))
-    if brier is None:
-        return "no data"
-    edge_n = _num((stats or {}).get("edge_n"))
-    if edge_n is None or edge_n < MIN_SAMPLE_SIZE:
-        shown = NA if edge_n is None else int(edge_n)
-        return f"n={shown} < {MIN_SAMPLE_SIZE}"
-
-    lower = _edge_lower_bound(stats)
-    if lower is None:
-        # An accumulator written before `edge_sd` existed restores the field as
-        # None and never re-arms on the incremental path, which is the daily
-        # path in production. That is a MIGRATION state, not a thin sample, and
-        # saying so is the difference between "run a rebuild" and "this tool
-        # has no data".
-        if (stats or {}).get("edge_sd", "missing") is None:
-            return "needs --rebuild"
-        return "no spread"
-
-    # A cleared bound is the policy's promote condition and nothing below may
-    # silently override it. Conditional accuracy is a strong diagnostic but it
-    # is NOT in the policy, its 0.50 line carries no interval (today's live
-    # values all straddle it on a Wilson 95%), so it qualifies a promote rather
-    # than vetoing one.
-    # Each reason NAMES THE COLUMN that triggered it rather than describing it
-    # in prose. The reader can then check the verdict against a cell on the
-    # same row, and the cell stays the width of the other columns instead of
-    # wrapping to three lines.
-    # Reliability is a HARD gate, and it runs BEFORE the floor test so an
-    # unreliable tool can never read PROMOTE however good its bound looks. The
-    # score is computed only on the calls that returned a usable prediction, so
-    # a tool answering four in five is not 80% of a good tool -- the missing
-    # fifth is not a random sample, and the ROI sim already refuses to simulate
-    # it. Promoting something the simulator will not score is incoherent.
-    #
-    # Asymmetric on purpose, exactly like the no-skill rule below: a promote is
-    # blocked on a single window, a demote needs both to agree. Unreliability
-    # is usually an outage or an upstream API change, and one bad week should
-    # retire nothing.
-    conditional = _num((stats or {}).get("conditional_accuracy_rate"))
-    if lower > PROMOTE_DELTA:
-        if conditional is not None and conditional < COIN_FLIP:
-            note = f"floor ok, condAcc {conditional:.0%}"
-            return f"keep ({note})" if deployed else f"review: {note}"
-        return "keep (floor ok)" if deployed else "PROMOTE"
-
-    if conditional is not None and conditional < COIN_FLIP:
-        reason = f"condAcc {conditional:.0%}"
-        return f"demote: {reason}" if deployed else f"no: {reason}"
-
-    # Sustained, not a one-off: both the month and the latest week must agree.
-    if _below_no_skill(stats) and (recent is None or _below_no_skill(recent)):
-        return "demote: no-skill" if deployed else "no: no-skill"
-
-    return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
 
 
 # Drawn inside the header's own text, above and below the title, so the rule
@@ -600,169 +443,39 @@ TITLE_RULE_MIN = 24
 
 # The marker states the day's outcome before a word is read. Keyed to the
 # verdict, never hardcoded.
-VERDICT_MARKER = {
-    "promote": "🟢",
-    "demote": "🟠",
-    "blocked": "🔴",
-    "none": "⚪",
-}
 
 
-def _headline(
-    prod: dict[str, str],
-    tourn: dict[str, str],
-    platform: str,
-    as_of: str | None = None,
-) -> dict[str, Any]:
-    """Build the one-message answer: what to promote, what to demote.
+def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
+    """Build the title message that opens a platform's report.
 
-    The tables carry the evidence; this carries the decision. A reader who
-    stops after the first message must still leave with the right action, and
-    with an honest count of how many tools the data could not judge.
+    Names the report and the day it covers. It carries no verdict: this module
+    renders measurements, and what to do about them is a separate decision.
 
-    :param prod: verdicts for the deployed tools.
-    :param tourn: verdicts for the candidates.
     :param platform: platform key, for the heading.
     :param as_of: the last date the data covers, taken from the scores file
         rather than a clock -- this module has no clock, and a title stamped
         with "today" would misdate a report rendered from an older artifact.
     :return: a webhook payload.
     """
-    promote = sorted(t for t, v in tourn.items() if v.startswith("PROMOTE"))
-    demote = sorted(t for t, v in prod.items() if v.startswith("demote"))
-    unjudged = sorted(
-        t
-        for t, v in {**prod, **tourn}.items()
-        if v.startswith(("n=", "no spread", "needs --rebuild"))
-    )
-    # Asked of the shared survivor rule, NOT of the verdict text. It used to
-    # look for a "NO REPLACEMENT" substring; when that moved out of the rows
-    # the check silently became always-false and the headline flipped from
-    # NO ACTION to "DEMOTE 4" -- the exact instruction the guard exists to
-    # prevent.
-    blocked = bool(prod) and not _survivors(prod)
-
-    if promote:
-        state, token = "promote", f"PROMOTE {len(promote)}"
-        detail = "Promote " + ", ".join(f"`{t}`" for t in promote) + "."
-    elif demote and not blocked:
-        state, token = "demote", f"DEMOTE {len(demote)}"
-        detail = "Demote " + ", ".join(f"`{t}`" for t in demote) + "."
-    elif demote:
-        state, token = "blocked", "NO ACTION"
-        # NOT len(demote): "blocked" means no tool SURVIVED, which includes the
-        # ones the gate could not judge at all. Counting only the demotes read
-        # "All 1 deployed tools fail the gate" on a three-tool roster.
-        detail = (
-            "No deployed tool clears the gate, so demoting the "
-            f"{len(demote)} that fail outright would leave this platform "
-            "with no forecaster. Treat as a platform-level problem, not a "
-            "tool swap."
-        )
-    else:
-        state, token = "none", "NO CHANGE"
-        detail = "No candidate clears the promote margin."
-
     label = PLATFORM_TITLES.get(platform, platform.title())
-    marker = VERDICT_MARKER[state]
     # Date on the title line, not a line of its own: a third line inside the
     # header would render the date at header size, which is louder than a date
     # deserves. It stays inside the rules so the whole identity of the report
-    # -- platform, outcome, day -- is one block.
-    stamp = f"  ·  {as_of}" if as_of else ""
-    line = f"{marker}  {label.upper()}  ·  {token}{stamp}"
+    # -- platform and day -- is one block.
+    stamp = f"  \u00b7  {as_of}" if as_of else ""
+    line = f"{label.upper()}{stamp}"
     rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
-    title = f"{rule}\n{line}\n{rule}"
-
-    lines = [detail]
-    if unjudged:
-        lines.append(
-            f"_{len(unjudged)} tool(s) had too little data to judge: "
-            + ", ".join(f"`{t}`" for t in unjudged)
-            + "._"
-        )
     return message(
-        f"{label} {as_of or ''}: {token}".strip(),
+        f"{label} {as_of or ''}".strip(),
         [
-            header(title),
-            section("\n".join(lines)),
+            header(f"{rule}\n{line}\n{rule}"),
             context(
-                "Tables are RANKED BY `Edge` -- how far the tool beat "
-                "the market. Promotion is a different test: `floor` (Edge minus "
-                f"a penalty for uncertainty) must clear +{PROMOTE_DELTA} with "
-                f"n >= {MIN_SAMPLE_SIZE}. A tool winning under half the markets "
-                "where it disagreed with the price cannot be promoted whatever "
-                "its headline accuracy says."
+                "Tables are RANKED BY `Edge` -- how far the tool beat the "
+                f"market. A `{LOW_SAMPLE_MARK}` marks a window under "
+                f"n = {MIN_SAMPLE_SIZE}, where a number is reported but not "
+                "yet worth reading."
             ),
         ],
-    )
-
-
-def _survivors(verdicts: dict[str, str]) -> list[str]:
-    """Tools that could actually replace a demoted one.
-
-    A verdict that is neither a demote nor a keep -- "n=12 < 30", "no spread",
-    "needs --rebuild" -- is NOT a survivor. Counting it as one lets the report
-    recommend retiring every tool it could assess while leaving the platform
-    holding only the one it just said it could not judge.
-
-    :param verdicts: mapping of tool name to verdict.
-    :return: names of tools that survive.
-    """
-    return [
-        tool
-        for tool, verdict in verdicts.items()
-        if verdict.startswith(("keep", "PROMOTE", "review"))
-    ]
-
-
-def _no_replacement_blocks(
-    verdicts: dict[str, str], candidates: dict[str, str] | None = None
-) -> list[dict[str, Any]]:
-    """The no-replacement warning as blocks, or nothing when it does not apply.
-
-    :param verdicts: mapping of tool name to verdict for one platform.
-    :param candidates: tournament verdicts, which may hold a replacement.
-    :return: a single context block, or an empty list.
-    """
-    note = _no_replacement_note(verdicts, candidates)
-    return [context(note)] if note else []
-
-
-def _no_replacement_note(
-    verdicts: dict[str, str], candidates: dict[str, str] | None = None
-) -> str | None:
-    """The warning that belongs under a table where every tool demotes.
-
-    Rendered once, adjacent to the rows it qualifies, rather than repeated in
-    each row. Acting on the demotes one at a time would retire every forecaster
-    on the platform, which is why it has to sit beside the table and not only
-    in the headline message.
-
-    Checks the tournament before claiming there is no replacement. Reading only
-    the deployed cohort let the page assert "no forecaster at all" directly
-    under a headline announcing a promotable candidate -- the one case where a
-    replacement demonstrably exists and the operator should be told to reach
-    for it.
-
-    :param verdicts: mapping of tool name to verdict for one platform.
-    :param candidates: tournament verdicts, which may hold a replacement.
-    :return: the warning, or None when at least one tool survives.
-    """
-    if not verdicts or _survivors(verdicts):
-        return None
-    ready = sorted(t for t, v in (candidates or {}).items() if v.startswith("PROMOTE"))
-    if ready:
-        names = ", ".join(f"`{t}`" for t in ready)
-        return (
-            f":warning: *NO DEPLOYED REPLACEMENT* - all {len(verdicts)} "
-            f"deployed tools demote, but {names} clears the promote gate in "
-            "the tournament. Promote before retiring, not after."
-        )
-    return (
-        f":warning: *NO REPLACEMENT* - all {len(verdicts)} deployed tools "
-        "demote. Acting on these row by row would leave the platform with no "
-        "forecaster at all; treat it as a platform-level problem."
     )
 
 
@@ -774,32 +487,6 @@ def _rank(tool: str, ranked: Sequence[str]) -> str:
     :return: "1", "2", ... or "-" for a tool the gate could not judge.
     """
     return str(ranked.index(tool) + 1) if tool in ranked else "-"
-
-
-def _floor(stats: dict[str, Any] | None) -> str:
-    """Format the lower bound the ranking and the promote rule both use.
-
-    Shown because it decides things. The report ranks on it and the gate tests
-    it, so leaving it off-screen would repeat exactly the failure this module
-    was written to stop: a number that drives a verdict while the reader can
-    only see a different number beside it. It also explains an order that
-    ``Edge`` alone appears to contradict.
-
-    :param stats: per-tool stats for the decision window.
-    :return: signed bound to 4 decimals, or ``n/a``.
-    """
-    lower = _edge_lower_bound(stats)
-    return NA if lower is None else f"{lower:+.4f}"
-
-
-def _conditional(stats: dict[str, Any] | None) -> str:
-    """Format the win rate on markets where the tool disagreed with the price.
-
-    :param stats: per-tool stats for that window.
-    :return: e.g. ``64%``, or ``n/a``.
-    """
-    rate = _num((stats or {}).get("conditional_accuracy_rate"))
-    return NA if rate is None else f"{rate * 100:.0f}%"
 
 
 # ---------------------------------------------------------------------------
@@ -839,12 +526,9 @@ _AT_COLUMNS = (
     Col("mkt cum", align="right"),
     Col("Edge W-1", align="right"),
     Col("Edge cum", align="right"),
-    Col("floor", align="right"),
     Col("Δ Edge", align="right"),
-    Col("condAcc", align="right"),
     Col("ROI 90d", align="right"),
     Col("w/costs", align="right"),
-    Col("rec", wrap=True),
 )
 
 
@@ -924,29 +608,6 @@ def _rows_w2(
     return rows
 
 
-def _verdicts_for(
-    tools: Sequence[str],
-    at: dict[str, dict[str, Any]],
-    deployed: bool,
-    w1: dict[str, dict[str, Any]] | None = None,
-) -> dict[str, str]:
-    """Apply the gate to a cohort, with the no-replacement guard.
-
-    :param tools: tool names in the cohort.
-    :param at: by_tool stats for the decision window.
-    :param deployed: True for production tools.
-    :param w1: last week's stats, used to confirm a sustained demote signal.
-    :return: mapping of tool name to verdict.
-    """
-    verdicts = {
-        t: _verdict(at.get(t), deployed=deployed, recent=(w1 or {}).get(t))
-        for t in tools
-    }
-    # No cohort-level rewrite: the every-tool-demotes case is stated once
-    # under the table by _no_replacement_note, not stamped into each row.
-    return verdicts
-
-
 def _rows_at(
     tools: Sequence[str],
     w1: dict[str, dict[str, Any]],
@@ -963,8 +624,6 @@ def _rows_at(
     :param mode: "production" or "tournament", for the ROI lookup.
     :return: one cell tuple per tool.
     """
-    deployed = mode == "production"
-    verdicts = _verdicts_for(tools, at, deployed, w1)
     ranked = [t for t in tools if _num((at.get(t) or {}).get("edge")) is not None]
 
     rows: list[tuple[str, ...]] = []
@@ -985,12 +644,9 @@ def _rows_at(
                 _score((b or {}).get("market_brier")),
                 _signed((a or {}).get("edge")),
                 _signed((b or {}).get("edge")),
-                _floor(b),
                 _delta(a, b, "edge", lower_is_better=False),
-                _conditional(b),
                 _roi(roi.get((tool, mode))),
                 _roi_haircut(roi.get((tool, mode))),
-                verdicts[tool],
             )
         )
     return rows
@@ -1240,8 +896,6 @@ def build_digest_messages(
 
     messages: list[dict[str, Any]] = [
         _headline(
-            _verdicts_for(sorted(prod_tools), windows["at"], True, windows["w1"]),
-            _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
             platform,
             _as_of(results_dir / WINDOW_FILES["at"].format(platform=platform)),
         )
@@ -1302,13 +956,7 @@ def build_digest_messages(
                             order_at, windows["w1"], windows["at"], roi, "production"
                         ),
                     ),
-                ]
-                + _no_replacement_blocks(
-                    _verdicts_for(
-                        sorted(prod_tools), windows["at"], True, windows["w1"]
-                    ),
-                    _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
-                ),
+                ],
             )
         )
 

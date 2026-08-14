@@ -1,7 +1,5 @@
 # Benchmark Pipeline
 
-> **Reading the daily Slack report?** See [DAILY_REPORT_OPERATOR_GUIDE.md](DAILY_REPORT_OPERATOR_GUIDE.md) -- one page on what to do each morning.
-
 Tools for evaluating and comparing prediction tool performance.
 
 ## How it works — the big picture

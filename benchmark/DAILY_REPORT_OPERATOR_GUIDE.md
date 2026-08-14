@@ -133,6 +133,13 @@ has few markets or its results swing wildly, small when thousands of markets agr
 floor  =  Edge  −  1.645 × ( spread ÷ √markets )
 ```
 
+- **spread** — how much those per-market numbers jump around (their standard deviation).
+  A tool that is steadily +0.05 has a small spread; one that swings +0.9 / −0.8 has a big one.
+- **1.645** — the 95% confidence multiplier. It is what makes this a *worst case you can
+  still be 95% sure about*, rather than a guess.
+- **√markets** — why evidence compounds: to halve the deduction you need **four times**
+  the markets, not twice.
+
 Two real tools, same report:
 
 | tool | Edge | spread | markets | deduction | **floor** |

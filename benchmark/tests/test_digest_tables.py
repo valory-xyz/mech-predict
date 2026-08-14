@@ -33,7 +33,7 @@ from typing import Any
 import pytest
 from benchmark.digest_tables import (
     _edge_lower_bound,
-    _guard_last_tools,
+    _no_replacement_note,
     _verdict,
     build_digest_messages,
 )
@@ -628,7 +628,7 @@ class TestPromoteDemoteGate:
         row = _stats(
             edge=0.01, edge_sd=0.05, edge_n=100, conditional_accuracy_rate=0.47
         )
-        assert "loses its disagreements" in _verdict(row, deployed=False)
+        assert "condAcc" in _verdict(row, deployed=False)
         assert _verdict(row, deployed=True).startswith("demote")
 
     def test_conditional_accuracy_qualifies_a_promote_but_cannot_veto_it(
@@ -656,7 +656,7 @@ class TestPromoteDemoteGate:
     def test_thin_sample_says_so_rather_than_guessing(self) -> None:
         """Below the floor the answer is "not enough data", not "no improvement"."""
         row = _stats(edge=0.09, edge_sd=0.1, edge_n=12)
-        assert _verdict(row, deployed=False).startswith("insufficient")
+        assert _verdict(row, deployed=False).startswith("n=")
 
     def test_below_no_skill_demotes_a_deployed_tool(self) -> None:
         """A Brier worse than its own base rate is a demote signal."""
@@ -668,7 +668,7 @@ class TestPromoteDemoteGate:
             edge_n=100,
             conditional_accuracy_rate=0.55,
         )
-        assert _verdict(row, deployed=True) == "demote: below no-skill"
+        assert _verdict(row, deployed=True) == "demote: no-skill"
 
 
 class TestPoolAwareGating:
@@ -755,16 +755,14 @@ class TestNoReplacementGuard:
 
     def test_all_demote_becomes_a_flagged_call(self) -> None:
         """When every tool demotes, each verdict carries the consequence."""
-        guarded = _guard_last_tools(
-            {"a": "demote: below no-skill", "b": "demote: loses its disagreements"}
+        note = _no_replacement_note(
+            {"a": "demote: no-skill", "b": "demote: condAcc 42%"}
         )
-        assert all("NO REPLACEMENT" in v for v in guarded.values())
+        assert note is not None and "NO REPLACEMENT" in note
 
     def test_a_survivor_leaves_the_demotes_alone(self) -> None:
         """One tool worth keeping means the demotes are actionable as written."""
-        guarded = _guard_last_tools({"a": "demote: below no-skill", "b": "keep"})
-        assert guarded["a"] == "demote: below no-skill"
-        assert "NO REPLACEMENT" not in guarded["b"]
+        assert _no_replacement_note({"a": "demote: no-skill", "b": "keep"}) is None
 
 
 class TestSustainedDemote:
@@ -796,7 +794,7 @@ class TestSustainedDemote:
             edge_n=500,
             conditional_accuracy_rate=0.55,
         )
-        assert _verdict(bad, deployed=True, recent=bad) == "demote: below no-skill"
+        assert _verdict(bad, deployed=True, recent=bad) == "demote: no-skill"
 
     def test_one_bad_window_alone_does_not_demote(self) -> None:
         """The month is bad but the week has recovered: not sustained."""
@@ -901,9 +899,7 @@ class TestMigrationState:
         edge_sd=None and market_brier=None.
         """
         stale = _stats(edge_sd=None)
-        assert (
-            _verdict(stale, deployed=True) == "needs --rebuild (no edge spread stored)"
-        )
+        assert _verdict(stale, deployed=True) == "needs --rebuild"
 
     def test_unjudgeable_tool_is_not_a_replacement(self) -> None:
         """Three demotes plus one unjudgeable is still no replacement.
@@ -911,15 +907,15 @@ class TestMigrationState:
         Otherwise the report can recommend retiring every tool it could assess
         and leave the platform holding only the one it just said it cannot.
         """
-        guarded = _guard_last_tools(
+        note = _no_replacement_note(
             {
-                "a": "demote: below no-skill",
-                "b": "demote: below no-skill",
-                "c": "demote: below no-skill",
-                "d": "insufficient (n=12 < 30)",
+                "a": "demote: no-skill",
+                "b": "demote: no-skill",
+                "c": "demote: no-skill",
+                "d": "n=12 < 30",
             }
         )
-        assert all("NO REPLACEMENT" in v for v in guarded.values())
+        assert note is not None and "NO REPLACEMENT" in note
 
 
 class TestBaseInBothTables:

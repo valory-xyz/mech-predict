@@ -462,7 +462,7 @@ def _verdict(
     edge_n = _num((stats or {}).get("edge_n"))
     if edge_n is None or edge_n < MIN_SAMPLE_SIZE:
         shown = NA if edge_n is None else int(edge_n)
-        return f"insufficient (n={shown} < {MIN_SAMPLE_SIZE})"
+        return f"n={shown} < {MIN_SAMPLE_SIZE}"
 
     lower = _edge_lower_bound(stats)
     if lower is None:
@@ -472,28 +472,32 @@ def _verdict(
         # saying so is the difference between "run a rebuild" and "this tool
         # has no data".
         if (stats or {}).get("edge_sd", "missing") is None:
-            return "needs --rebuild (no edge spread stored)"
-        return "insufficient (no spread)"
+            return "needs --rebuild"
+        return "no spread"
 
     # A cleared bound is the policy's promote condition and nothing below may
     # silently override it. Conditional accuracy is a strong diagnostic but it
     # is NOT in the policy, its 0.50 line carries no interval (today's live
     # values all straddle it on a Wilson 95%), so it qualifies a promote rather
     # than vetoing one.
+    # Each reason NAMES THE COLUMN that triggered it rather than describing it
+    # in prose. The reader can then check the verdict against a cell on the
+    # same row, and the cell stays the width of the other columns instead of
+    # wrapping to three lines.
     conditional = _num((stats or {}).get("conditional_accuracy_rate"))
     if lower > PROMOTE_DELTA:
         if conditional is not None and conditional < COIN_FLIP:
-            note = f"clears margin BUT wins only {conditional:.0%} of disagreements"
+            note = f"floor ok, condAcc {conditional:.0%}"
             return f"keep ({note})" if deployed else f"review: {note}"
-        return "keep (clears margin)" if deployed else "PROMOTE"
+        return "keep (floor ok)" if deployed else "PROMOTE"
 
     if conditional is not None and conditional < COIN_FLIP:
-        loses = f"loses its disagreements ({conditional:.0%})"
-        return f"demote: {loses}" if deployed else f"no: {loses}"
+        reason = f"condAcc {conditional:.0%}"
+        return f"demote: {reason}" if deployed else f"no: {reason}"
 
     # Sustained, not a one-off: both the month and the latest week must agree.
     if _below_no_skill(stats) and (recent is None or _below_no_skill(recent)):
-        return "demote: below no-skill" if deployed else "no: below no-skill"
+        return "demote: no-skill" if deployed else "no: no-skill"
 
     return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
 
@@ -510,23 +514,14 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
     :param verdicts: mapping of tool name to verdict, for ONE platform cohort.
     :return: the same mapping, annotated when every tool would be demoted.
     """
-    # A tool the report could not judge is NOT a replacement. Counting it as
-    # one lets the digest recommend retiring every tool it could assess while
-    # leaving the platform holding only the one it just said it cannot.
-    survivors = [
-        t
-        for t, v in verdicts.items()
-        if not v.startswith("demote")
-        and not v.startswith("insufficient")
-        and not v.startswith("needs --rebuild")
-        and v != "no data"
-    ]
-    if not verdicts or survivors:
+    if not verdicts or _survivors(verdicts):
         return verdicts
-    return {
-        tool: f"{verdict} - NO REPLACEMENT, do not act alone"
-        for tool, verdict in verdicts.items()
-    }
+    # The warning does NOT go in every row. It was identical on each one, 35
+    # characters long, and already stated in the headline; repeating it made
+    # the cell five times wider than its neighbours and wrapped every row to
+    # three lines. It is rendered once, as a context line under the table it
+    # qualifies -- see _no_replacement_note.
+    return dict(verdicts)
 
 
 def _headline(
@@ -583,6 +578,54 @@ def _headline(
                 "headline accuracy says. Evidence in the tables below."
             ),
         ],
+    )
+
+
+def _survivors(verdicts: dict[str, str]) -> list[str]:
+    """Tools that could actually replace a demoted one.
+
+    A verdict that is neither a demote nor a keep -- "n=12 < 30", "no spread",
+    "needs --rebuild" -- is NOT a survivor. Counting it as one lets the report
+    recommend retiring every tool it could assess while leaving the platform
+    holding only the one it just said it could not judge.
+
+    :param verdicts: mapping of tool name to verdict.
+    :return: names of tools that survive.
+    """
+    return [
+        tool
+        for tool, verdict in verdicts.items()
+        if verdict.startswith(("keep", "PROMOTE", "review"))
+    ]
+
+
+def _no_replacement_blocks(verdicts: dict[str, str]) -> list[dict[str, Any]]:
+    """The no-replacement warning as blocks, or nothing when it does not apply.
+
+    :param verdicts: mapping of tool name to verdict for one platform.
+    :return: a single context block, or an empty list.
+    """
+    note = _no_replacement_note(verdicts)
+    return [context(note)] if note else []
+
+
+def _no_replacement_note(verdicts: dict[str, str]) -> str | None:
+    """The warning that belongs under a table where every tool demotes.
+
+    Rendered once, adjacent to the rows it qualifies, rather than repeated in
+    each row. Acting on the demotes one at a time would retire every forecaster
+    on the platform, which is why it has to sit beside the table and not only
+    in the headline message.
+
+    :param verdicts: mapping of tool name to verdict for one platform.
+    :return: the warning, or None when at least one tool survives.
+    """
+    if not verdicts or _survivors(verdicts):
+        return None
+    return (
+        f":warning: *NO REPLACEMENT* - all {len(verdicts)} deployed tools "
+        "demote. Acting on these row by row would leave the platform with no "
+        "forecaster at all; treat it as a platform-level problem."
     )
 
 
@@ -1109,7 +1152,12 @@ def build_digest_messages(
                             order_at, windows["w1"], windows["at"], roi, "production"
                         ),
                     ),
-                ],
+                ]
+                + _no_replacement_blocks(
+                    _verdicts_for(
+                        sorted(prod_tools), windows["at"], True, windows["w1"]
+                    )
+                ),
             )
         )
 

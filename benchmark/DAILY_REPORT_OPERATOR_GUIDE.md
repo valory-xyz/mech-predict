@@ -50,19 +50,37 @@ The title tells you the outcome before you read anything else:
 | 🔴 **NO ACTION** | every deployed tool is failing, but switching them all off would leave nothing running. Escalate, do not act tool-by-tool |
 | ⚪ **NO CHANGE** | nothing to do |
 
-### The columns that matter
+### The two gates, in one sentence each
 
-Only three. Everything else is context.
+> **PROMOTE** a tournament tool when it has **at least 30 scored markets**, its **`floor` is above +0.04**, and its **`condAcc` is 50% or better**.
 
-- **`Edge`** — how much better the tool was than the market price. Above zero means it beat the
-  price. This is what the tables are sorted by, best at the top.
-- **`floor`** — the *worst case* for that Edge, allowing for luck and small samples. A tool is
-  only promotable if this is comfortably above zero.
-- **`condAcc`** — how often the tool was right *when it disagreed with the price*. Those are the
-  only markets a bet is placed on. **Under 50% means a coin flip**, however good the rest looks.
+> **DEMOTE** a production tool when it has **at least 30 scored markets** and **either** its **`condAcc` is below 50%**, **or** its Brier is worse than its own no-skill baseline in **both** the week and the cumulative window — **unless** demoting it would leave the platform with no tool at all.
 
-Ignore `Brier` on its own. It looks like a score but it moves with how hard the questions were,
-so a tool can look better simply because it had an easier week. That is why `Edge` exists.
+If nothing clears the promote gate, **promote nothing**. The tables are still ranked by `Edge`
+so you can see who is closest, but being top of the table is not a reason to promote.
+
+### Why those three numbers — a worked example
+
+Four candidates. Each fails for a different reason, and each reason is a column.
+
+| tool | Edge | spread | markets | `floor` | `condAcc` | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| lucky-v1 | **+0.30** | 1.60 | 100 | +0.037 | 61% | `no: +0.003 short` |
+| bluffer-v2 | +0.09 | 0.10 | 100 | **+0.074** | **45%** | `review: floor ok, condAcc 45%` |
+| solid-v3 | +0.09 | 0.10 | 100 | +0.074 | 62% | **`PROMOTE`** |
+| thin-v4 | +0.25 | 0.30 | **12** | +0.108 | 70% | `n=12 < 30` |
+
+- **`lucky-v1` has the best Edge and is still refused.** Its results swing wildly, so once you
+  allow for that its worst case is +0.037 — just under the bar. A big average built on a few
+  lucky wins is not an edge you can bet on. **That is what `floor` protects against.**
+- **`bluffer-v2` passes the floor and is still refused.** It scores well overall, but when it
+  actually *disagrees with the price* it is right only 45% of the time — worse than a coin. It
+  earns its score by agreeing with the market on easy questions, which makes no money.
+  **That is what `condAcc` protects against.**
+- **`solid-v3` is the same Edge as bluffer-v2, but right 62% of the time when it disagrees.**
+  Promote it.
+- **`thin-v4` looks best of all and is refused for having 12 markets.** Not "no improvement" —
+  *not enough evidence yet*. Leave it running and look again next week.
 
 ### Alerts mean "wait"
 
@@ -75,13 +93,14 @@ If a tool is marked **`*`**, it has too few markets to judge. Do not act on it.
 
 ## 3. What to do
 
-**The report already applies the rules.** The `rec` column is the recommendation; you are
-checking it, not recalculating it.
+**The report already applies the gates above.** The `rec` column is the recommendation; you
+are checking it, not recalculating it.
 
 | `rec` says | You do |
 |---|---|
 | `PROMOTE` | promote it (below) |
 | `demote: …` | demote it (below) |
+| `review: …` | look at it, but do not promote — it cleared the floor and failed `condAcc` |
 | `keep` | nothing |
 | `n=… < 30`, `no spread`, `needs --rebuild` | nothing — not enough data, or the scorer needs a rebuild |
 

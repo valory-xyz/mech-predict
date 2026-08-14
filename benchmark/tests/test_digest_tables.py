@@ -32,6 +32,8 @@ from typing import Any
 
 import pytest
 from benchmark.digest_tables import (
+    TITLE_RULE,
+    VERDICT_MARKER,
     _edge_lower_bound,
     _no_replacement_note,
     _verdict,
@@ -1113,10 +1115,19 @@ class TestTitle:
         _write(results, "rolling_scores_polymarket.json", {"alpha": _stats()})
         _write(results, "prev_rolling_scores_polymarket.json", {"alpha": _stats()})
         _write(results, "scores_tournament_polymarket.json", {})
-        first = build_digest_messages(results, "polymarket")[0]["blocks"][0]
+        payload = build_digest_messages(results, "polymarket")[0]
+        first = payload["blocks"][0]
         assert first["type"] == "header"
         assert first["text"]["type"] == "plain_text"
-        assert first["text"]["text"] == "Benchmark Report (Polystrat) - 2026-08-11"
+        # Rule / title / rule share ONE block: Slack pads between blocks, so a
+        # rule in its own section always sits a visible gap from its title.
+        rule, title, closing = first["text"]["text"].split("\n")
+        assert rule == closing == TITLE_RULE
+        assert "POLYSTRAT" in title
+        # The date is not in the header -- it is in the fallback and the
+        # context line, so the title stays one scannable line.
+        assert "2026-08-11" in payload["text"]
+        assert "2026-08-11" in payload["blocks"][2]["elements"][0]["text"]
 
 
 class TestHeadlineSafety:
@@ -1151,6 +1162,67 @@ class TestHeadlineSafety:
             _write(results, name, {"a": bad, "b": bad})
         _write(results, "scores_tournament_polymarket.json", {})
         headline = build_digest_messages(results, "polymarket")[0]
-        text = headline["blocks"][1]["text"]["text"]
-        assert "NO ACTION" in text
-        assert "DEMOTE" not in text
+        title = headline["blocks"][0]["text"]["text"]
+        assert "NO ACTION" in title
+        assert "DEMOTE" not in title
+        assert VERDICT_MARKER["blocked"] in title
+
+
+class TestVerdictMarker:
+    """The title's marker is derived from the verdict, never hardcoded."""
+
+    def _headline_title(self, tmp_path: Path, cohort: dict, tourn: dict) -> str:
+        """Render one platform and return its title text.
+
+        :param tmp_path: pytest temp dir.
+        :param cohort: production by_tool stats.
+        :param tourn: tournament by_tool stats.
+        :return: the header text.
+        """
+        results = tmp_path / "r"
+        results.mkdir(exist_ok=True)
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", tourn)
+        messages = build_digest_messages(results, "polymarket")
+        return messages[0]["blocks"][0]["text"]["text"]
+
+    def test_a_promotable_candidate_turns_the_marker_green(
+        self, tmp_path: Path
+    ) -> None:
+        """A candidate clearing the margin is the one green outcome.
+
+        :param tmp_path: pytest temp dir.
+        """
+        good = _stats(
+            edge=0.20,
+            edge_sd=0.10,
+            edge_n=200,
+            conditional_accuracy_rate=0.70,
+            brier=0.18,
+            baseline_brier=0.24,
+        )
+        title = self._headline_title(tmp_path, {"live": good}, {"cand": good})
+        assert VERDICT_MARKER["promote"] in title
+        assert "PROMOTE 1" in title
+
+    def test_nothing_to_do_is_the_neutral_marker(self, tmp_path: Path) -> None:
+        """A quiet day reads neutral, not alarming.
+
+        :param tmp_path: pytest temp dir.
+        """
+        fine = _stats(
+            edge=0.01,
+            edge_sd=0.10,
+            edge_n=200,
+            conditional_accuracy_rate=0.60,
+            brier=0.20,
+            baseline_brier=0.24,
+        )
+        title = self._headline_title(tmp_path, {"live": fine}, {})
+        assert VERDICT_MARKER["none"] in title
+        assert "NO CHANGE" in title

@@ -548,6 +548,21 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
     return dict(verdicts)
 
 
+# Drawn inside the header's own text, above and below the title, so the rule
+# and the title are ONE block. Slack pads BETWEEN blocks, so a rule in its own
+# section always sits a visible gap away from the title it belongs to.
+TITLE_RULE = "━" * 32
+
+# The marker states the day's outcome before a word is read. Keyed to the
+# verdict, never hardcoded.
+VERDICT_MARKER = {
+    "promote": "🟢",
+    "demote": "🟠",
+    "blocked": "🔴",
+    "none": "⚪",
+}
+
+
 def _headline(
     prod: dict[str, str],
     tourn: dict[str, str],
@@ -571,7 +586,9 @@ def _headline(
     promote = sorted(t for t, v in tourn.items() if v == "PROMOTE")
     demote = sorted(t for t, v in prod.items() if v.startswith("demote"))
     unjudged = sorted(
-        t for t, v in {**prod, **tourn}.items() if v.startswith("insufficient")
+        t
+        for t, v in {**prod, **tourn}.items()
+        if v.startswith(("n=", "no spread", "needs --rebuild"))
     )
     # Asked of the shared survivor rule, NOT of the verdict text. It used to
     # look for a "NO REPLACEMENT" substring; when that moved out of the rows
@@ -581,39 +598,46 @@ def _headline(
     blocked = bool(prod) and not _survivors(prod)
 
     if promote:
-        verdict = f"PROMOTE {len(promote)}: " + ", ".join(f"`{t}`" for t in promote)
+        state, token = "promote", f"PROMOTE {len(promote)}"
+        detail = "Promote " + ", ".join(f"`{t}`" for t in promote) + "."
     elif demote and not blocked:
-        verdict = f"DEMOTE {len(demote)}: " + ", ".join(f"`{t}`" for t in demote)
+        state, token = "demote", f"DEMOTE {len(demote)}"
+        detail = "Demote " + ", ".join(f"`{t}`" for t in demote) + "."
     elif demote:
-        verdict = (
-            f"NO ACTION - all {len(demote)} deployed tools fail the gate, so "
-            "demoting them would leave this platform with no forecaster. "
-            "Treat as a platform-level problem, not a tool swap."
+        state, token = "blocked", "NO ACTION"
+        detail = (
+            f"All {len(demote)} deployed tools fail the gate, so demoting them "
+            "would leave this platform with no forecaster. Treat as a "
+            "platform-level problem, not a tool swap."
         )
     else:
-        verdict = "NO CHANGE - no candidate clears the promote margin."
+        state, token = "none", "NO CHANGE"
+        detail = "No candidate clears the promote margin."
 
-    lines = [f"*{verdict}*"]
+    label = PLATFORM_TITLES.get(platform, platform.title())
+    marker = VERDICT_MARKER[state]
+    title = f"{TITLE_RULE}\n{marker}  {label.upper()}  ·  {token}\n{TITLE_RULE}"
+
+    lines = [detail]
     if unjudged:
         lines.append(
             f"_{len(unjudged)} tool(s) had too little data to judge: "
             + ", ".join(f"`{t}`" for t in unjudged)
             + "._"
         )
-    label = PLATFORM_TITLES.get(platform, platform.title())
-    title = f"Benchmark Report ({label})" + (f" - {as_of}" if as_of else "")
+    dated = f"{as_of}  ·  " if as_of else ""
     return message(
-        f"{title}: {verdict}",
+        f"{label} {as_of or ''}: {token}".strip(),
         [
             header(title),
             section("\n".join(lines)),
             context(
-                "Tables are RANKED BY `Edge` -- how far the tool beat the "
-                "market. Promotion is a different test: `floor` (Edge minus a "
-                f"penalty for uncertainty) must clear +{PROMOTE_DELTA} with n >= "
-                f"{MIN_SAMPLE_SIZE}. A tool winning under half the markets where "
-                "it disagreed with the price cannot be promoted whatever its "
-                "headline accuracy says. Evidence in the tables below."
+                f"{dated}Tables are RANKED BY `Edge` -- how far the tool beat "
+                "the market. Promotion is a different test: `floor` (Edge minus "
+                f"a penalty for uncertainty) must clear +{PROMOTE_DELTA} with "
+                f"n >= {MIN_SAMPLE_SIZE}. A tool winning under half the markets "
+                "where it disagreed with the price cannot be promoted whatever "
+                "its headline accuracy says."
             ),
         ],
     )

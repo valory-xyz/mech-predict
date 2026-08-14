@@ -33,11 +33,11 @@ from typing import Any
 import pytest
 from benchmark.digest_tables import (
     RELIABILITY_GATE,
-    _survivors,
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _edge_lower_bound,
     _no_replacement_note,
+    _survivors,
     _verdict,
     build_digest_messages,
 )

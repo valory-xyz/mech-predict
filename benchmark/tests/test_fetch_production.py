@@ -45,6 +45,7 @@ from benchmark.datasets.fetch_production import (
     _match_and_build,
     _match_delivery,
     _migrate_legacy_log,
+    _pad_request_id,
     _parse_request_context,
     _should_defer_unparsed,
     append_rows,
@@ -2289,6 +2290,67 @@ class _FakeMarketplaceSubgraph:
         return {"delivers": page}
 
 
+class TestPadRequestId:
+    """Verify the leading-zero normalisation on marketplace request IDs.
+
+    graph-node strips leading zeros from some ``Bytes32`` hex values,
+    so ``Deliver.request.id`` comes back at 64-65 chars for the subset
+    of IDs whose first byte contains zero nibbles, while the
+    mech-analytics lake stores every ``request_id`` at the full 66-char
+    padded form. ``_pad_request_id`` normalises both shapes to the
+    same string before the coverage check does set subtraction, so a
+    truncated ID and its padded twin collapse to one comparison unit.
+    Non-hex placeholders pass through untouched so a semantic test
+    fixture (``"0xreq_in"``) isn't silently reshaped into
+    ``"0x...req_in"``.
+    """
+
+    def test_pads_65_char_hex_to_66(self) -> None:
+        """65-char hex (1 leading zero stripped) → padded to 66 chars."""
+        # Modal production case (87% of the artifact's truncated missing IDs).
+        rid = "0x" + "8a0a16555a31f51eaca13f4984e7445e100ab3151dc0123de09520fa10129e0"
+        padded = (
+            "0x0" + "8a0a16555a31f51eaca13f4984e7445e100ab3151dc0123de09520fa10129e0"
+        )
+
+        assert _pad_request_id(rid) == padded
+        assert len(_pad_request_id(rid)) == 66
+
+    def test_pads_64_char_hex_to_66(self) -> None:
+        """64-char hex (2 leading zeros stripped) → padded to 66 chars."""
+        rid = "0x" + "2debc48c4622fe81215da0cdb87caea1f2578b0bbda8879656cc72e4bda896"
+        padded = (
+            "0x00" + "2debc48c4622fe81215da0cdb87caea1f2578b0bbda8879656cc72e4bda896"
+        )
+
+        assert _pad_request_id(rid) == padded
+        assert len(_pad_request_id(rid)) == 66
+
+    def test_already_full_length_passes_through_unchanged(self) -> None:
+        """Idempotence: a full-length hex ID is returned byte-identical."""
+        rid = "0x" + "5df6b8c116b6ffc0e25d6374337bcb030ab2be2bcbdd98733ac7479acd752c68"
+
+        assert _pad_request_id(rid) == rid
+
+    def test_uppercase_hex_preserved(self) -> None:
+        """Case-preservation: EIP-55-style mixed hex is not case-mangled."""
+        rid = "0x" + "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+        assert len(rid) == 66
+        assert _pad_request_id(rid) == rid
+
+    def test_non_hex_body_returned_unchanged(self) -> None:
+        """Semantic placeholders like ``"0xreq_in"`` must pass through unchanged."""
+        for fixture in ("0xreq_in", "0xreq_1", "0xdeliver", "0xreq_ok"):
+            assert (
+                _pad_request_id(fixture) == fixture
+            ), f"non-hex fixture {fixture!r} was mutated by the padder"
+
+    def test_missing_0x_prefix_returned_unchanged(self) -> None:
+        """Inputs without a ``0x`` prefix are out of remit and returned as-is."""
+        assert _pad_request_id("abcdef") == "abcdef"
+        assert _pad_request_id("") == ""
+
+
 class TestFetchAllDeliveryRequestIds:
     """Coverage-side enumeration with cursor pagination.
 
@@ -2317,6 +2379,62 @@ class TestFetchAllDeliveryRequestIds:
             "blockTimestamp": str(delivery_ts),
             "request": request,
         }
+
+    def test_truncated_subgraph_request_id_is_padded_in_the_result_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Truncated ``Deliver.request.id`` values must be padded on ingest.
+
+        graph-node strips leading zeros from some ``Bytes32`` hex
+        values, and the mech-analytics lake stores every
+        ``request_id`` in its full 66-char padded form. The coverage
+        check compares the two sets by string equality, so a
+        truncated ID and its padded twin must collapse to the same
+        string on the way into ``request_ids`` — otherwise every
+        stripped ID is a false-positive "missing from lake" hit
+        (measured at ~5% of ``Deliver.request.id`` on marketplace-
+        gnosis, which dominated 93% of one recent run's missing
+        list). Sole tap that keeps the invariant local: normalise on
+        ingest, not at every comparison site.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        request_ts_gt = 1_700_000_000
+        request_ts_lt = 1_700_100_000
+        truncated = (
+            "0x" + "8a0a16555a31f51eaca13f4984e7445e100ab3151dc0123de09520fa10129e0"
+        )
+        padded = (
+            "0x0" + "8a0a16555a31f51eaca13f4984e7445e100ab3151dc0123de09520fa10129e0"
+        )
+        assert len(truncated) == 65 and len(padded) == 66
+        rows = [
+            self._deliver(
+                "0xd_trunc",
+                delivery_ts=request_ts_gt + 500,
+                request_id=truncated,
+                request_ts=request_ts_gt + 100,
+            ),
+        ]
+        fake = _FakeMarketplaceSubgraph(rows)
+        monkeypatch.setattr(fp, "_post_graphql", fake)
+
+        ids, dropped = fp.fetch_all_delivery_request_ids(
+            "http://marketplace",
+            request_ts_gt=request_ts_gt,
+            request_ts_lt=request_ts_lt,
+        )
+
+        assert ids == {
+            padded
+        }, f"expected the padded form in the result set, got {ids!r}"
+        assert truncated not in ids, (
+            "the truncated hex form must not appear in the result set — "
+            "it would produce a false-positive 'missing from lake' hit "
+            "on every string-comparison"
+        )
+        assert dropped == 0
 
     def test_single_page_sweep_filters_client_side_on_request_time(
         self, monkeypatch: pytest.MonkeyPatch

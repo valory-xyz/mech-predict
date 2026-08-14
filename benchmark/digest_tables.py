@@ -99,6 +99,7 @@ from benchmark.slack_blocks import (
     section,
     table_block,
 )
+from benchmark.slack_tables import display_width
 
 log = logging.getLogger(__name__)
 
@@ -551,7 +552,14 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
 # Drawn inside the header's own text, above and below the title, so the rule
 # and the title are ONE block. Slack pads BETWEEN blocks, so a rule in its own
 # section always sits a visible gap away from the title it belongs to.
-TITLE_RULE = "━" * 32
+#
+# Its length is derived from the title it frames rather than fixed: the title
+# grows with the platform name, the verdict token and the date, and a constant
+# rule ends up shorter than the line it is meant to underline. Slack renders
+# headers in a proportional font, so this cannot be exact -- it tracks the
+# title instead of pretending to match it.
+TITLE_RULE_CHAR = "━"
+TITLE_RULE_MIN = 24
 
 # The marker states the day's outcome before a word is read. Keyed to the
 # verdict, never hardcoded.
@@ -621,7 +629,9 @@ def _headline(
     # deserves. It stays inside the rules so the whole identity of the report
     # -- platform, outcome, day -- is one block.
     stamp = f"  ·  {as_of}" if as_of else ""
-    title = f"{TITLE_RULE}\n{marker}  {label.upper()}  ·  {token}{stamp}\n{TITLE_RULE}"
+    line = f"{marker}  {label.upper()}  ·  {token}{stamp}"
+    rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
+    title = f"{rule}\n{line}\n{rule}"
 
     lines = [detail]
     if unjudged:

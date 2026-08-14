@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 from benchmark.digest_tables import (
-    TITLE_RULE,
+    TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _edge_lower_bound,
     _no_replacement_note,
@@ -1122,12 +1122,13 @@ class TestTitle:
         # Rule / title / rule share ONE block: Slack pads between blocks, so a
         # rule in its own section always sits a visible gap from its title.
         rule, title, closing = first["text"]["text"].split("\n")
-        assert rule == closing == TITLE_RULE
+        assert rule == closing and set(rule) == {TITLE_RULE_CHAR}
         assert "POLYSTRAT" in title
         # Date on the TITLE line, inside the rules, so platform, outcome and
         # day are one block. A third header line would render it at header
         # size, which is louder than a date deserves.
         assert "2026-08-11" in title
+        assert len(rule) >= len(title) - 2, "rule spans the title it frames"
         assert "2026-08-11" in payload["text"]
 
 

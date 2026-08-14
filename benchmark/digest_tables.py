@@ -464,6 +464,21 @@ def _below_no_skill(stats: dict[str, Any] | None) -> bool:
     return brier is not None and base is not None and brier - base >= NO_SKILL_MARGIN
 
 
+def _below_reliability(stats: dict[str, Any] | None) -> bool:
+    """Did this window fail to return a usable prediction often enough to matter?
+
+    Reliability is ``valid_n / n``. A tool that answers four calls in five is
+    not one the trader can lean on, whatever the four scored -- and the failures
+    are not a random sample, so the Brier computed on them is not a fair read of
+    the tool either.
+
+    :param stats: per-tool stats for one window.
+    :return: True when reliability is known and below the gate.
+    """
+    rate = _num((stats or {}).get("reliability"))
+    return rate is not None and rate < RELIABILITY_GATE
+
+
 def _verdict(
     stats: dict[str, Any] | None,
     deployed: bool,
@@ -512,6 +527,27 @@ def _verdict(
     # in prose. The reader can then check the verdict against a cell on the
     # same row, and the cell stays the width of the other columns instead of
     # wrapping to three lines.
+    # Reliability is a HARD gate, and it runs BEFORE the floor test so an
+    # unreliable tool can never read PROMOTE however good its bound looks. The
+    # score is computed only on the calls that returned a usable prediction, so
+    # a tool answering four in five is not 80% of a good tool -- the missing
+    # fifth is not a random sample, and the ROI sim already refuses to simulate
+    # it. Promoting something the simulator will not score is incoherent.
+    #
+    # Asymmetric on purpose, exactly like the no-skill rule below: a promote is
+    # blocked on a single window, a demote needs both to agree. Unreliability
+    # is usually an outage or an upstream API change, and one bad week should
+    # retire nothing.
+    if _below_reliability(stats):
+        # _below_reliability owns the threshold for BOTH windows. Inlining the
+        # comparison here too left the helper governing only `recent`, so
+        # loosening the boundary went uncaught by the boundary test.
+        rate = f"reliability {_num((stats or {}).get('reliability')):.0%}"
+        if not deployed:
+            return f"no: {rate}"
+        if recent is None or _below_reliability(recent):
+            return f"demote: {rate}"
+
     conditional = _num((stats or {}).get("conditional_accuracy_rate"))
     if lower > PROMOTE_DELTA:
         if conditional is not None and conditional < COIN_FLIP:

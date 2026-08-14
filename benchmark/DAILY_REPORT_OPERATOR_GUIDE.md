@@ -45,7 +45,7 @@ The title tells you the outcome before you read anything else:
 | 🔴 **NO ACTION** | no deployed tool clears the gate. Switching them all off would leave nothing running — escalate, do not act tool-by-tool |
 | ⚪ **NO CHANGE** | nothing to do |
 
-**The four columns that decide anything.** Everything else is context.
+**The five columns that decide anything.** Everything else is context.
 
 | Column | Reading |
 |---|---|
@@ -53,6 +53,7 @@ The title tells you the outcome before you read anything else:
 | **floor** | the *worst* Edge the evidence still supports. **This is what the gate tests**, not Edge |
 | **condAcc** | win rate on the markets where the tool **disagreed** with the price — the only markets a bet is placed on |
 | **n** | scored markets. Under 30, nothing is decided |
+| **rel** | share of calls that returned a usable answer. Under 80%, the tool is broken — its score is computed on the calls it *did* answer |
 
 ### Alerts mean "wait"
 
@@ -67,13 +68,13 @@ A **`*`** on a tool means too few markets to judge. Do not act on it.
 **The report already applies the gates.** The `rec` column is the recommendation — you are
 checking it, not recalculating it.
 
-> **PROMOTE** a tournament tool when it has **≥ 30 scored markets**, its **`floor` is above
-> +0.04**, and its **`condAcc` is 50% or better**.
+> **PROMOTE** a tournament tool when it has **≥ 30 scored markets**, its **`rel` is 80% or
+> better**, its **`floor` is above +0.04**, and its **`condAcc` is 50% or better**.
 
-> **DEMOTE** a production tool when it has **≥ 30 scored markets**, does **not** clear that
-> same floor, and **either** wins **under half** its disagreements **or** scores worse than
-> its own no-skill baseline in **both** windows — **unless** demoting it would leave the
-> platform with no tool at all.
+> **DEMOTE** a production tool with **≥ 30 scored markets** when **either** its **`rel` falls
+> below 80%**, **or** — having failed the promote floor — it wins **under half** its
+> disagreements or scores worse than its own no-skill baseline. The `rel` and no-skill
+> signals must show in **both** windows; **unless** demoting it would empty the platform.
 
 If nothing clears the promote gate, **promote nothing**. Being top of the table is not a
 reason to promote.
@@ -84,6 +85,7 @@ reason to promote.
 | `demote: …` | demote it (below) |
 | `review: …` | look, but do not promote — it cleared the floor and failed `condAcc` |
 | `keep` | nothing |
+| `no: reliability …` / `demote: reliability …` | the tool is failing calls — treat as broken, not as bad forecasting |
 | `n=… < 30`, `no spread`, `needs --rebuild` | nothing — not enough data, or the scorer needs a rebuild |
 
 ### A `PROMOTE` is a nomination, not a green light
@@ -140,10 +142,11 @@ That is the entire column: *given how few markets this is, how bad could the tru
 average still be?* Gating on `floor` rather than `Edge` means a tool must be good **and**
 well-proven, not merely good-looking. A great average off 31 lucky markets does not clear it.
 
-## Why the other three
+## Why the others
 
 | Metric | Why it gates |
 |---|---|
+| **`rel` ≥ 80%** | The score is computed only on the calls that came back. A tool answering four in five is not 80% of a good tool — the missing fifth is not a random sample, and the ROI simulation already refuses to score it |
 | **`condAcc` ≥ 50%** | A tool that agrees with the price on easy questions scores well and earns nothing — the trader only bets where the tool **disagrees**. Losing over half of those is a coin flip with costs |
 | **n ≥ 30** | Below it the report says *"not enough data yet"* — which is a different answer from *"no improvement"*, and must not be read as one |
 | **Brier vs base** | The demote signal must show in **both** windows. One window is noise: a live tool once sat 0.0003 above its floor over 2,055 markets while winning 65% of its disagreements |

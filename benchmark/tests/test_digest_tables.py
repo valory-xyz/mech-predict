@@ -32,6 +32,8 @@ from typing import Any
 
 import pytest
 from benchmark.digest_tables import (
+    RELIABILITY_GATE,
+    _survivors,
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _edge_lower_bound,
@@ -1378,3 +1380,77 @@ class TestStarvedAlertRobustness:
         body = _body(results, allowed_tools={"alpha"})
         assert "sample starved" in body
         assert "n/a scored rows in W-1" in body
+
+
+class TestReliabilityGate:
+    """Reliability is a hard gate, blocking promotes and demoting when sustained."""
+
+    def test_an_unreliable_candidate_cannot_promote_however_good_its_bound(
+        self,
+    ) -> None:
+        """The score is computed only on the calls that returned a prediction.
+
+        A tool answering four calls in five is not 80% of a good tool: the
+        missing fifth is not a random sample. A bound built on the answered
+        subset must not carry it into production.
+        """
+        strong = dict(edge=0.30, edge_sd=0.1, edge_n=200, conditional_accuracy_rate=0.7)
+        assert _verdict(_stats(reliability=0.99, **strong), deployed=False) == "PROMOTE"
+        assert (
+            _verdict(_stats(reliability=0.60, **strong), deployed=False)
+            == "no: reliability 60%"
+        )
+
+    def test_a_deployed_tool_demotes_only_when_both_windows_agree(self) -> None:
+        """Asymmetric like the no-skill rule: block fast, retire slowly.
+
+        Unreliability is usually an outage or an upstream change. One bad week
+        must not retire a working tool.
+        """
+        # brier BELOW its own base rate, so the no-skill rule stays silent and
+        # only the reliability rule is under test here.
+        sound = dict(
+            brier=0.2000, baseline_brier=0.2400, edge=0.01, edge_sd=0.1, edge_n=200
+        )
+        broken = _stats(reliability=0.50, **sound)
+        healthy = _stats(reliability=0.99, **sound)
+        # sustained -> demote
+        assert (
+            _verdict(broken, deployed=True, recent=broken) == "demote: reliability 50%"
+        )
+        # one window only -> not a demote
+        assert not _verdict(broken, deployed=True, recent=healthy).startswith("demote")
+        # no weekly window at all -> the single reading stands
+        assert _verdict(broken, deployed=True) == "demote: reliability 50%"
+
+    def test_the_gate_outranks_a_cleared_floor(self) -> None:
+        """It runs BEFORE the floor test, so a great bound cannot mask it."""
+        stats = _stats(
+            reliability=0.10,
+            edge=0.50,
+            edge_sd=0.05,
+            edge_n=500,
+            conditional_accuracy_rate=0.9,
+        )
+        assert _verdict(stats, deployed=False) == "no: reliability 10%"
+
+    def test_a_missing_reliability_does_not_block_anything(self) -> None:
+        """Absent data is not a failing grade -- it is absent."""
+        stats = _stats(edge=0.30, edge_sd=0.1, edge_n=200)
+        del stats["reliability"]
+        assert _verdict(stats, deployed=False) == "PROMOTE"
+
+    def test_the_boundary_is_inclusive(self) -> None:
+        """Exactly at the gate passes; a hair under fails."""
+        at = _stats(reliability=RELIABILITY_GATE, edge=0.30, edge_sd=0.1, edge_n=200)
+        under = _stats(
+            reliability=RELIABILITY_GATE - 0.01, edge=0.30, edge_sd=0.1, edge_n=200
+        )
+        assert _verdict(at, deployed=False) == "PROMOTE"
+        assert _verdict(under, deployed=False).startswith("no: reliability")
+
+    def test_an_unreliable_demote_is_not_a_survivor(self) -> None:
+        """It must count toward the never-empty-a-platform guard."""
+        verdicts = {"a": "demote: reliability 50%"}
+        assert _survivors(verdicts) == []
+        assert "NO REPLACEMENT" in (_no_replacement_note(verdicts, {}) or "")

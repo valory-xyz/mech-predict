@@ -484,6 +484,36 @@ def _verdict(
     deployed: bool,
     recent: dict[str, Any] | None = None,
 ) -> str:
+    """Apply the gate, then flag low reliability as a WARNING rather than a veto.
+
+    Reliability qualifies a good verdict instead of overturning it. A tool that
+    misses calls may still be the best forecaster available, and refusing to
+    promote it can leave a worse tool deployed -- so the number is surfaced on
+    the row and the human decides. Only the positive verdicts are annotated: a
+    demote needs no extra reason, and a row the gate could not judge is not
+    made clearer by a second caveat.
+
+    :param stats: per-tool stats for the decision window.
+    :param deployed: True for a production tool, False for a candidate.
+    :param recent: stats for the most recent week.
+    :return: a short verdict string for the ``rec`` cell.
+    """
+    verdict = _verdict_core(stats, deployed, recent)
+    rate = _num((stats or {}).get("reliability"))
+    if (
+        rate is not None
+        and rate < RELIABILITY_GATE
+        and verdict.startswith(("PROMOTE", "keep", "review"))
+    ):
+        return f"{verdict} (rel {rate:.0%})"
+    return verdict
+
+
+def _verdict_core(
+    stats: dict[str, Any] | None,
+    deployed: bool,
+    recent: dict[str, Any] | None = None,
+) -> str:
     """Apply the promote/demote gate to one tool.
 
     The rule is the policy's, stated once and used for both rosters:
@@ -538,16 +568,6 @@ def _verdict(
     # blocked on a single window, a demote needs both to agree. Unreliability
     # is usually an outage or an upstream API change, and one bad week should
     # retire nothing.
-    if _below_reliability(stats):
-        # _below_reliability owns the threshold for BOTH windows. Inlining the
-        # comparison here too left the helper governing only `recent`, so
-        # loosening the boundary went uncaught by the boundary test.
-        rate = f"reliability {_num((stats or {}).get('reliability')):.0%}"
-        if not deployed:
-            return f"no: {rate}"
-        if recent is None or _below_reliability(recent):
-            return f"demote: {rate}"
-
     conditional = _num((stats or {}).get("conditional_accuracy_rate"))
     if lower > PROMOTE_DELTA:
         if conditional is not None and conditional < COIN_FLIP:
@@ -608,7 +628,7 @@ def _headline(
         with "today" would misdate a report rendered from an older artifact.
     :return: a webhook payload.
     """
-    promote = sorted(t for t, v in tourn.items() if v == "PROMOTE")
+    promote = sorted(t for t, v in tourn.items() if v.startswith("PROMOTE"))
     demote = sorted(t for t, v in prod.items() if v.startswith("demote"))
     unjudged = sorted(
         t
@@ -731,7 +751,7 @@ def _no_replacement_note(
     """
     if not verdicts or _survivors(verdicts):
         return None
-    ready = sorted(t for t, v in (candidates or {}).items() if v == "PROMOTE")
+    ready = sorted(t for t, v in (candidates or {}).items() if v.startswith("PROMOTE"))
     if ready:
         names = ", ".join(f"`{t}`" for t in ready)
         return (

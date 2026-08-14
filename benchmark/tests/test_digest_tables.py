@@ -1382,75 +1382,113 @@ class TestStarvedAlertRobustness:
         assert "n/a scored rows in W-1" in body
 
 
-class TestReliabilityGate:
-    """Reliability is a hard gate, blocking promotes and demoting when sustained."""
+class TestReliabilityWarning:
+    """Reliability qualifies a verdict; it never overturns one."""
 
-    def test_an_unreliable_candidate_cannot_promote_however_good_its_bound(
+    def test_an_unreliable_candidate_still_promotes_but_carries_the_number(
         self,
     ) -> None:
-        """The score is computed only on the calls that returned a prediction.
+        """A warning, not a veto.
 
-        A tool answering four calls in five is not 80% of a good tool: the
-        missing fifth is not a random sample. A bound built on the answered
-        subset must not carry it into production.
+        A tool that misses calls may still be the best forecaster available,
+        and blocking it can leave a worse tool deployed. The number rides on
+        the row so the human decides.
         """
         strong = dict(edge=0.30, edge_sd=0.1, edge_n=200, conditional_accuracy_rate=0.7)
         assert _verdict(_stats(reliability=0.99, **strong), deployed=False) == "PROMOTE"
         assert (
             _verdict(_stats(reliability=0.60, **strong), deployed=False)
-            == "no: reliability 60%"
+            == "PROMOTE (rel 60%)"
         )
 
-    def test_a_deployed_tool_demotes_only_when_both_windows_agree(self) -> None:
-        """Asymmetric like the no-skill rule: block fast, retire slowly.
+    def test_an_annotated_promote_still_counts_as_a_promote(self) -> None:
+        """The headline matches on prefix, so the warning cannot mute it.
 
-        Unreliability is usually an outage or an upstream change. One bad week
-        must not retire a working tool.
+        Exact-equality matching would have turned the annotation into a silent
+        block -- the row would read PROMOTE while the headline said NO CHANGE.
         """
-        # brier BELOW its own base rate, so the no-skill rule stays silent and
-        # only the reliability rule is under test here.
+        assert _survivors({"a": "PROMOTE (rel 60%)"}) == ["a"]
+        note = _no_replacement_note(
+            {"bad": "demote: no-skill"}, {"cand": "PROMOTE (rel 60%)"}
+        )
+        assert note is not None and "NO DEPLOYED REPLACEMENT" in note
+
+    def test_a_deployed_tool_is_not_demoted_for_reliability_alone(self) -> None:
+        """It stays a keep, and stays a survivor."""
         sound = dict(
             brier=0.2000, baseline_brier=0.2400, edge=0.01, edge_sd=0.1, edge_n=200
         )
-        broken = _stats(reliability=0.50, **sound)
-        healthy = _stats(reliability=0.99, **sound)
-        # sustained -> demote
-        assert (
-            _verdict(broken, deployed=True, recent=broken) == "demote: reliability 50%"
-        )
-        # one window only -> not a demote
-        assert not _verdict(broken, deployed=True, recent=healthy).startswith("demote")
-        # no weekly window at all -> the single reading stands
-        assert _verdict(broken, deployed=True) == "demote: reliability 50%"
+        verdict = _verdict(_stats(reliability=0.50, **sound), deployed=True)
+        assert verdict == "keep (rel 50%)"
+        assert _survivors({"a": verdict}) == ["a"]
 
-    def test_the_gate_outranks_a_cleared_floor(self) -> None:
-        """It runs BEFORE the floor test, so a great bound cannot mask it."""
-        stats = _stats(
-            reliability=0.10,
-            edge=0.50,
-            edge_sd=0.05,
-            edge_n=500,
-            conditional_accuracy_rate=0.9,
+    def test_a_demote_is_not_annotated(self) -> None:
+        """A demote needs no second reason."""
+        bad = _stats(
+            reliability=0.50,
+            edge=0.01,
+            edge_sd=0.1,
+            edge_n=200,
+            conditional_accuracy_rate=0.3,
         )
-        assert _verdict(stats, deployed=False) == "no: reliability 10%"
+        assert _verdict(bad, deployed=True) == "demote: condAcc 30%"
 
-    def test_a_missing_reliability_does_not_block_anything(self) -> None:
-        """Absent data is not a failing grade -- it is absent."""
+    def test_an_unjudgeable_row_is_not_annotated(self) -> None:
+        """A caveat on "n=12 < 30" adds nothing."""
+        thin = _stats(reliability=0.50, edge=0.30, edge_sd=0.1, edge_n=12)
+        assert _verdict(thin, deployed=False) == "n=12 < 30"
+
+    def test_a_missing_reliability_annotates_nothing(self) -> None:
+        """Absent data is not a failing grade."""
         stats = _stats(edge=0.30, edge_sd=0.1, edge_n=200)
         del stats["reliability"]
         assert _verdict(stats, deployed=False) == "PROMOTE"
 
     def test_the_boundary_is_inclusive(self) -> None:
-        """Exactly at the gate passes; a hair under fails."""
-        at = _stats(reliability=RELIABILITY_GATE, edge=0.30, edge_sd=0.1, edge_n=200)
-        under = _stats(
-            reliability=RELIABILITY_GATE - 0.01, edge=0.30, edge_sd=0.1, edge_n=200
+        """Exactly at the gate is clean; a hair under warns."""
+        base = dict(edge=0.30, edge_sd=0.1, edge_n=200)
+        assert (
+            _verdict(_stats(reliability=RELIABILITY_GATE, **base), False) == "PROMOTE"
         )
-        assert _verdict(at, deployed=False) == "PROMOTE"
-        assert _verdict(under, deployed=False).startswith("no: reliability")
+        assert _verdict(
+            _stats(reliability=RELIABILITY_GATE - 0.01, **base), False
+        ).endswith("(rel 79%)")
 
-    def test_an_unreliable_demote_is_not_a_survivor(self) -> None:
-        """It must count toward the never-empty-a-platform guard."""
-        verdicts = {"a": "demote: reliability 50%"}
-        assert _survivors(verdicts) == []
-        assert "NO REPLACEMENT" in (_no_replacement_note(verdicts, {}) or "")
+    def test_the_headline_announces_an_annotated_promote(self, tmp_path: Path) -> None:
+        """End to end: the warning must not mute the headline.
+
+        _survivors matches on prefix, but the HEADLINE had its own exact
+        equality test. Annotating the verdict there would have produced a row
+        reading PROMOTE under a title reading NO CHANGE -- a warning that
+        silently became a block.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": _stats()})
+        _write(
+            results,
+            "scores_tournament_polymarket.json",
+            {
+                "cand": _stats(
+                    reliability=0.60,
+                    edge=0.30,
+                    edge_sd=0.1,
+                    edge_n=200,
+                    conditional_accuracy_rate=0.7,
+                )
+            },
+        )
+        messages = build_digest_messages(
+            results, "polymarket", allowed_tools={"alpha", "cand"}
+        )
+        title = messages[0]["blocks"][0]["text"]["text"]
+        assert "PROMOTE 1" in title
+        assert VERDICT_MARKER["promote"] in title
+        assert "rel 60%" in _body(results, allowed_tools={"alpha", "cand"})

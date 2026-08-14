@@ -1268,6 +1268,49 @@ DELIVER_REQUEST_IDS_QUERY = """
 _DELIVERY_LAG_ENVELOPE_S = 7 * 24 * 60 * 60
 
 
+def _pad_request_id(rid: str) -> str:
+    """Left-pad the hex body of a marketplace request_id to 32 bytes.
+
+    graph-node returns ``Bytes32`` fields with leading-zero-stripped
+    hex for a subset of rows — measured at ~5% of
+    ``Deliver.request.id`` on marketplace-gnosis — while the
+    mech-analytics lake stores every ``request_id`` in its full
+    66-character padded form. Without normalisation, the coverage
+    check's ``marketplace_ids - lake_ids`` set subtraction reports
+    every stripped ID as "missing from lake" even when the underlying
+    request is in fact in the lake, and the false-positive rate
+    dominates the real coverage signal (~93% of one recent run's
+    "missing" list were truncated hex strings whose padded form
+    resolved to an actual lake row).
+
+    Normalising here (on ingest into the marketplace-side set) rather
+    than at every comparison site keeps the invariant local: everything
+    in ``request_ids`` is in the same 66-char shape as the lake before
+    any set operation touches it.
+
+    Non-hex bodies are returned unchanged. Test fixtures use semantic
+    placeholders (``"0xreq_in"``, ``"0xreq_1"``) that would otherwise
+    be silently reshaped into ``"0x...req_in"`` and defeat the point
+    of a readable stub; a real producer sending non-hex IDs is also
+    left alone rather than reshaped into something equally wrong.
+
+    :param rid: request_id as returned by the marketplace subgraph.
+        Expected 66-char ``0x``-prefixed hex, but ``64-65`` chars
+        appear on the fraction of IDs whose leading byte has zero
+        nibbles.
+    :return: the same value padded to 66 chars if it decodes as
+        hex, otherwise returned unchanged.
+    """
+    if not rid.startswith("0x"):
+        return rid
+    body = rid[2:]
+    try:
+        int(body, 16)
+    except ValueError:
+        return rid
+    return "0x" + body.zfill(64)
+
+
 def fetch_all_delivery_request_ids(
     marketplace_url: str,
     request_ts_gt: int,
@@ -1397,7 +1440,7 @@ def fetch_all_delivery_request_ids(
                 dropped_no_rid += 1
                 continue
             if request_ts_gt < req_ts < request_ts_lt:
-                request_ids.add(rid)
+                request_ids.add(_pad_request_id(rid))
 
         log.info(
             "  fetched %d delivers (running set size %d)", len(page), len(request_ids)

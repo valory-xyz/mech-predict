@@ -2396,6 +2396,9 @@ class TestFetchAllDeliveryRequestIds:
         gnosis, which dominated 93% of one recent run's missing
         list). Sole tap that keeps the invariant local: normalise on
         ingest, not at every comparison site.
+
+        :param monkeypatch: pytest fixture used to swap the module's
+            ``_post_graphql`` for a fake subgraph.
         """
         # pylint: disable-next=import-outside-toplevel
         from benchmark.datasets import fetch_production as fp

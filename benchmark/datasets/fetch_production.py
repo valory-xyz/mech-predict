@@ -1293,6 +1293,13 @@ def _pad_request_id(rid: str) -> str:
     be silently reshaped into ``"0x...req_in"`` and defeat the point
     of a readable stub; a real producer sending non-hex IDs is also
     left alone rather than reshaped into something equally wrong.
+
+    :param rid: request_id as returned by the marketplace subgraph.
+        Expected 66-char ``0x``-prefixed hex, but ``64-65`` chars
+        appear on the fraction of IDs whose leading byte has zero
+        nibbles.
+    :return: the same value padded to 66 chars if it decodes as
+        hex, otherwise returned unchanged.
     """
     if not rid.startswith("0x"):
         return rid

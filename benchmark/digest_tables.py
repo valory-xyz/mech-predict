@@ -91,7 +91,14 @@ from typing import Any, Collection, Iterable, Sequence
 
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
-from benchmark.slack_blocks import Col, context, message, section, table_block
+from benchmark.slack_blocks import (
+    Col,
+    context,
+    header,
+    message,
+    section,
+    table_block,
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +113,9 @@ LOW_SAMPLE_MARK = "*"
 # sample floor. Rendering a delta off a 19-row window invites exactly the
 # false alarms this redesign exists to remove.
 INSUFFICIENT = "insufficient"
+
+# Deployment names, so the title matches what the team calls each platform.
+PLATFORM_TITLES = {"polymarket": "Polystrat", "omen": "Omenstrat"}
 
 WINDOW_FILES = {
     "at": "scores_{platform}.json",
@@ -164,6 +174,20 @@ def _load_window(path: Path) -> str | None:
     if not start or not end:
         return None
     return f"{str(start)[:10]}..{str(end)[:10]}"
+
+
+def _as_of(path: Path) -> str | None:
+    """The last date the scores file covers, for the title.
+
+    :param path: path to a scores json file.
+    :return: e.g. "2026-08-11", or None when unavailable.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    end = payload.get("window_end") or payload.get("generated_at")
+    return str(end)[:10] if end else None
 
 
 def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -525,7 +549,10 @@ def _guard_last_tools(verdicts: dict[str, str]) -> dict[str, str]:
 
 
 def _headline(
-    prod: dict[str, str], tourn: dict[str, str], platform: str
+    prod: dict[str, str],
+    tourn: dict[str, str],
+    platform: str,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Build the one-message answer: what to promote, what to demote.
 
@@ -536,6 +563,9 @@ def _headline(
     :param prod: verdicts for the deployed tools.
     :param tourn: verdicts for the candidates.
     :param platform: platform key, for the heading.
+    :param as_of: the last date the data covers, taken from the scores file
+        rather than a clock -- this module has no clock, and a title stamped
+        with "today" would misdate a report rendered from an older artifact.
     :return: a webhook payload.
     """
     promote = sorted(t for t, v in tourn.items() if v == "PROMOTE")
@@ -543,7 +573,12 @@ def _headline(
     unjudged = sorted(
         t for t, v in {**prod, **tourn}.items() if v.startswith("insufficient")
     )
-    blocked = any("NO REPLACEMENT" in v for v in prod.values())
+    # Asked of the shared survivor rule, NOT of the verdict text. It used to
+    # look for a "NO REPLACEMENT" substring; when that moved out of the rows
+    # the check silently became always-false and the headline flipped from
+    # NO ACTION to "DEMOTE 4" -- the exact instruction the guard exists to
+    # prevent.
+    blocked = bool(prod) and not _survivors(prod)
 
     if promote:
         verdict = f"PROMOTE {len(promote)}: " + ", ".join(f"`{t}`" for t in promote)
@@ -565,10 +600,13 @@ def _headline(
             + ", ".join(f"`{t}`" for t in unjudged)
             + "._"
         )
+    label = PLATFORM_TITLES.get(platform, platform.title())
+    title = f"Benchmark Report ({label})" + (f" - {as_of}" if as_of else "")
     return message(
-        f"Verdict ({platform})",
+        f"{title}: {verdict}",
         [
-            section(f"*TOOL VERDICT - {platform.upper()}*\n" + "\n".join(lines)),
+            header(title),
+            section("\n".join(lines)),
             context(
                 "Tables are RANKED BY `Edge` -- how far the tool beat the "
                 "market. Promotion is a different test: `floor` (Edge minus a "
@@ -1099,6 +1137,7 @@ def build_digest_messages(
             _verdicts_for(sorted(prod_tools), windows["at"], True, windows["w1"]),
             _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
             platform,
+            _as_of(results_dir / WINDOW_FILES["at"].format(platform=platform)),
         )
     ]
 

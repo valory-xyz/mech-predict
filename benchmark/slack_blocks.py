@@ -123,7 +123,7 @@ def table_block(
             columns
         ), f"row has {len(row)} cells, expected {len(columns)}: {row!r}"
 
-    header = [cell(column.header) for column in columns]
+    header_row = [cell(column.header) for column in columns]
     body = [[cell(value) for value in row] for row in rows]
 
     total = sum(len(column.header) for column in columns) + sum(
@@ -135,7 +135,7 @@ def table_block(
 
     return {
         "type": "table",
-        "rows": [header] + body,
+        "rows": [header_row] + body,
         "column_settings": [
             {"align": column.align, "is_wrapped": column.wrap} for column in columns
         ],
@@ -149,6 +149,22 @@ def section(text: str) -> dict[str, Any]:
     :return: a ``section`` block.
     """
     return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+def header(text: str) -> dict[str, Any]:
+    """Build a header block -- Slack's large-title style.
+
+    ``plain_text`` only: a ``mrkdwn`` text object is rejected by
+    blocks.validate, so a header cannot carry inline formatting. Slack caps it
+    at 150 characters.
+
+    :param text: the title, plain text.
+    :return: a ``header`` block.
+    """
+    return {
+        "type": "header",
+        "text": {"type": "plain_text", "text": text[:150], "emoji": True},
+    }
 
 
 def context(text: str) -> dict[str, Any]:

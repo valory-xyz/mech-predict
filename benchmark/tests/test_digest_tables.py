@@ -1084,3 +1084,73 @@ class TestFloorIsVisible:
         assert top[0] == "1", "best Edge leads"
         assert "-0.1935" in top, "and its floor shows why it is not promotable"
         assert not top[-1].startswith("PROMOTE")
+
+
+class TestTitle:
+    """The report titles itself, at header size, with the data's own date."""
+
+    def test_header_block_carries_platform_and_date(self, tmp_path: Path) -> None:
+        """A `header` block, dated from window_end rather than a clock.
+
+        Slack renders `header` at title size and accepts plain_text only --
+        a mrkdwn text object is rejected. The date comes from the data so a
+        report rendered from an older artifact is not stamped with today.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        (results / "scores_polymarket.json").write_text(
+            json.dumps(
+                {
+                    "window_start": "2026-07-01T00:00:00Z",
+                    "window_end": "2026-08-11T03:26:49Z",
+                    "by_tool": {"alpha": _stats()},
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write(results, "rolling_scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": _stats()})
+        _write(results, "scores_tournament_polymarket.json", {})
+        first = build_digest_messages(results, "polymarket")[0]["blocks"][0]
+        assert first["type"] == "header"
+        assert first["text"]["type"] == "plain_text"
+        assert first["text"]["text"] == "Benchmark Report (Polystrat) - 2026-08-11"
+
+
+class TestHeadlineSafety:
+    """The NO ACTION headline must not depend on verdict wording."""
+
+    def test_all_demote_still_says_no_action(self, tmp_path: Path) -> None:
+        """Every tool demoting yields NO ACTION, never "DEMOTE n".
+
+        The check used to search the verdict text for a "NO REPLACEMENT"
+        substring. When that warning moved out of the rows, the check silently
+        became always-false and the headline flipped to "DEMOTE 4" -- the exact
+        instruction the guard exists to prevent. It now asks the shared
+        survivor rule instead of reading strings.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.40,
+        )
+        for name in (
+            "scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"a": bad, "b": bad})
+        _write(results, "scores_tournament_polymarket.json", {})
+        headline = build_digest_messages(results, "polymarket")[0]
+        text = headline["blocks"][1]["text"]["text"]
+        assert "NO ACTION" in text
+        assert "DEMOTE" not in text

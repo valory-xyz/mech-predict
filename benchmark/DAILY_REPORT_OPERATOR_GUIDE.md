@@ -1,8 +1,18 @@
 # Daily report — operator guide
 
 What to do each morning with the benchmark report in Slack.
-The statistics behind it live in [PROMOTE_DEMOTE_POLICY.md](PROMOTE_DEMOTE_POLICY.md); this
-page is the daily routine.
+
+This is the **daily operating page** for one part of a larger system:
+
+| Document | Answers |
+|---|---|
+| [PROPOSAL.md](PROPOSAL.md) | how the whole loop is designed — harvest, benchmark, search, promote |
+| [PROMOTE_DEMOTE_POLICY.md](PROMOTE_DEMOTE_POLICY.md) | the statistics behind the gate |
+| **this page** | what to do with today's report |
+
+In the loop of [PROPOSAL.md](PROPOSAL.md) — `HARVEST → BENCHMARK → SEARCH → PROMOTE` — the
+daily report is the readout of **BENCHMARK**, and this page is how a human turns that readout
+into a decision.
 
 ---
 
@@ -110,7 +120,23 @@ are checking it, not recalculating it.
 2. Is `condAcc` **under 50%**? → do not promote it, whatever else says.
 3. Would demoting leave the platform with **no tool**? → the title says 🔴 NO ACTION. Escalate.
 
-### To promote a tool — two repositories, in order
+### A `PROMOTE` verdict is a nomination, not a green light
+
+The report says a candidate **passes the statistical gate**. Deployment still needs the rest of
+[PROPOSAL.md](PROPOSAL.md) Part 10:
+
+```mermaid
+flowchart LR
+    R["daily report<br/>says PROMOTE"] --> A["ablation<br/>(Part 8)"]
+    A --> H["human review<br/>(Part 9)"]
+    H --> C["canary<br/>(Part 10 step 5)"]
+    C --> live["full production"]
+```
+
+Skipping straight to deployment is how a tool that wins overall but is catastrophically worse on
+one category gets shipped. The steps below are the mechanics of the last box.
+
+### To deploy a tool — two repositories, in order
 
 ```mermaid
 flowchart LR

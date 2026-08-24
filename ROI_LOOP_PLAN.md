@@ -84,6 +84,10 @@ Labels: [READY] = evidence is in, build now · [RESEARCH-FIRST] = answer its que
 | 8 | **Only ask questions research can answer.** Many markets can't be researched: "will a podcast guest say word X" (speech-habit guessing), short-term price moves (news is already in the price), sports (the odds beat anything our tools read). Build a classifier labeling every market researchable-or-not: (a) split reports and issues by it [READY]; (b) later, let the trader skip the rest [RESEARCH-FIRST] | (a) mech-predict · (b) trader | Market selection | In an internal study, only 38% of Polymarket markets were researchable — and 42% of forecast spend went where research cannot help | M |
 | 9 | **Stamp every bet with the tool that produced it** [READY] | trader | Measurement | Today not one dollar of profit or loss can be attributed to a tool version; a badly broken release stayed invisible for 12 days | M |
 
+### Already in flight
+
+Two open PRs on the **daily Slack report** are early pieces of this plan: [#433](https://github.com/valory-xyz/mech-predict/pull/433) makes the report's numbers computed rather than transcribed (trustworthy inputs), and [#445](https://github.com/valory-xyz/mech-predict/pull/445) adds a promote/demote recommendation built on exactly the section-3 signals — edge over the market price with a statistical floor, plus accuracy-when-disagreeing. This plan does not duplicate them: #3 extends the same judgment from the daily report to **benchmark verdicts on candidate fixes**, and #6 adopts #445's gate as the promotion bar and adds the repeat-run and clean-data rules.
+
 ## 4. Rollout stages — nothing interferes with what is deployed
 
 **Every change ships without touching the running system**: loop changes live in reporting and benchmarks; tool changes are new versions with optional inputs/outputs; trader changes sit behind switches that are off by default.

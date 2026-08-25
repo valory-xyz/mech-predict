@@ -243,7 +243,7 @@ class TestDeltas:
         assert "-0.1400 worse" in cells, cells  # Edge -0.1700 vs -0.0300
 
     def test_low_sample_suppresses_delta(self, tmp_path: Path) -> None:
-        """A window under the floor shows the value, warning-marked."""
+        """A window under the floor shows value AND judgment, starred."""
         results = tmp_path / "r"
         results.mkdir()
         thin = _stats(valid_n=10, edge_n=10)
@@ -253,7 +253,7 @@ class TestDeltas:
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
         cells = _cells(body, "alpha")
-        assert any(c.endswith(" *") and c[0] in "+-" for c in cells)
+        assert any(c.endswith(" *") and ("better" in c or "worse" in c) for c in cells)
         assert "10 *" in cells, "under-floor counts carry the marker"
 
 
@@ -611,7 +611,10 @@ class TestPoolAwareGating:
         )
         cells = _cells(_body(results), "alpha")
         assert "+0.0500 worse" in cells, cells
-        assert sum(c.endswith(" *") and c[0] in "+-" for c in cells) >= 1, cells
+        assert (
+            sum(c.endswith(" *") and ("better" in c or "worse" in c) for c in cells)
+            >= 1
+        ), cells
 
 
 class TestPlatformAlertFloor:

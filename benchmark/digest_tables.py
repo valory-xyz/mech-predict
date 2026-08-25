@@ -226,7 +226,7 @@ def _delta(
     :param reference: stats for the comparison window (W-2 or all-time).
     :param field: metric key present in both stats dicts.
     :param lower_is_better: True for Brier, False for Edge.
-    :return: e.g. ``+0.0417 worse``, ``+0.0417 *`` (low sample), or ``n/a``.
+    :return: e.g. ``+0.0417 worse``, ``+0.0417 worse *`` (low sample), or ``n/a``.
     """
     if not current or not reference:
         return NA
@@ -237,12 +237,13 @@ def _delta(
     # Edge and mkt live on the edge-eligible pool; everything else on valid_n.
     count_field = "edge_n" if field in ("edge", "market_brier") else "valid_n"
     diff = a - b
-    if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
-        # Value shown, judgment withheld: under the sample floor the delta is
-        # real arithmetic but not evidence -- the same star the counts carry.
-        return f"{diff:+.4f} {LOW_SAMPLE_MARK}"
     improved = diff < 0 if lower_is_better else diff > 0
-    return f"{diff:+.4f} {'better' if improved else 'worse'}"
+    cell = f"{diff:+.4f} {'better' if improved else 'worse'}"
+    if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
+        # Same cell, starred: under the sample floor the arithmetic is real
+        # but not statistically significant -- the star the counts carry.
+        return f"{cell} {LOW_SAMPLE_MARK}"
+    return cell
 
 
 COMPLETENESS_RATIO = 0.70
@@ -272,14 +273,16 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
         [
             header(f"{rule}\n{line}\n{rule}"),
             context(
-                "Legend:\n"
-                f"\u2022 `{LOW_SAMPLE_MARK}`: marks a window under "
+                "*Legend:*\n"
+                f"\u2022 {LOW_SAMPLE_MARK}: marks a window under "
                 f"n = {MIN_SAMPLE_SIZE} -- the number is reported but not "
                 "statistically significant.\n"
-                "\u2022 `base`: Brier of always predicting the pool's "
-                "average YES rate -- the zero-skill floor.\n"
-                "\u2022 `mkt`: the market price's own Brier on the same "
-                "questions."
+                "\u2022 *n*: number of scored predictions, not distinct "
+                "markets -- a market asked repeatedly counts each time.\n"
+                "\u2022 *base*: score of always predicting the pool's "
+                "average YES rate -- the zero-skill reference.\n"
+                "\u2022 *mkt*: score of always predicting the current "
+                "market price -- the crowd reference."
             ),
         ],
     )

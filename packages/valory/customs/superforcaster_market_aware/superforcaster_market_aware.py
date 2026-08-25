@@ -135,8 +135,17 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
+# max_tokens is 4096, not the parent's 500. The parent emits a short prose
+# JSON object; this tool emits a 12-field structured object whose eight
+# reasoning fields carry the whole chain of thought. At 500 the completion is
+# truncated mid-object and `.parse()` raises "Could not parse response content
+# as the length limit was reached", which the decorator converts into
+# {"p_yes": null, ...} -- a delivery the trader rejects, i.e. silently no bet
+# on every single request. Every structured-output tool in this family
+# (superforcaster, superforcaster_calibrated_full_search,
+# superforcaster-polymarket-v4) uses 4096 for the same reason.
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"

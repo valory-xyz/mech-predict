@@ -760,6 +760,44 @@ class TestEvidenceReliabilityScreen:
         assert "does NOT apply to a market price supplied to you directly" in desc
 
 
+class TestTokenBudget:
+    """The completion budget has to fit the whole structured object."""
+
+    def test_max_tokens_is_large_enough_for_the_schema(self) -> None:
+        """A 500-token budget truncates the 12-field object mid-parse.
+
+        Found the hard way: inherited from the parent, which emits a short
+        prose JSON object. This tool emits eight reasoning fields plus four
+        numbers, so `.parse()` raised "Could not parse response content as the
+        length limit was reached" on EVERY live call, and the decorator turned
+        that into {"p_yes": null, ...} -- a delivery the trader rejects. The
+        failure is invisible to a stubbed test, which is why it needs an
+        explicit floor.
+        """
+        assert module.DEFAULT_OPENAI_SETTINGS["max_tokens"] >= 4096
+
+    def test_budget_matches_the_structured_output_siblings(self) -> None:
+        """Every structured-output tool in the family uses the same budget."""
+        import importlib
+
+        for sibling in (
+            "superforcaster",
+            "superforcaster_calibrated_full_search",
+            "superforcaster_polymarket_v4",
+        ):
+            mod = importlib.import_module(
+                f"packages.valory.customs.{sibling}.{sibling}"
+            )
+            assert (
+                mod.DEFAULT_OPENAI_SETTINGS["max_tokens"]
+                == module.DEFAULT_OPENAI_SETTINGS["max_tokens"]
+            ), f"{sibling} disagrees on the structured-output token budget"
+
+    def test_temperature_is_deterministic(self) -> None:
+        """Replay and A/B comparisons depend on temperature 0."""
+        assert module.DEFAULT_OPENAI_SETTINGS["temperature"] == 0
+
+
 class TestDeliveredPayload:
     """The bytes the trader receives must stay a flat, strict-parseable object."""
 

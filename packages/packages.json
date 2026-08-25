@@ -27,9 +27,9 @@
         "custom/valory/finetuned_prediction/0.1.0": "bafybeiclpkn4sqvri7k5aiklt5fm6hnt3tgo4qxtrkzxe4fwzfs2plgbk4",
         "custom/valory/propose_question/0.1.0": "bafybeif2dmjftef7pnixwnutn42tdaxbbr77anl5ixsv6kwsxnk7sm6fni",
         "custom/valory/superforcaster_polymarket_v4/0.1.0": "bafybeieuzna7fsv4iwz7gvqpvkurfdskd2tul6b4asjg4dcsp4oieic6ti",
-        "custom/valory/superforcaster_market_aware/0.1.0": "bafybeift3se6jk7sxrsu4s67pwtgkohm25cnlvwac3hwtauomcyjmuqrmy",
-        "agent/valory/mech_predict/0.1.0": "bafybeih6wehamk3fiu7dzy2vviq65erog6zrym3jixw4cb55lqufbzgwpe",
-        "service/valory/mech_predict/0.1.0": "bafybeid4ibcm4a3u24qnppgm22jknwc6w7wjbe2hwnhxyx5bnp4xkmvmwa"
+        "custom/valory/superforcaster_market_aware/0.1.0": "bafybeicahbrd5s4msfft4ykiiyyg2hev7l4smmnud6sisg25v7tg5vw75e",
+        "agent/valory/mech_predict/0.1.0": "bafybeigmppmi45dejsmxfnzuqan6jhsjzgpjnyvw3pwzwxy4c2gvckgtxy",
+        "service/valory/mech_predict/0.1.0": "bafybeihiyybj65fj4oi32onirp23p3y7obvd2edl3flaqyspiggyxppjha"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",

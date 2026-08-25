@@ -39,7 +39,9 @@ flowchart LR
 
 **Start with 1 → 2 this week.** 3 and 4 are independent and can run in parallel. 5–7 follow. (Open PRs #433/#445 — computed daily-report tables + promote/demote — are early pieces of 5 and 6.)
 
-**Success for 1–2:** the upgraded tool beats the original on the same markets — on accuracy *and* against the market price. Then promote it and repeat the recipe on the next tool.
+**Success for 1–2:** on the same markets and at the same information cutoff, the upgraded tool improves forecast quality over the original and adds value beyond the contemporaneous market price. Use Brier score or log loss as the primary forecast-quality measure, with accuracy as a sanity check; measure market-relative value by scoring against the market probability and simulating returns after fees, slippage, and execution constraints. Promote only when the improvement is large enough to be meaningful and repeats on a second run, then apply the recipe to the next tool.
+
+Accuracy alone is not sufficient for promotion: it reduces a probability forecast to a binary choice, ignores confidence and calibration, and does not show whether the market has already priced in the same information. A tool that always selects the favourite can be highly accurate but still lose money when its confidence is worse than the market's implied probability. Conversely, price-relative evaluation tests whether the tool contributes information that could create a tradeable edge. Accuracy should therefore remain a guardrail against degraded predictions, while calibrated performance relative to the market — and ultimately realizable returns — provides the decisive evidence.
 
 ## 4. Quick wins on the displayed metrics (independent of the loop)
 

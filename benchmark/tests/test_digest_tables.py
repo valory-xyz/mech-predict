@@ -403,7 +403,7 @@ class TestRendering:
         ]
         assert "superforcaster-polymarket-v1" in rows
         assert "retired" not in rows
-        assert "Deployed tools only" in body
+        assert body.count("Currently deployed tools only") >= 2
 
     def test_no_deployed_set_renders_the_scored_roster(self, tmp_path: Path) -> None:
         """Lookup failure (None) must widen the tables, never empty them.
@@ -425,7 +425,9 @@ class TestRendering:
             for r in b["rows"][1:]
         ]
         assert set(rows) >= {"a", "b"}
-        assert "Deployed tools only" not in "\n".join(_flatten(m) for m in payloads)
+        assert "Currently deployed tools only" not in "\n".join(
+            _flatten(m) for m in payloads
+        )
 
     def test_retired_tools_stay_out_of_1a_but_keep_their_90d_row(
         self, tmp_path: Path

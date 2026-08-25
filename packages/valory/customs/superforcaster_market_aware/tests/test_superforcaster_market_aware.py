@@ -428,7 +428,7 @@ class TestDeliveredPayload:
     """The bytes the trader receives must stay a flat, strict-parseable object."""
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_payload_is_flat_json_with_exactly_the_four_fields(
+    def test_payload_is_flat_json_with_the_four_required_plus_extras(
         self, mock_client_mgr: MagicMock
     ) -> None:
         """run() delivers strict-json.loads-parseable JSON, four keys, sum 1."""
@@ -446,8 +446,17 @@ class TestDeliveredPayload:
         raw = result[0]
         assert raw.lstrip()[:1] == "{", "a leading non-brace char means NO BET"
         payload = json.loads(raw)
-        assert set(payload) == {"p_yes", "p_no", "confidence", "info_utility"}
-        assert all(isinstance(v, float) for v in payload.values())
+        assert set(payload) == {
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+            "researchability",
+            "evidence_quality",
+            "market_prob_seen",
+        }
+        for required in ("p_yes", "p_no", "confidence", "info_utility"):
+            assert isinstance(payload[required], float)
         assert payload["p_yes"] + payload["p_no"] == 1.0
         for leaked in ("facts", "aggregation", "evidence_reliability_screen"):
             assert leaked not in raw
@@ -493,7 +502,9 @@ class TestSuperforcasterSourceContent:
         assert "**Content:**" in prediction_prompt
         # result[0] is the LLM completion content (via the OpenAIClient
         # wrapper), not an auto-MagicMock - so this JSON assertion is real.
-        assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
+        payload = json.loads(result[0])
+        for key, value in json.loads(PREDICTION_JSON).items():
+            assert payload[key] == value
 
     @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
     @patch(f"{SF_MODULE}.OpenAIClientManager")

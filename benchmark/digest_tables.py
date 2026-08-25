@@ -693,10 +693,9 @@ def build_digest_messages(
                 "1b. Production - 90D vs W-1",
                 [
                     section(
-                        "*1b. PRODUCTION 90D vs W-1 - ranked by `Edge 90d`*\n"
-                        "_90d: trailing 90-day window, recomputed nightly._"
+                        "*1b. PRODUCTION 90D vs W-1 - ranked by `Edge 90d`*"
                         + (
-                            " _Currently deployed tools only._"
+                            "\n_Currently deployed tools only._"
                             if deployed_tools is not None
                             else ""
                         )

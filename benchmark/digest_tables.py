@@ -75,7 +75,6 @@ NA = "n/a"
 LOW_SAMPLE_MARK = "*"
 
 # A delta renders only when BOTH windows clear the sample floor.
-INSUFFICIENT = "insufficient"
 
 # Deployment names, so the title matches what the team calls each platform.
 PLATFORM_TITLES = {"polymarket": "Polystrat", "omen": "Omenstrat"}
@@ -227,7 +226,7 @@ def _delta(
     :param reference: stats for the comparison window (W-2 or all-time).
     :param field: metric key present in both stats dicts.
     :param lower_is_better: True for Brier, False for Edge.
-    :return: e.g. ``+0.0417 worse``, ``+0.0417 \u26a0 insufficient``, or ``n/a``.
+    :return: e.g. ``+0.0417 worse``, ``+0.0417 *`` (low sample), or ``n/a``.
     """
     if not current or not reference:
         return NA
@@ -240,8 +239,8 @@ def _delta(
     diff = a - b
     if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
         # Value shown, judgment withheld: under the sample floor the delta is
-        # real arithmetic but not evidence, so no better/worse verdict.
-        return f"{diff:+.4f} \u26a0 {INSUFFICIENT}"
+        # real arithmetic but not evidence -- the same star the counts carry.
+        return f"{diff:+.4f} {LOW_SAMPLE_MARK}"
     improved = diff < 0 if lower_is_better else diff > 0
     return f"{diff:+.4f} {'better' if improved else 'worse'}"
 

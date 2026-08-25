@@ -253,7 +253,7 @@ class TestDeltas:
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
         cells = _cells(body, "alpha")
-        assert any("\u26a0 insufficient" in c for c in cells)
+        assert any(c.endswith(" *") and c[0] in "+-" for c in cells)
         assert "10 *" in cells, "under-floor counts carry the marker"
 
 
@@ -611,7 +611,7 @@ class TestPoolAwareGating:
         )
         cells = _cells(_body(results), "alpha")
         assert "+0.0500 worse" in cells, cells
-        assert sum("\u26a0 insufficient" in c for c in cells) >= 1, cells
+        assert sum(c.endswith(" *") and c[0] in "+-" for c in cells) >= 1, cells
 
 
 class TestPlatformAlertFloor:

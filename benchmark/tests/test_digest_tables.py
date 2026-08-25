@@ -392,6 +392,30 @@ class TestRendering:
                 elif name.startswith(("n ", "Brier", "Edge", "mkt", "base")):
                     assert align == "right", f"{name} must right-align"
 
+    def test_windows_read_left_to_right_in_time(self, tmp_path: Path) -> None:
+        """Older window left, newer right: W-2 before W-1, cum before W-1.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path,
+            at={"alpha": _stats()},
+            w1={"alpha": _stats()},
+            w2={"alpha": _stats()},
+        )
+        payloads = build_digest_messages(results, "polymarket")
+        for m in payloads:
+            for b in m["blocks"]:
+                if b["type"] != "table":
+                    continue
+                names = [c["text"] for c in b["rows"][0]]
+                if "n W-2" in names:
+                    assert names.index("n W-2") < names.index("n W-1")
+                    assert names.index("Brier W-2") < names.index("Brier W-1")
+                if "n cum" in names:
+                    assert names.index("n cum") < names.index("n W-1")
+                    assert names.index("Edge cum") < names.index("Edge W-1")
+
     def test_edge_renders_with_explicit_sign(self, tmp_path: Path) -> None:
         """A positive Edge carries a leading plus; Brier never does.
 

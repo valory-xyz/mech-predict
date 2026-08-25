@@ -273,10 +273,14 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
         [
             header(f"{rule}\n{line}\n{rule}"),
             context(
-                "Tables are RANKED BY `Edge` -- how far the tool beat the "
-                f"market. A `{LOW_SAMPLE_MARK}` marks a window under "
-                f"n = {MIN_SAMPLE_SIZE}, where a number is reported but not "
-                "yet worth reading."
+                "Legend:\n"
+                f"\u2022 `{LOW_SAMPLE_MARK}`: marks a window under "
+                f"n = {MIN_SAMPLE_SIZE} -- the number is reported but not "
+                "statistically significant.\n"
+                "\u2022 `base`: Brier of always predicting the pool's "
+                "average YES rate -- the zero-skill floor.\n"
+                "\u2022 `mkt`: the market price's own Brier on the same "
+                "questions."
             ),
         ],
     )
@@ -297,13 +301,13 @@ def _cols(names: Iterable[str]) -> tuple[Col, ...]:
 
 
 _W2_COLUMNS = _cols(
-    "#;tool;n W-1;n W-2;rel W-1;Brier W-1;Brier W-2;Δ Brier;base W-1;"
-    "base W-2;mkt W-1;mkt W-2;Edge W-1;Edge W-2;Δ Edge".split(";")
+    "#;tool;n W-2;n W-1;rel W-1;Brier W-2;Brier W-1;Δ Brier;base W-2;"
+    "base W-1;mkt W-2;mkt W-1;Edge W-2;Edge W-1;Δ Edge".split(";")
 )
 
 _AT_COLUMNS = _cols(
-    "#;tool;n W-1;n cum;rel W-1;Brier W-1;Brier cum;Δ Brier;base cum;"
-    "mkt W-1;mkt cum;Edge W-1;Edge cum;Δ Edge".split(";")
+    "#;tool;n cum;n W-1;rel W-1;Brier cum;Brier W-1;Δ Brier;base cum;"
+    "mkt cum;mkt W-1;Edge cum;Edge W-1;Δ Edge".split(";")
 )
 
 
@@ -350,18 +354,18 @@ def _rows_w2(
             (
                 str(ranked.index(tool) + 1) if tool in ranked else "-",
                 tool,
-                _count(a),
                 _count(b),
+                _count(a),
                 _reliability(a),
-                _score((a or {}).get("brier")),
                 _score((b or {}).get("brier")),
+                _score((a or {}).get("brier")),
                 _delta(a, b, "brier", lower_is_better=True),
-                _score((a or {}).get("baseline_brier")),
                 _score((b or {}).get("baseline_brier")),
-                _score((a or {}).get("market_brier")),
+                _score((a or {}).get("baseline_brier")),
                 _score((b or {}).get("market_brier")),
-                _score((a or {}).get("edge"), signed=True),
+                _score((a or {}).get("market_brier")),
                 _score((b or {}).get("edge"), signed=True),
+                _score((a or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
             )
         )
@@ -389,17 +393,17 @@ def _rows_at(
             (
                 str(ranked.index(tool) + 1) if tool in ranked else "-",
                 tool,
-                _count(a),
                 _count(b),
+                _count(a),
                 _reliability(a),
-                _score((a or {}).get("brier")),
                 _score((b or {}).get("brier")),
+                _score((a or {}).get("brier")),
                 _delta(a, b, "brier", lower_is_better=True),
                 _score((b or {}).get("baseline_brier")),
-                _score((a or {}).get("market_brier")),
                 _score((b or {}).get("market_brier")),
-                _score((a or {}).get("edge"), signed=True),
+                _score((a or {}).get("market_brier")),
                 _score((b or {}).get("edge"), signed=True),
+                _score((a or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
             )
         )

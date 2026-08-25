@@ -384,7 +384,7 @@ class TestRendering:
         results = _results_dir(
             tmp_path, at={"a": _stats()}, w1={"a": _stats()}, w2={"a": _stats()}
         )
-        assert build_digest_messages(results, "polymarket", deployed_tools=[]) == []
+        assert not build_digest_messages(results, "polymarket", deployed_tools=[])
 
     def test_deployed_filter_limits_1a_and_1b_to_live_tools(
         self, tmp_path: Path

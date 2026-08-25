@@ -31,13 +31,16 @@ import pytest
 from benchmark.grouping import _accumulate_group, _derive_group
 from benchmark.scorer import (
     PLATFORMS,
+    SCORES_SCHEMA_VERSION,
     SOURCE_LEGACY_LOGS,
     SOURCE_MECH_ANALYTICS,
     _cli_legacy_full_recompute,
     _cli_period,
     _derive_platform_path,
     _derive_tournament_path,
+    _finalize_scores,
     _is_edge_eligible,
+    _load_scores_for_resume,
     _partition_rows_by_platform,
     _score_extreme_predictions,
     _score_latency_reservoir,
@@ -3767,8 +3770,6 @@ class TestSchemaStampEarned:
         :param tmp_path: directory.
         :return: path.
         """
-        import json as _json
-
         legacy = {
             "current_month": "2026-08",
             "overall": {
@@ -3798,7 +3799,7 @@ class TestSchemaStampEarned:
         ):
             legacy[dim] = {}
         path = tmp_path / "scores.json"
-        path.write_text(_json.dumps(legacy))
+        path.write_text(json.dumps(legacy))
         return path
 
     def test_pre_migration_accumulator_keeps_its_old_version(
@@ -3811,28 +3812,22 @@ class TestSchemaStampEarned:
 
         :param tmp_path: pytest temp dir.
         """
-        from benchmark import scorer as scorer_mod
-
-        acc = scorer_mod._load_scores_for_resume(self._legacy(tmp_path))
+        acc = _load_scores_for_resume(self._legacy(tmp_path))
         assert acc is not None
-        out = scorer_mod._finalize_scores(acc)
-        assert out["schema_version"] < scorer_mod.SCORES_SCHEMA_VERSION
+        out = _finalize_scores(acc)
+        assert out["schema_version"] < SCORES_SCHEMA_VERSION
 
     def test_resume_restores_the_window_bounds(self, tmp_path: Path) -> None:
         """window_start/window_end survive the restore, so updates widen.
 
         :param tmp_path: pytest temp dir.
         """
-        import json as _json
-
         path = self._legacy(tmp_path)
-        data = _json.loads(path.read_text())
+        data = json.loads(path.read_text())
         data["window_start"] = "2020-01-01T00:00:00Z"
         data["window_end"] = "2026-08-01T00:00:00Z"
-        path.write_text(_json.dumps(data))
-        from benchmark import scorer as scorer_mod
-
-        acc = scorer_mod._load_scores_for_resume(path)
+        path.write_text(json.dumps(data))
+        acc = _load_scores_for_resume(path)
         assert acc is not None
         assert acc["window_start"] == "2020-01-01T00:00:00Z"
         assert acc["window_end"] == "2026-08-01T00:00:00Z"

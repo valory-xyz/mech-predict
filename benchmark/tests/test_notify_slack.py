@@ -28,6 +28,7 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
+from benchmark import tool_usage
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
@@ -593,8 +594,6 @@ class TestDeployedToolsForTriState:
 
         :param monkeypatch: pytest monkeypatch.
         """
-        import benchmark.tool_usage as tool_usage
-
         monkeypatch.setattr(
             tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": []}
         )
@@ -605,8 +604,6 @@ class TestDeployedToolsForTriState:
 
         :param monkeypatch: pytest monkeypatch.
         """
-        import benchmark.tool_usage as tool_usage
-
         monkeypatch.setattr(
             tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": None}
         )

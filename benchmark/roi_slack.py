@@ -567,7 +567,7 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
     bet_groups.sort(key=_display_sort_key)
 
     blocks: list[dict[str, Any]] = [
-        section("*SIMULATED TRADER ROI*"),
+        section("*4. SIMULATED TRADER ROI*"),
         table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]),
     ]
 
@@ -580,4 +580,4 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
     if tail:
         blocks.append(context(" · ".join(tail)))
 
-    return message(f"ROI companion ({platform})", blocks)
+    return message(f"4. Simulated trader ROI ({platform})", blocks)

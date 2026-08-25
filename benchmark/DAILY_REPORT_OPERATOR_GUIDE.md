@@ -37,11 +37,13 @@ flowchart LR
 
 Low reliability (`rel` < 80%) never decides — it annotates: `PROMOTE (rel 60%)`.
 
+**`PROMOTE` means *eligible*, not *merged*: confirm the win repeats on a second independent window or a benchmark holdout run before merging the promotion** (per the promotion criteria in ROI_LOOP_PLAN.md).
+
 ## 4. Every possible `rec` value
 
 | `rec` says | Meaning | You do |
 |---|---|---|
-| `PROMOTE` | candidate passed all three gate tests | start the promote flow (§5) |
+| `PROMOTE` | candidate passed all three gate tests | confirm on a second independent run, then start the promote flow (§5) |
 | `review: floor ok, condAcc NN%` | bound cleared but loses its disagreements — scores by agreeing with the market | look, do **not** promote |
 | `no: +0.0XX short` | bound missed the +0.04 margin by that much | nothing; watch it |
 | `no: condAcc NN%` | candidate loses the markets it disagrees on | nothing |
@@ -89,7 +91,9 @@ A textbook **one-sided 95% confidence lower bound on a mean** — the worst true
 | `spread ÷ √markets` | the **standard error**: how much that average would wobble on a re-drawn sample. The √ is why evidence compounds — halving the deduction takes 4× the markets |
 | `1.645` | the normal-curve point with 5% below it — the one-sided 95% multiplier |
 
-It claims: *if the per-market edges are independent, there is ≤5% chance the tool's true long-run Edge is below this number.* One-sided on purpose: a false promote loses money, a missed one costs a day.
+It claims: *if the per-market edges are independent, there is ≤5% chance the tool's true long-run Edge is below this number.*
+
+**Polymarket caveat:** deployed tools' `floor` is computed on production rows, which the trader's outcome-side filter censors to prices in **[0.20, 0.80]** — so a deployed-Polymarket floor is conditional on that band and **must not be compared against a candidate's (tournament) floor**, which sees uncensored prices. One-sided on purpose: a false promote loses money, a missed one costs a day.
 
 Known gaps, absorbed by the +0.04 margin: markets are not fully independent (ladder markets resolve off one event, so the deduction runs small), small samples would want Student-t rather than 1.645, and the test re-runs daily, so 95% is per-day, not per-decision.
 

@@ -487,17 +487,9 @@ def _verdict_core(
     # in prose. The reader can then check the verdict against a cell on the
     # same row, and the cell stays the width of the other columns instead of
     # wrapping to three lines.
-    # Reliability is a HARD gate, and it runs BEFORE the floor test so an
-    # unreliable tool can never read PROMOTE however good its bound looks. The
-    # score is computed only on the calls that returned a usable prediction, so
-    # a tool answering four in five is not 80% of a good tool -- the missing
-    # fifth is not a random sample, and the ROI sim already refuses to simulate
-    # it. Promoting something the simulator will not score is incoherent.
-    #
-    # Asymmetric on purpose, exactly like the no-skill rule below: a promote is
-    # blocked on a single window, a demote needs both to agree. Unreliability
-    # is usually an outage or an upstream API change, and one bad week should
-    # retire nothing.
+    # Reliability never vetoes: the _verdict wrapper annotates a positive
+    # verdict with (rel NN%) instead -- a tool that misses calls may still
+    # be the best forecaster available.
     conditional = _num((stats or {}).get("conditional_accuracy_rate"))
     if lower > PROMOTE_DELTA:
         if conditional is not None and conditional < COIN_FLIP:

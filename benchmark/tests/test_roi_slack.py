@@ -1325,9 +1325,7 @@ class TestRoiBlockMessageTails:
     """The block message must not lose what the text section carries."""
 
     @staticmethod
-    def _write(
-        tmp_path: Path, groups: list, as_of: str = "2020-01-01"
-    ) -> Path:
+    def _write(tmp_path: Path, groups: list, as_of: str = "2020-01-01") -> Path:
         """Write a minimal roi_results.json.
 
         :param tmp_path: directory.

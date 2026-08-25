@@ -20,10 +20,10 @@ flowchart LR
 
 ## 2. The rules
 
-1. **Tools emit forecast signals only** — probabilities and objective properties of the question (e.g. "is it researchable"). **The trading engine makes every decision.** No tool ever signals bet / don't-bet, in any wording.
-2. **Market data may be given to a tool as an *optional* input** — the tool must work exactly as today when it isn't.
-3. **Nothing interferes with current deployments** — tool changes are new versions; trader changes sit behind switches that are off by default.
-4. **Manual first, automation later** — improvements ship as direct PRs; the automated agent loop adopts a recipe only after it is proven.
+1. **Tools emit forecast signals only** — probabilities and objective properties of the question (e.g. "is it researchable").
+2. **The trading engine makes every decision.** No tool ever signals bet / don't-bet, in any wording.
+3. **Market data may be given to a tool as an *optional* input** — the tool must work exactly as today when it isn't.
+4. **Safe rollout, manual first** — nothing interferes with current deployments: tool changes are new versions, trader changes sit behind switches that are off by default, and improvements ship as direct PRs. The automated agent loop adopts a recipe only after it is proven.
 
 ## 3. Prioritized actions (each in one box, ranked by impact and effort)
 

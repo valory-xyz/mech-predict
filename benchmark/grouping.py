@@ -91,12 +91,8 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
             brier = brier_score(p_yes, outcome)
             edge = edge_score(p_yes, market_prob, outcome)
             group["edge_sum"] += edge
-            # The market's own Brier on this row. Accumulated separately
-            # rather than derived as ``brier + edge`` at read time: ``brier``
-            # averages over ALL valid rows while ``edge`` averages over the
-            # edge-eligible subset, so that identity only holds when the two
-            # pools coincide. Storing the market's error over its own pool
-            # keeps the reported figure exact.
+            # Market Brier over the edge-eligible pool. NOT derivable as
+            # brier+edge: those average over different row pools.
             if group.get("market_brier_sum") is not None:
                 group["market_brier_sum"] += (
                     market_prob - (1.0 if outcome else 0.0)
@@ -288,12 +284,8 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     :param scores: the full scores dict with accumulators.
     :param row: a production log row dict.
     """
-    # Observed window bounds. The accumulator's span is NOT what its
-    # `current_month` key suggests: on live data that field read 2026-08 while
-    # the file held every row since 2026-07-01, because the month rollover
-    # snapshots history without fully resetting the live file. Recording the
-    # real first and last row is the only way a reader -- or the digest -- can
-    # state the window it is looking at.
+    # Observed row bounds; current_month misstates the span after rollover
+    # (see benchmark.digest_tables._window_meta).
     stamp = row.get("predicted_at")
     if stamp:
         first = scores.get("window_start")

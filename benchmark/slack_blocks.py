@@ -18,16 +18,9 @@
 # ------------------------------------------------------------------------------
 """Build Slack Block Kit ``table`` blocks for the benchmark digest.
 
-Slack lays the columns out itself, so nothing here pads, measures or truncates
-a cell. That removes a whole class of defect the fixed-width renderer has to
-defend against: display-width miscounts on non-ASCII glyphs, a 239-character
-line that only scrolls on desktop, and column skew whenever a cell contains
-something wider than ``len()`` reports.
-
-Verified against Slack, not assumed
------------------------------------
-Every constraint below was checked against ``https://slack.com/api/blocks.validate``,
-which needs no token and no scopes:
+Constraints, verified against ``https://slack.com/api/blocks.validate``
+(over-budget blocks are REJECTED, surfacing as an opaque HTTP 400 on a
+webhook, so ``table_block`` asserts the documented budgets locally):
 
 * a cell is ``{"type": "cell_text", "text": "..."}``. ``raw_text`` and an
   ``elements`` array are both rejected, and ``style`` is not an allowed
@@ -37,16 +30,6 @@ which needs no token and no scopes:
   only -- ``start``/``end``/``justify`` are rejected) and ``is_wrapped``;
 * 20 columns validate, 21 do not;
 * a ``section`` and a ``table`` coexist in one message, and two tables do too.
-
-An incoming webhook accepts these blocks (HTTP 200 against a live webhook), so
-this needs no bot token, no OAuth scope and no transport change.
-
-Fail loud, not silent
----------------------
-Over-long TEXT is truncated by Slack; over-long BLOCKS are REJECTED, which on a
-webhook surfaces as an opaque HTTP 400. There is no graceful degradation, so
-:func:`table_block` asserts the documented budgets locally rather than letting
-an unattended CI job discover them.
 """
 
 from __future__ import annotations
@@ -73,10 +56,8 @@ class Col:
     """One table column.
 
     :param header: header cell text.
-    :param align: ``left``, ``right`` or ``center``. Numeric columns read far
-        better right-aligned, which the fixed-width renderer could not do.
-    :param wrap: whether Slack may wrap the cell. False keeps an identifier
-        such as a 37-character tool name on one line.
+    :param align: ``left``, ``right`` or ``center``.
+    :param wrap: whether Slack may wrap the cell.
     """
 
     header: str
@@ -98,15 +79,14 @@ def table_block(
 ) -> dict[str, Any]:
     """Build a ``table`` block from a column spec and pre-formatted rows.
 
-    The first rendered row is the header. Slack has no header-row flag and no
-    per-cell styling, so it is an ordinary row -- Slack styles it itself.
+    The first rendered row is the header (Slack has no header-row flag).
 
     :param columns: column specs; length must match every row's cell count.
     :param rows: pre-formatted cell strings, one sequence per row.
     :return: a Block Kit ``table`` block.
-    :raises AssertionError: on a row-arity mismatch, an unknown alignment, or a
-        documented Slack budget being exceeded -- all of which Slack would
-        otherwise reject as an opaque HTTP 400 on an unattended run.
+    :raises AssertionError: on a row-arity mismatch, an unknown alignment, or
+        a documented Slack budget being exceeded -- otherwise an opaque HTTP
+        400 on an unattended run.
     """
     assert (
         len(columns) <= MAX_COLUMNS
@@ -154,9 +134,7 @@ def section(text: str) -> dict[str, Any]:
 def header(text: str) -> dict[str, Any]:
     """Build a header block -- Slack's large-title style.
 
-    ``plain_text`` only: a ``mrkdwn`` text object is rejected by
-    blocks.validate, so a header cannot carry inline formatting. Slack caps it
-    at 150 characters.
+    ``plain_text`` only (mrkdwn is rejected); Slack caps it at 150 characters.
 
     :param text: the title, plain text.
     :return: a ``header`` block.
@@ -179,10 +157,7 @@ def context(text: str) -> dict[str, Any]:
 def message(fallback: str, blocks: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Wrap blocks in a webhook payload.
 
-    ``text`` is required as the notification fallback: it is what a reader sees
-    in a push notification and in clients that cannot render the blocks.
-
-    :param fallback: plain-text summary of the message.
+    :param fallback: plain-text summary, the notification fallback text.
     :param blocks: Block Kit blocks.
     :return: the JSON payload to POST to an incoming webhook.
     """

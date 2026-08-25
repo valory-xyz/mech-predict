@@ -278,9 +278,7 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     edge_avg = round(sum(edges) / len(edges), 4)
-    # See grouping.accumulate_row: the market's Brier is averaged over the
-    # edge-eligible rows, NOT reconstructed from the tool's all-valid-row
-    # ``brier`` plus ``edge`` -- those two average over different pools.
+    # Market Brier over the edge-eligible pool (see grouping._accumulate_group).
     market_briers = [
         (r["market_prob_at_prediction"] - (1.0 if r["final_outcome"] else 0.0)) ** 2
         for r in edge_rows
@@ -942,8 +940,7 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
     latency_reservoir = _score_latency_reservoir(rows)
     worst_10, best_10 = _score_extreme_predictions(rows)
 
-    # Observed bounds, so the rendered report can name the span it is showing
-    # instead of inferring one from a filename or a stale month stamp.
+    # Observed bounds so the report can name its span.
     stamps = sorted(r["predicted_at"] for r in rows if r.get("predicted_at"))
 
     return {
@@ -1247,11 +1244,8 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         restored["outcome_yes_count"] = g.get("outcome_yes_count", 0)
         restored["log_loss_sum"] = g.get("log_loss_sum", 0.0)
         restored["edge_sum"] = g.get("edge_sum", 0.0)
-        # None, NOT 0.0, when resuming from a scores.json written before this
-        # field existed: edge_n is restored in full, so a 0.0 sum would derive
-        # market_brier ~= 0 and read as "the market is nearly perfect" forever
-        # (the incremental path is the normal daily path; --rebuild is the
-        # exception). None makes _derive_group emit no value until a rebuild.
+        # None, not 0.0, for pre-field files: edge_n restores in full, so 0.0
+        # would derive market_brier ~= 0 forever on the incremental path.
         restored["market_brier_sum"] = g.get("market_brier_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)

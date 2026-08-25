@@ -16,27 +16,12 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Fixed-width table renderer shared by every Slack section this repo posts.
+"""Fixed-width Slack table renderer, extracted from ``benchmark.roi_slack``.
 
-Extracted verbatim from ``benchmark.roi_slack`` so the ROI companion and the
-benchmark digest render through ONE implementation. Slack desktop code blocks
-scroll horizontally rather than wrapping, so a wide table is legible; column
-widths are therefore content-driven and only columns given an explicit cap are
-ever ellipsized.
-
-Pure and stdlib-only: same ``(columns, rows)`` in, same bytes out. That is what
-makes a rendered Slack section golden-file testable, which is the whole point
-of building these tables in Python instead of asking a model to transcribe them.
-
-Display width, not character count
-----------------------------------
-Padding uses :func:`display_width`, which counts East-Asian *Wide* and
-*Fullwidth* characters -- and the symbols Slack renders as emoji -- as two
-columns. ``len()`` counts them as one, so a cell containing a glyph such as the
-parse-reliability warning renders one column short and skews every column to
-its right. Callers are still encouraged to keep table cells
-ASCII and reserve glyphs for prose -- this function makes a slip harmless
-rather than making glyphs advisable.
+Pure and stdlib-only: same ``(columns, rows)`` in, same bytes out. Padding is
+display-width-aware (:func:`display_width`) so emoji-presented glyphs cannot
+skew the columns to their right; only columns with an explicit cap are ever
+ellipsized.
 """
 
 from __future__ import annotations
@@ -55,8 +40,6 @@ class Column:
 
     :param header: header cell text; also participates in width computation.
     :param cap: maximum display width, or None for uncapped (content-driven).
-        Cap only free-form text; capping an identifier such as a tool name
-        destroys information a reader needs, and Slack scrolls anyway.
     """
 
     header: str
@@ -90,15 +73,6 @@ def char_width(char: str) -> int:
 
 def display_width(text: str) -> int:
     """Return the number of columns *text* occupies when Slack renders it.
-
-    East-Asian Wide and Fullwidth characters occupy two columns, as do the
-    symbols Slack renders as emoji (see ``_EMOJI_PRESENTATION_EXTRAS``) and any
-    character followed by the emoji variation selector. Everything else
-    occupies one. Combining marks are not handled -- no table cell in this repo
-    contains one.
-
-    Padding with ``len()`` instead is what skews a table: a cell carrying one
-    such glyph renders a column short and shifts every column to its right.
 
     :param text: cell text.
     :return: display width in columns.
@@ -184,17 +158,14 @@ def column_widths(
 
 
 def render_table(columns: Sequence[Column], rows: Sequence[Sequence[str]]) -> list[str]:
-    """Render header + divider + data lines.
-
-    Returns lines only -- callers add the code-block fences, so a caller can
-    place several tables in one message or skip the fence entirely.
+    """Render header + divider + data lines, without code-block fences.
 
     :param columns: column specs; length must match every row's cell count.
     :param rows: pre-formatted cell sequences, one per table row. An empty
-        list renders nothing (callers only emit a block when it has rows).
+        list renders nothing.
     :return: table lines, without code-block fences.
     :raises AssertionError: when a row's cell count differs from the column
-        count -- a silent column drop is far worse than a loud failure.
+        count.
     """
     if not rows:
         return []

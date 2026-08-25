@@ -448,6 +448,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
+          BENCHMARK_COMPUTED_TABLES: 'true'
         run: |
           python -m benchmark.notify_slack \
             --report benchmark/results/report_omen.md \
@@ -459,6 +460,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
           REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
+          BENCHMARK_COMPUTED_TABLES: 'true'
         run: |
           python -m benchmark.notify_slack \
             --report benchmark/results/report_polymarket.md \

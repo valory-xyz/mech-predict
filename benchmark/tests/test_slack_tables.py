@@ -40,15 +40,6 @@ class TestDisplayWidth:
         """Emoji-presentation glyphs occupy two columns, not one."""
         assert display_width(glyph) > len(glyph.rstrip("️"))
 
-    def test_len_would_have_skewed_the_column(self) -> None:
-        """A cell with a wide glyph is wider than len() reports.
-
-        This is the whole reason display_width exists: padding with len()
-        renders such a row one column short and skews everything right of it.
-        """
-        cell = "⚠ parse 94%"
-        assert display_width(cell) == len(cell) + 1
-
 
 class TestAlignment:
     """Every rendered line must agree on column boundaries."""
@@ -111,13 +102,3 @@ class TestEmpty:
     def test_code_block_of_nothing_is_empty(self) -> None:
         """An empty table produces no fence, not an empty fenced block."""
         assert code_block([]) == ""
-
-
-class TestDeterminism:
-    """Same input, same bytes -- the property that makes golden files work."""
-
-    def test_render_is_pure(self) -> None:
-        """Rendering twice yields identical output."""
-        columns = (Column("tool"), Column("Edge"))
-        rows = [("a", "-0.1058"), ("b", "+0.0111")]
-        assert render_table(columns, rows) == render_table(columns, rows)

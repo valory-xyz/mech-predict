@@ -352,10 +352,6 @@ def _build_report_url() -> str | None:
 def post_to_slack(webhook_url: str, summary: str | dict[str, Any]) -> None:
     """POST a message to a Slack incoming webhook.
 
-    Accepts either plain text or a full payload. The digest sends Block Kit
-    ``table`` blocks, which an incoming webhook accepts with no bot token; the
-    LLM prose and the ROI companion still send text.
-
     On rejection Slack returns the reason as a short plaintext body
     (e.g. ``invalid_payload``, ``no_text``, ``too_many_attachments``).
     ``urlopen`` raises :class:`HTTPError` before that body is read, so we
@@ -365,10 +361,8 @@ def post_to_slack(webhook_url: str, summary: str | dict[str, Any]) -> None:
     :param webhook_url: Slack incoming-webhook URL (from a secret).
     :param summary: message text, or a payload dict with ``text``/``blocks``.
     :raises RuntimeError: if Slack rejects the payload, with its reason.
-
-        Over-long TEXT is truncated by Slack, but over-long BLOCKS are
-        REJECTED -- so a blocks payload fails loudly here rather than posting
-        a silently shortened table.
+        Over-long blocks are rejected (not truncated like text), so a bad
+        table fails loudly.
     """
     body = summary if isinstance(summary, dict) else {"text": summary}
     payload = json.dumps(body).encode()
@@ -408,10 +402,6 @@ _PLATFORM_KEY_BY_LABEL: Mapping[str, str] = MappingProxyType(
 
 def _computed_tables_enabled() -> bool:
     """Check whether the computed-table messages should be posted.
-
-    Opt-in while the redesign is validated: the existing LLM digest keeps
-    posting unchanged, and the tables are appended as extra messages. Once the
-    tables are trusted they replace the transcription prompt entirely.
 
     :return: True when BENCHMARK_COMPUTED_TABLES is set to a truthy value.
     """
@@ -517,9 +507,7 @@ def main() -> None:
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
-                # With the computed tables on, the ROI companion renders as a
-                # native table block too, so both halves of the digest look
-                # the same; otherwise it keeps its fixed-width form.
+                # Tables on: render the ROI companion as a native table too.
                 roi_section = (
                     build_roi_message(args.roi_results, platform_key)
                     if _computed_tables_enabled()
@@ -531,12 +519,8 @@ def main() -> None:
                 exc_info=True,
             )
 
-    # Computed tables: every cell is read from a scorer artifact, so nothing
-    # here can be mistranscribed or dropped the way an LLM rendering of the
-    # markdown report can. Each table is its OWN message -- Slack splits at
-    # ~3000 characters and a split breaks the code fence, destroying the
-    # alignment the table depends on. Off by default; flip
-    # BENCHMARK_COMPUTED_TABLES=true to post them.
+    # Computed tables: cells read straight from scorer artifacts. One message
+    # per table (same split rationale as above); opt-in via BENCHMARK_COMPUTED_TABLES.
     table_messages: list[dict[str, Any]] = []
     if _computed_tables_enabled():
         try:
@@ -546,8 +530,7 @@ def main() -> None:
                     args.report.parent,
                     platform_key,
                     args.roi_results,
-                    # Third-party tools must never be ranked, compared, or
-                    # recommended on; the registry is the allowlist.
+                    # Registry = allowlist; third-party tools are never ranked.
                     allowed_tools=TOOL_REGISTRY,
                 )
         except Exception:  # pylint: disable=broad-except

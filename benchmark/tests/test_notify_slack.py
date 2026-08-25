@@ -538,8 +538,7 @@ class TestComputedTablesFlag:
     ) -> None:
         """Common truthy spellings all turn the tables on.
 
-        The flywheel sets this from a repo variable, where "true" and "1" are
-        both idiomatic; a strict == "true" check would silently no-op.
+        A strict == "true" check would silently no-op on the also-idiomatic "1".
 
         :param monkeypatch: pytest fixture.
         :param value: environment value under test.

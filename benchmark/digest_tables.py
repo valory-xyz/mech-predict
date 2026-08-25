@@ -18,13 +18,8 @@
 # ------------------------------------------------------------------------------
 """Build the benchmark Slack digest as computed tables.
 
-Every cell here is read from a scorer artifact or is a pure function of
-fields in one. No value passes through a language model. That is the point:
-the previous digest was an LLM rendering of the markdown report, which meant a
-mislabelled column ("BSS vs mkt" carrying a base-rate skill score) propagated
-untouched for weeks and rows were dropped often enough that the prompt grew six
-defensive sentences telling the model not to drop them. A prompt cannot be
-unit-tested; this module can.
+Every cell is computed from a scorer artifact -- no LLM anywhere -- so this
+module is unit-testable.
 
 Inputs, all written by ``benchmark.scorer`` into the same results directory:
 
@@ -38,47 +33,20 @@ file                                          window
 ``roi_results.json``                          90-day ROI simulation
 ===========================================  ==============================
 
-``scores_<platform>.json`` is a cumulative accumulator whose span is neither
-all-time nor a calendar month, and its own ``current_month`` key does not
-describe it: on the live artifact that key read ``2026-08`` while the file held
-every row back to ``2026-07-01``, because the rollover snapshots history without
-fully resetting the live file. A ``--rebuild`` writes only the newest month, so
-the same filename can mean either span. The columns are therefore labelled
-``cum`` and the section line prints the observed ``window_start..window_end``
-rather than asserting a window nobody recorded.
+The cumulative accumulator's ``current_month`` key does not describe its span
+(the month rollover snapshots history without fully resetting the live file),
+so the section line prints the observed ``window_start..window_end``.
 
-Tournament rows have no W-1/W-2 because rolling scorer invocations pass
-``--skip-tournament-output``; those cells render the literal ``n/a`` rather
-than a fabricated or back-filled number.
+``base`` (no-skill floor) and ``mkt`` (market Brier) are shown in Brier units
+beside the tool's Brier; a skill-score ratio is deliberately NOT rendered --
+its denominator sits off-screen.
 
-Two baselines, both shown, neither as a ratio
----------------------------------------------
-``base`` is the no-skill floor (``yes_rate * (1 - yes_rate)``) and ``mkt`` is
-the market's own Brier on the same markets. Both are printed in Brier units
-beside the tool's Brier so the reader subtracts by eye. A skill-score ratio is
-deliberately NOT rendered: its denominator sits off-screen, which is precisely
-how a wrong denominator went unnoticed.
-
-``base`` is per TOOL and per WINDOW, not a constant, and it is shown in both
-tables for that reason. An earlier version omitted it from the weekly table on
-the grounds that it barely moves; the data says otherwise. One live tool ran
-``base`` 0.1438 in W-1 against 0.2270 in W-2 -- a 37% swing, driven by its
-``yes_rate`` falling to 0.1741 from 0.2708 when 34 of 37 markets resolving on
-one day were near-identical weather questions that all settled No. A moving
-``base`` also moves the no-skill bar the demote rule reads, so a swing between
-adjacent weeks is a red flag worth seeing on the face of the report rather than
-something an audit has to find.
-
-One table per Slack message
----------------------------
-Each message carries one native Block Kit ``table`` block, so Slack lays the
-columns out itself -- nothing here pads or measures a cell. Messages stay
-separate anyway: it keeps each table under Slack's per-message cell-character
-cap and lets a reader thread a reply to one table rather than to all of them.
+One table per Slack message: stays under Slack's per-message cell-character
+cap and lets a reader thread a reply to one table.
 
 Pure builder, stdlib only: no network, no LLM, no clock. A broken digest must
-never break the daily post, so the entry point returns an empty list instead of
-raising when its inputs are missing or unparseable.
+never break the daily post, so the entry point returns an empty list instead
+of raising when its inputs are missing or unparseable.
 """
 
 from __future__ import annotations
@@ -104,14 +72,10 @@ log = logging.getLogger(__name__)
 
 NA = "n/a"
 
-# Marks a window whose sample is too small to support a keep/demote call. The
-# marker is ASCII on purpose: table cells stay ASCII so column padding cannot
-# skew, and glyphs are reserved for prose outside the code block.
+# ASCII on purpose: table cells stay ASCII so column padding cannot skew.
 LOW_SAMPLE_MARK = "*"
 
-# A delta between two windows is only rendered when BOTH sides clear the
-# sample floor. Rendering a delta off a 19-row window invites exactly the
-# false alarms this redesign exists to remove.
+# A delta renders only when BOTH windows clear the sample floor.
 INSUFFICIENT = "insufficient"
 
 # Deployment names, so the title matches what the team calls each platform.
@@ -133,9 +97,6 @@ WINDOW_FILES = {
 def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     """Read one scores file and return its ``by_tool`` mapping.
 
-    Missing or unparseable files yield an empty mapping: a window that did not
-    run renders ``n/a`` cells rather than failing the whole post.
-
     :param path: path to a scores json file.
     :return: mapping of tool name to its stats dict; empty when unavailable.
     """
@@ -151,43 +112,23 @@ def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
 
 
-def _load_window(path: Path) -> str | None:
-    """Describe the span the accumulator actually covers.
+def _window_meta(path: Path) -> tuple[str | None, str | None]:
+    """Read one scores file's observed span and last-covered date.
 
-    Do NOT trust ``current_month`` for this. On the live artifact that field
-    read ``2026-08`` while the file held every row back to ``2026-07-01`` --
-    the month rollover snapshots history without fully resetting the live
-    accumulator, so the stamp names the month it was last written in, not the
-    window it covers. A ``--rebuild`` writes only the newest month, so the same
-    filename means different spans depending on which path last touched it.
-    ``window_start``/``window_end`` are the observed bounds and are the only
-    honest source; without them the label says so rather than inventing one.
+    ``window_start``/``window_end`` are the observed bounds and the only
+    honest span source; ``current_month`` is not (see the module docstring).
 
     :param path: path to a scores json file.
-    :return: e.g. "2026-07-01..2026-08-11", or None when unavailable.
+    :return: (span like "2026-07-01..2026-08-11" or None, as-of date or None).
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return None, None
     start, end = payload.get("window_start"), payload.get("window_end")
-    if not start or not end:
-        return None
-    return f"{str(start)[:10]}..{str(end)[:10]}"
-
-
-def _as_of(path: Path) -> str | None:
-    """The last date the scores file covers, for the title.
-
-    :param path: path to a scores json file.
-    :return: e.g. "2026-08-11", or None when unavailable.
-    """
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    end = payload.get("window_end") or payload.get("generated_at")
-    return str(end)[:10] if end else None
+    span = f"{str(start)[:10]}..{str(end)[:10]}" if start and end else None
+    stamp = payload.get("window_end") or payload.get("generated_at")
+    return span, str(stamp)[:10] if stamp else None
 
 
 def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]]:
@@ -205,10 +146,8 @@ def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return {}
-    # roi_sim groups by (platform, tool, mode, MODEL), so several groups share
-    # a (tool, mode) key -- 14 of them in a live file. Last-wins would drop a
-    # real number: omen factual_research has a gpt-4.1 group at +15.8% plus two
-    # model-less groups whose roi_mid is None, and the None one sorts last.
+    # roi_sim groups by (platform, tool, mode, MODEL), so several groups can
+    # share a (tool, mode) key; naive last-wins would drop a real ROI number.
     # Keep the best-evidenced group instead: a real roi_mid beats None, then
     # the larger bet count.
     indexed: dict[tuple[str, str], dict[str, Any]] = {}
@@ -228,11 +167,8 @@ def _roi_rank(group: dict[str, Any]) -> tuple[int, int]:
     :param group: ROI group dict.
     :return: sort key; higher wins. A usable roi_mid dominates bet count.
     """
-    has_roi = 1 if _is_number(group.get("roi_mid")) else 0
-    n_bets = group.get("n_bets")
-    # isinstance rather than _is_number: the narrowing has to be visible to
-    # the type checker for the int() call.
-    bets = int(n_bets) if isinstance(n_bets, (int, float)) else 0
+    has_roi = 1 if _num(group.get("roi_mid")) is not None else 0
+    bets = int(_num(group.get("n_bets")) or 0)
     return (has_roi, bets)
 
 
@@ -241,21 +177,8 @@ def _roi_rank(group: dict[str, Any]) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def _is_number(value: object) -> bool:
-    """Check whether *value* is a real number (bools excluded).
-
-    :param value: candidate value.
-    :return: True when value is an int or float and not a bool.
-    """
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def _num(value: object) -> float | None:
-    """Return *value* as a float when it is a real number, else None.
-
-    A single narrowing helper: ``_is_number`` answers the question but the type
-    checker cannot see through it, so every caller was repeating an isinstance
-    guard to satisfy mypy.
+    """Return *value* as a float when it is a real number (bools excluded).
 
     :param value: candidate value.
     :return: the value as a float, or None.
@@ -265,32 +188,24 @@ def _num(value: object) -> float | None:
     return float(value)
 
 
-def _score(value: object) -> str:
+def _score(value: object, signed: bool = False) -> str:
     """Format a Brier-unit score to 4 decimals.
 
     :param value: candidate value.
+    :param signed: render an explicit sign (Edge columns).
     :return: formatted score, or ``n/a``.
     """
-    return f"{value:.4f}" if _is_number(value) else NA
-
-
-def _signed(value: object) -> str:
-    """Format a signed Brier-unit score to 4 decimals.
-
-    :param value: candidate value.
-    :return: formatted score with explicit sign, or ``n/a``.
-    """
-    return f"{value:+.4f}" if _is_number(value) else NA
+    if _num(value) is None:
+        return NA
+    return f"{value:+.4f}" if signed else f"{value:.4f}"
 
 
 def _count(stats: dict[str, Any] | None) -> str:
     """Format a window's scored-row count, marking under-floor samples.
 
-    Renders ``valid_n/edge_n`` when the two pools differ. Brier averages over
-    every valid row; Edge and mkt average over the subset that carried a market
-    price. Printing only ``valid_n`` let an Edge computed on 11 rows sit
-    unstarred beside ``n = 40``, so the marker keys off whichever pool is
-    smaller.
+    Renders ``valid_n/edge_n`` when the pools differ: Brier averages over
+    valid rows, Edge/mkt over the priced subset, and the low-sample marker
+    keys off the smaller pool.
 
     :param stats: per-tool stats dict for that window, or None.
     :return: count cell, e.g. ``301``, ``40/11`` or ``19 *``, or ``n/a``.
@@ -312,17 +227,14 @@ def _count(stats: dict[str, Any] | None) -> str:
 
 
 def _reliability(stats: dict[str, Any] | None) -> str:
-    """Format a window's reliability as a percentage.
+    """Format a window's reliability (``valid_n / n``) as a percentage.
 
-    Reliability is ``valid_n / n`` -- the share of attempts that produced a
-    usable prediction. It qualifies the Brier printed beside it, because Brier
-    is averaged over the valid rows only: a tool at 94% has its score computed
-    on 94% of its attempts, and the missing rows are not a random sample.
+    Qualifies the Brier beside it: the score is averaged over valid rows only.
 
     :param stats: per-tool stats dict for that window, or None.
     :return: percentage cell, e.g. ``97%``, or ``n/a``.
     """
-    if not stats or not _is_number(stats.get("reliability")):
+    if not stats or _num(stats.get("reliability")) is None:
         return NA
     return f"{stats['reliability'] * 100:.0f}%"
 
@@ -330,9 +242,8 @@ def _reliability(stats: dict[str, Any] | None) -> str:
 def _has_floor(stats: dict[str, Any] | None, field: str = "valid_n") -> bool:
     """Check whether a window has enough rows to support a delta.
 
-    Takes the count field so an Edge delta is floored on ``edge_n`` while a
-    Brier delta stays on ``valid_n`` -- the two average over different pools,
-    and gating both on the larger one suppresses nothing.
+    Edge deltas floor on ``edge_n``, Brier deltas on ``valid_n`` -- the two
+    average over different pools.
 
     :param stats: per-tool stats dict for that window, or None.
     :param field: the count to gate on.
@@ -350,9 +261,9 @@ def _delta(
 ) -> str:
     """Format the current-vs-reference movement of one metric.
 
-    The direction word is spelled out because the sign alone is ambiguous
-    across columns: a positive Brier delta is a regression while a positive
-    Edge delta is an improvement, and readers were mixing them up.
+    The direction word is spelled out: the sign alone is ambiguous across
+    columns (a positive Brier delta is a regression, a positive Edge delta
+    an improvement).
 
     :param current: stats for the current window (W-1).
     :param reference: stats for the comparison window (W-2 or all-time).
@@ -362,13 +273,9 @@ def _delta(
     """
     if not current or not reference:
         return NA
-    # isinstance rather than _is_number: the narrowing has to be visible to
-    # the type checker for the subtraction below.
-    a = current.get(field)
-    b = reference.get(field)
-    if isinstance(a, bool) or not isinstance(a, (int, float)):
-        return NA
-    if isinstance(b, bool) or not isinstance(b, (int, float)):
+    a = _num(current.get(field))
+    b = _num(reference.get(field))
+    if a is None or b is None:
         return NA
     # Edge and mkt live on the edge-eligible pool; everything else on valid_n.
     count_field = "edge_n" if field in ("edge", "market_brier") else "valid_n"
@@ -379,89 +286,43 @@ def _delta(
     return f"{diff:+.4f} {'better' if improved else 'worse'}"
 
 
-def _roi(group: dict[str, Any] | None) -> str:
-    """Format the simulated 90-day ROI midpoint.
+def _roi_pct(group: dict[str, Any] | None, key: str) -> str:
+    """Format a simulated 90-day ROI figure.
 
-    ``roi_sim`` already emits ``roi_mid`` in percent (5.94 means +5.9%), so
-    it is formatted, never rescaled.
+    ``roi_sim`` already emits percent (5.94 means +5.9%), so the value is
+    formatted, never rescaled. ``roi_haircut`` is a point estimate -- no CI.
 
     :param group: ROI group dict for this (tool, mode), or None.
+    :param key: ``roi_mid`` or ``roi_haircut``.
     :return: percentage cell, e.g. ``+15.3%``, or ``n/a``.
     """
-    if not group or not _is_number(group.get("roi_mid")):
+    if not group or _num(group.get(key)) is None:
         return NA
-    return f"{float(group['roi_mid']):+.1f}%"
+    return f"{float(group[key]):+.1f}%"
 
-
-def _roi_haircut(group: dict[str, Any] | None) -> str:
-    """Format the simulated 90-day ROI net of execution costs.
-
-    Point estimate only -- ``roi_sim`` publishes no CI for the haircut figure.
-    Already in percent, like ``roi_mid``, so it is formatted, never rescaled.
-
-    :param group: ROI group dict for this (tool, mode), or None.
-    :return: percentage cell, e.g. ``+14.5%``, or ``n/a``.
-    """
-    if not group or not _is_number(group.get("roi_haircut")):
-        return NA
-    return f"{float(group['roi_haircut']):+.1f}%"
-
-
-# Promote margin and floor: promote only when the one-sided 95% lower bound on
-# the paired edge clears delta, with n >= 30. Delta is a margin in Brier units,
-# not a p-value, and the bar is asymmetric on purpose -- a false promote loses
-# money while a missed one just keeps the incumbent another day. The reasoning
-# and a worked example live in DAILY_REPORT_OPERATOR_GUIDE.md.
-# A Brier this far above its own base-rate floor is a signal; less is noise.
-# One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
-# at n >= 30 on a mean this is the same call to well inside the margin, and it
-# is computable from the stored sum/sum-of-squares without per-row data.
-
-# A tool that wins fewer than half the markets where it DISAGREED with the price
-# has no tradable edge, whatever its headline accuracy looks like.
 
 # A row exists only once its market has RESOLVED, so the newest window always
-# holds fewer rows than an older one of equal length -- it has had less time to
-# fill. Measured on live data the most recent week ran 23-28% the size of the
-# week before it on one platform while the other was essentially complete, and
-# a delta computed across that gap flipped sign on the tool the report was
-# calling most improved. Below this ratio the week is treated as incomplete.
+# holds fewer rows than an older one of equal length; a delta computed across
+# that gap can flip sign. Below this ratio the week is treated as incomplete.
 COMPLETENESS_RATIO = 0.70
 
 
-# Drawn inside the header's own text, above and below the title, so the rule
-# and the title are ONE block. Slack pads BETWEEN blocks, so a rule in its own
-# section always sits a visible gap away from the title it belongs to.
-#
-# Its length is derived from the title it frames rather than fixed: the title
-# grows with the platform name, the verdict token and the date, and a constant
-# rule ends up shorter than the line it is meant to underline. Slack renders
-# headers in a proportional font, so this cannot be exact -- it tracks the
-# title instead of pretending to match it.
+# The rule lives inside the header's own text so Slack cannot pad between
+# rule and title; its length tracks the title rather than being fixed.
 TITLE_RULE_CHAR = "━"
 TITLE_RULE_MIN = 24
-
-# The marker states the day's outcome before a word is read. Keyed to the
-# verdict, never hardcoded.
 
 
 def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
     """Build the title message that opens a platform's report.
 
-    Names the report and the day it covers. It carries no verdict: this module
-    renders measurements, and what to do about them is a separate decision.
-
     :param platform: platform key, for the heading.
-    :param as_of: the last date the data covers, taken from the scores file
-        rather than a clock -- this module has no clock, and a title stamped
-        with "today" would misdate a report rendered from an older artifact.
+    :param as_of: the last date the data covers -- taken from the scores file,
+        not a clock; this module has no clock.
     :return: a webhook payload.
     """
     label = PLATFORM_TITLES.get(platform, platform.title())
-    # Date on the title line, not a line of its own: a third line inside the
-    # header would render the date at header size, which is louder than a date
-    # deserves. It stays inside the rules so the whole identity of the report
-    # -- platform and day -- is one block.
+    # Date inside the rules, on the title line: platform and day are one block.
     stamp = f"  \u00b7  {as_of}" if as_of else ""
     line = f"{label.upper()}{stamp}"
     rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
@@ -479,90 +340,50 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
     )
 
 
-def _rank(tool: str, ranked: Sequence[str]) -> str:
-    """Position in the best-to-worst ordering, or a dash when unranked.
-
-    :param tool: tool name.
-    :param ranked: the judged tools, already in order.
-    :return: "1", "2", ... or "-" for a tool the gate could not judge.
-    """
-    return str(ranked.index(tool) + 1) if tool in ranked else "-"
-
-
 # ---------------------------------------------------------------------------
 # Table construction
 # ---------------------------------------------------------------------------
 
-_W2_COLUMNS = (
-    Col("tool"),
-    Col("n W-1", align="right"),
-    Col("n W-2", align="right"),
-    Col("rel W-1", align="right"),
-    Col("Brier W-1", align="right"),
-    Col("Brier W-2", align="right"),
-    Col("Δ Brier", align="right"),
-    Col("base W-1", align="right"),
-    Col("base W-2", align="right"),
-    Col("mkt W-1", align="right"),
-    Col("mkt W-2", align="right"),
-    Col("Edge W-1", align="right"),
-    Col("Edge W-2", align="right"),
-    Col("Δ Edge", align="right"),
-    Col("ROI 90d", align="right"),
-    Col("w/costs", align="right"),
+
+def _cols(names: Iterable[str]) -> tuple[Col, ...]:
+    """Column specs: ``tool`` left-aligned, every other column right-aligned.
+
+    :param names: column header names.
+    :return: Col spec tuple for ``table_block``.
+    """
+    return tuple(Col(n) if n == "tool" else Col(n, align="right") for n in names)
+
+
+_W2_COLUMNS = _cols(
+    "tool;n W-1;n W-2;rel W-1;Brier W-1;Brier W-2;Δ Brier;base W-1;"
+    "base W-2;mkt W-1;mkt W-2;Edge W-1;Edge W-2;Δ Edge;ROI 90d;w/costs".split(";")
 )
 
-_AT_COLUMNS = (
-    Col("#", align="right"),
-    Col("tool"),
-    Col("n W-1", align="right"),
-    Col("n cum", align="right"),
-    Col("rel W-1", align="right"),
-    Col("Brier W-1", align="right"),
-    Col("Brier cum", align="right"),
-    Col("Δ Brier", align="right"),
-    Col("base cum", align="right"),
-    Col("mkt W-1", align="right"),
-    Col("mkt cum", align="right"),
-    Col("Edge W-1", align="right"),
-    Col("Edge cum", align="right"),
-    Col("Δ Edge", align="right"),
-    Col("ROI 90d", align="right"),
-    Col("w/costs", align="right"),
+_AT_COLUMNS = _cols(
+    "#;tool;n W-1;n cum;rel W-1;Brier W-1;Brier cum;Δ Brier;base cum;"
+    "mkt W-1;mkt cum;Edge W-1;Edge cum;Δ Edge;ROI 90d;w/costs".split(";")
 )
 
 
 def _sort_key(
     entry: tuple[str, dict[str, Any] | None, dict[str, Any] | None],
 ) -> tuple[int, float, str]:
-    """Order rows BEST first on Edge -- how far the tool beat the market.
+    """Order rows best-first on Edge; scored before unscored; name breaks ties.
 
-    Edge, not the promote bound. The bound subtracts a penalty for
-    uncertainty, so ranking on it partly ranks HOW WELL MEASURED a tool is
-    rather than how good it is: on live data the tool with the BEST edge
-    (-0.1551) sorted last purely because it had 31 markets against another's
-    421. "Demote the worst" would then point at the least-measured tool, not
-    the worst one -- a lower bound is the conservative test for PROMOTING, and
-    backwards for demoting.
-
-    So the order answers "how good", the ``floor`` column answers "how sure",
-    and ``rec`` answers "what can we act on". They are allowed to disagree, and
-    a rank-1 tool that is not promotable is informative rather than wrong.
+    Edge, not an uncertainty-penalized bound: a bound would rank how well
+    MEASURED a tool is, not how good.
 
     :param entry: (tool name, current stats, reference stats).
-    :return: sort key; scored rows first by descending Edge, then unscored,
-        with the tool name breaking every tie.
+    :return: sort key.
     """
     name, current, reference = entry
     for stats in (current, reference):
         edge = _num((stats or {}).get("edge"))
         if edge is not None:
             return (0, -edge, name)
-    # Tool name breaks the tie: without it, unranked rows come out in set
-    # iteration order, which differs between processes and makes the posted
-    # table undiffable day over day. _ordered() also sorts its input, so this
-    # is belt-and-braces -- deliberately. Removing EITHER is safe; removing
-    # BOTH reintroduces the bug, which is what TestOrderStability asserts.
+    # Belt-and-braces with _ordered()'s own sort against nondeterministic set
+    # iteration order. Removing EITHER is safe; removing BOTH reintroduces the
+    # bug, which is what TestOrderStability asserts.
     return (1, 0.0, name)
 
 
@@ -598,11 +419,11 @@ def _rows_w2(
                 _score((b or {}).get("baseline_brier")),
                 _score((a or {}).get("market_brier")),
                 _score((b or {}).get("market_brier")),
-                _signed((a or {}).get("edge")),
-                _signed((b or {}).get("edge")),
+                _score((a or {}).get("edge"), signed=True),
+                _score((b or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
-                _roi(roi.get((tool, mode))),
-                _roi_haircut(roi.get((tool, mode))),
+                _roi_pct(roi.get((tool, mode)), "roi_mid"),
+                _roi_pct(roi.get((tool, mode)), "roi_haircut"),
             )
         )
     return rows
@@ -631,7 +452,7 @@ def _rows_at(
         a, b = w1.get(tool), at.get(tool)
         rows.append(
             (
-                _rank(tool, ranked),
+                str(ranked.index(tool) + 1) if tool in ranked else "-",
                 tool,
                 _count(a),
                 _count(b),
@@ -642,11 +463,11 @@ def _rows_at(
                 _score((b or {}).get("baseline_brier")),
                 _score((a or {}).get("market_brier")),
                 _score((b or {}).get("market_brier")),
-                _signed((a or {}).get("edge")),
-                _signed((b or {}).get("edge")),
+                _score((a or {}).get("edge"), signed=True),
+                _score((b or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
-                _roi(roi.get((tool, mode))),
-                _roi_haircut(roi.get((tool, mode))),
+                _roi_pct(roi.get((tool, mode)), "roi_mid"),
+                _roi_pct(roi.get((tool, mode)), "roi_haircut"),
             )
         )
     return rows
@@ -658,7 +479,7 @@ def _scored(by_tool: dict[str, dict[str, Any]]) -> set[str]:
     :param by_tool: by_tool mapping from a scores file.
     :return: set of tool names with a numeric Brier.
     """
-    return {t for t, s in by_tool.items() if _is_number(s.get("brier"))}
+    return {t for t, s in by_tool.items() if _num(s.get("brier")) is not None}
 
 
 def _ran_but_unscored(
@@ -666,13 +487,8 @@ def _ran_but_unscored(
 ) -> set[str]:
     """Return PREDICTION tools that ran but produced no usable prediction.
 
-    A prediction tool at 100% parse failure has rows but no Brier, and
-    selecting on Brier alone would hide exactly the tool most in need of
-    attention. The allowlist is what makes this safe: the benchmark also sees
-    tools that are not forecasters at all -- a question-proposing tool, for
-    instance, never emits a ``p_yes``, so ``valid_n=0`` is its correct and
-    unremarkable reading, not a failure. Admitting those would manufacture an
-    alarm about a tool this report has no opinion on.
+    The allowlist keeps this from alarming on non-forecaster tools, whose
+    ``valid_n=0`` is a correct reading, not a failure.
 
     :param by_tool: by_tool mapping from a scores file.
     :param permitted: prediction-tool allowlist.
@@ -682,8 +498,8 @@ def _ran_but_unscored(
         tool
         for tool, stats in by_tool.items()
         if tool in permitted
-        and not _is_number(stats.get("brier"))
-        and _is_number(stats.get("n"))
+        and _num(stats.get("brier")) is None
+        and _num(stats.get("n")) is not None
         and int(stats["n"]) > 0
     }
 
@@ -723,20 +539,10 @@ def _alert_rows(
     tools: Sequence[str],
     at_w2: dict[str, dict[str, Any]] | None = None,
 ) -> list[tuple[str, ...]]:
-    """Build the alerts table: conditions that block a call, not calls.
+    """Build the alerts table: conditions that BLOCK a call, not calls.
 
-    Three conditions, all computed:
-
-    * sample starved -- W-1 has fewer than MIN_SAMPLE_SIZE scored rows, so no
-      keep/demote conclusion is supportable for that tool this week;
-    * reliability breach -- W-1 reliability fell below RELIABILITY_GATE, which
-      also excludes the tool from the ROI simulation;
-    * platform below no-skill -- every tool's all-time Brier exceeds its own
-      base-rate floor, which is a platform problem no tool swap addresses.
-
-    Reliability is deliberately NOT alerted on a bare week-over-week delta: at
-    the sample sizes involved a two-point drop is one or two extra failed rows,
-    and the previous digest raised three such "worse" bullets in one message.
+    Reliability is deliberately NOT alerted on a bare week-over-week delta:
+    at these sample sizes a two-point drop is one or two extra failed rows.
 
     :param w1: by_tool stats for the last 7 days.
     :param at: by_tool stats for the all-time window.
@@ -749,10 +555,8 @@ def _alert_rows(
 
     starved = [t for t in tools if w1.get(t) and not _has_floor(w1[t])]
     for tool in starved:
-        # _has_floor is False when valid_n is MISSING as well as when it is
-        # merely small, so this cannot subscript the field it just failed to
-        # find -- that raised KeyError/TypeError out of build_digest_messages
-        # and took the whole digest down with it.
+        # _has_floor is False when valid_n is MISSING as well as small, so
+        # this cannot KeyError on the field it just failed to find.
         starved_n = _num(w1[tool].get("valid_n"))
         shown = NA if starved_n is None else int(starved_n)
         rows.append(
@@ -766,7 +570,7 @@ def _alert_rows(
 
     for tool in tools:
         stats = w1.get(tool)
-        if not stats or not _is_number(stats.get("reliability")):
+        if not stats or _num(stats.get("reliability")) is None:
             continue
         if stats["reliability"] < RELIABILITY_GATE:
             rows.append(
@@ -778,18 +582,15 @@ def _alert_rows(
                 )
             )
 
-    # Two DIFFERENT conditions, against two different baselines. Collapsing
-    # them is the same mistake that produced "BSS vs mkt": Edge is measured
-    # against the MARKET, and a tool can lose to the market while still
-    # beating its own no-skill floor (live: factual_research on Omen, Brier
-    # 0.2234 vs base 0.2330 -- above no-skill -- with Edge -0.0266).
-    # Floored, like every other claim in the message. Without this the digest
-    # marked a tool "insufficient" in the table and then counted that same
-    # window toward "the fleet is worse than the market" in the alerts.
+    # Two DIFFERENT conditions against two different baselines: Edge is
+    # measured against the MARKET, and a tool can lose to the market while
+    # beating its own no-skill floor. Floored, like every other claim here.
     below_market = [
         at[t]
         for t in tools
-        if at.get(t) and _is_number(at[t].get("edge")) and _has_floor(at[t], "edge_n")
+        if at.get(t)
+        and _num(at[t].get("edge")) is not None
+        and _has_floor(at[t], "edge_n")
     ]
     if len(below_market) >= 2 and all(s["edge"] < 0 for s in below_market):
         best = max(s["edge"] for s in below_market)
@@ -805,9 +606,8 @@ def _alert_rows(
             )
         )
 
-    # Resolution censoring: W-1 cannot be compared with W-2 until it has had
-    # time to fill. This is the one alert that fires on an ABSENCE, so it has
-    # to be computed here rather than inferred from any single row.
+    # Resolution censoring: the one alert that fires on an ABSENCE, so it is
+    # computed here rather than inferred from any single row.
     w1_rows = sum(int(_num(w1[t].get("valid_n")) or 0) for t in tools if w1.get(t))
     w2_rows = sum(
         int(_num(at_w2[t].get("valid_n")) or 0) for t in tools if at_w2.get(t)
@@ -827,12 +627,12 @@ def _alert_rows(
     scored = [
         t
         for t in tools
-        if at.get(t) and _is_number(at[t].get("brier")) and _has_floor(at[t])
+        if at.get(t) and _num(at[t].get("brier")) is not None and _has_floor(at[t])
     ]
     below_floor = [
         t
         for t in scored
-        if _is_number(at[t].get("baseline_brier"))
+        if _num(at[t].get("baseline_brier")) is not None
         and at[t]["brier"] > at[t]["baseline_brier"]
     ]
     if len(scored) >= 2 and below_floor and len(below_floor) == len(scored):
@@ -865,10 +665,8 @@ def build_digest_messages(
     :param platform: platform key, e.g. "polymarket" or "omen".
     :param roi_results: path to roi_results.json; defaults to
         ``results_dir/roi_results.json``.
-    :param allowed_tools: when given, only these tools are rendered. Callers
-        pass the prediction-tool registry, so tools that are not forecasters --
-        a question-proposing tool never emits a ``p_yes`` -- cannot appear.
-        Injected rather than imported to keep this module stdlib-only.
+    :param allowed_tools: when given, only these tools are rendered -- callers
+        pass the prediction-tool registry. Injected to stay stdlib-only.
     :return: ordered webhook payloads; empty when there is nothing to post.
     """
     windows = {
@@ -876,9 +674,11 @@ def build_digest_messages(
         for key, name in WINDOW_FILES.items()
     }
     roi = _load_roi(roi_results or results_dir / "roi_results.json", platform)
-    # The accumulator's span is not fixed and not stated by its own
-    # `current_month` key, so the section line carries the observed bounds.
-    span = _load_window(results_dir / WINDOW_FILES["at"].format(platform=platform))
+    # The accumulator's span is not fixed; the section line carries the
+    # observed bounds.
+    span, as_of = _window_meta(
+        results_dir / WINDOW_FILES["at"].format(platform=platform)
+    )
     month_label = span if span else "an UNSTATED span - see the docstring"
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
@@ -894,17 +694,10 @@ def build_digest_messages(
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
 
-    messages: list[dict[str, Any]] = [
-        _headline(
-            platform,
-            _as_of(results_dir / WINDOW_FILES["at"].format(platform=platform)),
-        )
-    ]
+    messages: list[dict[str, Any]] = [_headline(platform, as_of)]
 
-    # Degrade LOUDLY. Both rolling files come from separate --period-days
-    # scorer invocations that can fail independently of the all-time rebuild.
-    # Without this the W-1/W-2 columns silently fill with n/a and the digest
-    # reads as "no change this week" rather than "this week was not scored".
+    # Degrade LOUDLY: without this, a failed rolling scorer run reads as
+    # "no change this week" rather than "this week was not scored".
     missing = [
         label for key, label in (("w1", "W-1"), ("w2", "W-2")) if not windows[key]
     ]
@@ -921,11 +714,9 @@ def build_digest_messages(
 
     if prod_tools:
         order_w2 = _ordered(prod_tools, windows["w1"], windows["w2"])
-        # Cumulative FIRST here, weekly first in 1a. _sort_key ranks on the
-        # earlier window that has an edge, so the argument order IS the ranking
-        # metric: passing w1 first ranked 1b by the weekly edge under a caption
-        # that says "RANKED BY Edge cum", which put the # column and the column
-        # it names in visible disagreement.
+        # Cumulative FIRST here, weekly first in 1a: _sort_key ranks on the
+        # first window argument that has an edge, so the argument order IS
+        # the ranking metric the caption names.
         order_at = _ordered(prod_tools, windows["at"], windows["w1"])
         messages.append(
             message(

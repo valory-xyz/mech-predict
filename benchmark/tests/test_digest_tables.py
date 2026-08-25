@@ -227,9 +227,7 @@ class TestNoSkillScore:
         """The no-skill floor is shown in Brier units, as a column."""
         body = _body(results)
         assert "base cum" in body
-        assert "0.2400" in _cells(
-            body, "alpha", after="1b. PRODUCTION - W-1 vs CUMULATIVE"
-        )
+        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION CUM vs W-1")
 
 
 class TestDeltas:

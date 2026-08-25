@@ -340,7 +340,7 @@ def _rows_w2(
     w1: dict[str, dict[str, Any]],
     w2: dict[str, dict[str, Any]],
 ) -> list[tuple[str, ...]]:
-    """Build the W-1 vs W-2 table rows.
+    """Build the W-2 vs W-1 table rows.
 
     :param tools: tool names to render, in the order given.
     :param w1: by_tool stats for the last 7 days.
@@ -379,7 +379,7 @@ def _rows_at(
     w1: dict[str, dict[str, Any]],
     at: dict[str, dict[str, Any]],
 ) -> list[tuple[str, ...]]:
-    """Build the W-1 vs all-time table rows.
+    """Build the cumulative vs W-1 table rows.
 
     :param tools: tool names to render, in the order given.
     :param w1: by_tool stats for the last 7 days (empty for tournament).
@@ -662,10 +662,10 @@ def build_digest_messages(
         order_at = _ordered(prod_tools, windows["at"], windows["w1"])
         messages.append(
             message(
-                "1a. Production - W-1 vs W-2",
+                "1a. Production - W-2 vs W-1",
                 [
                     section(
-                        "*1a. PRODUCTION W-1 vs W-2 - ranked by `Edge W-1`*"
+                        "*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"
                         "  _what changed this week_"
                     ),
                     table_block(
@@ -677,10 +677,10 @@ def build_digest_messages(
         )
         messages.append(
             message(
-                "1b. Production - W-1 vs cumulative",
+                "1b. Production - CUM vs W-1",
                 [
                     section(
-                        f"*1b. PRODUCTION W-1 vs CUM - ranked by `Edge cum`*  "
+                        f"*1b. PRODUCTION CUM vs W-1 - ranked by `Edge cum`*  "
                         f"_how far each tool beat the market; this week "
                         f"against {month_label}_"
                     ),

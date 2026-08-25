@@ -26,15 +26,15 @@ from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 import requests
 
 import packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware as module
 from packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware import (
     OpenAIClientManager,
-    OpenAIResponse,
-    Usage,
+    PredictionResult,
+    _parse_completion,
     fetch_additional_sources,
-    generate_prediction_with_retry,
     run,
 )
 
@@ -43,10 +43,10 @@ class TestOpenAIClientManager:
     """Verify OpenAIClientManager creates per-context clients without globals."""
 
     def test_context_manager_returns_client_instance(self) -> None:
-        """__enter__ returns a fresh OpenAIClient, __exit__ closes it."""
+        """__enter__ returns a fresh OpenAI client, __exit__ closes it."""
         mgr = OpenAIClientManager(api_key="sk-test")
         with patch(
-            "packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware.OpenAIClient"
+            "packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware.OpenAI"
         ) as MockClient:
             mock_instance = MagicMock()
             MockClient.return_value = mock_instance
@@ -55,7 +55,7 @@ class TestOpenAIClientManager:
                 assert client is mock_instance
                 MockClient.assert_called_once_with(api_key="sk-test")
 
-            mock_instance.client.close.assert_called_once()
+            mock_instance.close.assert_called_once()
 
     def test_no_global_client_variable(self) -> None:
         """The module must not define a module-level 'client' variable."""
@@ -68,9 +68,9 @@ class TestOpenAIClientManager:
                         f"Module-level 'client' variable found at line {i}: {line}"
                     )
 
-    def test_generate_prediction_requires_client_param(self) -> None:
-        """generate_prediction_with_retry requires client as first param."""
-        params = list(inspect.signature(generate_prediction_with_retry).parameters)
+    def test_parse_completion_requires_client_param(self) -> None:
+        """_parse_completion requires client as its first param."""
+        params = list(inspect.signature(_parse_completion).parameters)
         assert params[0] == "client"
 
 
@@ -99,7 +99,7 @@ FAKE_SERPER_RESPONSE = {
     ],
 }
 
-# (cleaned_text, capture_payload) tuples — matches _fetch_page_content's return
+# (cleaned_text, capture_payload) tuples - matches _fetch_page_content's return
 FAKE_PAGE_CONTENT = "Extracted main article body about the test topic."
 FAKE_FETCH_RESULTS = {
     "http://example.com/result": (FAKE_PAGE_CONTENT, FAKE_PAGE_CONTENT),
@@ -154,20 +154,151 @@ def _make_mock_api_keys(
     return mock
 
 
+def _make_prediction_stub() -> PredictionResult:
+    """Build a valid PredictionResult for use as a parse() return value.
+
+    :return: a PredictionResult whose numbers match PREDICTION_JSON.
+    """
+    numbers = json.loads(PREDICTION_JSON)
+    return PredictionResult(
+        facts="some facts",
+        reasons_no="reasons no",
+        reasons_yes="reasons yes",
+        aggregation="aggregation block",
+        reflection="reflection block",
+        **numbers,
+    )
+
+
 def _stub_openai(mock_client_mgr: MagicMock) -> MagicMock:
-    """Wire OpenAIClientManager to a stub returning PREDICTION_JSON."""
-    # The non-calibrated path calls the OpenAIClient.completions(...) wrapper
-    # (not chat.completions.create directly), so the stub must set
-    # completions.return_value to a real OpenAIResponse — otherwise result[0]
-    # is an auto-MagicMock and JSON-shape assertions are vacuous.
+    """Wire OpenAIClientManager to a client whose parse() returns a PredictionResult.
+
+    :param mock_client_mgr: the patched OpenAIClientManager.
+    :return: the stubbed OpenAI client.
+    """
     mock_client = MagicMock()
-    mock_client.completions.return_value = OpenAIResponse(
-        content=PREDICTION_JSON,
-        usage=Usage(prompt_tokens=10, completion_tokens=5),
+    parsed_msg = MagicMock(parsed=_make_prediction_stub(), refusal=None)
+    mock_client.beta.chat.completions.parse.return_value = MagicMock(
+        choices=[MagicMock(message=parsed_msg)],
+        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
     )
     mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
     mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
     return mock_client
+
+
+class TestPredictionResultSchema:
+    """Guard the structured-output schema this tool depends on."""
+
+    def test_numeric_fields_are_declared_last(self) -> None:
+        """The four numerics must be the last fields, in order.
+
+        Structured outputs generate fields in declaration order, so the
+        numbers being last is what conditions them on the reasoning chain.
+        Reordering still validates and still passes every other test, which
+        is exactly why it needs an explicit assertion.
+        """
+        assert list(PredictionResult.model_fields)[-4:] == [
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+        ]
+
+    def test_reasoning_fields_precede_the_numbers(self) -> None:
+        """Every reasoning field is declared before the first number."""
+        order = list(PredictionResult.model_fields)
+        first_number = order.index("p_yes")
+        for name in ("facts", "reasons_no", "reasons_yes", "aggregation", "reflection"):
+            assert order.index(name) < first_number
+
+    def test_validator_rejects_probabilities_that_do_not_sum_to_one(self) -> None:
+        """p_yes + p_no far from 1 is refused by the model validator."""
+        with pytest.raises(ValidationError):
+            PredictionResult(
+                facts="f",
+                reasons_no="n",
+                reasons_yes="y",
+                aggregation="a",
+                reflection="r",
+                p_yes=0.7,
+                p_no=0.5,
+                confidence=0.5,
+                info_utility=0.5,
+            )
+
+    def test_validator_accepts_probabilities_summing_to_one(self) -> None:
+        """A well-formed instance validates."""
+        parsed = PredictionResult(
+            facts="f",
+            reasons_no="n",
+            reasons_yes="y",
+            aggregation="a",
+            reflection="r",
+            p_yes=0.7,
+            p_no=0.3,
+            confidence=0.5,
+            info_utility=0.5,
+        )
+        assert parsed.p_yes + parsed.p_no == 1.0
+
+    def test_every_numeric_field_is_bounded_to_the_unit_interval(self) -> None:
+        """Each of the four numerics declares ge=0 and le=1.
+
+        Asserted structurally rather than by feeding one bad value: with
+        p_yes + p_no forced to 1, an out-of-range p_yes implies an
+        out-of-range p_no, so a single-value probe passes even when one
+        field has lost its bounds.
+        """
+        for name in ("p_yes", "p_no", "confidence", "info_utility"):
+            meta = PredictionResult.model_fields[name].metadata
+            bounds = {type(c).__name__: getattr(c, "ge", getattr(c, "le", None))
+                      for c in meta}
+            assert bounds.get("Ge") == 0.0, f"{name} lost its ge=0 bound"
+            assert bounds.get("Le") == 1.0, f"{name} lost its le=1 bound"
+
+    def test_out_of_range_probability_is_refused(self) -> None:
+        """Field bounds ge=0 / le=1 are enforced."""
+        with pytest.raises(ValidationError):
+            PredictionResult(
+                facts="f",
+                reasons_no="n",
+                reasons_yes="y",
+                aggregation="a",
+                reflection="r",
+                p_yes=1.4,
+                p_no=-0.4,
+                confidence=0.5,
+                info_utility=0.5,
+            )
+
+
+class TestDeliveredPayload:
+    """The bytes the trader receives must stay a flat, strict-parseable object."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_payload_is_flat_json_with_exactly_the_four_fields(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() delivers strict-json.loads-parseable JSON, four keys, sum 1."""
+        _stub_openai(mock_client_mgr)
+
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        raw = result[0]
+        assert raw.lstrip()[:1] == "{", "a leading non-brace char means NO BET"
+        payload = json.loads(raw)
+        assert set(payload) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert all(isinstance(v, float) for v in payload.values())
+        assert payload["p_yes"] + payload["p_no"] == 1.0
+        assert "facts" not in raw and "aggregation" not in raw
 
 
 class TestSuperforcasterSourceContent:
@@ -199,7 +330,7 @@ class TestSuperforcasterSourceContent:
         captured = result[4]["source_content"]
         assert captured["mode"] == "cleaned"
         assert captured["serper_response"] == FAKE_SERPER_RESPONSE
-        # Both organic URLs were scraped → both in pages capture
+        # Both organic URLs were scraped -> both in pages capture
         assert captured["pages"] == {
             "http://example.com/result": FAKE_PAGE_CONTENT,
             "http://example.com/second": "Second page body.",
@@ -209,7 +340,7 @@ class TestSuperforcasterSourceContent:
         assert FAKE_PAGE_CONTENT in prediction_prompt
         assert "**Content:**" in prediction_prompt
         # result[0] is the LLM completion content (via the OpenAIClient
-        # wrapper), not an auto-MagicMock — so this JSON assertion is real.
+        # wrapper), not an auto-MagicMock - so this JSON assertion is real.
         assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
 
     @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
@@ -292,7 +423,7 @@ class TestSuperforcasterSourceContent:
         )
 
         prediction_prompt = result[1]
-        # raw HTML was run back through _clean_html → extracted article text
+        # raw HTML was run back through _clean_html -> extracted article text
         assert "Federal Reserve" in prediction_prompt
         assert "<html>" not in prediction_prompt  # raw markup not dumped verbatim
 
@@ -401,7 +532,7 @@ class TestScrapePages:
             {"link": "http://example.com/unknown", "title": "T2", "snippet": "s2"},
         ]
         captured = _scrape_pages(organic, mode="cleaned")
-        # success → content attached + in capture; failure → neither (exercises
+        # success -> content attached + in capture; failure -> neither (exercises
         # the `if text:` / `if capture:` guards).
         assert organic[0]["content"] == FAKE_PAGE_CONTENT
         assert "content" not in organic[1]
@@ -421,7 +552,7 @@ class TestEvidenceBlockCap:
             {"title": "T", "link": "http://x", "snippet": "s", "position": 1},
         ]
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
-        assert "[… evidence truncated …]" not in rendered
+        assert "[... evidence truncated ...]" not in rendered
         assert "T" in rendered
 
     def test_oversize_evidence_is_trimmed_with_marker(self) -> None:
@@ -444,7 +575,7 @@ class TestEvidenceBlockCap:
             for i in range(5)
         ]
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
-        assert "[… evidence truncated …]" in rendered
+        assert "[... evidence truncated ...]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
         # Trailing items are dropped, leading (most-relevant) kept: a
         # leading-drop mutation would keep T4 and drop T0, failing this.
@@ -461,8 +592,8 @@ class TestEvidenceBlockCap:
             {"question": "lorem ipsum " * 800, "link": "http://x", "snippet": "s"}
         ]
         rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1")
-        # organic is empty → early return, no trailing-drop marker added
-        assert "[… evidence truncated …]" not in rendered
+        # organic is empty -> early return, no trailing-drop marker added
+        assert "[... evidence truncated ...]" not in rendered
         assert "lorem ipsum" in rendered
 
 
@@ -483,7 +614,7 @@ class TestFetchPageContent:
 
     @patch(f"{SF_MODULE}.requests.get")
     def test_happy_path_cleaned(self, mock_get: MagicMock) -> None:
-        """200 + HTML → (cleaned_text, cleaned_text) in cleaned mode."""
+        """200 + HTML -> (cleaned_text, cleaned_text) in cleaned mode."""
         mock_get.return_value = self._resp(text=_HTML_PAGE)
         text, capture = module._fetch_page_content("http://x", mode="cleaned")
         assert text is not None and "Federal Reserve" in text
@@ -491,7 +622,7 @@ class TestFetchPageContent:
 
     @patch(f"{SF_MODULE}.requests.get")
     def test_happy_path_raw_stores_html(self, mock_get: MagicMock) -> None:
-        """200 + HTML → capture is the raw HTML in raw mode."""
+        """200 + HTML -> capture is the raw HTML in raw mode."""
         mock_get.return_value = self._resp(text=_HTML_PAGE)
         text, capture = module._fetch_page_content("http://x", mode="raw")
         assert text is not None and "Federal Reserve" in text
@@ -513,7 +644,7 @@ class TestFetchPageContent:
 
     @patch(f"{SF_MODULE}.requests.get")
     def test_request_exception_returns_none(self, mock_get: MagicMock) -> None:
-        """A network exception is swallowed → (None, None)."""
+        """A network exception is swallowed -> (None, None)."""
         mock_get.side_effect = requests.Timeout("slow")
         assert module._fetch_page_content("http://x") == (None, None)
 
@@ -522,7 +653,7 @@ class TestFetchPageContent:
     def test_unextractable_html_returns_none(
         self, mock_get: MagicMock, _mock_clean: MagicMock
     ) -> None:
-        """200 + HTML but readability extracts nothing → (None, None)."""
+        """200 + HTML but readability extracts nothing -> (None, None)."""
         mock_get.return_value = self._resp(text="<html></html>")
         assert module._fetch_page_content("http://x") == (None, None)
 
@@ -557,9 +688,12 @@ class TestErrorHandling:
     def test_null_content_surfaces_as_error_json(
         self, mock_client_mgr: MagicMock, _mock_sleep: MagicMock
     ) -> None:
-        """An LLM refusal (content=None) becomes error JSON, not a None prediction."""
+        """An LLM refusal (parsed=None) becomes error JSON, not a None prediction."""
         mock_client = _stub_openai(mock_client_mgr)
-        mock_client.completions.return_value = OpenAIResponse(content=None)
+        mock_client.beta.chat.completions.parse.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(parsed=None, refusal="policy"))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
 
         result = run(
             tool="superforcaster-market-aware",
@@ -570,9 +704,9 @@ class TestErrorHandling:
             source_content={"serper_response": FAKE_SERPER_RESPONSE},
         )
 
-        payload = json.loads(result[0])  # not None → no downstream json.loads(None)
+        payload = json.loads(result[0])  # not None -> no downstream json.loads(None)
         assert payload["p_yes"] is None
-        assert "content" in payload["error"].lower()
+        assert "refus" in payload["error"].lower()
 
 
 class TestSerperRequest:
@@ -592,7 +726,7 @@ class TestSerperRequest:
     def test_serper_http_error_surfaces_as_error_json(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
-        """A 4xx/5xx Serper response raises via raise_for_status → error JSON."""
+        """A 4xx/5xx Serper response raises via raise_for_status -> error JSON."""
         _stub_openai(mock_client_mgr)
         bad_response = MagicMock()
         bad_response.raise_for_status.side_effect = requests.HTTPError("429 Too Many")

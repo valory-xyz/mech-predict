@@ -29,6 +29,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import openai
 import requests
 from markdownify import markdownify as md
+from openai import OpenAI
+from pydantic import BaseModel, Field, model_validator
 from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
@@ -102,81 +104,23 @@ def with_key_rotation(func: Callable) -> Callable:
 
 
 class OpenAIClientManager:
-    """Client context manager for OpenAI."""
+    """Context manager that creates and closes a local OpenAI client."""
 
     def __init__(self, api_key: str):
-        """Initializes with API keys"""
+        """Initializes with API key."""
         self.api_key = api_key
-        self._client: Optional["OpenAIClient"] = None
+        self._client: Optional[OpenAI] = None
 
-    def __enter__(self) -> "OpenAIClient":
-        """Initializes and returns LLM client."""
-        self._client = OpenAIClient(api_key=self.api_key)
+    def __enter__(self) -> OpenAI:
+        """Initializes and returns the OpenAI client."""
+        self._client = OpenAI(api_key=self.api_key)
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        """Closes the LLM client"""
+        """Closes the OpenAI client."""
         if self._client is not None:
-            self._client.client.close()
+            self._client.close()
             self._client = None
-
-
-class Usage:
-    """Usage class."""
-
-    def __init__(
-        self,
-        prompt_tokens: Optional[Any] = None,
-        completion_tokens: Optional[Any] = None,
-    ):
-        """Initializes with prompt tokens and completion tokens."""
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-
-
-class OpenAIResponse:
-    """Response class."""
-
-    def __init__(self, content: Optional[str] = None, usage: Optional[Usage] = None):
-        """Initializes with content and usage class."""
-        self.content = content
-        self.usage = usage if usage is not None else Usage()
-
-
-class OpenAIClient:
-    """OpenAI Client"""
-
-    def __init__(self, api_key: str):
-        """Initializes with API keys and client."""
-        self.api_key = api_key
-        self.client = openai.OpenAI(api_key=self.api_key)
-
-    def completions(
-        self,
-        model: str,
-        messages: List = [],  # noqa: B006
-        timeout: Optional[Union[float, int]] = None,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        n: Optional[int] = None,
-        stop: Any = None,
-        max_tokens: Optional[float] = None,
-    ) -> Optional[OpenAIResponse]:
-        """Generate a completion from the specified LLM provider using the given model and messages."""
-        response_provider = self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            n=1,
-            timeout=timeout if timeout is not None else 150,
-            stop=None,
-        )
-        response = OpenAIResponse()
-        response.content = response_provider.choices[0].message.content
-        response.usage.prompt_tokens = response_provider.usage.prompt_tokens
-        response.usage.completion_tokens = response_provider.usage.completion_tokens
-        return response
 
 
 def count_tokens(text: str, model: str) -> int:
@@ -221,11 +165,120 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 MAX_EVIDENCE_TOKENS = 4000
 
 
+class PredictionResult(BaseModel):
+    """Superforecaster structured output.
+
+    The text fields carry the reasoning chain the prompt asks for (facts ->
+    reasons against -> reasons for -> aggregation + tentative -> reflection).
+    Only the four numeric fields are returned on-chain per the mech protocol.
+
+    Using structured outputs means the completion is guaranteed to match this
+    schema, so the prompt carries no JSON-format instructions and no regex
+    extraction is needed on the way out.
+    """
+
+    facts: str = Field(
+        ...,
+        description=(
+            "Core factual points compiled from the sources and from relevant "
+            "background that may not be in the sources. Specific and relevant, "
+            "covering the core considerations for the forecast. No conclusions "
+            "about how a fact influences the answer."
+        ),
+    )
+    reasons_no: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be NO. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    reasons_yes: str = Field(
+        ...,
+        description=(
+            "Reasons why the answer might be YES. Rate the strength of each "
+            "reason on a scale of 1-10."
+        ),
+    )
+    aggregation: str = Field(
+        ...,
+        description=(
+            "Aggregate the considerations. Do not summarize or repeat previous "
+            "points; investigate how the competing factors and mechanisms "
+            "interact and weigh against each other. Factorize across "
+            "exhaustive, mutually exclusive cases only when that helps. Adjust "
+            "for the negativity and sensationalism bias of news sources. Think "
+            "like a superforecaster. End by stating an initial tentative "
+            "probability as a single number between 0 and 1."
+        ),
+    )
+    reflection: str = Field(
+        ...,
+        description=(
+            "Sanity checks and finalisation. Check for over/underconfidence, "
+            "improper treatment of conjunctive or disjunctive conditions, and "
+            "other forecasting biases. Consider priors and base rates, and how "
+            "far case-specific information justifies deviating from them. Be "
+            "precise with tail probabilities. Never change the forecast for the "
+            "sake of modesty or balance alone. Highlight the key factors that "
+            "inform the final forecast."
+        ),
+    )
+    # IMPORTANT: the four numeric fields below MUST stay LAST in this schema.
+    # Structured outputs generate fields in declaration order, so keeping the
+    # numbers after the reasoning is what conditions them on the chain of
+    # thought. Do not reorder or alphabetize: pydantic will not complain and
+    # the schema still validates, but the calibration silently degrades.
+    p_yes: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event in the Question occurs.",
+    )
+    p_no: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event does NOT occur.",
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the prediction (0 = lowest, 1 = highest).",
+    )
+    info_utility: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Utility of the information in the sources to inform the "
+            "prediction (0 = lowest, 1 = highest)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_p_yes_p_no_sum(self) -> "PredictionResult":
+        """Validate that p_yes and p_no sum to 1.
+
+        :return: the validated model.
+        :raises ValueError: when the two probabilities do not sum to 1.
+        """
+        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
+            raise ValueError(
+                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
+                f"{self.p_yes + self.p_no})"
+            )
+        return self
+
+
+SYSTEM_PROMPT = "You are a helpful assistant."
+
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
 forecasts under uncertainty, with your performance evaluated according to the Brier score. When
-forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly “small” probabilities,
-or 90% (9:1) and 99% (99:1) as similarly “high” probabilities. As the odds show, they are
+forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly "small" probabilities,
+or 90% (9:1) and 99% (99:1) as similarly "high" probabilities. As the odds show, they are
 markedly different, so output your probabilities accordingly.
 
 Question:
@@ -240,97 +293,102 @@ We have retrieved the following information for this question:
 Recall the question you are forecasting:
 {question}
 
-Instructions:
-1. Compress key factual information from the sources, as well as useful background information
-which may not be in the sources, into a list of core factual points to reference. Aim for
-information which is specific, relevant, and covers the core considerations you'll use to make
-your forecast. For this step, do not draw any conclusions about how a fact will influence your
-answer or forecast. Place this section of your response in <facts></facts> tags.
+Instructions. Return a structured PredictionResult whose fields carry the following
+reasoning chain:
 
-2. Provide a few reasons why the answer might be no. Rate the strength of each reason on a
-scale of 1-10. Use <no></no> tags.
+1. `facts` - Compress key factual information from the sources, as well as useful background
+information which may not be in the sources, into a list of core factual points to reference.
+Aim for information which is specific, relevant, and covers the core considerations you'll use
+to make your forecast. For this step, do not draw any conclusions about how a fact will
+influence your answer or forecast.
 
-3. Provide a few reasons why the answer might be yes. Rate the strength of each reason on a
-scale of 1-10. Use <yes></yes> tags.
+2. `reasons_no` - Provide a few reasons why the answer might be no. Rate the strength of each
+reason on a scale of 1-10.
 
-4. Aggregate your considerations. Do not summarize or repeat previous points; instead,
-investigate how the competing factors and mechanisms interact and weigh against each other.
-Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it would be
-beneficial to your reasoning. We have detected that you overestimate world conflict, drama,
-violence, and crises due to news' negativity bias, which doesn't necessarily represent overall
-trends or base rates. Similarly, we also have detected you overestimate dramatic, shocking,
-or emotionally charged news due to news' sensationalism bias. Therefore adjust for news'
-negativity bias and sensationalism bias by considering reasons to why your provided sources
-might be biased or exaggerated. Think like a superforecaster. Use <thinking></thinking> tags
-for this section of your response.
+3. `reasons_yes` - Provide a few reasons why the answer might be yes. Rate the strength of each
+reason on a scale of 1-10.
 
-5. Output an initial probability (prediction) as a single number between 0 and 1 given steps 1-4.
-Use <tentative></tentative> tags.
+4. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
+instead, investigate how the competing factors and mechanisms interact and weigh against each
+other. Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it
+would be beneficial to your reasoning. We have detected that you overestimate world conflict,
+drama, violence, and crises due to news' negativity bias, which doesn't necessarily represent
+overall trends or base rates. Similarly, we also have detected you overestimate dramatic,
+shocking, or emotionally charged news due to news' sensationalism bias. Therefore adjust for
+news' negativity bias and sensationalism bias by considering reasons to why your provided
+sources might be biased or exaggerated. Think like a superforecaster. End this field by
+stating an initial tentative probability as a single number between 0 and 1 given steps 1-4.
 
-6. Reflect on your answer, performing sanity checks and mentioning any additional knowledge
-or background information which may be relevant. Check for over/underconfidence, improper
-treatment of conjunctive or disjunctive conditions (only if applicable), and other forecasting
-biases when reviewing your reasoning. Consider priors/base rates, and the extent to which
-case-specific information justifies the deviation between your tentative forecast and the prior.
-Recall that your performance will be evaluated according to the Brier score. Be precise with tail
-probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
-or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors
-that inform your final forecast. Use <thinking></thinking> tags for this portion of your response.
+5. `reflection` - Reflect on your tentative answer, performing sanity checks and mentioning any
+additional knowledge or background information which may be relevant. Check for
+over/underconfidence, improper treatment of conjunctive or disjunctive conditions (only if
+applicable), and other forecasting biases when reviewing your reasoning. Consider priors/base
+rates, and the extent to which case-specific information justifies the deviation between your
+tentative forecast and the prior. Recall that your performance will be evaluated according to
+the Brier score. Be precise with tail probabilities. Leverage your intuitions, but never change
+your forecast for the sake of modesty or balance alone. Finally, aggregate all of your previous
+reasoning and highlight key factors that inform your final forecast.
 
-7. Output your final prediction (a number between 0 and 1 with an asterisk at the beginning and
-end of the decimal) in <answer></answer> tags.
-
-
-OUTPUT_FORMAT
-* Your output response must be only a single JSON object to be parsed by Python's "json.loads()".
-* The JSON must contain four fields: "p_yes", "p_no", "confidence", and "info_utility".
-* Each item in the JSON must have a value between 0 and 1.
-   - "p_yes": Estimated probability that the event in the "Question" occurs.
-   - "p_no": Estimated probability that the event in the "Question" does not occur.
-   - "confidence": A value between 0 and 1 indicating the confidence in the prediction. 0 indicates lowest
-     confidence value; 1 maximum confidence value.
-   - "info_utility": Utility of the information provided in "sources" to help you make the prediction.
-     0 indicates lowest utility; 1 maximum utility.
-* The sum of "p_yes" and "p_no" must equal 1.
-* Output only the JSON object. Do not include any other contents in your response.
-* This is incorrect:"```json{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}```"
-* This is incorrect:```json"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"```
-* This is correct:"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"
+6. `p_yes`, `p_no`, `confidence`, `info_utility` - Output your final prediction. `p_yes` is the
+probability that the event in the Question occurs and `p_no` that it does not; the two must sum
+to 1. `confidence` is how confident you are in the prediction and `info_utility` how useful the
+retrieved information was in making it. All four are numbers between 0 and 1.
 """
 
 
-def generate_prediction_with_retry(
-    client: "OpenAIClient",
+def _parse_completion(
+    client: OpenAI,
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float,
-    max_tokens: int,
+    response_format: Any,
+    temperature: float = 0,
+    max_tokens: int = 4096,
     retries: int = COMPLETION_RETRIES,
     delay: int = COMPLETION_DELAY,
     counter_callback: Optional[Callable] = None,
 ) -> Tuple[Any, Optional[Callable]]:
-    """Attempt to generate a prediction with retries on failure."""
+    """Call OpenAI Structured Outputs and parse into a Pydantic model.
+
+    ``client.beta.chat.completions.parse()`` guarantees the completion is
+    well-formed JSON matching the schema's field names and types, so the
+    prompt carries no JSON-format instructions and no output extraction is
+    needed. It does NOT enforce the custom ``model_validator``
+    (``p_yes + p_no ~= 1``): that raises ``pydantic.ValidationError`` (a
+    ``ValueError``) inside ``.parse()``, which is why ``ValueError`` is in the
+    retry tuple below.
+
+    :param client: an initialised OpenAI client.
+    :param model: OpenAI model identifier.
+    :param messages: chat messages list (role + content dicts).
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature (0 = deterministic).
+    :param max_tokens: maximum tokens to generate.
+    :param retries: number of retry attempts on transient / validation failure.
+    :param delay: delay in seconds between retries.
+    :param counter_callback: optional callback tracking token usage.
+    :return: tuple of (parsed model instance, counter_callback).
+    :raises RuntimeError: if all retries are exhausted without a successful parse.
+    """
     attempt = 0
     last_error: Optional[Exception] = None
     while attempt < retries:
         try:
-            response = client.completions(
+            response = client.beta.chat.completions.parse(
                 model=model,
                 messages=messages,
+                response_format=response_format,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                n=1,
-                timeout=90,
-                stop=None,
+                timeout=150,
             )
 
-            # A refusal / empty completion yields content=None. Surface it as
-            # an error (mirrors the calibrated sibling's `parsed is None`
-            # guard) so the decorator's error JSON carries the real reason
-            # instead of returning None as the prediction and tripping
-            # json.loads(None) downstream in tournament scoring.
-            if response is None or response.content is None:
-                raise ValueError("Model returned no content (possible refusal)")
+            parsed = response.choices[0].message.parsed
+
+            if parsed is None:
+                refusal = response.choices[0].message.refusal
+                raise ValueError(
+                    f"Model refused or returned unparseable output: {refusal}"
+                )
 
             if counter_callback is not None:
                 counter_callback(
@@ -340,14 +398,24 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            return response.content, counter_callback
-        except Exception as e:  # noqa: BLE001
-            print(f"Attempt {attempt + 1} failed with error: {e}")
+            return parsed, counter_callback
+        except (
+            openai.APIConnectionError,
+            openai.InternalServerError,
+            ValueError,
+        ) as e:
+            # NB: openai.RateLimitError is deliberately NOT caught here.
+            # Letting it propagate to the with_key_rotation decorator lets the
+            # decorator rotate API keys on a rate-limit hit; retrying in-place
+            # on the same throttled key never rotates. Transient connection /
+            # server / validation failures stay here and retry on the same key.
+            print(f"[superforcaster-market-aware] Attempt {attempt + 1} failed: {e}")
             time.sleep(delay)
             attempt += 1
             last_error = e
+
     raise RuntimeError(
-        f"Failed to generate prediction after retries: {last_error}"
+        f"Failed to get structured LLM completion after retries: {last_error}"
     ) from last_error
 
 
@@ -361,7 +429,7 @@ def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
         return None
     words = text.split()
     if len(words) > max_words:
-        text = " ".join(words[:max_words]) + " […]"
+        text = " ".join(words[:max_words]) + " [...]"
     return text.strip()
 
 
@@ -375,7 +443,7 @@ def _fetch_page_content(
 
     `capture_payload` is the raw HTML when mode=="raw" (for full-fidelity
     replay) and the cleaned text otherwise. Returns (None, None) on any
-    fetch / parse failure — the caller falls back to the Serper snippet.
+    fetch / parse failure - the caller falls back to the Serper snippet.
 
     :param url: The URL to fetch.
     :param mode: ``"cleaned"`` stores extracted text; ``"raw"`` stores HTML.
@@ -478,7 +546,7 @@ def fetch_additional_sources(question: str, serper_api_key: str) -> requests.Res
         "Content-Type": "application/json",
     }
     # timeout matches the fleet's other Serper callers (factual_research,
-    # prediction_request, …); without it a hung connection blocks the run.
+    # prediction_request, ...); without it a hung connection blocks the run.
     return requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
 
@@ -549,7 +617,7 @@ def _cap_evidence_block(
     ):
         trimmed.pop()
     rendered = format_sources_data(trimmed, misc_data)
-    rendered += "\n[… evidence truncated …]\n"
+    rendered += "\n[... evidence truncated ...]\n"
     return rendered
 
 
@@ -660,26 +728,60 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         print(f"\n{prediction_prompt=}\n")
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting prompt response...")
-        extracted_block, counter_callback = generate_prediction_with_retry(
+        prediction: PredictionResult
+        prediction, counter_callback = _parse_completion(
             client=llm_client,
             model=model,
             messages=messages,
+            response_format=PredictionResult,
             temperature=temperature,
             max_tokens=max_tokens,
-            retries=COMPLETION_RETRIES,
-            delay=COMPLETION_DELAY,
             counter_callback=counter_callback,
         )
 
-        used_params = {
+        print(f"[superforcaster-market-aware] === FACTS ===\n{prediction.facts}")
+        print(
+            f"[superforcaster-market-aware] === REASONS_NO ===\n{prediction.reasons_no}"
+        )
+        print(
+            f"[superforcaster-market-aware] === REASONS_YES ===\n"
+            f"{prediction.reasons_yes}"
+        )
+        print(
+            f"[superforcaster-market-aware] === AGGREGATION ===\n"
+            f"{prediction.aggregation}"
+        )
+        print(
+            f"[superforcaster-market-aware] === REFLECTION ===\n"
+            f"{prediction.reflection}"
+        )
+        print(
+            f"[superforcaster-market-aware] Result: p_yes={prediction.p_yes}, "
+            f"p_no={prediction.p_no}, confidence={prediction.confidence}, "
+            f"info_utility={prediction.info_utility}"
+        )
+
+        # On-chain result: only the four standard mech fields. Structured
+        # outputs guarantee this is a flat, strict-json.loads-parseable object,
+        # so no reasoning prose can leak into the delivered payload.
+        result = json.dumps(
+            {
+                "p_yes": prediction.p_yes,
+                "p_no": prediction.p_no,
+                "confidence": prediction.confidence,
+                "info_utility": prediction.info_utility,
+            }
+        )
+
+        used_params: Dict[str, Any] = {
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if return_source_content:
             used_params["source_content"] = captured_source_content
-        return extracted_block, prediction_prompt, None, counter_callback, used_params
+        return result, prediction_prompt, None, counter_callback, used_params

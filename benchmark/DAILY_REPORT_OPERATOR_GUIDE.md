@@ -1,175 +1,93 @@
 # Daily report — operator guide
 
-What to do each morning with the benchmark report in Slack. This page is the whole
-procedure; [PROPOSAL.md](PROPOSAL.md) is the design of the system it sits in.
+The morning routine for the benchmark Slack report. Design of the wider system:
+[PROPOSAL.md](PROPOSAL.md).
 
----
-
-## 1. How the loop works
+## 1. The loop
 
 ```mermaid
 flowchart LR
-    new["someone writes<br/>a new tool"] --> tourn["TOURNAMENT<br/>runs live, no money"]
-    tourn --> daily["DAILY REPORT<br/>posted to Slack"]
+    new["new tool"] --> tourn["TOURNAMENT<br/>live, no money"]
+    tourn --> daily["DAILY REPORT"]
     prod["PRODUCTION<br/>deployed, real money"] --> daily
-    daily --> you{"you read it"}
-    you -->|"a candidate is good enough"| promote["PROMOTE<br/>tournament → production"]
-    you -->|"a deployed tool is bad"| demote["DEMOTE<br/>stop serving it"]
-    you -->|"most days"| nothing["do nothing"]
-    promote --> prod
-    demote --> retired["retired"]
+    daily --> you{"you"}
+    you -->|promote| prod
+    you -->|demote| retired["retired"]
+    you -->|"most days"| nothing["nothing"]
 ```
 
-Tools live in one of two places. **Tournament** tools answer real questions but no money
-rides on them. **Production** tools are deployed and the trader bets on what they say.
-Every night both are scored against what actually happened.
+## 2. The report, message by message
 
----
+| Message | Contains | You look at it when |
+|---|---|---|
+| **Title** | the verdict: 🟢 `PROMOTE n` · 🟠 `DEMOTE n` · 🔴 `NO ACTION` · ⚪ `NO CHANGE` | always — often the only thing you need |
+| 1a. Production W-2 vs W-1 | week-over-week movement | a delta surprised you |
+| 1b. Production 90D vs W-1 | the decision table: `floor`, `condAcc`, `rec` | title said act, or you want the evidence |
+| 2. Tournament | candidates, same columns | title said PROMOTE |
+| 3. Alerts | reasons to distrust today's numbers | **before acting on anything** |
+| 4. Simulated trader ROI | context only — never a decision input | curiosity |
 
-## 2. Reading the Slack messages
+🔴 `NO ACTION` = every deployed tool fails but demoting all would empty the platform → escalate, never act tool-by-tool.
 
-| Message | What it is |
-|---|---|
-| **Title** | The answer. Read this first |
-| **1a / 1b** | Production tools — this week, and overall |
-| **2. Tournament** | Candidates waiting to be promoted |
-| **3. Alerts** | Reasons to *not* trust today's numbers |
-| **ROI** | What the trader would have earned |
+## 3. The two gates
 
-The title tells you the outcome before you read anything else:
+> **PROMOTE** a tournament tool: **n ≥ 30** and **`floor` > +0.04** and **`condAcc` ≥ 50%**.
 
-| Title | Meaning |
-|---|---|
-| 🟢 **PROMOTE n** | a candidate is ready — act |
-| 🟠 **DEMOTE n** | a deployed tool should be switched off — act |
-| 🔴 **NO ACTION** | no deployed tool clears the gate. Switching them all off would leave nothing running — escalate, do not act tool-by-tool |
-| ⚪ **NO CHANGE** | nothing to do |
+> **DEMOTE** a production tool: **n ≥ 30**, fails that floor, and **either** `condAcc` < 50% **or** Brier above its own `base` by ≥ 0.01 in **both** the 90d window and the last week — **unless** it would empty the platform.
 
-**The four columns that decide anything**, plus one that qualifies them.
+Low reliability (`rel` < 80%) never decides — it annotates: `PROMOTE (rel 60%)`.
 
-| Column | Reading |
-|---|---|
-| **Edge** | how far the tool beat the market price. Ranks the table — best first |
-| **floor** | the *worst* Edge the evidence still supports. **This is what the gate tests**, not Edge |
-| **condAcc** | win rate on the markets where the tool **disagreed** with the price — the only markets a bet is placed on |
-| **n** | scored markets. Under 30, nothing is decided |
-| **rel** | share of calls that returned a usable answer. Under 80% it is flagged as `(rel NN%)` on the row — a **warning, not a veto**: the score is computed only on the calls it *did* answer |
+## 4. Every possible `rec` value
 
-### Alerts mean "wait"
+| `rec` says | Meaning | You do |
+|---|---|---|
+| `PROMOTE` | candidate passed all three gate tests | start the promote flow (§5) |
+| `review: floor ok, condAcc NN%` | bound cleared but loses its disagreements — scores by agreeing with the market | look, do **not** promote |
+| `no: +0.0XX short` | bound missed the +0.04 margin by that much | nothing; watch it |
+| `no: condAcc NN%` | candidate loses the markets it disagrees on | nothing |
+| `no: no-skill` | candidate worse than always guessing the base rate | nothing |
+| `keep` | deployed tool, no demote signal | nothing |
+| `keep (floor ok)` | deployed tool that would even pass the promote bar | nothing |
+| `keep (floor ok, condAcc NN%)` | passes the bar but condAcc dipped below 50% | keep an eye on it |
+| `demote: condAcc NN%` | deployed tool loses its disagreements | start the demote flow (§5) |
+| `demote: no-skill` | worse than its own base rate, in both windows | demote flow (§5) |
+| `n=X < 30` | too few scored markets to judge | nothing — *not enough data ≠ no improvement* |
+| `no data` | nothing scored in the window | nothing; check collection if persistent |
+| `no spread` | edge exists but no variance recorded (n < 2) | nothing |
+| `needs --rebuild` | scores file predates the spread field — migration state, not a data state | wait for the nightly rebuild; flag if it persists |
+| any of the above + `(rel NN%)` | verdict stands, but the tool answered only NN% of calls | check why it misses calls before acting |
 
-**`week still filling`** — a question only counts once it resolves, so this week's data has
-not finished arriving. Ignore the weekly columns; use the 90d ones.
-A **`*`** on a tool means too few markets to judge. Do not act on it.
+Under 1b, `⚠ NO REPLACEMENT` = all deployed tools demote and nothing can replace them (→ 🔴). `⚠ NO DEPLOYED REPLACEMENT — … clears the promote gate in the tournament` = promote **before** retiring.
 
----
+A `PROMOTE` is a **nomination**: statistics passed. Deployment still takes ablation + human review + canary ([PROPOSAL.md](PROPOSAL.md) Part 10). Promoting **adds**; it never replaces.
 
-## 3. What to do
-
-**The report already applies the gates.** The `rec` column is the recommendation — you are
-checking it, not recalculating it.
-
-> **PROMOTE** a tournament tool when it has **≥ 30 scored markets**, its **`floor` is above
-> +0.04**, and its **`condAcc` is 50% or better**.
-
-> **DEMOTE** a production tool when it has **≥ 30 scored markets**, does **not** clear that
-> same floor, and **either** wins **under half** its disagreements **or** scores worse than
-> its own no-skill baseline in **both** the 90d window and the week — **unless** demoting it would leave the
-> platform with no tool at all.
-
-Low reliability never decides either one. It rides along as `(rel NN%)` so you can see the
-verdict was built on partial data, and you make the call.
-
-If nothing clears the promote gate, **promote nothing**. Being top of the table is not a
-reason to promote.
-
-| `rec` says | You do |
-|---|---|
-| `PROMOTE` | promote it (below) |
-| `demote: …` | demote it (below) |
-| `review: …` | look, but do not promote — it cleared the floor and failed `condAcc` |
-| `keep` | nothing |
-| anything ending `(rel NN%)` | the verdict stands, but the tool is missing calls — check why before acting |
-| `n=… < 30`, `no spread`, `needs --rebuild` | nothing — not enough data, or the scorer needs a rebuild |
-
-### A `PROMOTE` is a nomination, not a green light
-
-It means the candidate passed the **statistical** gate. Deployment still needs the rest of
-[PROPOSAL.md](PROPOSAL.md) Part 10 — ablation, human review, then canary. Promoting **adds**
-to the deployed set; it does not replace. Keep several tools live.
-
-### Which repository
+## 5. Which repository
 
 | Action | Where |
 |---|---|
-| **Deploy** a tool | 1. `mech-predict` — add to the service, merge, cut a release.<br/>2. `agent-deployments` — add to `TOOLS_TO_PACKAGE_HASH`, update `METADATA_HASH`, bump `PROPEL_SERVICE_HASH_ID`. **Order matters**: CI rejects a tool not yet in the released service |
-| **Demote** a tool | `agent-deployments` only — remove from `TOOLS_TO_PACKAGE_HASH`, update `METADATA_HASH` |
-| **Add a candidate** to the tournament | `mech-predict` only — add to `benchmark/tournament_tools.json` |
+| **Deploy** | 1. `mech-predict`: add tool to the service, merge, cut a release. 2. `agent-deployments`: add to `TOOLS_TO_PACKAGE_HASH`, update `METADATA_HASH`, bump `PROPEL_SERVICE_HASH_ID`. **This order** — CI rejects a tool not in the released service |
+| **Demote** | `agent-deployments` only: remove from `TOOLS_TO_PACKAGE_HASH`, update `METADATA_HASH` |
+| **New candidate** | `mech-predict` only: add to `benchmark/tournament_tools.json` |
 
-**If in doubt, do nothing.** A missed promotion costs a day. A wrong demotion takes a
-working tool out of production.
+**If in doubt, do nothing.** A missed promotion costs a day; a wrong demotion costs a working tool.
 
----
+## Appendix — why these metrics
 
-# Appendix — why these metrics
+**Why not accuracy?** The trader bets bigger when a tool sounds more confident, so a tool can pick the right side 70% of the time and still lose money by being overconfident on the wrong 30%. Tools are graded on beating the **price** (`Edge`), guarded against confident-wrong and against hedging to 50/50.
 
-## Why not just accuracy?
-
-The point is for the trader to make money. It **bets bigger when a tool sounds more
-confident**, so a tool's job isn't to pick the right side — it's to give honest odds that
-beat the market's price. A tool can pick the right side 70% of the time and still lose
-money if it sounds too sure on the ones it gets wrong: the trader bets big on those and
-loses big. So tools are graded on how far they beat the price (**Edge**), and guarded
-against the two ways a score flatters: being confident and wrong, and hedging to 50/50.
-
-## `floor` — the number the gate actually tests
-
-Each time a tool prices a market that later resolves, we record **one number**: how much
-closer the tool was to the truth than the market price was. That is the market's Brier
-score minus the tool's. Positive = the tool beat the price. **Edge** is the average of
-those numbers. **`floor` is that average minus a safety deduction** — large when the tool
-has few markets or its results swing wildly, small when thousands of markets agree.
+**`floor` — what the promote test actually reads:**
 
 ```
 floor  =  Edge  −  1.645 × ( spread ÷ √markets )
 ```
 
-- **spread** — how much those per-market numbers jump around (their standard deviation).
-  A tool that is steadily +0.05 has a small spread; one that swings +0.9 / −0.8 has a big one.
-- **1.645** — the 95% confidence multiplier. It is what makes this a *worst case you can
-  still be 95% sure about*, rather than a guess.
-- **√markets** — why evidence compounds: to halve the deduction you need **four times**
-  the markets, not twice.
+The worst true Edge the evidence still supports at 95% confidence. `spread` = how much per-market results jump around; `√markets` = to halve the deduction you need 4× the markets. Two real tools, same report:
 
-Two real tools, same report:
+| tool | Edge | markets | deduction | floor |
+|---|---:|---:|---:|---:|
+| `factual_research` | −0.0256 | 6,938 | 0.005 | −0.0308 |
+| `superforcaster-polymarket-v2` | −0.1551 | 31 | **0.113** | −0.2680 |
 
-| tool | Edge | spread | markets | deduction | **floor** |
-|---|---:|---:|---:|---:|---:|
-| `factual_research` | −0.0256 | 0.262 | **6,938** | 0.005 | **−0.0308** |
-| `superforcaster-polymarket-v2` | −0.1551 | 0.382 | **31** | **0.113** | **−0.2680** |
+Same spread, **22× the deduction** — a great average off 31 lucky markets does not clear the gate.
 
-Same kind of spread — but the deduction is **22× larger** for the tool with 31 markets.
-That is the entire column: *given how few markets this is, how bad could the true long-run
-average still be?* Gating on `floor` rather than `Edge` means a tool must be good **and**
-well-proven, not merely good-looking. A great average off 31 lucky markets does not clear it.
-
-## Why the others
-
-| Metric | Why it gates |
-|---|---|
-| **`rel`** (warning only) | The score is computed only on the calls that came back, and the missing ones are not a random sample. It is **not** a gate: a tool that misses calls may still be the best forecaster available, and blocking it can leave a worse one deployed |
-| **`condAcc` ≥ 50%** | A tool that agrees with the price on easy questions scores well and earns nothing — the trader only bets where the tool **disagrees**. Losing over half of those is a coin flip with costs |
-| **n ≥ 30** | Below it the report says *"not enough data yet"* — which is a different answer from *"no improvement"*, and must not be read as one |
-| **Brier vs base** | The demote signal must show in **both** windows. One window is noise: a live tool once sat 0.0003 above its floor over 2,055 markets while winning 65% of its disagreements |
-
-**Why +0.04, and why one-sided:** a false promote loses money; a missed promote just keeps
-the incumbent for another day. The bar is deliberately asymmetric.
-
-## Known limits
-
-- The deduction assumes markets are independent. Ladder markets (*"above 100k / 110k /
-  120k"*) resolve off one underlying event, so the true sample is smaller than `n` and the
-  deduction is **too small**. Nothing corrects for this yet.
-- `floor` renders from 2 markets but only gates from 30 — a spectacular bound on 5 markets
-  is not actionable. Only `rec` knows that.
-- The gate is re-tested daily against a slow-moving window, so the 95% is per-cell-per-day,
-  not per-decision.
+**The other gate inputs:** `condAcc` = win rate on the only markets a bet is placed on (where the tool disagrees with the price) — under 50% is a coin flip with costs. `n ≥ 30` = below it, "not enough data yet" is the honest answer. `base` = the zero-skill reference; a demote needs the below-`base` signal in **both** windows because one window is noise. `rel` = warning only: the score is computed on the calls that came back, and blocking a tool for missed calls can leave a worse one deployed.

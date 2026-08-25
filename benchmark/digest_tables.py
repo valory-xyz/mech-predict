@@ -368,8 +368,9 @@ def _headline(
                 f"+{PROMOTE_DELTA}.\n"
                 "\u2022 *condAcc*: win rate on the markets where the tool "
                 "DISAGREED with the price -- under 50% blocks a promote.\n"
-                "\u2022 *rec*: the verdict -- see "
-                "DAILY_REPORT_OPERATOR_GUIDE.md."
+                "\u2022 *rec*: the verdict -- every value explained in the "
+                "<https://github.com/valory-xyz/mech-predict/blob/main/"
+                "benchmark/DAILY_REPORT_OPERATOR_GUIDE.md|operator guide>."
             ),
         ],
     )

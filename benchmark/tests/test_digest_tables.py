@@ -320,6 +320,25 @@ class TestAlerts:
         assert "reliability breach" in body
 
 
+class TestSpanFallback:
+    """A missing window span explains itself in operator language."""
+
+    def test_unstated_span_names_the_cause_not_the_docstring(
+        self, tmp_path: Path
+    ) -> None:
+        """No window bounds -> the caption says why and what fixes it.
+
+        The fallback renders into Slack, where "see the docstring" points
+        at nothing a reader can open.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(tmp_path, at={"alpha": _stats()})
+        body = _body(results)
+        assert "docstring" not in body
+        assert "predates window stamping" in body
+
+
 class TestRendering:
     """Pin the presentation choices a reader depends on."""
 
@@ -676,7 +695,7 @@ class TestWindowLabel:
         :param results: results-directory fixture.
         """
         body = _body(results)
-        assert "UNSTATED" in body
+        assert "unstated" in body
         assert "2026-08" not in body
 
 

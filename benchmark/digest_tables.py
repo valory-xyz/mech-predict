@@ -679,7 +679,14 @@ def build_digest_messages(
     span, as_of = _window_meta(
         results_dir / WINDOW_FILES["at"].format(platform=platform)
     )
-    month_label = span if span else "an UNSTATED span - see the docstring"
+    month_label = (
+        span
+        if span
+        else (
+            "an unstated span (scores file predates window stamping; "
+            "the next rebuild adds it)"
+        )
+    )
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])

@@ -1008,13 +1008,7 @@ class TestPromoteDemoteGate:
     def test_conditional_accuracy_qualifies_a_promote_but_cannot_veto_it(
         self,
     ) -> None:
-        """A cleared bound is the policy's condition; condAcc annotates it.
-
-        condAcc carries no confidence interval and its 0.50 line
-        carries no interval -- on live data every value straddles 0.50 on a
-        Wilson 95%. Letting it silently veto a bound that cleared the margin
-        would be a stricter gate than the policy, applied invisibly.
-        """
+        """A cleared bound is the policy's condition; condAcc annotates it."""
         row = _stats(
             edge=0.0825,
             edge_sd=0.149248,
@@ -1109,14 +1103,7 @@ class TestMigrationState:
     """An accumulator predating this PR must say so, not read as thin data."""
 
     def test_missing_edge_sd_asks_for_a_rebuild(self) -> None:
-        """None edge_sd means the field was never accumulated, not no spread.
-
-        `_restore_group` restores it as None from a pre-PR scores.json and
-        `_accumulate_group` skips a None accumulator, so it never re-arms on
-        the incremental path -- which IS the daily production path. Reproduced
-        against the real CI artifact: all four Polymarket tools carry
-        edge_sd=None and market_brier=None.
-        """
+        """None edge_sd means the field was never accumulated, not no spread."""
         stale = _stats(edge_sd=None)
         assert _verdict(stale, deployed=True) == "needs --rebuild"
 
@@ -1143,10 +1130,6 @@ class TestFloorIsVisible:
     def test_floor_column_renders_the_bound(self, tmp_path: Path) -> None:
         """The rendered value equals the bound the gate tests.
 
-        Ranking on a quantity the reader cannot see is the same defect as a
-        skill score whose denominator sits off-screen -- the order looks to
-        contradict the Edge column with no visible reason.
-
         :param tmp_path: pytest temp dir.
         """
         results = tmp_path / "r"
@@ -1166,10 +1149,6 @@ class TestFloorIsVisible:
 
     def test_floor_is_shown_beside_the_edge_it_qualifies(self, tmp_path: Path) -> None:
         """A leading Edge with a negative floor renders both, side by side.
-
-        The order says which tool is best; the floor says whether we can act
-        on it. Showing only one of the two is what makes an order look
-        arbitrary.
 
         :param tmp_path: pytest temp dir.
         """
@@ -1198,12 +1177,6 @@ class TestHeadlineSafety:
 
     def test_all_demote_still_says_no_action(self, tmp_path: Path) -> None:
         """Every tool demoting yields NO ACTION, never "DEMOTE n".
-
-        The check used to search the verdict text for a "NO REPLACEMENT"
-        substring. When that warning moved out of the rows, the check silently
-        became always-false and the headline flipped to "DEMOTE 4" -- the exact
-        instruction the guard exists to prevent. It now asks the shared
-        survivor rule instead of reading strings.
 
         :param tmp_path: pytest temp dir.
         """
@@ -1299,10 +1272,6 @@ class TestBlockedHeadline:
     ) -> None:
         """A blocked roster means nothing survived, not that everything demoted.
 
-        Unjudgeable tools ("n=12 < 30") are not survivors, so a roster can be
-        blocked while only one tool actually demotes. Counting the demotes
-        rendered "All 1 deployed tools fail the gate".
-
         :param tmp_path: pytest temp dir.
         """
         results = tmp_path / "results"
@@ -1378,12 +1347,7 @@ class TestReliabilityWarning:
     def test_an_unreliable_candidate_still_promotes_but_carries_the_number(
         self,
     ) -> None:
-        """A warning, not a veto.
-
-        A tool that misses calls may still be the best forecaster available,
-        and blocking it can leave a worse tool deployed. The number rides on
-        the row so the human decides.
-        """
+        """A warning, not a veto."""
         strong = dict(edge=0.30, edge_sd=0.1, edge_n=200, conditional_accuracy_rate=0.7)
         assert _verdict(_stats(reliability=0.99, **strong), deployed=False) == "PROMOTE"
         assert (
@@ -1446,11 +1410,6 @@ class TestReliabilityWarning:
 
     def test_the_headline_announces_an_annotated_promote(self, tmp_path: Path) -> None:
         """End to end: the warning must not mute the headline.
-
-        _survivors matches on prefix, but the HEADLINE had its own exact
-        equality test. Annotating the verdict there would have produced a row
-        reading PROMOTE under a title reading NO CHANGE -- a warning that
-        silently became a block.
 
         :param tmp_path: pytest temp dir.
         """

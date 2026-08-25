@@ -376,10 +376,10 @@ def _headline(
 
 
 def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
-    """One-sided 95% lower bound on the tool's mean edge over the market.
+    """One-sided 95% lower bound on the mean edge, or None without a spread.
 
-    :param stats: per-tool stats for a window.
-    :return: the lower bound, or None when it cannot be computed.
+    :param stats: per-tool stats for the decision window.
+    :return: the bound, or None.
     """
     edge = _num((stats or {}).get("edge"))
     sd = _num((stats or {}).get("edge_sd"))
@@ -390,15 +390,12 @@ def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
 
 
 def _below_no_skill(stats: dict[str, Any] | None) -> bool:
-    """Is this window's Brier materially worse than its own base-rate floor?
+    """Is this window's Brier materially worse than its own base rate?
 
-    "Materially" matters: a live tool sat 0.0003 above its floor on 2,055
-    markets while winning 65% of the 1,968 markets where it disagreed with the
-    price. A hairline gap is noise, and the policy is explicit that a demote
-    needs a sustained signal rather than a one-off reading.
+    Material means >= NO_SKILL_MARGIN: a hairline gap is noise, not a demote.
 
     :param stats: per-tool stats for one window.
-    :return: True when the tool is below no-skill by more than the margin.
+    :return: True when below no-skill by more than the margin.
     """
     brier = _num((stats or {}).get("brier"))
     base = _num((stats or {}).get("baseline_brier"))
@@ -406,12 +403,7 @@ def _below_no_skill(stats: dict[str, Any] | None) -> bool:
 
 
 def _below_reliability(stats: dict[str, Any] | None) -> bool:
-    """Did this window fail to return a usable prediction often enough to matter?
-
-    Reliability is ``valid_n / n``. A tool that answers four calls in five is
-    not one the trader can lean on, whatever the four scored -- and the failures
-    are not a random sample, so the Brier computed on them is not a fair read of
-    the tool either.
+    """Did too few calls return a usable prediction this window?
 
     :param stats: per-tool stats for one window.
     :return: True when reliability is known and below the gate.
@@ -425,14 +417,10 @@ def _verdict(
     deployed: bool,
     recent: dict[str, Any] | None = None,
 ) -> str:
-    """Apply the gate, then flag low reliability as a WARNING rather than a veto.
+    """Gate verdict; low reliability annotates positive outcomes.
 
-    Reliability qualifies a good verdict instead of overturning it. A tool that
-    misses calls may still be the best forecaster available, and refusing to
-    promote it can leave a worse tool deployed -- so the number is surfaced on
-    the row and the human decides. Only the positive verdicts are annotated: a
-    demote needs no extra reason, and a row the gate could not judge is not
-    made clearer by a second caveat.
+    ``PROMOTE (rel 60%)`` -- the warning rides along, never vetoes: a tool
+    that misses calls may still be the best forecaster available.
 
     :param stats: per-tool stats for the decision window.
     :param deployed: True for a production tool, False for a candidate.
@@ -530,10 +518,8 @@ def _verdict_core(
 def _survivors(verdicts: dict[str, str]) -> list[str]:
     """Tools that could actually replace a demoted one.
 
-    A verdict that is neither a demote nor a keep -- "n=12 < 30", "no spread",
-    "needs --rebuild" -- is NOT a survivor. Counting it as one lets the report
-    recommend retiring every tool it could assess while leaving the platform
-    holding only the one it just said it could not judge.
+    "n=12 < 30" or "no spread" is NOT a survivor: retiring every judged tool
+    must not leave the platform holding only what could not be judged.
 
     :param verdicts: mapping of tool name to verdict.
     :return: names of tools that survive.
@@ -561,18 +547,10 @@ def _no_replacement_blocks(
 def _no_replacement_note(
     verdicts: dict[str, str], candidates: dict[str, str] | None = None
 ) -> str | None:
-    """The warning that belongs under a table where every tool demotes.
+    """The warning under a table where every deployed tool demotes.
 
-    Rendered once, adjacent to the rows it qualifies, rather than repeated in
-    each row. Acting on the demotes one at a time would retire every forecaster
-    on the platform, which is why it has to sit beside the table and not only
-    in the headline message.
-
-    Checks the tournament before claiming there is no replacement. Reading only
-    the deployed cohort let the page assert "no forecaster at all" directly
-    under a headline announcing a promotable candidate -- the one case where a
-    replacement demonstrably exists and the operator should be told to reach
-    for it.
+    Names a promotable tournament candidate when one exists -- promote before
+    retiring -- and says "no forecaster at all" only when true.
 
     :param verdicts: mapping of tool name to verdict for one platform.
     :param candidates: tournament verdicts, which may hold a replacement.
@@ -601,12 +579,12 @@ def _verdicts_for(
     deployed: bool,
     w1: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, str]:
-    """Apply the gate to a cohort, with the no-replacement guard.
+    """Apply the gate to one cohort.
 
-    :param tools: tool names in the cohort.
-    :param at: by_tool stats for the decision window.
+    :param tools: tool names.
+    :param at: decision-window stats (trailing 90d, or tournament pool).
     :param deployed: True for production tools.
-    :param w1: last week's stats, used to confirm a sustained demote signal.
+    :param w1: weekly stats, for the sustained-demote confirmation.
     :return: mapping of tool name to verdict.
     """
     verdicts = {
@@ -619,16 +597,10 @@ def _verdicts_for(
 
 
 def _floor(stats: dict[str, Any] | None) -> str:
-    """Format the lower bound the ranking and the promote rule both use.
-
-    Shown because it decides things. The report ranks on it and the gate tests
-    it, so leaving it off-screen would repeat exactly the failure this module
-    was written to stop: a number that drives a verdict while the reader can
-    only see a different number beside it. It also explains an order that
-    ``Edge`` alone appears to contradict.
+    """Format the promote bound for its column, beside the Edge it qualifies.
 
     :param stats: per-tool stats for the decision window.
-    :return: signed bound to 4 decimals, or ``n/a``.
+    :return: signed 4-decimal bound, or ``n/a``.
     """
     lower = _edge_lower_bound(stats)
     return NA if lower is None else f"{lower:+.4f}"

@@ -371,6 +371,62 @@ class TestRendering:
                 elif name.startswith(("n ", "Brier", "Edge", "mkt", "base")):
                     assert align == "right", f"{name} must right-align"
 
+    def test_deployed_filter_limits_1a_and_1b_to_live_tools(
+        self, tmp_path: Path
+    ) -> None:
+        """With a deployed set given, 1a/1b list only what the mechs serve.
+
+        Names normalize across conventions: the manifest says
+        superforcaster_polymarket_v1, the scorer superforcaster-polymarket-v1.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path,
+            at={"superforcaster-polymarket-v1": _stats(), "retired": _stats()},
+            w1={"superforcaster-polymarket-v1": _stats(), "retired": _stats()},
+            w2={"superforcaster-polymarket-v1": _stats(), "retired": _stats()},
+        )
+        payloads = build_digest_messages(
+            results,
+            "polymarket",
+            deployed_tools=["superforcaster_polymarket_v1"],
+        )
+        body = "\n".join(_flatten(m) for m in payloads)
+        rows = [
+            r[1]["text"]
+            for m in payloads
+            for b in m["blocks"]
+            if b["type"] == "table"
+            for r in b["rows"][1:]
+            if m["text"].startswith("1")
+        ]
+        assert "superforcaster-polymarket-v1" in rows
+        assert "retired" not in rows
+        assert "Deployed tools only" in body
+
+    def test_no_deployed_set_renders_the_scored_roster(self, tmp_path: Path) -> None:
+        """Lookup failure (None) must widen the tables, never empty them.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path,
+            at={"a": _stats(), "b": _stats()},
+            w1={"a": _stats()},
+            w2={"a": _stats()},
+        )
+        payloads = build_digest_messages(results, "polymarket", deployed_tools=None)
+        rows = [
+            r[1]["text"]
+            for m in payloads
+            for b in m["blocks"]
+            if b["type"] == "table" and m["text"].startswith("1b")
+            for r in b["rows"][1:]
+        ]
+        assert set(rows) >= {"a", "b"}
+        assert "Deployed tools only" not in "\n".join(_flatten(m) for m in payloads)
+
     def test_retired_tools_stay_out_of_1a_but_keep_their_90d_row(
         self, tmp_path: Path
     ) -> None:

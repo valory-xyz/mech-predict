@@ -62,6 +62,7 @@ from benchmark.slack_blocks import (
     table_block,
 )
 from benchmark.slack_tables import display_width
+from benchmark.tool_usage import normalize_tool_name
 
 log = logging.getLogger(__name__)
 
@@ -598,6 +599,7 @@ def build_digest_messages(
     results_dir: Path,
     platform: str,
     allowed_tools: Collection[str] | None = None,
+    deployed_tools: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the benchmark digest as one webhook payload per table.
 
@@ -605,6 +607,11 @@ def build_digest_messages(
     :param platform: platform key, e.g. "polymarket" or "omen".
     :param allowed_tools: when given, only these tools are rendered -- callers
         pass the prediction-tool registry. Injected to stay stdlib-only.
+    :param deployed_tools: tools live on this platform's mechs right now
+        (from the on-chain manifests). When given, tables 1a/1b list ONLY
+        these; None means the lookup was unavailable and the scored roster
+        renders unfiltered. Matched via normalize_tool_name, since manifests
+        and scorer artifacts disagree on dash vs underscore.
     :return: ordered webhook payloads; empty when there is nothing to post.
     """
     windows = {
@@ -650,6 +657,10 @@ def build_digest_messages(
     # nothing to say there -- with a 90d reference window the roster includes
     # tools retired months ago, and rendering them in 1a is a row of pure n/a.
     # They still appear in 1b, where their 90d numbers are real.
+    if deployed_tools is not None:
+        live = {normalize_tool_name(t) for t in deployed_tools}
+        prod_tools = {t for t in prod_tools if normalize_tool_name(t) in live}
+
     weekly_tools = prod_tools & (_scored(windows["w1"]) | _scored(windows["w2"]))
     if prod_tools:
         # The 90d reference FIRST here, weekly first in 1a: _sort_key ranks on
@@ -677,6 +688,11 @@ def build_digest_messages(
                     section(
                         "*1b. PRODUCTION 90D vs W-1 - ranked by `Edge 90d`*\n"
                         "_90d: trailing 90-day window, recomputed nightly._"
+                        + (
+                            " _Deployed tools only._"
+                            if deployed_tools is not None
+                            else ""
+                        )
                     ),
                     table_block(
                         _AT_COLUMNS,

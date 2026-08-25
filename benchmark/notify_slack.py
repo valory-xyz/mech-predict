@@ -419,6 +419,39 @@ def _v1_heading(platform_label: str, report_text: str) -> str:
     return f"{rule}\n*{line}*\n{rule}"
 
 
+def _deployed_tools_for(platform_key: str, override: str | None) -> list[str] | None:
+    """Tools live on this platform's mechs, from the on-chain manifests.
+
+    Best-effort: the lookup walks trader release -> service.yaml valid_mechs
+    -> marketplace subgraph -> IPFS manifests, any of which can be down. On
+    failure the digest renders unfiltered rather than not at all.
+
+    :param platform_key: "omen" or "polymarket".
+    :param override: comma-separated tool names to use instead of the live
+        lookup (testing); empty string means no override.
+    :return: deployed tool names, or None when the lookup failed.
+    """
+    if override:
+        return [t.strip() for t in override.split(",") if t.strip()]
+    try:
+        from benchmark.tool_usage import (  # pylint: disable=import-outside-toplevel
+            DEPLOYMENT_TO_PLATFORM,
+            fetch_valid_tools,
+        )
+
+        merged: list[str] = []
+        for deployment, tools in fetch_valid_tools().items():
+            if DEPLOYMENT_TO_PLATFORM.get(deployment) != platform_key:
+                continue
+            if tools is None:
+                return None
+            merged.extend(tools)
+        return merged or None
+    except Exception:  # pylint: disable=broad-except
+        log.warning("Deployed-tools lookup failed; tables render unfiltered.")
+        return None
+
+
 def _computed_tables_enabled() -> bool:
     """Check whether the computed-table messages should be posted.
 
@@ -459,6 +492,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print summary without posting to Slack"
+    )
+    parser.add_argument(
+        "--deployed-tools",
+        default="",
+        help=(
+            "Comma-separated deployed tool names; overrides the live "
+            "on-chain lookup (testing)."
+        ),
     )
     parser.add_argument(
         "--roi-results",
@@ -546,6 +587,10 @@ def main() -> None:
                     platform_key,
                     # Registry = allowlist; third-party tools are never ranked.
                     allowed_tools=TOOL_REGISTRY,
+                    # 1a/1b list only what the mechs serve right now.
+                    deployed_tools=_deployed_tools_for(
+                        platform_key, args.deployed_tools
+                    ),
                 )
         except Exception:  # pylint: disable=broad-except
             log.warning(

@@ -673,7 +673,14 @@ def build_digest_messages(
                 message(
                     "1a. Production - W-2 vs W-1",
                     [
-                        section("*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"),
+                        section(
+                            "*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"
+                            + (
+                                "\n_Currently deployed tools only._"
+                                if deployed_tools is not None
+                                else ""
+                            )
+                        ),
                         table_block(
                             _W2_COLUMNS,
                             _rows_w2(order_w2, windows["w1"], windows["w2"]),
@@ -689,7 +696,7 @@ def build_digest_messages(
                         "*1b. PRODUCTION 90D vs W-1 - ranked by `Edge 90d`*\n"
                         "_90d: trailing 90-day window, recomputed nightly._"
                         + (
-                            " _Deployed tools only._"
+                            " _Currently deployed tools only._"
                             if deployed_tools is not None
                             else ""
                         )

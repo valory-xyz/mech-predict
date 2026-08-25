@@ -91,6 +91,12 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
             brier = brier_score(p_yes, outcome)
             edge = edge_score(p_yes, market_prob, outcome)
             group["edge_sum"] += edge
+            # Market Brier over the edge-eligible pool. NOT derivable as
+            # brier+edge: those average over different row pools.
+            if group.get("market_brier_sum") is not None:
+                group["market_brier_sum"] += (
+                    market_prob - (1.0 if outcome else 0.0)
+                ) ** 2
             group["edge_n"] += 1
             if edge > 0:
                 group["edge_positive_count"] += 1
@@ -176,9 +182,14 @@ def _derive_group(group: dict[str, Any]) -> dict[str, Any]:
     result["edge_n"] = edge_n
     if edge_n > 0:
         result["edge"] = round(group["edge_sum"] / edge_n, 4)
+        market_sum = group.get("market_brier_sum")
+        result["market_brier"] = (
+            None if market_sum is None else round(market_sum / edge_n, 4)
+        )
         result["edge_positive_rate"] = round(group["edge_positive_count"] / edge_n, 4)
     else:
         result["edge"] = None
+        result["market_brier"] = None
         result["edge_positive_rate"] = None
 
     # Diagnostic edge metrics — conditional accuracy, disagreement Brier, bias
@@ -273,6 +284,16 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     :param scores: the full scores dict with accumulators.
     :param row: a production log row dict.
     """
+    # Observed row bounds; current_month misstates the span after rollover
+    # (see benchmark.digest_tables._as_of_date).
+    stamp = row.get("predicted_at")
+    if stamp:
+        first = scores.get("window_start")
+        if first is None or stamp < first:
+            scores["window_start"] = stamp
+        last = scores.get("window_end")
+        if last is None or stamp > last:
+            scores["window_end"] = stamp
     _accumulate_group(scores["overall"], row)
 
     tool = row.get("tool_name") or "unknown"

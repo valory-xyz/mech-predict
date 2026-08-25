@@ -25,7 +25,9 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import re
 import pytest
+from typing import get_args
 from pydantic import ValidationError
 import requests
 
@@ -162,8 +164,11 @@ def _make_prediction_stub() -> PredictionResult:
     numbers = json.loads(PREDICTION_JSON)
     return PredictionResult(
         facts="some facts",
+        researchability="R",
+        evidence_quality=0.6,
         reasons_no="reasons no",
         reasons_yes="reasons yes",
+        evidence_reliability_screen="screen block",
         aggregation="aggregation block",
         reflection="reflection block",
         **numbers,
@@ -209,7 +214,16 @@ class TestPredictionResultSchema:
         """Every reasoning field is declared before the first number."""
         order = list(PredictionResult.model_fields)
         first_number = order.index("p_yes")
-        for name in ("facts", "reasons_no", "reasons_yes", "aggregation", "reflection"):
+        for name in (
+            "facts",
+            "researchability",
+            "evidence_quality",
+            "reasons_no",
+            "reasons_yes",
+            "evidence_reliability_screen",
+            "aggregation",
+            "reflection",
+        ):
             assert order.index(name) < first_number
 
     def test_validator_rejects_probabilities_that_do_not_sum_to_one(self) -> None:
@@ -217,8 +231,11 @@ class TestPredictionResultSchema:
         with pytest.raises(ValidationError):
             PredictionResult(
                 facts="f",
+                researchability="R",
+                evidence_quality=0.5,
                 reasons_no="n",
                 reasons_yes="y",
+                evidence_reliability_screen="s",
                 aggregation="a",
                 reflection="r",
                 p_yes=0.7,
@@ -231,8 +248,11 @@ class TestPredictionResultSchema:
         """A well-formed instance validates."""
         parsed = PredictionResult(
             facts="f",
+            researchability="R",
+            evidence_quality=0.5,
             reasons_no="n",
             reasons_yes="y",
+            evidence_reliability_screen="s",
             aggregation="a",
             reflection="r",
             p_yes=0.7,
@@ -250,7 +270,7 @@ class TestPredictionResultSchema:
         out-of-range p_no, so a single-value probe passes even when one
         field has lost its bounds.
         """
-        for name in ("p_yes", "p_no", "confidence", "info_utility"):
+        for name in ("p_yes", "p_no", "confidence", "info_utility", "evidence_quality"):
             meta = PredictionResult.model_fields[name].metadata
             bounds = {type(c).__name__: getattr(c, "ge", getattr(c, "le", None))
                       for c in meta}
@@ -262,8 +282,11 @@ class TestPredictionResultSchema:
         with pytest.raises(ValidationError):
             PredictionResult(
                 facts="f",
+                researchability="R",
+                evidence_quality=0.5,
                 reasons_no="n",
                 reasons_yes="y",
+                evidence_reliability_screen="s",
                 aggregation="a",
                 reflection="r",
                 p_yes=1.4,
@@ -271,6 +294,134 @@ class TestPredictionResultSchema:
                 confidence=0.5,
                 info_utility=0.5,
             )
+
+
+class TestResearchabilityField:
+    """The researchability class is an epistemic property, not a trade signal."""
+
+    def test_taxonomy_is_the_frozen_eight_classes(self) -> None:
+        """The module constant matches the frozen rubric, order included."""
+        assert module.RESEARCHABILITY_CLASSES == (
+            "NR-sports",
+            "NR-utterance",
+            "NR-price",
+            "NR-numeric",
+            "NR-headline",
+            "NR-behavior",
+            "R",
+            "REVIEW",
+        )
+
+    def test_schema_enum_matches_the_taxonomy_constant(self) -> None:
+        """The schema's Literal and the module constant cannot drift apart."""
+        literal = get_args(PredictionResult.model_fields["researchability"].annotation)
+        assert set(literal) == set(module.RESEARCHABILITY_CLASSES)
+
+    def test_unknown_class_is_refused(self) -> None:
+        """A class outside the taxonomy fails validation."""
+        with pytest.raises(ValidationError):
+            _make_prediction_stub().model_copy(update={"researchability": "NR-weather"})
+            PredictionResult.model_validate(
+                {**_make_prediction_stub().model_dump(), "researchability": "NR-weather"}
+            )
+
+    def test_sports_exception_is_stated_in_the_field_description(self) -> None:
+        """The border rule must never promote sports to R.
+
+        Without the exception spelled out, the 'when torn answer R' rule
+        pulls sports questions into R, which is the single largest class in
+        the labelled corpus this field is meant to be comparable with.
+        """
+        desc = PredictionResult.model_fields["researchability"].description
+        assert "ALWAYS NR-sports" in desc
+        assert "never promotes them" in desc
+
+
+class TestForecastSignalOnly:
+    """Rule 1: the tool emits forecast signals, never trade advice."""
+
+    def test_no_trade_advice_vocabulary_anywhere_model_facing(self) -> None:
+        """No trade-action vocabulary in the prompt or any field description.
+
+        Matched on word boundaries rather than exact phrases. An earlier
+        exact-phrase list let "you should not bet" through: it contains
+        neither "should bet" nor "do not bet". Any standalone occurrence of
+        the trade verbs is a violation regardless of the surrounding words,
+        so the token itself is what gets banned.
+
+        Asserted over everything the model reads -- the prompt, the system
+        prompt, and every schema field description -- because that is where
+        such wording would actually change behaviour.
+        """
+        model_facing = [module.PREDICTION_PROMPT, module.SYSTEM_PROMPT]
+        model_facing += [
+            f.description or "" for f in PredictionResult.model_fields.values()
+        ]
+        blob = " ".join(model_facing)
+        banned = re.compile(
+            r"\b(bets?|betting|wager(?:s|ed|ing)?|stake(?:s|d)?|"
+            r"eligib(?:le|ility)|abstain(?:s|ed|ing)?|"
+            r"buy|sell|long|short\s+the)\b",
+            re.IGNORECASE,
+        )
+        hits = sorted({m.group(0).lower() for m in banned.finditer(blob)})
+        assert not hits, f"trade-advice vocabulary in model-facing text: {hits}"
+
+    def test_the_ban_regex_actually_fires(self) -> None:
+        """Negative control: the guard is not vacuously green."""
+        banned = re.compile(
+            r"\b(bets?|betting|wager(?:s|ed|ing)?|stake(?:s|d)?|"
+            r"eligib(?:le|ility)|abstain(?:s|ed|ing)?|"
+            r"buy|sell|long|short\s+the)\b",
+            re.IGNORECASE,
+        )
+        for phrase in (
+            "you should not bet",
+            "do not bet on this",
+            "the market is not eligible",
+            "abstain from trading",
+            "place a wager",
+        ):
+            assert banned.search(phrase), f"guard misses: {phrase!r}"
+        assert not banned.search("a better forecast between two options")
+
+    def test_researchability_is_framed_as_a_property_not_a_recommendation(self) -> None:
+        """The field description says so explicitly."""
+        desc = PredictionResult.model_fields["researchability"].description
+        assert "objective property" in desc
+        assert "NOT a recommendation" in desc
+
+
+class TestEvidenceReliabilityScreen:
+    """The ported screen, with the market-odds clause inverted."""
+
+    def test_screen_is_declared_before_the_aggregation(self) -> None:
+        """The screen must precede any probability forming."""
+        order = list(PredictionResult.model_fields)
+        assert order.index("evidence_reliability_screen") < order.index("aggregation")
+
+    def test_all_four_clauses_survived_the_port(self) -> None:
+        """Clauses (a)-(d) are all present."""
+        desc = PredictionResult.model_fields["evidence_reliability_screen"].description
+        for clause in (
+            "Prediction-market-odds filter",
+            "Forward-looking-intent discount",
+            "Temporal-evidence filter",
+            "Criterion-specificity check",
+        ):
+            assert clause in desc
+
+    def test_odds_clause_distinguishes_scraped_from_supplied(self) -> None:
+        """Odds found in sources stay discarded; supplied market context does not.
+
+        This inversion is the whole point of the tool. The parent screen
+        discards every prediction-market price as circular, which is right for
+        a price scraped off a web page and wrong for the price of the very
+        market being forecast when it is handed over as an input.
+        """
+        desc = PredictionResult.model_fields["evidence_reliability_screen"].description
+        assert "found in the SOURCES" in desc
+        assert "does NOT apply to a market price supplied to you directly" in desc
 
 
 class TestDeliveredPayload:
@@ -298,7 +449,8 @@ class TestDeliveredPayload:
         assert set(payload) == {"p_yes", "p_no", "confidence", "info_utility"}
         assert all(isinstance(v, float) for v in payload.values())
         assert payload["p_yes"] + payload["p_no"] == 1.0
-        assert "facts" not in raw and "aggregation" not in raw
+        for leaked in ("facts", "aggregation", "evidence_reliability_screen"):
+            assert leaked not in raw
 
 
 class TestSuperforcasterSourceContent:

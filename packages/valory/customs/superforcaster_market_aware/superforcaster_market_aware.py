@@ -24,7 +24,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import openai
 import requests
@@ -164,6 +164,23 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # 1M context but bounds cost and guards against outlier pages.
 MAX_EVIDENCE_TOKENS = 4000
 
+# Researchability taxonomy. Frozen wording, reused verbatim rather than
+# reinvented: the same eight tokens and the same border rule already back a
+# large corpus of hand/LLM-labelled questions, so this tool's judgements can be
+# scored against existing labels instead of needing a fresh ground truth.
+# Order matters -- the prompt says first match wins, and NR-sports is first
+# because sports questions otherwise get promoted to R by the border rule.
+RESEARCHABILITY_CLASSES = (
+    "NR-sports",
+    "NR-utterance",
+    "NR-price",
+    "NR-numeric",
+    "NR-headline",
+    "NR-behavior",
+    "R",
+    "REVIEW",
+)
+
 
 class PredictionResult(BaseModel):
     """Superforecaster structured output.
@@ -186,6 +203,52 @@ class PredictionResult(BaseModel):
             "about how a fact influences the answer."
         ),
     )
+    researchability: Literal[
+        "NR-sports",
+        "NR-utterance",
+        "NR-price",
+        "NR-numeric",
+        "NR-headline",
+        "NR-behavior",
+        "R",
+        "REVIEW",
+    ] = Field(
+        ...,
+        description=(
+            "Whether pre-resolution web research can genuinely inform this "
+            "question. Exactly one class, first match wins. NR-sports: the "
+            "outcome of a sports match, game, race or tournament, or a player's "
+            "in-game performance - ALWAYS this class, even though form and news "
+            "research exist. NR-utterance: hinges on whether a person says or "
+            "tweets specific words a specific number of times. NR-price: a "
+            "short-horizon asset-price tick or threshold. NR-numeric: a narrow "
+            "numeric band effectively random at question time. NR-headline: "
+            "hinges on the exact phrasing of a future media headline. "
+            "NR-behavior: a trivial personal behaviour of an individual. R: "
+            "researchable - focused web research before the market resolves "
+            "could meaningfully move a rational forecast (elections, court "
+            "rulings, product launches, geopolitical events, scheduled "
+            "announcements). Border rule: if strong research could move a "
+            "rational forecast by more than 5 points, answer R; when genuinely "
+            "torn, answer R. EXCEPTION: sports outcomes are ALWAYS NR-sports - "
+            "the border rule never promotes them. REVIEW only when the question "
+            "is too ambiguous to classify. This is an objective property of the "
+            "question. It is NOT a recommendation to act or not act."
+        ),
+    )
+    evidence_quality: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "How well the retrieved evidence actually bears on the resolution "
+            "criterion (0 = the sources say nothing that discriminates between "
+            "Yes and No, 1 = a source directly establishes the outcome). Judge "
+            "the evidence, not your confidence in the forecast: a question can "
+            "be answered confidently from base rates while the retrieved "
+            "evidence is worthless, and that case scores low here."
+        ),
+    )
     reasons_no: str = Field(
         ...,
         description=(
@@ -198,6 +261,31 @@ class PredictionResult(BaseModel):
         description=(
             "Reasons why the answer might be YES. Rate the strength of each "
             "reason on a scale of 1-10."
+        ),
+    )
+    evidence_reliability_screen: str = Field(
+        ...,
+        description=(
+            "MANDATORY evidence-reliability screen, completed BEFORE forming a "
+            "tentative probability. (a) Prediction-market-odds filter: discard "
+            "any prediction-market trading price you found in the SOURCES "
+            "(polymarket / metaculus / manifold / predictit / kalshi) as "
+            "circular self-referential evidence. This applies to odds scraped "
+            "from a web page. It does NOT apply to a market price supplied to "
+            "you directly as market context, which is a legitimate input and is "
+            "handled where that context is given. (b) Forward-looking-intent "
+            "discount: for intent or expectation language ('is set to', 'is "
+            "expected to', 'plans to', 'scheduled to', 'is poised to'), treat "
+            "the outcome as only 40-60% likely to materialize absent strong "
+            "specific evidence. (c) Temporal-evidence filter: classify each "
+            "source TYPE A (dated within the resolution window, or directly "
+            "states the criterion was met) vs TYPE B (undated, outside the "
+            "window, or a standing page); state the TYPE A and TYPE B counts; "
+            "if ALL sources are TYPE B, anchor on the category base rate "
+            "(20-40% YES for 'X in headlines this week'-style markets). (d) "
+            "Criterion-specificity check: does any TYPE A evidence directly "
+            "confirm the exact resolution condition (not merely that the topic "
+            "is active)? If not, add uncertainty toward the base rate."
         ),
     )
     aggregation: str = Field(
@@ -302,13 +390,26 @@ Aim for information which is specific, relevant, and covers the core considerati
 to make your forecast. For this step, do not draw any conclusions about how a fact will
 influence your answer or forecast.
 
-2. `reasons_no` - Provide a few reasons why the answer might be no. Rate the strength of each
+2. `researchability` - Classify, in one token, whether pre-resolution web research can
+genuinely inform this question. Follow that field's class list exactly; first match wins, and
+sports outcomes are always NR-sports. This is an objective property of the question, not a
+recommendation to act.
+
+3. `evidence_quality` - Rate 0 to 1 how well the retrieved sources actually bear on the
+resolution criterion. Judge the evidence, not your confidence in the answer.
+
+4. `reasons_no` - Provide a few reasons why the answer might be no. Rate the strength of each
 reason on a scale of 1-10.
 
-3. `reasons_yes` - Provide a few reasons why the answer might be yes. Rate the strength of each
+5. `reasons_yes` - Provide a few reasons why the answer might be yes. Rate the strength of each
 reason on a scale of 1-10.
 
-4. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
+6. `evidence_reliability_screen` - MANDATORY, and completed BEFORE you form any probability.
+Follow every part of that field's instructions: the prediction-market-odds filter, the
+forward-looking-intent discount, the temporal-evidence TYPE A / TYPE B classification (state
+both counts), and the criterion-specificity check.
+
+7. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
 instead, investigate how the competing factors and mechanisms interact and weigh against each
 other. Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it
 would be beneficial to your reasoning. We have detected that you overestimate world conflict,
@@ -317,9 +418,9 @@ overall trends or base rates. Similarly, we also have detected you overestimate 
 shocking, or emotionally charged news due to news' sensationalism bias. Therefore adjust for
 news' negativity bias and sensationalism bias by considering reasons to why your provided
 sources might be biased or exaggerated. Think like a superforecaster. End this field by
-stating an initial tentative probability as a single number between 0 and 1 given steps 1-4.
+stating an initial tentative probability as a single number between 0 and 1 given the steps above.
 
-5. `reflection` - Reflect on your tentative answer, performing sanity checks and mentioning any
+8. `reflection` - Reflect on your tentative answer, performing sanity checks and mentioning any
 additional knowledge or background information which may be relevant. Check for
 over/underconfidence, improper treatment of conjunctive or disjunctive conditions (only if
 applicable), and other forecasting biases when reviewing your reasoning. Consider priors/base
@@ -329,7 +430,7 @@ the Brier score. Be precise with tail probabilities. Leverage your intuitions, b
 your forecast for the sake of modesty or balance alone. Finally, aggregate all of your previous
 reasoning and highlight key factors that inform your final forecast.
 
-6. `p_yes`, `p_no`, `confidence`, `info_utility` - Output your final prediction. `p_yes` is the
+9. `p_yes`, `p_no`, `confidence`, `info_utility` - Output your final prediction. `p_yes` is the
 probability that the event in the Question occurs and `p_no` that it does not; the two must sum
 to 1. `confidence` is how confident you are in the prediction and `info_utility` how useful the
 retrieved information was in making it. All four are numbers between 0 and 1.

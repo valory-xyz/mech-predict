@@ -227,7 +227,7 @@ def _delta(
     :param reference: stats for the comparison window (W-2 or all-time).
     :param field: metric key present in both stats dicts.
     :param lower_is_better: True for Brier, False for Edge.
-    :return: e.g. ``+0.0417 worse``, ``insufficient``, or ``n/a``.
+    :return: e.g. ``+0.0417 worse``, ``+0.0417 \u26a0 insufficient``, or ``n/a``.
     """
     if not current or not reference:
         return NA
@@ -237,9 +237,11 @@ def _delta(
         return NA
     # Edge and mkt live on the edge-eligible pool; everything else on valid_n.
     count_field = "edge_n" if field in ("edge", "market_brier") else "valid_n"
-    if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
-        return INSUFFICIENT
     diff = a - b
+    if not (_has_floor(current, count_field) and _has_floor(reference, count_field)):
+        # Value shown, judgment withheld: under the sample floor the delta is
+        # real arithmetic but not evidence, so no better/worse verdict.
+        return f"{diff:+.4f} \u26a0 {INSUFFICIENT}"
     improved = diff < 0 if lower_is_better else diff > 0
     return f"{diff:+.4f} {'better' if improved else 'worse'}"
 
@@ -657,7 +659,7 @@ def build_digest_messages(
                 "1a. Production - W-1 vs W-2",
                 [
                     section(
-                        "*1a. PRODUCTION - RANKED BY `Edge W-1`, best first*"
+                        "*1a. PRODUCTION W-1 vs W-2 - ranked by `Edge W-1`*"
                         "  _what changed this week_"
                     ),
                     table_block(
@@ -672,7 +674,7 @@ def build_digest_messages(
                 "1b. Production - W-1 vs cumulative",
                 [
                     section(
-                        f"*1b. PRODUCTION - RANKED BY `Edge cum`, best first*  "
+                        f"*1b. PRODUCTION W-1 vs CUM - ranked by `Edge cum`*  "
                         f"_how far each tool beat the market; this week "
                         f"against {month_label}_"
                     ),

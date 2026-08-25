@@ -243,7 +243,7 @@ class TestDeltas:
         assert "-0.1400 worse" in cells, cells  # Edge -0.1700 vs -0.0300
 
     def test_low_sample_suppresses_delta(self, tmp_path: Path) -> None:
-        """A window under the floor renders `insufficient`, not a number."""
+        """A window under the floor shows the value, warning-marked."""
         results = tmp_path / "r"
         results.mkdir()
         thin = _stats(valid_n=10, edge_n=10)
@@ -253,7 +253,7 @@ class TestDeltas:
         _write(results, "scores_tournament_polymarket.json", {})
         body = _body(results)
         cells = _cells(body, "alpha")
-        assert "insufficient" in cells
+        assert any("\u26a0 insufficient" in c for c in cells)
         assert "10 *" in cells, "under-floor counts carry the marker"
 
 
@@ -340,7 +340,7 @@ class TestW2Ranking:
         )
         body = _body(results)
         marker = "1a. PRODUCTION"
-        assert "RANKED BY `Edge W-1`" in body
+        assert "ranked by `Edge W-1`" in body
         # alpha wins the week and must lead 1a despite beta winning cumulative
         assert _cells(body, "alpha", after=marker)[0] == "1"
         assert _cells(body, "beta", after=marker)[0] == "2"
@@ -587,7 +587,7 @@ class TestPoolAwareGating:
         )
         cells = _cells(_body(results), "alpha")
         assert "+0.0500 worse" in cells, cells
-        assert cells.count("insufficient") >= 1, cells
+        assert sum("\u26a0 insufficient" in c for c in cells) >= 1, cells
 
 
 class TestPlatformAlertFloor:

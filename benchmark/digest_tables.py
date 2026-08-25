@@ -30,7 +30,6 @@ file                                          window
 ``rolling_scores_<platform>.json``            W-1, the last 7 days
 ``prev_rolling_scores_<platform>.json``       W-2, the 7 days before that
 ``scores_tournament_<platform>.json``         tournament, all-time only
-``roi_results.json``                          90-day ROI simulation
 ===========================================  ==============================
 
 The cumulative accumulator's ``current_month`` key does not describe its span
@@ -129,47 +128,6 @@ def _window_meta(path: Path) -> tuple[str | None, str | None]:
     span = f"{str(start)[:10]}..{str(end)[:10]}" if start and end else None
     stamp = payload.get("window_end") or payload.get("generated_at")
     return span, str(stamp)[:10] if stamp else None
-
-
-def _load_roi(path: Path, platform: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """Index the ROI simulation results by (tool name, mode) for this platform.
-
-    :param path: path to roi_results.json.
-    :param platform: platform key, e.g. "polymarket".
-    :return: mapping of (tool_name, mode) to the ROI group dict.
-    """
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.info("digest: no usable ROI results at %s (%s)", path, exc)
-        return {}
-    groups = payload.get("groups")
-    if not isinstance(groups, list):
-        return {}
-    # roi_sim groups by (platform, tool, mode, MODEL), so several groups can
-    # share a (tool, mode) key; naive last-wins would drop a real ROI number.
-    # Keep the best-evidenced group instead: a real roi_mid beats None, then
-    # the larger bet count.
-    indexed: dict[tuple[str, str], dict[str, Any]] = {}
-    for group in groups:
-        if not isinstance(group, dict) or group.get("platform") != platform:
-            continue
-        key = (str(group.get("tool_name") or ""), str(group.get("mode") or ""))
-        incumbent = indexed.get(key)
-        if incumbent is None or _roi_rank(group) > _roi_rank(incumbent):
-            indexed[key] = group
-    return indexed
-
-
-def _roi_rank(group: dict[str, Any]) -> tuple[int, int]:
-    """Rank competing ROI groups that share a (tool, mode) key.
-
-    :param group: ROI group dict.
-    :return: sort key; higher wins. A usable roi_mid dominates bet count.
-    """
-    has_roi = 1 if _num(group.get("roi_mid")) is not None else 0
-    bets = int(_num(group.get("n_bets")) or 0)
-    return (has_roi, bets)
 
 
 # ---------------------------------------------------------------------------
@@ -286,24 +244,6 @@ def _delta(
     return f"{diff:+.4f} {'better' if improved else 'worse'}"
 
 
-def _roi_pct(group: dict[str, Any] | None, key: str) -> str:
-    """Format a simulated 90-day ROI figure.
-
-    ``roi_sim`` already emits percent (5.94 means +5.9%), so the value is
-    formatted, never rescaled. ``roi_haircut`` is a point estimate -- no CI.
-
-    :param group: ROI group dict for this (tool, mode), or None.
-    :param key: ``roi_mid`` or ``roi_haircut``.
-    :return: percentage cell, e.g. ``+15.3%``, or ``n/a``.
-    """
-    if not group or _num(group.get(key)) is None:
-        return NA
-    return f"{float(group[key]):+.1f}%"
-
-
-# A row exists only once its market has RESOLVED, so the newest window always
-# holds fewer rows than an older one of equal length; a delta computed across
-# that gap can flip sign. Below this ratio the week is treated as incomplete.
 COMPLETENESS_RATIO = 0.70
 
 
@@ -356,12 +296,12 @@ def _cols(names: Iterable[str]) -> tuple[Col, ...]:
 
 _W2_COLUMNS = _cols(
     "#;tool;n W-1;n W-2;rel W-1;Brier W-1;Brier W-2;Δ Brier;base W-1;"
-    "base W-2;mkt W-1;mkt W-2;Edge W-1;Edge W-2;Δ Edge;ROI 90d;w/costs".split(";")
+    "base W-2;mkt W-1;mkt W-2;Edge W-1;Edge W-2;Δ Edge".split(";")
 )
 
 _AT_COLUMNS = _cols(
     "#;tool;n W-1;n cum;rel W-1;Brier W-1;Brier cum;Δ Brier;base cum;"
-    "mkt W-1;mkt cum;Edge W-1;Edge cum;Δ Edge;ROI 90d;w/costs".split(";")
+    "mkt W-1;mkt cum;Edge W-1;Edge cum;Δ Edge".split(";")
 )
 
 
@@ -391,16 +331,12 @@ def _rows_w2(
     tools: Sequence[str],
     w1: dict[str, dict[str, Any]],
     w2: dict[str, dict[str, Any]],
-    roi: dict[tuple[str, str], dict[str, Any]],
-    mode: str,
 ) -> list[tuple[str, ...]]:
     """Build the W-1 vs W-2 table rows.
 
     :param tools: tool names to render, in the order given.
     :param w1: by_tool stats for the last 7 days.
     :param w2: by_tool stats for the preceding 7 days.
-    :param roi: ROI groups indexed by (tool, mode).
-    :param mode: "production" or "tournament", for the ROI lookup.
     :return: one cell tuple per tool.
     """
     ranked = [t for t in tools if _num((w1.get(t) or {}).get("edge")) is not None]
@@ -425,8 +361,6 @@ def _rows_w2(
                 _score((a or {}).get("edge"), signed=True),
                 _score((b or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
-                _roi_pct(roi.get((tool, mode)), "roi_mid"),
-                _roi_pct(roi.get((tool, mode)), "roi_haircut"),
             )
         )
     return rows
@@ -436,16 +370,12 @@ def _rows_at(
     tools: Sequence[str],
     w1: dict[str, dict[str, Any]],
     at: dict[str, dict[str, Any]],
-    roi: dict[tuple[str, str], dict[str, Any]],
-    mode: str,
 ) -> list[tuple[str, ...]]:
     """Build the W-1 vs all-time table rows.
 
     :param tools: tool names to render, in the order given.
     :param w1: by_tool stats for the last 7 days (empty for tournament).
     :param at: by_tool stats for the all-time window.
-    :param roi: ROI groups indexed by (tool, mode).
-    :param mode: "production" or "tournament", for the ROI lookup.
     :return: one cell tuple per tool.
     """
     ranked = [t for t in tools if _num((at.get(t) or {}).get("edge")) is not None]
@@ -469,8 +399,6 @@ def _rows_at(
                 _score((a or {}).get("edge"), signed=True),
                 _score((b or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
-                _roi_pct(roi.get((tool, mode)), "roi_mid"),
-                _roi_pct(roi.get((tool, mode)), "roi_haircut"),
             )
         )
     return rows
@@ -659,15 +587,12 @@ def _alert_rows(
 def build_digest_messages(
     results_dir: Path,
     platform: str,
-    roi_results: Path | None = None,
     allowed_tools: Collection[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the benchmark digest as one webhook payload per table.
 
     :param results_dir: directory holding the scorer output files.
     :param platform: platform key, e.g. "polymarket" or "omen".
-    :param roi_results: path to roi_results.json; defaults to
-        ``results_dir/roi_results.json``.
     :param allowed_tools: when given, only these tools are rendered -- callers
         pass the prediction-tool registry. Injected to stay stdlib-only.
     :return: ordered webhook payloads; empty when there is nothing to post.
@@ -676,7 +601,6 @@ def build_digest_messages(
         key: _load_by_tool(results_dir / name.format(platform=platform))
         for key, name in WINDOW_FILES.items()
     }
-    roi = _load_roi(roi_results or results_dir / "roi_results.json", platform)
     # The accumulator's span is not fixed; the section line carries the
     # observed bounds.
     span, as_of = _window_meta(
@@ -738,9 +662,7 @@ def build_digest_messages(
                     ),
                     table_block(
                         _W2_COLUMNS,
-                        _rows_w2(
-                            order_w2, windows["w1"], windows["w2"], roi, "production"
-                        ),
+                        _rows_w2(order_w2, windows["w1"], windows["w2"]),
                     ),
                 ],
             )
@@ -756,9 +678,7 @@ def build_digest_messages(
                     ),
                     table_block(
                         _AT_COLUMNS,
-                        _rows_at(
-                            order_at, windows["w1"], windows["at"], roi, "production"
-                        ),
+                        _rows_at(order_at, windows["w1"], windows["at"]),
                     ),
                 ],
             )
@@ -776,7 +696,7 @@ def build_digest_messages(
                     ),
                     table_block(
                         _AT_COLUMNS,
-                        _rows_at(order, {}, windows["tournament"], roi, "tournament"),
+                        _rows_at(order, {}, windows["tournament"]),
                     ),
                     context(
                         "Two caveats. Tournament rows carry no W-1/W-2: rolling "

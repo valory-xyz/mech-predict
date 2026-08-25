@@ -544,7 +544,6 @@ def main() -> None:
                 table_messages = build_digest_messages(
                     args.report.parent,
                     platform_key,
-                    args.roi_results,
                     # Registry = allowlist; third-party tools are never ranked.
                     allowed_tools=TOOL_REGISTRY,
                 )

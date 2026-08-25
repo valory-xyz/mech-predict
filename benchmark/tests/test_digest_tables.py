@@ -270,15 +270,6 @@ class TestTournament:
         assert "0.1900" in cells and "0.0890" in cells
 
 
-class TestRoi:
-    """ROI is already a percentage in roi_results.json."""
-
-    def test_roi_is_not_rescaled(self, results: Path) -> None:
-        """roi_mid 15.3 renders as +15.3%, not +1530.0%."""
-        body = _body(results)
-        assert "+15.3%" in _cells(body, "alpha")
-
-
 class TestAlerts:
     """Alerts flag blocking conditions, not week-to-week wobble."""
 
@@ -442,40 +433,6 @@ class TestRobustness:
         assert _body(results) == (_body(results))
 
 
-class TestRoiKeying:
-    """roi_sim groups by model too, so (tool, mode) is not unique."""
-
-    def test_duplicate_keys_keep_the_group_with_a_real_roi(
-        self, tmp_path: Path
-    ) -> None:
-        """A None-roi group must not shadow a real one.
-
-        A live artifact's colliding (platform, tool, mode) keys made plain
-        last-wins drop a real ROI behind a roi_mid-None group.
-
-        :param tmp_path: pytest temp dir.
-        """
-        one = {"alpha": _stats()}
-        results = _results_dir(tmp_path, at=one, w1=one, w2=one)
-        common = {
-            "tool_name": "alpha",
-            "mode": "production",
-            "platform": "polymarket",
-        }
-        (results / "roi_results.json").write_text(
-            json.dumps(
-                {
-                    "groups": [
-                        {**common, "model": "gpt-4.1", "roi_mid": 15.8, "n_bets": 31},
-                        {**common, "model": "unknown", "roi_mid": None},
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        assert "+15.8%" in _cells(_body(results), "alpha")
-
-
 class TestAlertComparators:
     """Below-market and below-no-skill are different claims."""
 
@@ -603,45 +560,6 @@ class TestOrderStability:
             if cell["text"] in names
         ]
         assert order[: len(names)] == sorted(names), order
-
-
-class TestRoiHaircut:
-    """`w/costs` is the execution-cost-adjusted ROI, not a rescale of roi_mid."""
-
-    def test_haircut_renders_beside_roi(self, results: Path) -> None:
-        """Both ROI columns appear, with their own values.
-
-        :param results: results-directory fixture.
-        """
-        (results / "roi_results.json").write_text(
-            json.dumps(
-                {
-                    "groups": [
-                        {
-                            "tool_name": "alpha",
-                            "mode": "production",
-                            "platform": "polymarket",
-                            "roi_mid": 27.9,
-                            "roi_haircut": 14.5,
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        body = _body(results)
-        assert "w/costs" in body
-        cells = _cells(body, "alpha")
-        assert "+27.9%" in cells and "+14.5%" in cells
-
-    def test_missing_haircut_is_na_not_zero(self, results: Path) -> None:
-        """A group without roi_haircut renders n/a, never +0.0%.
-
-        :param results: results-directory fixture.
-        """
-        body = _body(results)
-        assert "+0.0%" not in _cells(body, "alpha")
-        assert "n/a" in _cells(body, "alpha")
 
 
 class TestPoolAwareGating:

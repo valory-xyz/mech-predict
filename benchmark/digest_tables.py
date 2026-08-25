@@ -646,24 +646,30 @@ def build_digest_messages(
             message(f"{' and '.join(missing)} unavailable", [section(warning)])
         )
 
+    # 1a compares the two weekly windows, so a tool absent from BOTH has
+    # nothing to say there -- with a 90d reference window the roster includes
+    # tools retired months ago, and rendering them in 1a is a row of pure n/a.
+    # They still appear in 1b, where their 90d numbers are real.
+    weekly_tools = prod_tools & (_scored(windows["w1"]) | _scored(windows["w2"]))
     if prod_tools:
-        order_w2 = _ordered(prod_tools, windows["w1"], windows["w2"])
-        # Cumulative FIRST here, weekly first in 1a: _sort_key ranks on the
-        # first window argument that has an edge, so the argument order IS
+        # The 90d reference FIRST here, weekly first in 1a: _sort_key ranks on
+        # the first window argument that has an edge, so the argument order IS
         # the ranking metric the caption names.
         order_at = _ordered(prod_tools, windows["at"], windows["w1"])
-        messages.append(
-            message(
-                "1a. Production - W-2 vs W-1",
-                [
-                    section("*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"),
-                    table_block(
-                        _W2_COLUMNS,
-                        _rows_w2(order_w2, windows["w1"], windows["w2"]),
-                    ),
-                ],
+        if weekly_tools:
+            order_w2 = _ordered(weekly_tools, windows["w1"], windows["w2"])
+            messages.append(
+                message(
+                    "1a. Production - W-2 vs W-1",
+                    [
+                        section("*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"),
+                        table_block(
+                            _W2_COLUMNS,
+                            _rows_w2(order_w2, windows["w1"], windows["w2"]),
+                        ),
+                    ],
+                )
             )
-        )
         messages.append(
             message(
                 "1b. Production - 90D vs W-1",

@@ -371,6 +371,49 @@ class TestRendering:
                 elif name.startswith(("n ", "Brier", "Edge", "mkt", "base")):
                     assert align == "right", f"{name} must right-align"
 
+    def test_retired_tools_stay_out_of_1a_but_keep_their_90d_row(
+        self, tmp_path: Path
+    ) -> None:
+        """A tool scored only in the 90d window renders in 1b, never in 1a.
+
+        The 90d reference reaches back past roster changes, so it includes
+        tools retired months ago. In 1a they would be a row of pure n/a.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path,
+            at={"live": _stats(), "retired": _stats()},
+            w1={"live": _stats()},
+            w2={"live": _stats()},
+        )
+        payloads = build_digest_messages(results, "polymarket")
+        by_text = {m["text"]: m for m in payloads}
+        rows_1a = [
+            r[1]["text"]
+            for b in by_text["1a. Production - W-2 vs W-1"]["blocks"]
+            if b["type"] == "table"
+            for r in b["rows"][1:]
+        ]
+        rows_1b = [
+            r[1]["text"]
+            for b in by_text["1b. Production - 90D vs W-1"]["blocks"]
+            if b["type"] == "table"
+            for r in b["rows"][1:]
+        ]
+        assert "retired" not in rows_1a and "live" in rows_1a
+        assert "retired" in rows_1b and "live" in rows_1b
+
+    def test_no_weekly_data_skips_1a_but_renders_1b(self, tmp_path: Path) -> None:
+        """90d-only data -> no 1a message at all, 1b still full.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(tmp_path, at={"alpha": _stats()})
+        texts = [m["text"] for m in build_digest_messages(results, "polymarket")]
+        assert "1a. Production - W-2 vs W-1" not in texts
+        assert "1b. Production - 90D vs W-1" in texts
+
     def test_tournament_keeps_cum_headers_production_says_90d(
         self, tmp_path: Path
     ) -> None:

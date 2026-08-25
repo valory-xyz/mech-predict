@@ -355,7 +355,7 @@ def _cols(names: Iterable[str]) -> tuple[Col, ...]:
 
 
 _W2_COLUMNS = _cols(
-    "tool;n W-1;n W-2;rel W-1;Brier W-1;Brier W-2;Δ Brier;base W-1;"
+    "#;tool;n W-1;n W-2;rel W-1;Brier W-1;Brier W-2;Δ Brier;base W-1;"
     "base W-2;mkt W-1;mkt W-2;Edge W-1;Edge W-2;Δ Edge;ROI 90d;w/costs".split(";")
 )
 
@@ -403,11 +403,14 @@ def _rows_w2(
     :param mode: "production" or "tournament", for the ROI lookup.
     :return: one cell tuple per tool.
     """
+    ranked = [t for t in tools if _num((w1.get(t) or {}).get("edge")) is not None]
+
     rows: list[tuple[str, ...]] = []
     for tool in tools:
         a, b = w1.get(tool), w2.get(tool)
         rows.append(
             (
+                str(ranked.index(tool) + 1) if tool in ranked else "-",
                 tool,
                 _count(a),
                 _count(b),
@@ -729,7 +732,10 @@ def build_digest_messages(
             message(
                 "1a. Production - W-1 vs W-2",
                 [
-                    section("*1a. PRODUCTION - W-1 vs W-2*  _what changed this week_"),
+                    section(
+                        "*1a. PRODUCTION - RANKED BY `Edge W-1`, best first*"
+                        "  _what changed this week_"
+                    ),
                     table_block(
                         _W2_COLUMNS,
                         _rows_w2(

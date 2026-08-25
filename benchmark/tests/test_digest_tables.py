@@ -320,6 +320,41 @@ class TestAlerts:
         assert "reliability breach" in body
 
 
+class TestW2Ranking:
+    """Table 1a ranks on the column its caption names: Edge W-1."""
+
+    def test_1a_ranks_on_the_weekly_edge(self, tmp_path: Path) -> None:
+        """Best weekly edge first, rank cell agreeing with the order.
+
+        1b ranks on the cumulative edge; 1a on the weekly one. Passing the
+        windows to _ordered in the wrong order flips this -- caught here.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path,
+            at={
+                "alpha": _stats(edge=0.0100),
+                "beta": _stats(edge=0.3000),
+            },
+            w1={
+                "alpha": _stats(edge=0.2500),
+                "beta": _stats(edge=-0.2000),
+            },
+            # W-2 edges OPPOSE W-1, so ranking on the wrong window is visible
+            w2={
+                "alpha": _stats(edge=-0.3000),
+                "beta": _stats(edge=0.2000),
+            },
+        )
+        body = _body(results)
+        marker = "1a. PRODUCTION"
+        assert "RANKED BY `Edge W-1`" in body
+        # alpha wins the week and must lead 1a despite beta winning cumulative
+        assert _cells(body, "alpha", after=marker)[0] == "1"
+        assert _cells(body, "beta", after=marker)[0] == "2"
+
+
 class TestSpanFallback:
     """A missing window span explains itself in operator language."""
 
@@ -556,13 +591,16 @@ class TestOrderStability:
             renders.add(proc.stdout)
         assert len(renders) == 1, f"{len(renders)} distinct renders across seeds"
         payloads = json.loads(renders.pop())
+        # The decision tables lead with a rank cell, so the tool name may
+        # sit in the first or second column.
         order = [
-            row[0]["text"]
+            cell["text"]
             for payload in payloads
             for block in payload["blocks"]
             if block["type"] == "table"
             for row in block["rows"]
-            if row[0]["text"] in names
+            for cell in row[:2]
+            if cell["text"] in names
         ]
         assert order[: len(names)] == sorted(names), order
 

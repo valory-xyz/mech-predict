@@ -20,6 +20,7 @@
 
 import functools
 import json
+import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -359,6 +360,50 @@ class PredictionResult(BaseModel):
             )
         return self
 
+
+# Maximum characters of resolution rules echoed into the prompt. The trader
+# already caps its `description` at 5000 chars, so this is a defensive second
+# bound for requesters that are not the trader.
+MAX_RESOLUTION_RULES_CHARS = 5000
+
+# Appended to PREDICTION_PROMPT by run() when the request supplies market
+# context. Kept OUT of PREDICTION_PROMPT itself and out of its format() slots
+# on purpose: the replay harness formats the superforcaster template with
+# exactly {question}, {today} and {sources}, so a fourth slot would raise
+# KeyError on every replayed row, and the guard that names that failure by
+# name is wired only to the factual_research branch. Appending instead keeps
+# the tool replayable, and the prompt the harness renders is exactly this
+# tool's blind mode -- which is the control arm an A/B needs anyway.
+MARKET_CONTEXT_BLOCK = """
+
+Market context for this question. This was supplied with the request. It was NOT
+retrieved from the web:
+- The market currently prices P(Yes) at {market_prob}.{close_line}
+
+How to use it. Treat this price as a prior held by other forecasters, and as a question
+to answer: what might those forecasters know that your sources do not? Do not copy it.
+Reason from your own evidence and state where you end up. If your evidence genuinely
+adds nothing beyond what the price already reflects, your honest estimate may coincide
+with the price - that is a correct answer, not a failure. If your evidence contradicts
+the price, say so in `aggregation` and let your own estimate stand.
+
+Note on the prediction-market-odds filter in `evidence_reliability_screen`: that filter
+concerns odds you found in the retrieved sources. It does NOT apply to the price above,
+which is a supplied input about the very question you are forecasting.
+"""
+
+MARKET_CLOSE_LINE = """
+- The market closes at {market_close_at}."""
+
+RESOLUTION_RULES_BLOCK = """
+
+Resolution rules for this market. These were supplied with the request and are
+authoritative for how it settles:
+<resolution_rules>{resolution_rules}</resolution_rules>
+
+Judge the question strictly against these rules rather than against your own reading of
+the title.
+"""
 
 SYSTEM_PROMPT = "You are a helpful assistant."
 
@@ -722,6 +767,98 @@ def _cap_evidence_block(
     return rendered
 
 
+def _coerce_market_prob(value: Any) -> Optional[float]:
+    """Return a usable P(Yes) from a request_context value, or None.
+
+    Rejects anything that is not a real number in [0, 1]. ``bool`` is excluded
+    explicitly because ``isinstance(True, int)`` is True in Python, so a stray
+    boolean would otherwise become the probability 1.0.
+
+    ``math.isfinite`` is belt-and-braces rather than load-bearing: the range
+    check alone already rejects NaN (every comparison against NaN is False)
+    and both infinities (they fail a bound). It is kept because relying on
+    NaN comparison semantics to reject NaN is the kind of implicit behaviour
+    that a later edit to the bounds would silently remove.
+
+    :param value: the raw ``market_prob`` from the request context.
+    :return: the probability as a float, or None when unusable.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
+        return None
+    return numeric
+
+
+def _extract_market_context(request_context: Any) -> Dict[str, Any]:
+    """Pull the three fields this tool reads out of a mech request_context.
+
+    Market context is an OPTIONAL input: a request that carries none, or
+    carries a malformed one, must leave the tool behaving exactly as it does
+    without it. So every failure here degrades to an empty dict rather than
+    raising -- a live mech request must never fail because a market field was
+    the wrong shape.
+
+    Only three keys are read. ``market_liquidity_usd``, ``market_spread`` and
+    ``amm_fee`` are deliberately ignored: they are execution-cost signals that
+    belong to the trading engine, not inputs to a forecast.
+
+    :param request_context: the ``request_context`` kwarg from the mech request.
+    :return: dict with any of ``market_prob``, ``market_close_at``,
+        ``resolution_rules``; empty when nothing usable was supplied.
+    """
+    if not isinstance(request_context, dict):
+        return {}
+
+    context: Dict[str, Any] = {}
+
+    market_prob = _coerce_market_prob(request_context.get("market_prob"))
+    if market_prob is not None:
+        context["market_prob"] = market_prob
+
+    close_at = request_context.get("market_close_at")
+    if isinstance(close_at, str) and close_at.strip():
+        context["market_close_at"] = close_at.strip()
+
+    rules = request_context.get("description")
+    if isinstance(rules, str) and rules.strip():
+        context["resolution_rules"] = rules.strip()[:MAX_RESOLUTION_RULES_CHARS]
+
+    return context
+
+
+def _render_market_blocks(context: Dict[str, Any]) -> str:
+    """Render the prompt suffix for a supplied market context.
+
+    The price block is gated on the price alone: a close timestamp or a set of
+    resolution rules without a price still renders the rules, but never an
+    empty "prices P(Yes) at None" line.
+
+    :param context: the dict from :func:`_extract_market_context`.
+    :return: the suffix to append to the prediction prompt; "" when the
+        request carried no usable market context.
+    """
+    suffix = ""
+
+    market_prob = context.get("market_prob")
+    if market_prob is not None:
+        close_at = context.get("market_close_at")
+        close_line = (
+            MARKET_CLOSE_LINE.format(market_close_at=close_at) if close_at else ""
+        )
+        suffix += MARKET_CONTEXT_BLOCK.format(
+            market_prob=f"{market_prob:.4f}".rstrip("0").rstrip("."),
+            close_line=close_line,
+        )
+
+    rules = context.get("resolution_rules")
+    if rules:
+        suffix += RESOLUTION_RULES_BLOCK.format(resolution_rules=rules)
+
+    return suffix
+
+
 def extract_question(prompt: str) -> str:
     """Uses regexp to extract question from the prompt"""
     # Match from 'question "' to '" and the `yes`' to handle nested quotes
@@ -827,6 +964,19 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         prediction_prompt = PREDICTION_PROMPT.format(
             question=question, today=d, sources=sources
         )
+        # Optional market context. Absent or malformed -> blind mode, in which
+        # the rendered prompt is byte-identical to the parent's plus this
+        # tool's own reasoning-field instructions, and no market-derived
+        # reasoning happens at all.
+        market_context = _extract_market_context(kwargs.get("request_context"))
+        prediction_prompt += _render_market_blocks(market_context)
+        if market_context:
+            print(
+                f"[superforcaster-market-aware] Market context supplied: "
+                f"{sorted(market_context)}"
+            )
+        else:
+            print("[superforcaster-market-aware] No market context; blind mode.")
         print(f"\n{prediction_prompt=}\n")
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

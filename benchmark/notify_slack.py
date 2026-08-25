@@ -24,7 +24,7 @@ import re
 import sys
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -33,7 +33,8 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
-from benchmark.roi_slack import build_roi_section
+from benchmark.digest_tables import build_digest_messages
+from benchmark.roi_slack import build_roi_message, build_roi_section
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
 
@@ -348,7 +349,7 @@ def _build_report_url() -> str | None:
     return None
 
 
-def post_to_slack(webhook_url: str, summary: str) -> None:
+def post_to_slack(webhook_url: str, summary: str | dict[str, Any]) -> None:
     """POST a message to a Slack incoming webhook.
 
     On rejection Slack returns the reason as a short plaintext body
@@ -358,10 +359,13 @@ def post_to_slack(webhook_url: str, summary: str) -> None:
     an opaque ``HTTP Error 400: Bad Request`` with no actionable detail.
 
     :param webhook_url: Slack incoming-webhook URL (from a secret).
-    :param summary: message text to post.
+    :param summary: message text, or a payload dict with ``text``/``blocks``.
     :raises RuntimeError: if Slack rejects the payload, with its reason.
+        Over-long blocks are rejected (not truncated like text), so a bad
+        table fails loudly.
     """
-    payload = json.dumps({"text": summary}).encode()
+    body = summary if isinstance(summary, dict) else {"text": summary}
+    payload = json.dumps(body).encode()
     req = Request(
         webhook_url,
         data=payload,
@@ -396,6 +400,76 @@ _PLATFORM_KEY_BY_LABEL: Mapping[str, str] = MappingProxyType(
 )
 
 
+def _v1_heading(platform_label: str, report_text: str) -> str:
+    """Rule-framed title for the LLM prose digest, badged REPORT V1.
+
+    Same style as the computed tables' REPORT V2 header so the two reports
+    are tellable apart in the channel; the date comes from the report's own
+    heading rather than a clock.
+
+    :param platform_label: deployment name, e.g. ``Omenstrat``.
+    :param report_text: full markdown report; its first line carries the date.
+    :return: three-line heading (rule, bolded title, rule).
+    """
+    first_line = report_text.split("\n", 1)[0]
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", first_line)
+    stamp = f"  \u00b7  {date_match.group(1)}" if date_match else ""
+    line = f"{platform_label.upper()}  \u00b7  REPORT V1{stamp}"
+    rule = "\u2501" * max(24, len(line))
+    return f"{rule}\n*{line}*\n{rule}"
+
+
+def _deployed_tools_for(platform_key: str, override: str | None) -> list[str] | None:
+    """Tools live on this platform's mechs, from the on-chain manifests.
+
+    Best-effort: the lookup walks trader release -> service.yaml valid_mechs
+    -> marketplace subgraph -> IPFS manifests, any of which can be down. On
+    failure the digest renders unfiltered rather than not at all.
+
+    :param platform_key: "omen" or "polymarket".
+    :param override: comma-separated tool names to use instead of the live
+        lookup (testing); empty string means no override.
+    :return: deployed tool names, or None when the lookup failed.
+    """
+    if override:
+        return [t.strip() for t in override.split(",") if t.strip()]
+    try:
+        from benchmark.tool_usage import (  # pylint: disable=import-outside-toplevel
+            DEPLOYMENT_TO_PLATFORM,
+            fetch_valid_tools,
+        )
+
+        merged: list[str] = []
+        matched = False
+        for deployment, tools in fetch_valid_tools().items():
+            if DEPLOYMENT_TO_PLATFORM.get(deployment) != platform_key:
+                continue
+            if tools is None:
+                return None
+            matched = True
+            merged.extend(tools)
+        # [] is a real answer (lookup succeeded, nothing deployed) and must
+        # not collapse into None (lookup failed): the digest renders [] as
+        # empty production tables and None as the unfiltered fallback.
+        return merged if matched else None
+    except Exception:  # pylint: disable=broad-except
+        log.warning("Deployed-tools lookup failed; tables render unfiltered.")
+        return None
+
+
+def _computed_tables_enabled() -> bool:
+    """Check whether the computed-table messages should be posted.
+
+    :return: True when BENCHMARK_COMPUTED_TABLES is set to a truthy value.
+    """
+    return os.environ.get("BENCHMARK_COMPUTED_TABLES", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _infer_platform_label(report_path: Path) -> str | None:
     """Derive the deployment label from the report filename.
 
@@ -423,6 +497,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Print summary without posting to Slack"
+    )
+    parser.add_argument(
+        "--deployed-tools",
+        default="",
+        help=(
+            "Comma-separated deployed tool names; overrides the live "
+            "on-chain lookup (testing)."
+        ),
     )
     parser.add_argument(
         "--roi-results",
@@ -464,11 +546,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Extract heading from report (e.g. "# Benchmark Report (Omenstrat) — 2026-04-03")
-    heading = "*Benchmark Report*"
-    first_line = report_text.split("\n", 1)[0]
-    if first_line.startswith("# "):
-        heading = f"*{first_line.lstrip('# ').strip()}*"
+    heading = _v1_heading(platform_label, report_text)
 
     log.info("Summarizing %s report with %s...", platform_label, MODEL)
     summary = f"{heading}\n\n{summarize_report(report_text, api_key, platform_label)}"
@@ -490,21 +568,56 @@ def main() -> None:
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
-                roi_section = build_roi_section(args.roi_results, platform_key)
+                # Tables on: render the ROI companion as a native table too.
+                roi_section = (
+                    build_roi_message(args.roi_results, platform_key)
+                    if _computed_tables_enabled()
+                    else build_roi_section(args.roi_results, platform_key)
+                )
         except Exception:  # pylint: disable=broad-except
             log.warning(
                 "ROI section build failed; posting digest without it.",
                 exc_info=True,
             )
 
+    # Computed tables: cells read straight from scorer artifacts. One message
+    # per table (same split rationale as above); opt-in via BENCHMARK_COMPUTED_TABLES.
+    table_messages: list[dict[str, Any]] = []
+    if _computed_tables_enabled():
+        try:
+            platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
+            if platform_key is not None:
+                table_messages = build_digest_messages(
+                    args.report.parent,
+                    platform_key,
+                    # Registry = allowlist; third-party tools are never ranked.
+                    allowed_tools=TOOL_REGISTRY,
+                    # 1a/1b list only what the mechs serve right now.
+                    deployed_tools=_deployed_tools_for(
+                        platform_key, args.deployed_tools
+                    ),
+                )
+        except Exception:  # pylint: disable=broad-except
+            log.warning(
+                "Computed tables build failed; posting digest without them.",
+                exc_info=True,
+            )
+
     if args.dry_run:
         print(summary)
+        for message in table_messages:
+            print(f"\n\n{message}")
         if roi_section:
             print(f"\n\n{roi_section}")
         return
 
     log.info("Posting to Slack...")
     post_to_slack(webhook_url, summary)
+    for message in table_messages:
+        try:
+            post_to_slack(webhook_url, message)
+        except Exception:  # pylint: disable=broad-except
+            log.warning("Posting a computed table failed; continuing.", exc_info=True)
     if roi_section:
         try:
             post_to_slack(webhook_url, roi_section)

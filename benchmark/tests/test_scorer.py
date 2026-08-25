@@ -31,13 +31,16 @@ import pytest
 from benchmark.grouping import _accumulate_group, _derive_group
 from benchmark.scorer import (
     PLATFORMS,
+    SCORES_SCHEMA_VERSION,
     SOURCE_LEGACY_LOGS,
     SOURCE_MECH_ANALYTICS,
     _cli_legacy_full_recompute,
     _cli_period,
     _derive_platform_path,
     _derive_tournament_path,
+    _finalize_scores,
     _is_edge_eligible,
+    _load_scores_for_resume,
     _partition_rows_by_platform,
     _score_extreme_predictions,
     _score_latency_reservoir,
@@ -3755,3 +3758,76 @@ class TestRebuildFromMechAnalytics:
             history_path=history_path,
         )
         assert json.loads(tournament_path.read_text()) == {"tournament": "preserved"}
+
+
+class TestSchemaStampEarned:
+    """The version stamp reflects the accumulator's state, not the code's."""
+
+    @staticmethod
+    def _legacy(tmp_path: Path) -> Path:
+        """A pre-migration scores.json: no schema_version, no market sums.
+
+        :param tmp_path: directory.
+        :return: path.
+        """
+        legacy = {
+            "current_month": "2026-08",
+            "overall": {
+                "n": 5,
+                "valid_n": 5,
+                "brier_sum": 1.0,
+                "correct_count": 3,
+                "sharpness_sum": 0.5,
+            },
+        }
+        for dim in (
+            "by_tool",
+            "by_platform",
+            "by_category",
+            "by_horizon",
+            "by_tool_platform",
+            "by_tool_category",
+            "by_category_platform",
+            "by_tool_category_platform",
+            "by_tool_version",
+            "by_tool_version_mode",
+            "by_config",
+            "by_difficulty",
+            "by_liquidity",
+            "by_platform_difficulty",
+            "by_platform_liquidity",
+        ):
+            legacy[dim] = {}
+        path = tmp_path / "scores.json"
+        path.write_text(json.dumps(legacy))
+        return path
+
+    def test_pre_migration_accumulator_keeps_its_old_version(
+        self, tmp_path: Path
+    ) -> None:
+        """Restored legacy state finalizes below SCORES_SCHEMA_VERSION.
+
+        Stamping it current would stop the flywheel's stale-schema check from
+        ever firing the one rebuild that migrates it.
+
+        :param tmp_path: pytest temp dir.
+        """
+        acc = _load_scores_for_resume(self._legacy(tmp_path))
+        assert acc is not None
+        out = _finalize_scores(acc)
+        assert out["schema_version"] < SCORES_SCHEMA_VERSION
+
+    def test_resume_restores_the_window_bounds(self, tmp_path: Path) -> None:
+        """window_start/window_end survive the restore, so updates widen.
+
+        :param tmp_path: pytest temp dir.
+        """
+        path = self._legacy(tmp_path)
+        data = json.loads(path.read_text())
+        data["window_start"] = "2020-01-01T00:00:00Z"
+        data["window_end"] = "2026-08-01T00:00:00Z"
+        path.write_text(json.dumps(data))
+        acc = _load_scores_for_resume(path)
+        assert acc is not None
+        assert acc["window_start"] == "2020-01-01T00:00:00Z"
+        assert acc["window_end"] == "2026-08-01T00:00:00Z"

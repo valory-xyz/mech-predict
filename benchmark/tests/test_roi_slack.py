@@ -36,6 +36,7 @@ from benchmark.roi_slack import (
     _HEADERS,
     _load_results,
     _render_table,
+    build_roi_message,
     build_roi_section,
 )
 
@@ -1131,38 +1132,6 @@ class TestNotifySlackHook:
 
 
 # ---------------------------------------------------------------------------
-# _render_table structural guards
-# ---------------------------------------------------------------------------
-
-
-class TestRenderTableGuards:
-    """_render_table protects against empty input and column drift."""
-
-    def test_empty_rows_returns_no_lines(self) -> None:
-        """No rows -> no lines (never a max() on an empty header width)."""
-        lines = _render_table([])
-        assert isinstance(lines, list) and not lines
-
-    def test_full_width_row_renders(self) -> None:
-        """A correctly-sized row produces header + divider + one data line."""
-        row = tuple(f"c{i}" for i in range(len(_HEADERS)))
-        lines = _render_table([row])
-        assert len(lines) == 3
-
-    def test_short_row_raises_not_silently_truncates(self) -> None:
-        """A row with fewer cells than _HEADERS raises rather than dropping a column."""
-        short = tuple(f"c{i}" for i in range(len(_HEADERS) - 1))
-        with pytest.raises(AssertionError):
-            _render_table([short])
-
-    def test_long_row_raises(self) -> None:
-        """A row with more cells than _HEADERS also raises."""
-        long_row = tuple(f"c{i}" for i in range(len(_HEADERS) + 1))
-        with pytest.raises(AssertionError):
-            _render_table([long_row])
-
-
-# ---------------------------------------------------------------------------
 # Freshness + malformed-payload robustness
 # ---------------------------------------------------------------------------
 
@@ -1350,3 +1319,138 @@ class TestRoiSectionFreshness:
         )
         assert at_section is not None and "stale" not in at_section
         assert over_section is not None and "stale" in over_section
+
+
+class TestRoiBlockMessageTails:
+    """The block message must not lose what the text section carries."""
+
+    @staticmethod
+    def _write(tmp_path: Path, groups: list, as_of: str = "2020-01-01") -> Path:
+        """Write a minimal roi_results.json.
+
+        :param tmp_path: directory.
+        :param groups: group dicts.
+        :param as_of: staleness anchor.
+        :return: path.
+        """
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"as_of": as_of, "window_days": 30, "groups": groups})
+        )
+        return path
+
+    @staticmethod
+    def _group(tool: str, bets: int) -> dict:
+        """One active production group.
+
+        :param tool: name.
+        :param bets: bet count.
+        :return: group dict.
+        """
+        return {
+            "tool": tool,
+            "mode": "production",
+            "platform": "polymarket",
+            "active": True,
+            "is_prediction_tool": True,
+            "n_bets": bets,
+            "staked": bets * 10.0,
+            "roi_mid": 1.0,
+            "roi_low": 0.0,
+            "roi_high": 2.0,
+            "roi_haircut": 0.5,
+            "n_eligible": max(bets, 1),
+            "flags": [],
+        }
+
+    def test_stale_marker_reaches_the_block_title(self, tmp_path: Path) -> None:
+        """The marker lives on the text HEADER, which the block replaces.
+
+        Slicing notes[1:] used to drop it unconditionally -- the one line
+        that announces "roi_sim likely failed" never reached Slack.
+
+        :param tmp_path: pytest temp dir.
+        """
+        msg = build_roi_message(
+            self._write(tmp_path, [self._group("a", 5)]), "polymarket"
+        )
+        assert msg is not None
+        title = msg["blocks"][0]["text"]["text"]
+        assert "*(stale" in title and ")*" in title
+
+    def test_truncation_note_appears_exactly_once(self, tmp_path: Path) -> None:
+        """>MAX_TABLE_ROWS tools: one note, not the text section's plus ours.
+
+        :param tmp_path: pytest temp dir.
+        """
+        groups = [self._group(f"t{i}", 5) for i in range(MAX_TABLE_ROWS + 3)]
+        msg = build_roi_message(self._write(tmp_path, groups), "polymarket")
+        assert msg is not None
+        ctx = [b for b in msg["blocks"] if b["type"] == "context"]
+        joined = ctx[0]["elements"][0]["text"]
+        assert joined.count("more rows") == 1
+
+    def test_zero_bet_day_still_posts_its_tails(self, tmp_path: Path) -> None:
+        """No bets but real tails (idle counts, staleness) -> still a message.
+
+        Returning None here threw away everything the old text path posted.
+
+        :param tmp_path: pytest temp dir.
+        """
+        idle = dict(self._group("idle", 0), n_eligible=3)
+        msg = build_roi_message(self._write(tmp_path, [idle]), "polymarket")
+        assert msg is not None
+        kinds = [b["type"] for b in msg["blocks"]]
+        assert "table" not in kinds and "context" in kinds
+
+
+class TestRoiBlockMessage:
+    """The ROI companion renders as a native table block under the flag."""
+
+    def test_columns_match_the_text_table(self, tmp_path: Path) -> None:
+        """The block table carries the same columns as the fixed-width one.
+
+        :param tmp_path: pytest temp dir.
+        """
+        path = tmp_path / "roi.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "as_of": "2026-08-11",
+                    "groups": [
+                        {
+                            "platform": "polymarket",
+                            "tool_name": "alpha",
+                            "mode": "production",
+                            "model": "gpt-4.1",
+                            "is_prediction_tool": True,
+                            "n_eligible": 200,
+                            "n_bets": 31,
+                            "staked": 77.5,
+                            "roi_mid": 16.3,
+                            "roi_ci": [-7.4, 38.5],
+                            "roi_haircut": 7.0,
+                            "brier_all": 0.273,
+                            "brier_bets": 0.135,
+                            "parse_reliability": 100.0,
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = build_roi_message(path, "polymarket")
+        assert payload is not None
+        table = [b for b in payload["blocks"] if b["type"] == "table"][0]
+        assert [c["text"] for c in table["rows"][0]] == list(_HEADERS)
+
+    def test_no_bets_yields_no_message(self, tmp_path: Path) -> None:
+        """A platform with no betting rows posts nothing rather than an empty table.
+
+        :param tmp_path: pytest temp dir.
+        """
+        path = tmp_path / "roi.json"
+        path.write_text(
+            json.dumps({"as_of": "2026-08-11", "groups": []}), encoding="utf-8"
+        )
+        assert build_roi_message(path, "polymarket") is None

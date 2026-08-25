@@ -81,7 +81,19 @@ A `PROMOTE` is a **nomination**: statistics passed. Deployment still takes ablat
 floor  =  Edge  −  1.645 × ( spread ÷ √markets )
 ```
 
-The worst true Edge the evidence still supports at 95% confidence. `spread` = how much per-market results jump around; `√markets` = to halve the deduction you need 4× the markets. Two real tools, same report:
+A textbook **one-sided 95% confidence lower bound on a mean** — the worst true Edge the evidence still supports:
+
+| Piece | Meaning |
+|---|---|
+| `Edge` | the average of the per-market edge numbers |
+| `spread ÷ √markets` | the **standard error**: how much that average would wobble on a re-drawn sample. The √ is why evidence compounds — halving the deduction takes 4× the markets |
+| `1.645` | the normal-curve point with 5% below it — the one-sided 95% multiplier |
+
+It claims: *if the per-market edges are independent, there is ≤5% chance the tool's true long-run Edge is below this number.* One-sided on purpose: a false promote loses money, a missed one costs a day.
+
+Known gaps, absorbed by the +0.04 margin: markets are not fully independent (ladder markets resolve off one event, so the deduction runs small), small samples would want Student-t rather than 1.645, and the test re-runs daily, so 95% is per-day, not per-decision.
+
+Two real tools, same report:
 
 | tool | Edge | markets | deduction | floor |
 |---|---:|---:|---:|---:|

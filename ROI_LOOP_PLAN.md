@@ -29,8 +29,8 @@ flowchart LR
 
 | Priority | Action | Box | Impact | Effort |
 |---|--------|-----|--------|--------|
-| **1** | **Upgrade one tool, by hand**: pass it the market information (optional input) and let it determine whether the question is researchable — and use both to build a better prediction | Prediction | High | Low–Med |
-| **2** | **A/B test that tool**: original vs upgraded on the same past markets, using local replay benchmarking (small prerequisite: stop dropping the market price from replay rows — ~3 lines) | Measurement | High — the go/no-go evidence | Low |
+| **1** | **Upgrade one tool, by hand**: pass it the market information (optional input) and let it determine whether the question is researchable — and use both to build a better prediction | Prediction | High | Med |
+| **2** | **A/B test that tool**: original vs upgraded on the same past markets, using local replay benchmarking (small prerequisite: stop dropping the market price from replay rows — ~3 lines) | Measurement | High — the go/no-go evidence | Med |
 | 3 | **Fix the daily pipeline** so one platform's outage doesn't stop everything and reports never show stale data as fresh (broken ~10 days in August) | Measurement | High | Med |
 | 4 | **Stop betting the two market types holding ~83% of the loss** (linked "above $N" families, weather favourites) — trader configuration, off by default | Market selection | Highest proven (−7.3% → +0.3% replayed) | Med |
 | 5 | **Judge tools on money in every benchmark** — beats the price? right when it disagrees? simulated profit? — and open issues on those signals too | Measurement | Compounding | Med |

@@ -3,20 +3,20 @@ author: valory
 version: 0.1.0
 type: custom
 description: A tool for making binary predictions on prediction markets. It estimates
-  the probability that a market question resolves Yes. Departing from
-  superforcaster_full_search, it fetches full search-result pages (top organic results)
-  and extracts the main article text via readability + markdownify, feeding the cleaned
-  page body into the forecasting prompt instead of relying on Serper snippets alone, and
-  returns its forecast via OpenAI Structured Outputs. It optionally accepts market context
-  on the request and reports objective properties of the question alongside the forecast;
+  the probability that a market question resolves Yes. Departing from superforcaster_full_search,
+  it fetches full search-result pages (top organic results) and extracts the main
+  article text via readability + markdownify, feeding the cleaned page body into the
+  forecasting prompt instead of relying on Serper snippets alone, and returns its
+  forecast via OpenAI Structured Outputs. It optionally accepts market context on
+  the request and reports objective properties of the question alongside the forecast;
   it never advises a trade action.
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
-  superforcaster_market_aware.py: bafybeigydebqg7mahm3uap32qymfpdmrudvnwmwxulax2ky4mrh6t3owfe
+  superforcaster_market_aware.py: bafybeibswymamr3n5czdhjoasvgufkluiyytfdpyol5ylq5t53vqpgu3ba
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_market_aware.py: bafybeihromvcvabbnzkrl4neyj3r3j6fkdrggwfv57cwjtsqq3ge4ixwle
+  tests/test_superforcaster_market_aware.py: bafybeigcopwy2gieyuiexnjjtg36xxdlwbabuf25osydjqalk7bs7bm7hy
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_market_aware.py
 callable: run

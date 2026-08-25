@@ -21,15 +21,14 @@
 
 import inspect
 import json
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, get_args
 from unittest.mock import MagicMock, patch
 
-import re
 import pytest
-from typing import Any, get_args
-from pydantic import ValidationError
 import requests
+from pydantic import ValidationError
 
 import packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware as module
 from packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware import (
@@ -272,8 +271,9 @@ class TestPredictionResultSchema:
         """
         for name in ("p_yes", "p_no", "confidence", "info_utility", "evidence_quality"):
             meta = PredictionResult.model_fields[name].metadata
-            bounds = {type(c).__name__: getattr(c, "ge", getattr(c, "le", None))
-                      for c in meta}
+            bounds = {
+                type(c).__name__: getattr(c, "ge", getattr(c, "le", None)) for c in meta
+            }
             assert bounds.get("Ge") == 0.0, f"{name} lost its ge=0 bound"
             assert bounds.get("Le") == 1.0, f"{name} lost its le=1 bound"
 
@@ -349,11 +349,13 @@ class TestCoerceMarketProb:
 
     @pytest.mark.parametrize("value", [True, False])
     def test_booleans_are_rejected(self, value: bool) -> None:
-        """bool is a subclass of int, so True must be excluded explicitly.
+        """Booleans are a subclass of int, so True must be excluded explicitly.
 
         Without the explicit check, `market_prob: true` would silently become
         the probability 1.0 -- a maximally confident, entirely fabricated
         prior.
+
+        :param value: the boolean under test.
         """
         assert module._coerce_market_prob(value) is None
 
@@ -392,7 +394,9 @@ class TestExtractMarketContext:
     )
     def test_unusable_price_drops_only_the_price(self, prob: Any) -> None:
         """A bad price must not take the resolution rules down with it."""
-        ctx = module._extract_market_context({**REAL_REQUEST_CONTEXT, "market_prob": prob})
+        ctx = module._extract_market_context(
+            {**REAL_REQUEST_CONTEXT, "market_prob": prob}
+        )
         assert "market_prob" not in ctx
         assert "resolution_rules" in ctx
 
@@ -525,9 +529,7 @@ class TestBlindVersusMarketAwareRun:
             assert payload["p_yes"] + payload["p_no"] == 1.0
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_extras_are_present_in_both_modes(
-        self, mock_client_mgr: MagicMock
-    ) -> None:
+    def test_extras_are_present_in_both_modes(self, mock_client_mgr: MagicMock) -> None:
         """Rows stay schema-comparable so an A/B can pair them."""
         _stub_openai(mock_client_mgr)
         common = dict(
@@ -552,6 +554,8 @@ class TestBlindVersusMarketAwareRun:
 
         The stub always returns the same PredictionResult, so if the value
         tracked the model it would be constant across these two calls.
+
+        :param mock_client_mgr: the patched OpenAIClientManager.
         """
         _stub_openai(mock_client_mgr)
         common = dict(
@@ -575,6 +579,8 @@ class TestBlindVersusMarketAwareRun:
         A model answering 0.7 / 0.31 validates against the schema and would
         then be rejected by the trader as an invalid response. Deriving the
         complement removes that whole failure class.
+
+        :param mock_client_mgr: the patched OpenAIClientManager.
         """
         mock_client = _stub_openai(mock_client_mgr)
         drifting = _make_prediction_stub().model_copy(
@@ -649,7 +655,10 @@ class TestResearchabilityField:
         with pytest.raises(ValidationError):
             _make_prediction_stub().model_copy(update={"researchability": "NR-weather"})
             PredictionResult.model_validate(
-                {**_make_prediction_stub().model_dump(), "researchability": "NR-weather"}
+                {
+                    **_make_prediction_stub().model_dump(),
+                    "researchability": "NR-weather",
+                }
             )
 
     def test_sports_exception_is_stated_in_the_field_description(self) -> None:

@@ -1028,8 +1028,16 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     :param scores: raw accumulator dict.
     :return: finalized dict with derived stats.
     """
+    # The version the accumulator EARNED, not the code's. A restored
+    # pre-migration accumulator carries market_brier_sum=None (never
+    # re-armed on the incremental path), and stamping it current would stop
+    # the flywheel's stale-schema check from ever firing the one rebuild
+    # that migrates it.
+    migrated = scores["overall"].get("market_brier_sum") is not None
     result: dict[str, Any] = {
-        "schema_version": SCORES_SCHEMA_VERSION,
+        "schema_version": (
+            SCORES_SCHEMA_VERSION if migrated else scores.get("schema_version", 1)
+        ),
         "current_month": scores["current_month"],
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -1232,6 +1240,9 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     if "current_month" not in data or "brier_sum" not in data.get("overall", {}):
         return None
 
+    # Carried so _finalize_scores can preserve a pre-migration version
+    # instead of stamping the accumulator current (see the stamp comment).
+
     def _restore_group(g: dict[str, Any]) -> dict[str, Any]:
         restored = _empty_group()
         restored["n"] = g["n"]
@@ -1268,6 +1279,12 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores: dict[str, Any] = {
         "current_month": data["current_month"],
         "generated_at": data.get("generated_at", ""),
+        # Version and observed bounds ride along: the version so the stamp
+        # can preserve a pre-migration state, the bounds so an incremental
+        # update WIDENS the span instead of restarting it from this run.
+        "schema_version": data.get("schema_version", 1),
+        "window_start": data.get("window_start"),
+        "window_end": data.get("window_end"),
         "overall": _restore_group(data["overall"]),
     }
     for dim in (

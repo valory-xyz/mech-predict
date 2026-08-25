@@ -555,8 +555,6 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
     ]
     prediction_groups = [g for g in platform_groups if g.get("is_prediction_tool")]
     bet_groups = [g for g in prediction_groups if _as_int(g.get("n_bets")) > 0]
-    if not bet_groups:
-        return None
 
     extra = 0
     if len(bet_groups) > MAX_TABLE_ROWS:
@@ -566,18 +564,34 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
         ]
     bet_groups.sort(key=_display_sort_key)
 
-    blocks: list[dict[str, Any]] = [
-        section("*4. SIMULATED TRADER ROI*"),
-        table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]),
-    ]
-
-    # The prose tails from the text section carry real information (idle tools,
-    # excluded non-prediction tools, truncated rows); keep them as context.
+    # The stale marker lives on the text section's HEADER line; the block
+    # message replaces that header with its own title, so the marker must be
+    # carried over or the "roi_sim likely failed" announcement is lost.
     notes = [line for line in text.split("\n") if line and not line.startswith("`")]
-    tail = [n for n in notes[1:] if not n.startswith("tool ") and "|" not in n]
+    stale_match = re.search(r"\*\(stale[^)]*\)\*", notes[0]) if notes else None
+    stale = stale_match.group(0) if stale_match else ""
+    title = "*4. SIMULATED TRADER ROI*" + (f"  {stale}" if stale else "")
+
+    blocks: list[dict[str, Any]] = [section(title)]
+    if bet_groups:
+        blocks.append(table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]))
+
+    # The prose tails carry real information (idle tools, excluded
+    # non-prediction tools, zero-bet explanations); keep them as context.
+    # The text section's own truncation line is dropped -- its count is for
+    # the FIXED-WIDTH table's cap, and this message appends its own.
+    tail = [
+        n
+        for n in notes[1:]
+        if not n.startswith("tool ") and "|" not in n and not n.startswith(_ELLIPSIS)
+    ]
     if extra:
         tail.append(f"+{extra} more rows in the full report")
     if tail:
         blocks.append(context(" · ".join(tail)))
 
+    # A zero-bet day with nothing to explain is genuinely empty; a zero-bet
+    # day WITH tails (idle counts, staleness) still posts them.
+    if not bet_groups and not tail and not stale:
+        return None
     return message(f"4. Simulated trader ROI ({platform})", blocks)

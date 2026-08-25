@@ -299,7 +299,7 @@ class TestAlerts:
         assert "96%" in _cells(body, "alpha"), "still visible as a column"
 
     def test_gate_breach_is_alerted(self, results: Path) -> None:
-        """Below the 80% gate the tool is excluded from ROI, so it is flagged."""
+        """Below the 80% gate the row stays in ROI, flagged -- never excluded."""
         _write(
             results,
             "rolling_scores_polymarket.json",
@@ -370,6 +370,21 @@ class TestRendering:
                     assert align == "left", f"{name} must left-align"
                 elif name.startswith(("n ", "Brier", "Edge", "mkt", "base")):
                     assert align == "right", f"{name} must right-align"
+
+    def test_lookup_succeeded_with_zero_deployed_posts_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """deployed=[] empties the roster BEFORE the nothing-to-post guard.
+
+        The guard used to run first, letting a filtered-to-empty roster fall
+        through and post a title with no tables under it.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path, at={"a": _stats()}, w1={"a": _stats()}, w2={"a": _stats()}
+        )
+        assert build_digest_messages(results, "polymarket", deployed_tools=[]) == []
 
     def test_deployed_filter_limits_1a_and_1b_to_live_tools(
         self, tmp_path: Path

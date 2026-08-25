@@ -71,7 +71,6 @@ NA = "n/a"
 # ASCII on purpose: table cells stay ASCII so column padding cannot skew.
 LOW_SAMPLE_MARK = "*"
 
-# A delta renders only when BOTH windows clear the sample floor.
 
 # Deployment names, so the title matches what the team calls each platform.
 PLATFORM_TITLES = {"polymarket": "Polystrat", "omen": "Omenstrat"}
@@ -271,9 +270,14 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
                 "*Legend:*\n"
                 f"\u2022 {LOW_SAMPLE_MARK}: marks a window under "
                 f"n = {MIN_SAMPLE_SIZE} -- the number is reported but not "
-                "statistically significant.\n"
+                "statistically significant. Keys off the smaller of the two "
+                "pools below.\n"
                 "\u2022 *n*: number of scored predictions, not distinct "
-                "markets -- a market asked repeatedly counts each time.\n"
+                "markets -- a market asked repeatedly counts each time. "
+                "Shown as valid/edge when the Brier pool and the Edge pool "
+                "differ.\n"
+                "\u2022 *rel*: share of calls that returned a usable "
+                "prediction.\n"
                 "\u2022 *base*: score of always predicting the pool's "
                 "average YES rate -- the zero-skill reference.\n"
                 "\u2022 *mkt*: score of always predicting the current "
@@ -520,7 +524,7 @@ def _alert_rows(
                     "reliability breach",
                     tool,
                     f"{_reliability(stats)} in W-1, gate is " f"{RELIABILITY_GATE:.0%}",
-                    "tool is excluded from ROI; investigate parse failures",
+                    "row stays in ROI flagged \u26a0; investigate parse failures",
                 )
             )
 
@@ -629,6 +633,10 @@ def build_digest_messages(
         # A permitted tool that ran and scored nothing still belongs here.
         prod_tools |= _ran_but_unscored(windows["at"], permitted)
         prod_tools |= _ran_but_unscored(windows["w1"], permitted)
+    if deployed_tools is not None:
+        live = {normalize_tool_name(t) for t in deployed_tools}
+        prod_tools = {t for t in prod_tools if normalize_tool_name(t) in live}
+
     if not prod_tools and not tourn_tools:
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
@@ -657,10 +665,6 @@ def build_digest_messages(
     # nothing to say there -- with a 90d reference window the roster includes
     # tools retired months ago, and rendering them in 1a is a row of pure n/a.
     # They still appear in 1b, where their 90d numbers are real.
-    if deployed_tools is not None:
-        live = {normalize_tool_name(t) for t in deployed_tools}
-        prod_tools = {t for t in prod_tools if normalize_tool_name(t) in live}
-
     weekly_tools = prod_tools & (_scored(windows["w1"]) | _scored(windows["w2"]))
     if prod_tools:
         # The 90d reference FIRST here, weekly first in 1a: _sort_key ranks on

@@ -36,6 +36,7 @@ from benchmark.notify_slack import (
     _computed_tables_enabled,
     _configure_logging,
     _count_eligible_tools,
+    _deployed_tools_for,
     _infer_platform_label,
     _main_window_label,
     _v1_heading,
@@ -577,3 +578,36 @@ class TestV1Heading:
         """No date in the heading -> badge without a stamp, never a crash."""
         heading = _v1_heading("Polystrat", "no heading here")
         assert "*POLYSTRAT  \u00b7  REPORT V1*" in heading
+
+
+class TestDeployedToolsForTriState:
+    """[] means nothing deployed; None means the lookup failed."""
+
+    def test_successful_empty_lookup_is_empty_not_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All deployments answered with zero tools -> [], never None.
+
+        Collapsing them let a legitimately empty roster fall back to
+        rendering every historically-scored tool.
+
+        :param monkeypatch: pytest monkeypatch.
+        """
+        import benchmark.tool_usage as tool_usage
+
+        monkeypatch.setattr(
+            tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": []}
+        )
+        assert _deployed_tools_for("polymarket", "") == []
+
+    def test_failed_lookup_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deployment answering None poisons the platform to None.
+
+        :param monkeypatch: pytest monkeypatch.
+        """
+        import benchmark.tool_usage as tool_usage
+
+        monkeypatch.setattr(
+            tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": None}
+        )
+        assert _deployed_tools_for("polymarket", "") is None

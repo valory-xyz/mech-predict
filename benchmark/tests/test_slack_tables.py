@@ -21,7 +21,6 @@
 import pytest
 from benchmark.slack_tables import (
     Column,
-    code_block,
     display_width,
     fit,
     render_table,
@@ -98,7 +97,3 @@ class TestEmpty:
     def test_no_rows_renders_no_lines(self) -> None:
         """Callers skip the whole block when there is nothing to show."""
         assert render_table((Column("a"),), []) == []
-
-    def test_code_block_of_nothing_is_empty(self) -> None:
-        """An empty table produces no fence, not an empty fenced block."""
-        assert code_block([]) == ""

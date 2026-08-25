@@ -1321,6 +1321,91 @@ class TestRoiSectionFreshness:
         assert over_section is not None and "stale" in over_section
 
 
+class TestRoiBlockMessageTails:
+    """The block message must not lose what the text section carries."""
+
+    @staticmethod
+    def _write(
+        tmp_path: Path, groups: list, as_of: str = "2020-01-01T00:00:00Z"
+    ) -> Path:
+        """Write a minimal roi_results.json.
+
+        :param tmp_path: directory.
+        :param groups: group dicts.
+        :param as_of: staleness anchor.
+        :return: path.
+        """
+        path = tmp_path / "roi_results.json"
+        path.write_text(
+            json.dumps({"as_of": as_of, "window_days": 30, "groups": groups})
+        )
+        return path
+
+    @staticmethod
+    def _group(tool: str, bets: int) -> dict:
+        """One active production group.
+
+        :param tool: name.
+        :param bets: bet count.
+        :return: group dict.
+        """
+        return {
+            "tool": tool,
+            "mode": "production",
+            "platform": "polymarket",
+            "active": True,
+            "is_prediction_tool": True,
+            "n_bets": bets,
+            "staked": bets * 10.0,
+            "roi_mid": 1.0,
+            "roi_low": 0.0,
+            "roi_high": 2.0,
+            "roi_haircut": 0.5,
+            "n_eligible": max(bets, 1),
+            "flags": [],
+        }
+
+    def test_stale_marker_reaches_the_block_title(self, tmp_path: Path) -> None:
+        """The marker lives on the text HEADER, which the block replaces.
+
+        Slicing notes[1:] used to drop it unconditionally -- the one line
+        that announces "roi_sim likely failed" never reached Slack.
+
+        :param tmp_path: pytest temp dir.
+        """
+        msg = build_roi_message(
+            self._write(tmp_path, [self._group("a", 5)]), "polymarket"
+        )
+        assert msg is not None
+        title = msg["blocks"][0]["text"]["text"]
+        assert "*(stale" in title and ")*" in title
+
+    def test_truncation_note_appears_exactly_once(self, tmp_path: Path) -> None:
+        """>MAX_TABLE_ROWS tools: one note, not the text section's plus ours.
+
+        :param tmp_path: pytest temp dir.
+        """
+        groups = [self._group(f"t{i}", 5) for i in range(MAX_TABLE_ROWS + 3)]
+        msg = build_roi_message(self._write(tmp_path, groups), "polymarket")
+        assert msg is not None
+        ctx = [b for b in msg["blocks"] if b["type"] == "context"]
+        joined = ctx[0]["elements"][0]["text"]
+        assert joined.count("more rows") == 1
+
+    def test_zero_bet_day_still_posts_its_tails(self, tmp_path: Path) -> None:
+        """No bets but real tails (idle counts, staleness) -> still a message.
+
+        Returning None here threw away everything the old text path posted.
+
+        :param tmp_path: pytest temp dir.
+        """
+        idle = dict(self._group("idle", 0), n_eligible=3)
+        msg = build_roi_message(self._write(tmp_path, [idle]), "polymarket")
+        assert msg is not None
+        kinds = [b["type"] for b in msg["blocks"]]
+        assert "table" not in kinds and "context" in kinds
+
+
 class TestRoiBlockMessage:
     """The ROI companion renders as a native table block under the flag."""
 

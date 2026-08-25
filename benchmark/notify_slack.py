@@ -440,13 +440,18 @@ def _deployed_tools_for(platform_key: str, override: str | None) -> list[str] | 
         )
 
         merged: list[str] = []
+        matched = False
         for deployment, tools in fetch_valid_tools().items():
             if DEPLOYMENT_TO_PLATFORM.get(deployment) != platform_key:
                 continue
             if tools is None:
                 return None
+            matched = True
             merged.extend(tools)
-        return merged or None
+        # [] is a real answer (lookup succeeded, nothing deployed) and must
+        # not collapse into None (lookup failed): the digest renders [] as
+        # empty production tables and None as the unfiltered fallback.
+        return merged if matched else None
     except Exception:  # pylint: disable=broad-except
         log.warning("Deployed-tools lookup failed; tables render unfiltered.")
         return None

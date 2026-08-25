@@ -177,15 +177,3 @@ def render_table(columns: Sequence[Column], rows: Sequence[Sequence[str]]) -> li
     header = format_line([column.header for column in columns], widths)
     divider = format_line(["-" * width for width in widths], widths)
     return [header, divider] + [format_line(row, widths) for row in rows]
-
-
-def code_block(lines: Sequence[str]) -> str:
-    """Wrap rendered lines in a Slack code block.
-
-    :param lines: rendered table lines.
-    :return: fenced block, or an empty string when there are no lines.
-    """
-    if not lines:
-        return ""
-    body = "\n".join(lines)
-    return f"```\n{body}\n```"

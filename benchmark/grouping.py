@@ -285,7 +285,7 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     :param row: a production log row dict.
     """
     # Observed row bounds; current_month misstates the span after rollover
-    # (see benchmark.digest_tables._window_meta).
+    # (see benchmark.digest_tables._as_of_date).
     stamp = row.get("predicted_at")
     if stamp:
         first = scores.get("window_start")

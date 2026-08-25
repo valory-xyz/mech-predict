@@ -771,31 +771,29 @@ DELIVERS_BY_IDS_QUERY = """
 }
 """
 
-# Omen: bulk fetch bets on markets that resolved after the cutoff.
-# Filters by resolution time (currentAnswerTimestamp), not bet placement time.
-OMEN_BETS_QUERY = """
+# Omen: bulk fetch markets that resolved after the cutoff, straight from
+# the market entity (one row per market). The earlier ``bets``-based proxy
+# returned one row per bet on every resolved market -- thousands of rows per
+# window -- and the subgraph proxy times out (504) once skip pagination
+# passes ~3000 rows, which stalled the daily fetch permanently. Paginated by
+# ``id`` cursor (``id_gt``) so no ``skip`` depth is ever reached.
+OMEN_MARKETS_ENTITY = "fixedProductMarketMakerCreations"
+OMEN_RESOLVED_MARKETS_QUERY = """
 {
-  bets(
+  fixedProductMarketMakerCreations(
     first: %(first)s
-    skip: %(skip)s
-    orderBy: timestamp
-    orderDirection: desc
+    orderBy: id
+    orderDirection: asc
     where: {
-      fixedProductMarketMaker_: {
-        currentAnswer_not: null
-        currentAnswerTimestamp_gt: %(resolved_after)s
-      }
+      id_gt: "%(id_gt)s"
+      currentAnswer_not: null
+      currentAnswerTimestamp_gt: %(resolved_after)s
     }
   ) {
     id
-    timestamp
-    outcomeIndex
-    fixedProductMarketMaker {
-      id
-      currentAnswer
-      currentAnswerTimestamp
-      question
-    }
+    currentAnswer
+    currentAnswerTimestamp
+    question
   }
 }
 """
@@ -866,6 +864,50 @@ def _paginated_fetch(
         if len(batch) < batch_size:
             break
         skip += batch_size
+
+    return all_records
+
+
+def _id_cursor_paginated_fetch(
+    url: str,
+    query_template: str,
+    entity_key: str,
+    template_vars: dict[str, Any],
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> list[dict[str, Any]]:
+    """Fetch all records from a subgraph using ``id`` cursor pagination.
+
+    ``query_template`` must order by ``id`` ascending and carry an
+    ``id_gt: "%(id_gt)s"`` filter; each page resumes after the last id of
+    the previous one. Unlike :func:`_paginated_fetch` this never grows a
+    ``skip`` offset, so query cost stays flat however many rows the window
+    holds (deep ``skip`` on the predict subgraphs 504s past a few thousand).
+
+    :param url: subgraph endpoint URL.
+    :param query_template: ``%``-style query with ``first``/``id_gt`` slots.
+    :param entity_key: top-level key of the returned collection.
+    :param template_vars: extra template substitutions.
+    :param batch_size: page size.
+    :return: every record across all pages, in id order.
+    """
+    all_records: list[dict[str, Any]] = []
+    last_id = ""
+
+    while True:
+        query = query_template % {
+            **template_vars,
+            "first": batch_size,
+            "id_gt": last_id,
+        }
+        data = _post_graphql(url, {"query": query})
+        batch = data.get(entity_key, [])
+        if not batch:
+            break
+        all_records.extend(batch)
+        log.info("  fetched %d %s (total %d)", len(batch), entity_key, len(all_records))
+        if len(batch) < batch_size:
+            break
+        last_id = batch[-1]["id"]
 
     return all_records
 
@@ -1641,22 +1683,22 @@ class ResolvedMarkets:
 def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
     """Bulk fetch Omen markets that resolved after the given timestamp.
 
-    Filters by resolution time (currentAnswerTimestamp), not bet placement time.
+    Reads the market entity directly (one row per market, cursor-paginated
+    by id) and filters by resolution time (``currentAnswerTimestamp``).
     Indexes by both market ID (fpmm address) and question title.
 
     :param resolved_after: UNIX timestamp; only include markets resolved after this.
     :return: ResolvedMarkets indexed by ID and title.
     """
-    raw = _paginated_fetch(
+    raw = _id_cursor_paginated_fetch(
         PREDICT_OMEN_SUBGRAPH_URL,
-        OMEN_BETS_QUERY,
-        "bets",
+        OMEN_RESOLVED_MARKETS_QUERY,
+        OMEN_MARKETS_ENTITY,
         {"resolved_after": resolved_after},
     )
 
     markets = ResolvedMarkets()
-    for bet in raw:
-        fpmm = bet.get("fixedProductMarketMaker") or {}
+    for fpmm in raw:
         current_answer = fpmm.get("currentAnswer")
         if current_answer is None:
             continue
@@ -1666,8 +1708,7 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
         except (ValueError, TypeError):
             continue
 
-        question_raw = fpmm.get("question", "")
-        title = _extract_question_title(question_raw)
+        title = _extract_question_title(fpmm.get("question", ""))
         if not title:
             continue
 
@@ -1677,11 +1718,9 @@ def fetch_omen_resolved(resolved_after: int) -> ResolvedMarkets:
             "resolved_at_ts": int(resolved_at_ts) if resolved_at_ts else None,
         }
 
-        # Omen market ID is the fpmm contract address (the bet entity's id prefix)
-        # but the fpmm id from the subgraph is the FixedProductMarketMakerCreation id
-        # which matches request_context.market_id
-        market_id = fpmm.get("id")
-        markets.add(market_id, title, data)
+        # The FixedProductMarketMakerCreation id is the fpmm contract address,
+        # which matches request_context.market_id.
+        markets.add(fpmm.get("id"), title, data)
 
     return markets
 

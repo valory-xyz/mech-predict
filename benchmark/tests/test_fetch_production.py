@@ -379,6 +379,152 @@ class TestFetchPolymarketResolvedUsesQuestions:
 
 
 # ---------------------------------------------------------------------------
+# fetch_omen_resolved — queries markets directly, cursor-paginated by id
+# ---------------------------------------------------------------------------
+
+
+class TestFetchOmenResolvedUsesMarkets:
+    """Omen resolved markets come from the market entity, one row per market.
+
+    The previous ``bets``-based proxy returned one row per bet on every
+    resolved market (thousands of rows per window) and the subgraph proxy
+    504s once skip pagination passes ~3000 rows, so the daily fetch failed
+    deterministically. Querying ``fixedProductMarketMakerCreations`` returns
+    a few hundred rows and needs no nested filter.
+    """
+
+    @staticmethod
+    def _market(
+        market_id: str, title: str, answer: Optional[str], ts: str = "1700000000"
+    ) -> dict[str, Any]:
+        return {
+            "id": market_id,
+            "currentAnswer": answer,
+            "currentAnswerTimestamp": ts,
+            "question": f"{title}␟['Yes', 'No']␟0␟en_US",
+        }
+
+    def test_uses_market_entity_with_id_cursor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The query targets the market entity and is paginated by id cursor.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        captured: dict[str, Any] = {}
+
+        def fake_paginated(
+            url: str,
+            query: str,
+            entity_key: str,
+            template_vars: dict[str, Any],
+            **_kwargs: Any,
+        ) -> list[dict[str, Any]]:
+            captured["url"] = url
+            captured["query"] = query
+            captured["entity_key"] = entity_key
+            captured["template_vars"] = template_vars
+            return [
+                self._market("0xyes", "Will it happen?", "0x0"),
+                self._market("0xno", "Will it not happen?", "0x1"),
+                # Edge case: unresolved market — must be skipped.
+                self._market("0xopen", "Still open?", None),
+                # Edge case: non-hex answer — must be skipped.
+                self._market("0xbad", "Bad answer?", "not-hex"),
+                # Edge case: missing title — must be skipped.
+                {"id": "0xnotitle", "currentAnswer": "0x0", "question": ""},
+            ]
+
+        monkeypatch.setattr(fp, "_id_cursor_paginated_fetch", fake_paginated)
+        markets = fp.fetch_omen_resolved(resolved_after=1_600_000_000)
+
+        assert captured["url"] == fp.PREDICT_OMEN_SUBGRAPH_URL
+        assert captured["entity_key"] == fp.OMEN_MARKETS_ENTITY
+        assert "fixedProductMarketMakerCreations(" in captured["query"]
+        assert "bets(" not in captured["query"]
+        assert "skip:" not in captured["query"]
+        assert "id_gt:" in captured["query"]
+        assert "currentAnswerTimestamp_gt: %(resolved_after)s" in captured["query"]
+        assert captured["template_vars"] == {"resolved_after": 1_600_000_000}
+
+        assert len(markets) == 2
+        assert markets.by_id["0xyes"]["outcome"] is True
+        assert markets.by_id["0xyes"]["resolved_at_ts"] == 1_700_000_000
+        assert markets.by_id["0xno"]["outcome"] is False
+        assert markets.by_title["will it happen?"] is markets.by_id["0xyes"]
+        for skipped in ("0xopen", "0xbad", "0xnotitle"):
+            assert skipped not in markets.by_id
+
+
+class TestIdCursorPaginatedFetch:
+    """Cursor pagination by ``id`` never uses ``skip``."""
+
+    _TEMPLATE = (
+        '{ things(first: %(first)s, where: { id_gt: "%(id_gt)s", '
+        "ts_gt: %(ts)s }) { id } }"
+    )
+
+    def test_advances_cursor_until_short_page(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each page starts after the previous page's last id; stops on a short page.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        pages = [
+            [{"id": "a"}, {"id": "b"}],
+            [{"id": "c"}, {"id": "d"}],
+            [{"id": "e"}],
+        ]
+        queries: list[str] = []
+
+        def fake_post(_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            queries.append(payload["query"])
+            return {"things": pages[len(queries) - 1]}
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+        rows = fp._id_cursor_paginated_fetch(  # pylint: disable=protected-access
+            "http://x", self._TEMPLATE, "things", {"ts": 5}, batch_size=2
+        )
+
+        assert [r["id"] for r in rows] == ["a", "b", "c", "d", "e"]
+        assert len(queries) == 3
+        assert 'id_gt: ""' in queries[0]
+        assert 'id_gt: "b"' in queries[1]
+        assert 'id_gt: "d"' in queries[2]
+        assert all("ts_gt: 5" in q and "first: 2" in q for q in queries)
+
+    def test_empty_first_page_returns_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty page ends pagination without a second request.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls: list[str] = []
+
+        def fake_post(_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            calls.append(payload["query"])
+            return {"things": []}
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+        rows = fp._id_cursor_paginated_fetch(  # pylint: disable=protected-access
+            "http://x", self._TEMPLATE, "things", {"ts": 5}, batch_size=2
+        )
+        assert not rows
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # classify_category
 # ---------------------------------------------------------------------------
 

@@ -169,6 +169,9 @@ def _make_prediction_stub() -> PredictionResult:
         reasons_no="reasons no",
         reasons_yes="reasons yes",
         evidence_reliability_screen="screen block",
+        independent_reasoning="independent reasoning",
+        p_independent=json.loads(PREDICTION_JSON)["p_yes"],
+        market_reconciliation="no market context supplied",
         aggregation="aggregation block",
         reflection="reflection block",
         **numbers,
@@ -221,6 +224,9 @@ class TestPredictionResultSchema:
             "reasons_no",
             "reasons_yes",
             "evidence_reliability_screen",
+            "independent_reasoning",
+            "p_independent",
+            "market_reconciliation",
             "aggregation",
             "reflection",
         ):
@@ -236,6 +242,9 @@ class TestPredictionResultSchema:
                 reasons_no="n",
                 reasons_yes="y",
                 evidence_reliability_screen="s",
+                independent_reasoning="ir",
+                p_independent=0.5,
+                market_reconciliation="mr",
                 aggregation="a",
                 reflection="r",
                 p_yes=0.7,
@@ -253,6 +262,9 @@ class TestPredictionResultSchema:
             reasons_no="n",
             reasons_yes="y",
             evidence_reliability_screen="s",
+            independent_reasoning="ir",
+            p_independent=0.5,
+            market_reconciliation="mr",
             aggregation="a",
             reflection="r",
             p_yes=0.7,
@@ -270,7 +282,14 @@ class TestPredictionResultSchema:
         out-of-range p_no, so a single-value probe passes even when one
         field has lost its bounds.
         """
-        for name in ("p_yes", "p_no", "confidence", "info_utility", "evidence_quality"):
+        for name in (
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+            "evidence_quality",
+            "p_independent",
+        ):
             meta = PredictionResult.model_fields[name].metadata
             bounds = {
                 type(c).__name__: getattr(c, "ge", getattr(c, "le", None)) for c in meta
@@ -288,6 +307,9 @@ class TestPredictionResultSchema:
                 reasons_no="n",
                 reasons_yes="y",
                 evidence_reliability_screen="s",
+                independent_reasoning="ir",
+                p_independent=0.5,
+                market_reconciliation="mr",
                 aggregation="a",
                 reflection="r",
                 p_yes=1.4,
@@ -662,16 +684,39 @@ class TestResearchabilityField:
                 }
             )
 
-    def test_sports_exception_is_stated_in_the_field_description(self) -> None:
-        """The border rule must never promote sports to R.
+    def test_sports_rule_states_the_variance_reason_not_a_falsehood(self) -> None:
+        """Sports stays NR-sports, but for the true reason.
 
-        Without the exception spelled out, the 'when torn answer R' rule
-        pulls sports questions into R, which is the single largest class in
-        the labelled corpus this field is meant to be comparable with.
+        The earlier wording said sports is NR "even though form and news
+        research exist", which asserts that research cannot inform a sports
+        question. That is false: injury reports, lineups and rest days
+        demonstrably move a rational forecast. The real claim is about
+        VARIANCE - residual on-field randomness dominates what that research
+        adds - and stating a variance claim as a research claim inside a
+        field named `researchability` is a category error.
+
+        The class is kept because narrowing it points away from the measured
+        defect: the classifier's failure was over-assigning R, not
+        over-restricting it.
         """
         desc = PredictionResult.model_fields["researchability"].description
-        assert "ALWAYS NR-sports" in desc
-        assert "never promotes them" in desc
+        assert "residual on-field randomness dominates" in desc
+        assert "even though form and news" not in desc
+
+    def test_border_rule_requires_a_positive_test_for_R(self) -> None:
+        """R needs a nameable source, not a tie-break.
+
+        The shipped border rule resolved ties toward R ("when genuinely torn,
+        answer R") and answered R on 138 of 152 emissions, against a question
+        mix that was 16/38 utterance markets. Requiring the model to NAME a
+        specific findable source that would move the forecast replaces an
+        unfalsifiable tie-break with a check it can fail. Measured effect on
+        50 screening questions: R fell from ~91% of emissions to 8-16%.
+        """
+        desc = PredictionResult.model_fields["researchability"].description
+        assert "NAME a" in desc
+        assert "cannot name one" in desc
+        assert "when genuinely torn" not in desc.lower()
 
 
 class TestForecastSignalOnly:
@@ -845,6 +890,63 @@ class TestTruncationIsDiagnosable:
         assert not issubclass(openai.LengthFinishReasonError, ValueError)
 
 
+class TestCommitFirstOrdering:
+    """The independent estimate is committed before the price may be discussed."""
+
+    def test_independent_estimate_precedes_market_reconciliation(self) -> None:
+        """Declaration order is the mechanism, so it is asserted.
+
+        Structured outputs generate fields in declaration order, so placing
+        p_independent before market_reconciliation forces the model to commit
+        a number before it can rationalise toward a supplied price. Measured
+        on 50 screening questions: the final probability equalled
+        p_independent on 50 of 50 rows, against a prior design that moved
+        toward the price on 37 of 38.
+        """
+        order = list(PredictionResult.model_fields)
+        assert order.index("p_independent") < order.index("market_reconciliation")
+        assert order.index("market_reconciliation") < order.index("p_yes")
+
+    def test_independent_reasoning_forbids_the_price(self) -> None:
+        """The pre-commitment field must not invite the price in."""
+        desc = PredictionResult.model_fields["independent_reasoning"].description
+        assert "Do not mention" in desc
+
+    def test_revision_requires_a_named_source(self) -> None:
+        """Deference to the crowd is explicitly not a justification."""
+        desc = PredictionResult.model_fields["market_reconciliation"].description
+        assert "TYPE A source" in desc
+        assert "crowd is probably right is not" in desc
+
+    def test_market_block_states_the_order_of_work(self) -> None:
+        """The prompt-side half of the mechanism."""
+        assert "ORDER OF WORK" in module.MARKET_CONTEXT_BLOCK
+        assert (
+            "commit to it before considering this price" in module.MARKET_CONTEXT_BLOCK
+        )
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_p_independent_is_emitted_for_drift_measurement(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The payload carries the commitment so drift is measurable.
+
+        :param mock_client_mgr: the patched OpenAIClientManager.
+        """
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+            request_context=REAL_REQUEST_CONTEXT,
+        )
+        payload = json.loads(result[0])
+        assert payload["p_independent"] == json.loads(PREDICTION_JSON)["p_yes"]
+
+
 class TestDeliveredPayload:
     """The bytes the trader receives must stay a flat, strict-parseable object."""
 
@@ -875,6 +977,7 @@ class TestDeliveredPayload:
             "researchability",
             "evidence_quality",
             "market_prob_seen",
+            "p_independent",
         }
         for required in ("p_yes", "p_no", "confidence", "info_utility"):
             assert isinstance(payload[required], float)

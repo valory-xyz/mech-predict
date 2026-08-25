@@ -225,25 +225,27 @@ class PredictionResult(BaseModel):
     ] = Field(
         ...,
         description=(
-            "Whether pre-resolution web research can genuinely inform this "
-            "question. Exactly one class, first match wins. NR-sports: the "
-            "outcome of a sports match, game, race or tournament, or a player's "
-            "in-game performance - ALWAYS this class, even though form and news "
-            "research exist. NR-utterance: hinges on whether a person says or "
-            "tweets specific words a specific number of times. NR-price: a "
-            "short-horizon asset-price tick or threshold. NR-numeric: a narrow "
-            "numeric band effectively random at question time. NR-headline: "
-            "hinges on the exact phrasing of a future media headline. "
-            "NR-behavior: a trivial personal behaviour of an individual. R: "
-            "researchable - focused web research before the market resolves "
-            "could meaningfully move a rational forecast (elections, court "
-            "rulings, product launches, geopolitical events, scheduled "
-            "announcements). Border rule: if strong research could move a "
-            "rational forecast by more than 5 points, answer R; when genuinely "
-            "torn, answer R. EXCEPTION: sports outcomes are ALWAYS NR-sports - "
-            "the border rule never promotes them. REVIEW only when the question "
-            "is too ambiguous to classify. This is an objective property of the "
-            "question. It is NOT a recommendation to act or not act."
+            "Whether pre-resolution research can genuinely move a rational "
+            "forecast on THIS question. Answer R only if you can NAME a "
+            "specific, findable kind of source that would shift your "
+            "probability by more than 5 points if you had it (a scheduled "
+            "filing, a court docket, a poll, a published record). If you "
+            "cannot name one, choose the closest NR class rather than "
+            "defaulting to R. Classes, first match wins. NR-sports: the "
+            "outcome of a contest undecided at question time - research into "
+            "form, injuries and lineups is real, but the residual on-field "
+            "randomness dominates what it can add. NR-utterance: hinges on "
+            "whether a person says, posts or names specific words, or how "
+            "many times. NR-price: a short-horizon asset-price tick or "
+            "threshold. NR-numeric: a narrow numeric band effectively random "
+            "at question time. NR-headline: hinges on the exact phrasing of a "
+            "future media headline. NR-behavior: a trivial personal behaviour "
+            "of an individual. R: researchable - focused research before "
+            "resolution could meaningfully move a rational forecast "
+            "(elections, court rulings, product launches, geopolitical "
+            "events, scheduled announcements). REVIEW only when the question "
+            "is too ambiguous to classify. This is an objective property of "
+            "the question. It is NOT a recommendation to act or not act."
         ),
     )
     evidence_quality: float = Field(
@@ -298,6 +300,35 @@ class PredictionResult(BaseModel):
             "is active)? If not, add uncertainty toward the base rate."
         ),
     )
+    independent_reasoning: str = Field(
+        ...,
+        description=(
+            "Reason to a probability from YOUR evidence alone. Do not mention "
+            "or use any supplied market price in this field. If no market "
+            "price was supplied, reason normally."
+        ),
+    )
+    p_independent: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Your probability from your own evidence alone, committed BEFORE "
+            "you consider any supplied market price. When no price is "
+            "supplied this is simply your estimate."
+        ),
+    )
+    market_reconciliation: str = Field(
+        ...,
+        description=(
+            "If a market price was supplied, state where it sits relative to "
+            "p_independent and what other forecasters might know that your "
+            "sources do not. Moving away from p_independent requires naming a "
+            "specific TYPE A source that justifies it; a general sense that "
+            "the crowd is probably right is not such a justification. Write "
+            "'no market context supplied' when none was given."
+        ),
+    )
     aggregation: str = Field(
         ...,
         description=(
@@ -331,7 +362,11 @@ class PredictionResult(BaseModel):
         ...,
         ge=0.0,
         le=1.0,
-        description="Estimated probability that the event in the Question occurs.",
+        description=(
+            "Estimated probability that the event in the Question occurs. "
+            "Equal to p_independent unless market_reconciliation named a "
+            "specific TYPE A source justifying a change."
+        ),
     )
     p_no: float = Field(
         ...,
@@ -389,12 +424,14 @@ Market context for this question. This was supplied with the request. It was NOT
 retrieved from the web:
 - The market currently prices P(Yes) at {market_prob}.{close_line}
 
-How to use it. Treat this price as a prior held by other forecasters, and as a question
-to answer: what might those forecasters know that your sources do not? Do not copy it.
-Reason from your own evidence and state where you end up. If your evidence genuinely
-adds nothing beyond what the price already reflects, your honest estimate may coincide
-with the price - that is a correct answer, not a failure. If your evidence contradicts
-the price, say so in `aggregation` and let your own estimate stand.
+ORDER OF WORK. Do not copy it. Reason to `p_independent` from YOUR evidence alone and
+commit to it before considering this price at all. Then, in `market_reconciliation`, consider the price and say
+where it sits relative to your estimate: what might those forecasters know that your sources
+do not? Your final `p_yes` should EQUAL `p_independent` unless `market_reconciliation` names
+a specific TYPE A source that justifies moving it. A general sense that the crowd is probably
+right is not such a justification. If your evidence genuinely adds nothing beyond what the
+price already reflects, your honest estimate may coincide with the price - that is a correct
+answer, not a failure.
 
 Note on the prediction-market-odds filter in `evidence_reliability_screen`: that filter
 concerns odds you found in the retrieved sources. It does NOT apply to the price above,
@@ -463,7 +500,13 @@ Follow every part of that field's instructions: the prediction-market-odds filte
 forward-looking-intent discount, the temporal-evidence TYPE A / TYPE B classification (state
 both counts), and the criterion-specificity check.
 
-7. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
+7. `independent_reasoning` and `p_independent` - Reason to a probability from YOUR evidence
+alone and commit to it here, BEFORE considering any supplied market price.
+
+8. `market_reconciliation` - If a market price was supplied, say where it sits relative to
+`p_independent`. Moving away from it requires naming a specific TYPE A source.
+
+9. `aggregation` - Aggregate your considerations. Do not summarize or repeat previous points;
 instead, investigate how the competing factors and mechanisms interact and weigh against each
 other. Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it
 would be beneficial to your reasoning. We have detected that you overestimate world conflict,
@@ -474,7 +517,7 @@ news' negativity bias and sensationalism bias by considering reasons to why your
 sources might be biased or exaggerated. Think like a superforecaster. End this field by
 stating an initial tentative probability as a single number between 0 and 1 given the steps above.
 
-8. `reflection` - Reflect on your tentative answer, performing sanity checks and mentioning any
+10. `reflection` - Reflect on your tentative answer, performing sanity checks and mentioning any
 additional knowledge or background information which may be relevant. Check for
 over/underconfidence, improper treatment of conjunctive or disjunctive conditions (only if
 applicable), and other forecasting biases when reviewing your reasoning. Consider priors/base
@@ -484,7 +527,7 @@ the Brier score. Be precise with tail probabilities. Leverage your intuitions, b
 your forecast for the sake of modesty or balance alone. Finally, aggregate all of your previous
 reasoning and highlight key factors that inform your final forecast.
 
-9. `p_yes`, `p_no`, `confidence`, `info_utility` - Output your final prediction. `p_yes` is the
+11. `p_yes`, `p_no`, `confidence`, `info_utility` - Output your final prediction. `p_yes` is the
 probability that the event in the Question occurs and `p_no` that it does not; the two must sum
 to 1. `confidence` is how confident you are in the prediction and `info_utility` how useful the
 retrieved information was in making it. All four are numbers between 0 and 1.
@@ -1072,6 +1115,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 # downstream can tell a market-aware delivery from a blind one
                 # after the fact.
                 "market_prob_seen": market_context.get("market_prob"),
+                # The pre-market commitment, emitted so drift toward a
+                # supplied price is measurable from the delivered payload
+                # rather than inferred. On 50 screening questions the final
+                # probability equalled this on 50/50 rows.
+                "p_independent": round(prediction.p_independent, 4),
             }
         )
 

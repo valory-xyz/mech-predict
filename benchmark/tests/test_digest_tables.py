@@ -34,6 +34,7 @@ from benchmark.digest_tables import (
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _edge_lower_bound,
+    _headline,
     _no_replacement_note,
     _survivors,
     _verdict,
@@ -1027,7 +1028,7 @@ class TestPromoteDemoteGate:
         assert _verdict(row, deployed=False).startswith("n=")
 
     def test_below_no_skill_demotes_a_deployed_tool(self) -> None:
-        """A Brier worse than its own base rate is a demote signal."""
+        """Below no-skill in the 90d window AND a judgeable week: demote."""
         row = _stats(
             brier=0.30,
             baseline_brier=0.24,
@@ -1036,7 +1037,76 @@ class TestPromoteDemoteGate:
             edge_n=100,
             conditional_accuracy_rate=0.55,
         )
-        assert _verdict(row, deployed=True) == "demote: no-skill"
+        bad_week = _stats(brier=0.30, baseline_brier=0.24, valid_n=100)
+        assert _verdict(row, deployed=True, recent=bad_week) == "demote: no-skill"
+
+    def test_unjudgeable_week_never_confirms_a_demote(self) -> None:
+        """Absent and thin weeks agree: no confirmation, no demote.
+
+        "We know nothing about last week" must give ONE answer, and never
+        the destructive one. An absent week used to demote while a 3-row
+        week kept -- opposite verdicts from the same ignorance.
+        """
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        thin_lucky = _stats(brier=0.10, baseline_brier=0.24, valid_n=3)
+        thin_bad = _stats(brier=0.40, baseline_brier=0.24, valid_n=3)
+        assert _verdict(row, deployed=True, recent=None) == "keep"
+        assert _verdict(row, deployed=True, recent=thin_lucky) == "keep"
+        assert _verdict(row, deployed=True, recent=thin_bad) == "keep"
+
+    def test_candidate_no_skill_needs_no_week(self) -> None:
+        """Candidates carry no weekly window; their "no:" is non-destructive."""
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        assert _verdict(row, deployed=False) == "no: no-skill"
+
+
+class TestNoReplacementCounts:
+    """The note counts demotes honestly; unjudged tools are not "demoting"."""
+
+    def test_mixed_cohort_counts_demotes_not_the_roster(self) -> None:
+        """3 demotes + 1 unjudgeable reads '3 of 4', never 'all 4'."""
+        note = _no_replacement_note(
+            {
+                "a": "demote: no-skill",
+                "b": "demote: no-skill",
+                "c": "demote: no-skill",
+                "d": "n=12 < 30",
+            },
+            {},
+        )
+        assert note is not None
+        assert "3 of 4" in note
+        assert "all 4" not in note
+
+
+class TestHeadlineAnnotation:
+    """The headline must not read cleaner than the rec cell it summarizes."""
+
+    def test_promote_detail_carries_the_rel_annotation(self) -> None:
+        """PROMOTE (rel 60%) reaches the headline detail, not just the table."""
+        msg = _headline({}, {"cand": "PROMOTE (rel 60%)"}, "polymarket")
+        detail = msg["blocks"][1]["text"]["text"]
+        assert "(rel 60%)" in detail
+
+    def test_no_data_lands_in_the_unjudged_bucket(self) -> None:
+        """A ran-but-unscored tool is reported, not silently dropped."""
+        msg = _headline({"ghost": "no data"}, {}, "polymarket")
+        detail = msg["blocks"][1]["text"]["text"]
+        assert "too little data to judge" in detail and "ghost" in detail
 
 
 class TestNoReplacementGuard:
@@ -1338,7 +1408,7 @@ class TestReplacementAwareness:
         prod = {"bad": "demote: no-skill"}
         note = _no_replacement_note(prod, {"cand": "review: floor ok, condAcc 45%"})
         assert note is not None
-        assert "NO REPLACEMENT" in note
+        assert "NO REPLACEMENT" in note and "1 of 1" in note
 
 
 class TestReliabilityWarning:

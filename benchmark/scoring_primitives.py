@@ -115,6 +115,26 @@ def brier_score(p_yes: float, outcome: bool) -> float:
     return (p_yes - (1.0 if outcome else 0.0)) ** 2
 
 
+def sample_edge_sd(edge_sum: float, edge_sq_sum: float, edge_n: int) -> float | None:
+    """Bessel-corrected sample standard deviation of the per-row edge.
+
+    The floor's standard error wants the SAMPLE sd (divide by n-1): the
+    population form biases the promote bound high by ~4% of the margin at
+    the n=30 gate floor. One definition, used by both scoring paths, so the
+    persisted ``edge_sd`` cannot fork.
+
+    :param edge_sum: running sum of per-row edges.
+    :param edge_sq_sum: running sum of squared per-row edges.
+    :param edge_n: number of edge-eligible rows.
+    :return: sample sd rounded to 6 decimals, or None when ``edge_n`` < 2.
+    """
+    if edge_n < 2:
+        return None
+    mean = edge_sum / edge_n
+    variance = (edge_sq_sum - edge_n * mean * mean) / (edge_n - 1)
+    return round(math.sqrt(variance), 6) if variance > 0 else 0.0
+
+
 def edge_score(p_yes: float, market_prob: float, outcome: bool) -> float:
     """Compute edge over market for a single prediction.
 

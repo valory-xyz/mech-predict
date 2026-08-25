@@ -252,14 +252,6 @@ NO_SKILL_MARGIN = 0.01
 # is computable from the stored sum/sum-of-squares without per-row data.
 Z_ONE_SIDED_95 = 1.645
 
-NO_SKILL_MARGIN = 0.01
-# One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
-# at n >= 30 on a mean this is the same call to well inside the margin, and it
-# is computable from the stored sum/sum-of-squares without per-row data.
-Z_ONE_SIDED_95 = 1.645
-
-Z_ONE_SIDED_95 = 1.645
-
 COIN_FLIP = 0.50
 
 
@@ -299,14 +291,21 @@ def _headline(
     unjudged = sorted(
         t
         for t, v in {**prod, **tourn}.items()
-        if v.startswith(("n=", "no spread", "needs --rebuild"))
+        if v.startswith(("n=", "no data", "no spread", "needs --rebuild"))
     )
     # Asked of the shared survivor rule, NOT of the verdict text.
     blocked = bool(prod) and not _survivors(prod)
 
     if promote:
         state, token = "promote", f"PROMOTE {len(promote)}"
-        detail = "Promote " + ", ".join(f"`{t}`" for t in promote) + "."
+        # Keep the (rel NN%) annotation: the headline must not read cleaner
+        # than the rec cell it summarizes.
+        annotated = [
+            f"`{t}`{suffix and ' ' + suffix}"
+            for t in promote
+            for suffix in [tourn[t].removeprefix("PROMOTE").strip()]
+        ]
+        detail = "Promote " + ", ".join(annotated) + "."
     elif demote and not blocked:
         state, token = "demote", f"DEMOTE {len(demote)}"
         detail = "Demote " + ", ".join(f"`{t}`" for t in demote) + "."
@@ -430,11 +429,7 @@ def _verdict(
     """
     verdict = _verdict_core(stats, deployed, recent)
     rate = _num((stats or {}).get("reliability"))
-    if (
-        rate is not None
-        and rate < RELIABILITY_GATE
-        and verdict.startswith(("PROMOTE", "keep", "review"))
-    ):
+    if _below_reliability(stats) and verdict.startswith(("PROMOTE", "keep", "review")):
         return f"{verdict} (rel {rate:.0%})"
     return verdict
 
@@ -478,11 +473,9 @@ def _verdict_core(
             return "needs --rebuild"
         return "no spread"
 
-    # A cleared bound is the policy's promote condition and nothing below may
-    # silently override it. Conditional accuracy is a strong diagnostic but it
-    # is NOT in the policy, its 0.50 line carries no interval (today's live
-    # values all straddle it on a Wilson 95%), so it qualifies a promote rather
-    # than vetoing one.
+    # Conditional accuracy under 50% VETOES a candidate promote (review:,
+    # never PROMOTE) but only annotates a deployed keep -- destructive
+    # actions need the stronger signal, eligibility gating is cheap.
     # Each reason NAMES THE COLUMN that triggered it rather than describing it
     # in prose. The reader can then check the verdict against a cell on the
     # same row, and the cell stays the width of the other columns instead of
@@ -502,7 +495,18 @@ def _verdict_core(
         return f"demote: {reason}" if deployed else f"no: {reason}"
 
     # Sustained, not a one-off: both the 90d window and the latest week must agree.
-    if _below_no_skill(stats) and (recent is None or _below_no_skill(recent)):
+    # An absent or thin week is "we know nothing new" and must never take
+    # the destructive action; a 3-row lucky week must not erase a 500-row
+    # demote signal either -- the week counts only when it clears the same
+    # sample floor as every other cross-window comparison. Candidates carry
+    # no weekly window; their "no:" is non-destructive, so one reading is
+    # enough.
+    sustained = _below_no_skill(stats) and (
+        (_has_floor(recent) and _below_no_skill(recent))
+        if deployed
+        else (recent is None or _below_no_skill(recent))
+    )
+    if sustained:
         return "demote: no-skill" if deployed else "no: no-skill"
 
     return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
@@ -554,15 +558,19 @@ def _no_replacement_note(
     ready = sorted(t for t, v in (candidates or {}).items() if v.startswith("PROMOTE"))
     if ready:
         names = ", ".join(f"`{t}`" for t in ready)
+        demoted = sum(1 for v in verdicts.values() if v.startswith("demote"))
         return (
-            f":warning: *NO DEPLOYED REPLACEMENT* - all {len(verdicts)} "
-            f"deployed tools demote, but {names} clears the promote gate in "
-            "the tournament. Promote before retiring, not after."
+            f":warning: *NO DEPLOYED REPLACEMENT* - {demoted} of "
+            f"{len(verdicts)} deployed tools demote and none survives, but "
+            f"{names} clears the promote gate in the tournament. Promote "
+            "before retiring, not after."
         )
+    demoted = sum(1 for v in verdicts.values() if v.startswith("demote"))
     return (
-        f":warning: *NO REPLACEMENT* - all {len(verdicts)} deployed tools "
-        "demote. Acting on these row by row would leave the platform with no "
-        "forecaster at all; treat it as a platform-level problem."
+        f":warning: *NO REPLACEMENT* - {demoted} of {len(verdicts)} deployed "
+        "tools demote and none survives. Acting on these row by row would "
+        "leave the platform with no forecaster at all; treat it as a "
+        "platform-level problem."
     )
 
 
@@ -615,19 +623,13 @@ def _conditional(stats: dict[str, Any] | None) -> str:
 
 
 def _cols(names: Iterable[str]) -> tuple[Col, ...]:
-    """Column specs: ``tool`` left-aligned, every other column right-aligned.
+    """Column specs: right-aligned numerics, left ``tool``, wrapping ``rec``.
 
     :param names: column header names.
     :return: Col spec tuple for ``table_block``.
     """
-    return tuple(
-        (
-            Col(n)
-            if n == "tool"
-            else Col(n, wrap=True) if n == "rec" else Col(n, align="right")
-        )
-        for n in names
-    )
+    special: dict[str, dict[str, Any]] = {"tool": {}, "rec": {"wrap": True}}
+    return tuple(Col(n, **special.get(n, {"align": "right"})) for n in names)
 
 
 _W2_COLUMNS = _cols(

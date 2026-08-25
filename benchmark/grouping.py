@@ -34,7 +34,6 @@ underscore-prefixed helpers used by the scorer's finalize path.
 
 from __future__ import annotations
 
-import math
 from typing import Any, Optional
 
 from benchmark.scoring_primitives import (
@@ -55,6 +54,7 @@ from benchmark.scoring_primitives import (
     disagree_bucket,
     edge_score,
     log_loss_score,
+    sample_edge_sd,
 )
 
 
@@ -123,22 +123,16 @@ def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
 
 
 def _edge_sd(group: dict[str, Any], edge_n: int) -> Optional[float]:
-    """Population standard deviation of the per-row edge.
-
-    Derived from the running sum and sum-of-squares so no per-row values need
-    keeping. Returns None when the accumulator predates this field or when a
-    single row makes the spread undefined.
+    """Sample sd of the per-row edge, or None pre-migration / under 2 rows.
 
     :param group: accumulator dict.
     :param edge_n: number of edge-eligible rows.
     :return: standard deviation, or None when it cannot be computed.
     """
     sq_sum = group.get("edge_sq_sum")
-    if sq_sum is None or edge_n < 2:
+    if sq_sum is None:
         return None
-    mean = group["edge_sum"] / edge_n
-    variance = sq_sum / edge_n - mean * mean
-    return round(math.sqrt(variance), 6) if variance > 0 else 0.0
+    return sample_edge_sd(group["edge_sum"], sq_sum, edge_n)
 
 
 def _derive_group(group: dict[str, Any]) -> dict[str, Any]:

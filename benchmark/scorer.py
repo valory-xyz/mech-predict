@@ -17,7 +17,6 @@ import argparse
 import glob as glob_mod
 import json
 import logging
-import math
 import os
 import re
 from collections import defaultdict
@@ -50,6 +49,7 @@ from benchmark.scoring_primitives import (
     disagree_bucket,
     edge_score,
     log_loss_score,
+    sample_edge_sd,
 )
 from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
     minimize,
@@ -287,9 +287,7 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
-    mean_edge = sum(edges) / len(edges)
-    variance = sum(e * e for e in edges) / len(edges) - mean_edge * mean_edge
-    edge_sd = round(math.sqrt(variance), 6) if variance > 0 else 0.0
+    edge_sd = sample_edge_sd(sum(edges), sum(e * e for e in edges), len(edges))
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -328,7 +326,7 @@ def _compute_edge_diagnostics(
     diag: dict[str, Any] = {
         "edge": edge_avg,
         "market_brier": market_brier_avg,
-        "edge_sd": edge_sd if len(edges) >= 2 else None,
+        "edge_sd": edge_sd,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,

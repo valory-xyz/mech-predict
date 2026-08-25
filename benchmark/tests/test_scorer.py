@@ -3831,3 +3831,79 @@ class TestSchemaStampEarned:
         assert acc is not None
         assert acc["window_start"] == "2020-01-01T00:00:00Z"
         assert acc["window_end"] == "2026-08-01T00:00:00Z"
+
+
+class TestSchemaStampPartialMigration:
+    """The realistic post-schema-2 state: market sum armed, edge sum absent."""
+
+    def test_partial_migration_keeps_old_version(self, tmp_path: Path) -> None:
+        """market_brier_sum present but edge_sq_sum absent -> not migrated.
+
+        This is the state every accumulator is in the day #445 merges, and
+        the whole reason the version bumped to 3. Deleting the new clause
+        must fail this test.
+
+        :param tmp_path: pytest temp dir.
+        """
+        legacy = {
+            "current_month": "2026-08",
+            "schema_version": 2,
+            "overall": {
+                "n": 5,
+                "valid_n": 5,
+                "brier_sum": 1.0,
+                "correct_count": 3,
+                "sharpness_sum": 0.5,
+                "market_brier_sum": 0.9,
+            },
+        }
+        for dim in (
+            "by_tool",
+            "by_platform",
+            "by_category",
+            "by_horizon",
+            "by_tool_platform",
+            "by_tool_category",
+            "by_category_platform",
+            "by_tool_category_platform",
+            "by_tool_version",
+            "by_tool_version_mode",
+            "by_config",
+            "by_difficulty",
+            "by_liquidity",
+            "by_platform_difficulty",
+            "by_platform_liquidity",
+        ):
+            legacy[dim] = {}
+        path = tmp_path / "scores.json"
+        path.write_text(json.dumps(legacy))
+        acc = _load_scores_for_resume(path)
+        assert acc is not None
+        # restored edge_sq_sum must be None (not the seed), else the stamp lies
+        assert acc["overall"].get("edge_sq_sum") is None
+        out = _finalize_scores(acc)
+        assert out["schema_version"] == 2
+        assert out["schema_version"] < SCORES_SCHEMA_VERSION
+
+
+class TestSampleEdgeSd:
+    """The one shared sd definition, branch by branch."""
+
+    def test_bessel_corrected_value(self) -> None:
+        """Known sample: edges [0.1, 0.3] -> mean 0.2, sample sd 0.141421."""
+        from benchmark.scoring_primitives import sample_edge_sd
+
+        sd = sample_edge_sd(0.4, 0.1 * 0.1 + 0.3 * 0.3, 2)
+        assert sd == round((0.02 / 1) ** 0.5, 6)
+
+    def test_under_two_rows_is_none(self) -> None:
+        """A single row has no spread."""
+        from benchmark.scoring_primitives import sample_edge_sd
+
+        assert sample_edge_sd(0.1, 0.01, 1) is None
+
+    def test_cancellation_clamps_to_zero(self) -> None:
+        """Non-positive variance from float cancellation renders 0.0."""
+        from benchmark.scoring_primitives import sample_edge_sd
+
+        assert sample_edge_sd(2.0, 2.0, 2) == 0.0

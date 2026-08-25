@@ -513,7 +513,7 @@ class TestRendering:
         results = _results_dir(tmp_path, w1={"alpha": _stats()})
         body = _body(results)
         assert "90d unavailable" in body or (
-            "unavailable" in body and "90d" in body.split("unavailable")[0]
+            "unavailable" in body and "90d" in body.split("unavailable", maxsplit=1)[0]
         )
 
     def test_windows_read_left_to_right_in_time(self, tmp_path: Path) -> None:

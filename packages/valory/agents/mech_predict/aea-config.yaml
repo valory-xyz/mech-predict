@@ -76,7 +76,7 @@ customs:
 - valory/propose_question:0.1.0:bafybeif2dmjftef7pnixwnutn42tdaxbbr77anl5ixsv6kwsxnk7sm6fni
 - valory/superforcaster_full_search:0.1.0:bafybeihba6ch6g7gndfwv75dtpfrpnvg4dw6wq6lxexch5h3n3vjafuxsm
 - valory/superforcaster_calibrated_full_search:0.1.0:bafybeialuhbtfumvlbdtzimfn7wdacqwccn2ny5cbhi4tkri6iih6pfgxe
-- valory/superforcaster_market_aware:0.1.0:bafybeidq6qnuyr7xrt2gr2ghx3j6a4upb43dfzcn4fv7kdbj2kynn3igc4
+- valory/superforcaster_market_aware:0.1.0:bafybeihth4ih54fdge7vszfy6aett2lgrxpebb65gbz3nruls3y3rucgl4
 default_ledger: ethereum
 required_ledgers:
 - ethereum

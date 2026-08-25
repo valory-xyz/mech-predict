@@ -323,10 +323,15 @@ class PredictionResult(BaseModel):
         description=(
             "If a market price was supplied, state where it sits relative to "
             "p_independent and what other forecasters might know that your "
-            "sources do not. Moving away from p_independent requires naming a "
-            "specific TYPE A source that justifies it; a general sense that "
-            "the crowd is probably right is not such a justification. Write "
-            "'no market context supplied' when none was given."
+            "sources do not. The price aggregates the judgement of people who "
+            "have seen public information too, so it is evidence about the "
+            "base rate and about facts you may lack -- for a question whose "
+            "answer turns on a current value you cannot observe, it may be "
+            "the ONLY evidence of that value you have. Update toward it where "
+            "it plausibly reflects something your sources do not, and stand "
+            "your ground where you hold a specific TYPE A source it cannot "
+            "have priced. Write 'no market context supplied' when none was "
+            "given."
         ),
     )
     aggregation: str = Field(
@@ -364,8 +369,9 @@ class PredictionResult(BaseModel):
         le=1.0,
         description=(
             "Estimated probability that the event in the Question occurs. "
-            "Equal to p_independent unless market_reconciliation named a "
-            "specific TYPE A source justifying a change."
+            "Your final answer after market_reconciliation: it may differ "
+            "from p_independent, and should where the supplied price carries "
+            "information your own sources lack."
         ),
     )
     p_no: float = Field(
@@ -424,14 +430,14 @@ Market context for this question. This was supplied with the request. It was NOT
 retrieved from the web:
 - The market currently prices P(Yes) at {market_prob}.{close_line}
 
-ORDER OF WORK. Do not copy it. Reason to `p_independent` from YOUR evidence alone and
-commit to it before considering this price at all. Then, in `market_reconciliation`, consider the price and say
-where it sits relative to your estimate: what might those forecasters know that your sources
-do not? Your final `p_yes` should EQUAL `p_independent` unless `market_reconciliation` names
-a specific TYPE A source that justifies moving it. A general sense that the crowd is probably
-right is not such a justification. If your evidence genuinely adds nothing beyond what the
-price already reflects, your honest estimate may coincide with the price - that is a correct
-answer, not a failure.
+ORDER OF WORK. Reason to `p_independent` from YOUR evidence alone and commit to it first, so
+that your own reading is recorded before you see where the crowd sits. Then, in
+`market_reconciliation`, weigh the price: it aggregates the judgement of others who have also
+seen public information, so treat it as evidence about the base rate and about facts your
+sources may not contain. Your final `p_yes` may differ from `p_independent`, and SHOULD where
+the price plausibly carries something you lack - a current value you cannot observe, or a base
+rate your sources never state. Hold your own estimate where you have a specific TYPE A source
+the price cannot have absorbed. Coinciding with the price is a correct answer, not a failure.
 
 Note on the prediction-market-odds filter in `evidence_reliability_screen`: that filter
 concerns odds you found in the retrieved sources. It does NOT apply to the price above,

@@ -486,10 +486,22 @@ class TestRenderMarketBlocks:
         block = module._render_market_blocks({"market_prob": 0.5})
         assert "does NOT apply to the price above" in block
 
-    def test_block_does_not_instruct_copying_the_price(self) -> None:
-        """The price is a prior to update from, not an anchor to copy."""
+    def test_block_frames_the_price_as_evidence_not_an_answer(self) -> None:
+        """The price is evidence to weigh, and may move the forecast.
+
+        An earlier version instructed "Do not copy it" and pinned the final
+        answer to the pre-market estimate. Measured over 235 questions, that
+        was the worst of the three designs: the failure being corrected is a
+        MISSING PRIOR, not excessive deference. On "will TSLA close above
+        $400 on April 17" the blind tool answered 0.05 against a price of
+        0.80 and the market was right - it cannot observe the current share
+        price, and the quoted odds are the only evidence of it it will ever
+        see.
+        """
         block = module._render_market_blocks({"market_prob": 0.5})
-        assert "Do not copy it" in block
+        assert "treat it as evidence" in block
+        assert "may differ from `p_independent`" in block
+        assert "correct answer, not a failure" in block
 
 
 class TestBlindVersusMarketAwareRun:
@@ -912,18 +924,31 @@ class TestCommitFirstOrdering:
         desc = PredictionResult.model_fields["independent_reasoning"].description
         assert "Do not mention" in desc
 
-    def test_revision_requires_a_named_source(self) -> None:
-        """Deference to the crowd is explicitly not a justification."""
+    def test_price_may_inform_the_forecast(self) -> None:
+        """The price must be allowed to move the number.
+
+        Measured over 235 questions replayed three ways, every metric
+        improved monotonically with how much the tool used the price. Pinning
+        the final answer to the pre-market estimate scored Brier 0.236 and
+        -4.75% after costs; letting the price inform it scored 0.214 and
+        +0.11%. The defect being corrected is a MISSING PRIOR, not excessive
+        deference.
+        """
         desc = PredictionResult.model_fields["market_reconciliation"].description
-        assert "TYPE A source" in desc
-        assert "crowd is probably right is not" in desc
+        assert "Update toward it" in desc
+        assert "ONLY evidence" in desc
+        assert "crowd is probably right is not" not in desc
+
+    def test_p_yes_is_not_pinned_to_the_independent_estimate(self) -> None:
+        """The final answer may differ from the pre-market commitment."""
+        desc = PredictionResult.model_fields["p_yes"].description
+        assert "may differ from p_independent" in desc
 
     def test_market_block_states_the_order_of_work(self) -> None:
         """The prompt-side half of the mechanism."""
         assert "ORDER OF WORK" in module.MARKET_CONTEXT_BLOCK
-        assert (
-            "commit to it before considering this price" in module.MARKET_CONTEXT_BLOCK
-        )
+        assert "commit to it first" in module.MARKET_CONTEXT_BLOCK
+        assert "may differ from `p_independent`" in module.MARKET_CONTEXT_BLOCK
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_p_independent_is_emitted_for_drift_measurement(

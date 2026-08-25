@@ -348,6 +348,26 @@ jobs:
             $TOURNAMENT_FLAG
         continue-on-error: true
 
+      # Trailing 90-day window: the digest's third column set. A fixed
+      # window is a stable yardstick -- the live accumulator's span varies
+      # with rollover/rebuild history, so the digest no longer reads it.
+      # NOTE: the 90 below must match the digest's literal 90d labels
+      # (benchmark/digest_tables.py _AT_COLUMNS + captions) -- change both.
+      - name: Score trailing 90d window
+        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
+        run: |
+          TOURNAMENT_FLAG=""
+          if [ -f benchmark/results/tournament_scored.jsonl ]; then
+            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          fi
+          python -m benchmark.scorer \
+            --period-days 90 \
+            --logs-dir benchmark/datasets/logs/ \
+            --output benchmark/results/trailing_scores.json \
+            --skip-tournament-output \
+            $TOURNAMENT_FLAG
+        continue-on-error: true
+
       - name: Analyze (Omenstrat)
         run: python -m benchmark.analyze --platform omen --include-tournament
 

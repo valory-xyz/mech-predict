@@ -26,15 +26,11 @@ Inputs, all written by ``benchmark.scorer`` into the same results directory:
 ===========================================  ==============================
 file                                          window
 ===========================================  ==============================
-``scores_<platform>.json``                    cumulative; span is NOT fixed
+``trailing_scores_<platform>.json``           trailing 90d (nightly --period-days 90)
 ``rolling_scores_<platform>.json``            W-1, the last 7 days
 ``prev_rolling_scores_<platform>.json``       W-2, the 7 days before that
 ``scores_tournament_<platform>.json``         tournament, all-time only
 ===========================================  ==============================
-
-The cumulative accumulator's ``current_month`` key does not describe its span
-(the month rollover snapshots history without fully resetting the live file),
-so the section line prints the observed ``window_start..window_end``.
 
 ``base`` (no-skill floor) and ``mkt`` (market Brier) are shown in Brier units
 beside the tool's Brier; a skill-score ratio is deliberately NOT rendered --
@@ -80,7 +76,7 @@ LOW_SAMPLE_MARK = "*"
 PLATFORM_TITLES = {"polymarket": "Polystrat", "omen": "Omenstrat"}
 
 WINDOW_FILES = {
-    "at": "scores_{platform}.json",
+    "at": "trailing_scores_{platform}.json",
     "w1": "rolling_scores_{platform}.json",
     "w2": "prev_rolling_scores_{platform}.json",
     "tournament": "scores_tournament_{platform}.json",
@@ -113,8 +109,8 @@ def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
 def _as_of_date(path: Path) -> str | None:
     """Last date the scores file covers: window_end, else generated_at.
 
-    ``window_start``/``window_end`` are the honest span source;
-    ``current_month`` is not (see the module docstring).
+    The batch scorer stamps both bounds; ``window_end`` is the last
+    observed prediction, so it can trail the run date when predictions pause.
 
     :param path: scores json path.
     :return: as-of date (YYYY-MM-DD) or None.
@@ -306,6 +302,13 @@ _W2_COLUMNS = _cols(
 )
 
 _AT_COLUMNS = _cols(
+    "#;tool;n 90d;n W-1;rel W-1;Brier 90d;Brier W-1;Δ Brier;base 90d;"
+    "mkt 90d;mkt W-1;Edge 90d;Edge W-1;Δ Edge".split(";")
+)
+
+# Tournament rows come from the all-time tournament accumulator, not the
+# trailing window, so its headers keep the cum label.
+_TOURN_COLUMNS = _cols(
     "#;tool;n cum;n W-1;rel W-1;Brier cum;Brier W-1;Δ Brier;base cum;"
     "mkt cum;mkt W-1;Edge cum;Edge W-1;Δ Edge".split(";")
 )
@@ -377,11 +380,12 @@ def _rows_at(
     w1: dict[str, dict[str, Any]],
     at: dict[str, dict[str, Any]],
 ) -> list[tuple[str, ...]]:
-    """Build the cumulative vs W-1 table rows.
+    """Build the reference-window vs W-1 table rows.
 
     :param tools: tool names to render, in the order given.
     :param w1: by_tool stats for the last 7 days (empty for tournament).
-    :param at: by_tool stats for the all-time window.
+    :param at: by_tool stats for the reference window -- trailing 90d
+        for production, the all-time pool for the tournament.
     :return: one cell tuple per tool.
     """
     ranked = [t for t in tools if _num((at.get(t) or {}).get("edge")) is not None]
@@ -482,7 +486,7 @@ def _alert_rows(
     at these sample sizes a two-point drop is one or two extra failed rows.
 
     :param w1: by_tool stats for the last 7 days.
-    :param at: by_tool stats for the all-time window.
+    :param at: by_tool stats for the trailing 90d window.
     :param tools: tool names under consideration.
     :param at_w2: the prior week, used to detect a still-filling W-1.
     :return: alert rows, empty when nothing fires.
@@ -535,7 +539,7 @@ def _alert_rows(
             (
                 "platform below market",
                 f"ALL ({len(below_market)} tools over the floor)",
-                f"every cumulative Edge < 0; best is {best:+.4f}",
+                f"every 90d Edge < 0; best is {best:+.4f}",
                 "upstream calibration, not a tool swap. Check the "
                 "recorded price band too: a trader-side bet filter "
                 "can confine which markets this platform ever "
@@ -557,7 +561,7 @@ def _alert_rows(
                 f"W-1 holds {w1_rows} scored rows against W-2's {w2_rows} "
                 f"({w1_rows / w2_rows:.0%}); a row appears only once its market "
                 "resolves, so the newest week is not yet comparable",
-                "read the cumulative column, not the weekly deltas",
+                "read the 90d column, not the weekly deltas",
             )
         )
 
@@ -577,7 +581,7 @@ def _alert_rows(
             (
                 "platform below no-skill",
                 f"ALL ({len(below_floor)} tools over the floor)",
-                "every cumulative Brier exceeds its own base-rate floor",
+                "every 90d Brier exceeds its own base-rate floor",
                 "the fleet is worse than predicting the base rate",
             )
         )
@@ -624,15 +628,17 @@ def build_digest_messages(
 
     messages: list[dict[str, Any]] = [_headline(platform, as_of)]
 
-    # Degrade LOUDLY: without this, a failed rolling scorer run reads as
+    # Degrade LOUDLY: without this, a failed window-scorer run reads as
     # "no change this week" rather than "this week was not scored".
     missing = [
-        label for key, label in (("w1", "W-1"), ("w2", "W-2")) if not windows[key]
+        label
+        for key, label in (("w1", "W-1"), ("w2", "W-2"), ("at", "90d"))
+        if not windows[key]
     ]
     if missing:
         warning = (
-            f":warning: *{' and '.join(missing)} unavailable* - the rolling "
-            "scorer step produced no scores for this platform, so those "
+            f":warning: *{' and '.join(missing)} unavailable* - that "
+            "window's scorer step produced no scores for this platform, so those "
             "columns read `n/a` below. They are NOT unchanged; they are "
             "unmeasured."
         )
@@ -660,9 +666,12 @@ def build_digest_messages(
         )
         messages.append(
             message(
-                "1b. Production - CUM vs W-1",
+                "1b. Production - 90D vs W-1",
                 [
-                    section("*1b. PRODUCTION CUM vs W-1 - ranked by `Edge cum`*"),
+                    section(
+                        "*1b. PRODUCTION 90D vs W-1 - ranked by `Edge 90d`*\n"
+                        "_90d: trailing 90-day window, recomputed nightly._"
+                    ),
                     table_block(
                         _AT_COLUMNS,
                         _rows_at(order_at, windows["w1"], windows["at"]),
@@ -677,9 +686,12 @@ def build_digest_messages(
             message(
                 "2. Tournament - all-time pool",
                 [
-                    section("*2. TOURNAMENT - ranked by `Edge cum`*"),
+                    section(
+                        "*2. TOURNAMENT - ranked by `Edge cum`*\n"
+                        "_cum: the candidate's whole scored pool._"
+                    ),
                     table_block(
-                        _AT_COLUMNS,
+                        _TOURN_COLUMNS,
                         _rows_at(order, {}, windows["tournament"]),
                     ),
                     context(

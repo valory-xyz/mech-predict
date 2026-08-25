@@ -84,7 +84,7 @@ def _results_dir(
     results = tmp_path / "r"
     results.mkdir()
     windows = {
-        "scores_polymarket.json": at,
+        "trailing_scores_polymarket.json": at,
         "rolling_scores_polymarket.json": w1,
         "prev_rolling_scores_polymarket.json": w2,
     }
@@ -104,7 +104,7 @@ def _results(tmp_path: Path) -> Path:
     """
     results = tmp_path / "results"
     results.mkdir()
-    _write(results, "scores_polymarket.json", {"alpha": _stats()})
+    _write(results, "trailing_scores_polymarket.json", {"alpha": _stats()})
     _write(
         results,
         "rolling_scores_polymarket.json",
@@ -226,8 +226,8 @@ class TestNoSkillScore:
     def test_base_is_rendered_instead(self, results: Path) -> None:
         """The no-skill floor is shown in Brier units, as a column."""
         body = _body(results)
-        assert "base cum" in body
-        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION CUM vs W-1")
+        assert "base 90d" in body
+        assert "0.2400" in _cells(body, "alpha", after="1b. PRODUCTION 90D vs W-1")
 
 
 class TestDeltas:
@@ -245,7 +245,7 @@ class TestDeltas:
         results = tmp_path / "r"
         results.mkdir()
         thin = _stats(valid_n=10, edge_n=10)
-        _write(results, "scores_polymarket.json", {"alpha": thin})
+        _write(results, "trailing_scores_polymarket.json", {"alpha": thin})
         _write(results, "rolling_scores_polymarket.json", {"alpha": thin})
         _write(results, "prev_rolling_scores_polymarket.json", {"alpha": thin})
         _write(results, "scores_tournament_polymarket.json", {})
@@ -339,7 +339,7 @@ class TestW2Ranking:
         body = _body(results)
         marker = "1a. PRODUCTION"
         assert "ranked by `Edge W-1`" in body
-        # alpha wins the week and must lead 1a despite beta winning cumulative
+        # alpha wins the week and must lead 1a despite beta winning the 90d window
         assert _cells(body, "alpha", after=marker)[0] == "1"
         assert _cells(body, "beta", after=marker)[0] == "2"
 
@@ -371,6 +371,50 @@ class TestRendering:
                 elif name.startswith(("n ", "Brier", "Edge", "mkt", "base")):
                     assert align == "right", f"{name} must right-align"
 
+    def test_tournament_keeps_cum_headers_production_says_90d(
+        self, tmp_path: Path
+    ) -> None:
+        """Two different windows, two different labels.
+
+        Production's third window is the trailing 90d file; the tournament
+        table still reads the all-time accumulator, so its headers must say
+        cum -- 90d there would claim a window nobody computed.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(
+            tmp_path, at={"alpha": _stats()}, tournament={"cand": _stats()}
+        )
+        payloads = build_digest_messages(results, "polymarket")
+        by_text = {m["text"]: m for m in payloads}
+        prod = by_text["1b. Production - 90D vs W-1"]
+        tourn = by_text["2. Tournament - all-time pool"]
+        prod_headers = [
+            c["text"]
+            for b in prod["blocks"]
+            if b["type"] == "table"
+            for c in b["rows"][0]
+        ]
+        tourn_headers = [
+            c["text"]
+            for b in tourn["blocks"]
+            if b["type"] == "table"
+            for c in b["rows"][0]
+        ]
+        assert "Brier 90d" in prod_headers and "Brier cum" not in prod_headers
+        assert "Brier cum" in tourn_headers and "Brier 90d" not in tourn_headers
+
+    def test_missing_trailing_window_degrades_loudly(self, tmp_path: Path) -> None:
+        """No 90d file -> the unavailable warning names 90d.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = _results_dir(tmp_path, w1={"alpha": _stats()})
+        body = _body(results)
+        assert "90d unavailable" in body or (
+            "unavailable" in body and "90d" in body.split("unavailable")[0]
+        )
+
     def test_windows_read_left_to_right_in_time(self, tmp_path: Path) -> None:
         """Older window left, newer right: W-2 before W-1, cum before W-1.
 
@@ -391,9 +435,9 @@ class TestRendering:
                 if "n W-2" in names:
                     assert names.index("n W-2") < names.index("n W-1")
                     assert names.index("Brier W-2") < names.index("Brier W-1")
-                if "n cum" in names:
-                    assert names.index("n cum") < names.index("n W-1")
-                    assert names.index("Edge cum") < names.index("Edge W-1")
+                if "n 90d" in names:
+                    assert names.index("n 90d") < names.index("n W-1")
+                    assert names.index("Edge 90d") < names.index("Edge W-1")
 
     def test_edge_renders_with_explicit_sign(self, tmp_path: Path) -> None:
         """A positive Edge carries a leading plus; Brier never does.
@@ -453,7 +497,7 @@ class TestAlertComparators:
         # Two tools: a platform-wide claim needs more than one.
         stats = _stats(brier=0.2234, baseline_brier=0.2330, edge=-0.0266)
         both = {"alpha": stats, "beta": stats}
-        _write(results, "scores_polymarket.json", both)
+        _write(results, "trailing_scores_polymarket.json", both)
         _write(results, "rolling_scores_polymarket.json", both)
         _write(results, "prev_rolling_scores_polymarket.json", both)
         _write(results, "scores_tournament_polymarket.json", {})
@@ -729,7 +773,7 @@ class TestTitle:
         """
         results = tmp_path / "r"
         results.mkdir()
-        (results / "scores_polymarket.json").write_text(
+        (results / "trailing_scores_polymarket.json").write_text(
             json.dumps(
                 {
                     "window_start": "2026-07-01T00:00:00Z",
@@ -758,10 +802,8 @@ class TestTitle:
 class TestRankingWindow:
     """Table 1b must rank on the column its caption names."""
 
-    def test_1b_ranks_on_cumulative_edge_not_the_weekly_one(
-        self, tmp_path: Path
-    ) -> None:
-        """The `#` column has to agree with the `Edge cum` column beside it.
+    def test_1b_ranks_on_the_90d_edge_not_the_weekly_one(self, tmp_path: Path) -> None:
+        """The `#` column has to agree with the `Edge 90d` column beside it.
 
         _sort_key ranks on the first window that carries an edge, so the
         argument order at the call site IS the ranking metric.
@@ -770,11 +812,11 @@ class TestRankingWindow:
         """
         results = tmp_path / "results"
         results.mkdir()
-        # beta wins the week; alpha wins cumulatively. The caption promises
+        # beta wins the week; alpha wins the 90d window. The caption promises
         # cumulative, so alpha must rank first.
         _write(
             results,
-            "scores_polymarket.json",
+            "trailing_scores_polymarket.json",
             {
                 "alpha": _stats(edge=0.3000, edge_n=500),
                 "beta": _stats(edge=0.0100, edge_n=500),

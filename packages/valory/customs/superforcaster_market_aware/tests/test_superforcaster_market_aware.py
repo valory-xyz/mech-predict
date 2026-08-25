@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import re
 import pytest
-from typing import get_args
+from typing import Any, get_args
 from pydantic import ValidationError
 import requests
 
@@ -294,6 +294,333 @@ class TestPredictionResultSchema:
                 confidence=0.5,
                 info_utility=0.5,
             )
+
+
+# A real production request_context, captured from the Polygon marketplace
+# subgraph. Kept verbatim so the tests exercise the shape the trader actually
+# sends -- including the keys this tool deliberately ignores.
+REAL_REQUEST_CONTEXT = {
+    "market_id": "0x36d9e405ab5a9313c42daa29045ae8ee771f14c980d3325020d74b2bfabd3787",
+    "type": "polymarket",
+    "market_prob": 0.765,
+    "market_liquidity_usd": 1311.4949,
+    "market_spread": 0.01,
+    "market_close_at": "2026-08-28T23:59:00Z",
+    "description": "Kevin Warsh is scheduled to deliver a speech at the Jackson "
+    "Hole Economic Policy Symposium on August 28, 2026. This market will "
+    'resolve to "Yes" if Warsh says the listed term during his appearance.',
+}
+
+
+class TestCoerceMarketProb:
+    """A supplied price is only used when it is a real number in [0, 1]."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (0.765, 0.765),
+            (0, 0.0),
+            (1, 1.0),
+            (0.0, 0.0),
+            (1.0, 1.0),
+        ],
+    )
+    def test_usable_values(self, value: Any, expected: float) -> None:
+        """Real numbers inside the unit interval pass through."""
+        assert module._coerce_market_prob(value) == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "0.5",
+            None,
+            [0.5],
+            {"p": 0.5},
+            -0.1,
+            1.1,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+        ],
+    )
+    def test_unusable_values_are_rejected(self, value: Any) -> None:
+        """Anything else is refused rather than rendered into the prompt."""
+        assert module._coerce_market_prob(value) is None
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_booleans_are_rejected(self, value: bool) -> None:
+        """bool is a subclass of int, so True must be excluded explicitly.
+
+        Without the explicit check, `market_prob: true` would silently become
+        the probability 1.0 -- a maximally confident, entirely fabricated
+        prior.
+        """
+        assert module._coerce_market_prob(value) is None
+
+
+class TestExtractMarketContext:
+    """Market context is optional; malformed input degrades to blind mode."""
+
+    def test_real_production_context_yields_the_three_read_keys(self) -> None:
+        """The captured request gives price, close time and rules."""
+        ctx = module._extract_market_context(REAL_REQUEST_CONTEXT)
+        assert ctx["market_prob"] == 0.765
+        assert ctx["market_close_at"] == "2026-08-28T23:59:00Z"
+        assert ctx["resolution_rules"].startswith("Kevin Warsh is scheduled")
+
+    def test_execution_cost_keys_are_never_read(self) -> None:
+        """Liquidity, spread and fee belong to the trading engine, not here."""
+        ctx = module._extract_market_context(REAL_REQUEST_CONTEXT)
+        for ignored in (
+            "market_liquidity_usd",
+            "market_spread",
+            "amm_fee",
+            "market_id",
+            "type",
+        ):
+            assert ignored not in ctx
+
+    @pytest.mark.parametrize(
+        "bad", [None, "oops", 42, [1, 2, 3], (), {}, {"unrelated": "x"}]
+    )
+    def test_absent_or_malformed_context_is_blind_mode(self, bad: Any) -> None:
+        """Never raises; a live mech request must not fail on a bad field."""
+        assert module._extract_market_context(bad) == {}
+
+    @pytest.mark.parametrize(
+        "prob", ["0.7", 1.4, -0.2, True, float("nan"), None, [0.7]]
+    )
+    def test_unusable_price_drops_only_the_price(self, prob: Any) -> None:
+        """A bad price must not take the resolution rules down with it."""
+        ctx = module._extract_market_context({**REAL_REQUEST_CONTEXT, "market_prob": prob})
+        assert "market_prob" not in ctx
+        assert "resolution_rules" in ctx
+
+    def test_blank_strings_are_treated_as_absent(self) -> None:
+        """Whitespace-only close time / rules do not render empty blocks."""
+        ctx = module._extract_market_context(
+            {**REAL_REQUEST_CONTEXT, "market_close_at": "   ", "description": "  "}
+        )
+        assert "market_close_at" not in ctx and "resolution_rules" not in ctx
+
+    def test_resolution_rules_are_length_capped(self) -> None:
+        """A hostile requester cannot blow up the prompt with rules."""
+        ctx = module._extract_market_context(
+            {"description": "x" * (module.MAX_RESOLUTION_RULES_CHARS + 5000)}
+        )
+        assert len(ctx["resolution_rules"]) == module.MAX_RESOLUTION_RULES_CHARS
+
+    def test_omen_shaped_context_works(self) -> None:
+        """Omen requests carry no description or spread; that is fine."""
+        ctx = module._extract_market_context(
+            {"market_id": "0xfpmm", "type": "omen", "market_prob": 0.3, "amm_fee": 0.02}
+        )
+        assert ctx == {"market_prob": 0.3}
+
+
+class TestRenderMarketBlocks:
+    """The rendered suffix, and what it must never contain."""
+
+    def test_blind_mode_renders_nothing(self) -> None:
+        """No context -> empty suffix -> prompt identical to blind mode."""
+        assert module._render_market_blocks({}) == ""
+
+    def test_price_and_close_time_are_rendered(self) -> None:
+        """Both appear when both were supplied."""
+        block = module._render_market_blocks(
+            module._extract_market_context(REAL_REQUEST_CONTEXT)
+        )
+        assert "0.765" in block
+        assert "2026-08-28T23:59:00Z" in block
+
+    def test_rules_render_without_a_price(self) -> None:
+        """Rules alone must not produce a 'prices P(Yes) at None' line."""
+        block = module._render_market_blocks({"resolution_rules": "settle strictly"})
+        assert "settle strictly" in block
+        assert "P(Yes)" not in block
+
+    def test_no_none_or_nan_ever_reaches_the_prompt(self) -> None:
+        """Guard against formatting a missing value into the text."""
+        for ctx in (
+            {"market_prob": 0.5},
+            {"resolution_rules": "r"},
+            module._extract_market_context(REAL_REQUEST_CONTEXT),
+        ):
+            block = module._render_market_blocks(ctx)
+            assert "None" not in block and "nan" not in block
+
+    def test_block_states_the_odds_filter_does_not_apply(self) -> None:
+        """The supplied price must not be swept up by the scraped-odds filter.
+
+        The block sits next to the price for a reason: the instruction that
+        exempts it has to be adjacent to the datum it exempts, or the screen's
+        blanket-sounding clause wins.
+        """
+        block = module._render_market_blocks({"market_prob": 0.5})
+        assert "does NOT apply to the price above" in block
+
+    def test_block_does_not_instruct_copying_the_price(self) -> None:
+        """The price is a prior to update from, not an anchor to copy."""
+        block = module._render_market_blocks({"market_prob": 0.5})
+        assert "Do not copy it" in block
+
+
+class TestBlindVersusMarketAwareRun:
+    """End-to-end through run(), both modes."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_blind_mode_prompt_has_no_market_block(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """With no request_context the prompt carries no market reasoning."""
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+        assert "Market context for this question" not in result[1]
+        assert json.loads(result[0])["market_prob_seen"] is None
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_market_aware_prompt_carries_the_price(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """With a real request_context the price reaches the prompt."""
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+            request_context=REAL_REQUEST_CONTEXT,
+        )
+        assert "Market context for this question" in result[1]
+        assert "0.765" in result[1]
+        assert json.loads(result[0])["market_prob_seen"] == 0.765
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_malformed_context_runs_as_blind_mode_without_raising(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """A garbage request_context must not fail a live mech request."""
+        _stub_openai(mock_client_mgr)
+        for bad in ("oops", 42, [1, 2], {"market_prob": "not-a-number"}):
+            result = run(
+                tool="superforcaster-market-aware",
+                model="gpt-4o",
+                prompt=PREDICTION_PROMPT,
+                api_keys=_make_mock_api_keys("false"),
+                counter_callback=None,
+                source_content={"serper_response": FAKE_SERPER_RESPONSE},
+                request_context=bad,
+            )
+            payload = json.loads(result[0])
+            assert payload["market_prob_seen"] is None
+            assert payload["p_yes"] + payload["p_no"] == 1.0
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_extras_are_present_in_both_modes(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Rows stay schema-comparable so an A/B can pair them."""
+        _stub_openai(mock_client_mgr)
+        common = dict(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+        blind = json.loads(run(**common)[0])
+        aware = json.loads(run(**common, request_context=REAL_REQUEST_CONTEXT)[0])
+        assert set(blind) == set(aware)
+        for key in ("researchability", "evidence_quality"):
+            assert blind[key] is not None and aware[key] is not None
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_market_prob_seen_is_echoed_not_generated(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The echo comes from the request, never from the model.
+
+        The stub always returns the same PredictionResult, so if the value
+        tracked the model it would be constant across these two calls.
+        """
+        _stub_openai(mock_client_mgr)
+        common = dict(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+        a = json.loads(run(**common, request_context={"market_prob": 0.11})[0])
+        b = json.loads(run(**common, request_context={"market_prob": 0.92})[0])
+        assert (a["market_prob_seen"], b["market_prob_seen"]) == (0.11, 0.92)
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_p_no_is_derived_so_the_sum_is_exact(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The schema tolerates 0.01 drift; the trader tests exact equality.
+
+        A model answering 0.7 / 0.31 validates against the schema and would
+        then be rejected by the trader as an invalid response. Deriving the
+        complement removes that whole failure class.
+        """
+        mock_client = _stub_openai(mock_client_mgr)
+        drifting = _make_prediction_stub().model_copy(
+            update={"p_yes": 0.7, "p_no": 0.31}
+        )
+        mock_client.beta.chat.completions.parse.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(parsed=drifting, refusal=None))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+        payload = json.loads(result[0])
+        assert payload["p_yes"] + payload["p_no"] == 1.0
+
+
+class TestReplayCompatibility:
+    """The replay harness formats this template with exactly three kwargs."""
+
+    def test_prompt_has_exactly_the_three_replayable_slots(self) -> None:
+        """A fourth slot would KeyError on every replayed row.
+
+        benchmark/prompt_replay.py's superforcaster branch calls
+        PREDICTION_PROMPT.format(question=, today=, sources=). The guard that
+        would name a mismatch by name is wired only to the factual_research
+        branch, so this assertion stands in for it.
+        """
+        slots = set(re.findall(r"\{(\w+)\}", module.PREDICTION_PROMPT))
+        assert slots == {"question", "today", "sources"}
+
+    def test_market_blocks_live_outside_the_replayed_template(self) -> None:
+        """Market context is appended by run(), not a template slot."""
+        assert "market_prob" not in module.PREDICTION_PROMPT
+        assert "{market_prob}" in module.MARKET_CONTEXT_BLOCK
+
+    def test_the_replayed_prompt_renders(self) -> None:
+        """Format it the way the harness does; it must not raise."""
+        rendered = module.PREDICTION_PROMPT.format(
+            question="Will X?", today="01/01/2026", sources="<background/>"
+        )
+        assert "Will X?" in rendered
 
 
 class TestResearchabilityField:

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional, get_args
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 import requests
 from pydantic import ValidationError
@@ -796,6 +797,52 @@ class TestTokenBudget:
     def test_temperature_is_deterministic(self) -> None:
         """Replay and A/B comparisons depend on temperature 0."""
         assert module.DEFAULT_OPENAI_SETTINGS["temperature"] == 0
+
+
+class TestTruncationIsDiagnosable:
+    """A truncated completion must fail fast and say why."""
+
+    def test_length_error_raises_a_named_runtime_error(self) -> None:
+        """openai.LengthFinishReasonError becomes an actionable message.
+
+        It subclasses OpenAIError, not ValueError, so it does not match the
+        retry tuple. Without an explicit branch it falls through to
+        with_key_rotation's catch-all and is reported as an opaque string --
+        which is how a 500-token budget shipped unnoticed past a fully
+        stubbed suite.
+        """
+        client = MagicMock()
+        client.beta.chat.completions.parse.side_effect = openai.LengthFinishReasonError(
+            completion=MagicMock()
+        )
+        with pytest.raises(RuntimeError, match="max_tokens"):
+            module._parse_completion(
+                client=client,
+                model="gpt-4o",
+                messages=[],
+                response_format=PredictionResult,
+                max_tokens=500,
+            )
+
+    def test_length_error_does_not_burn_retries(self) -> None:
+        """Truncation is deterministic at temperature 0; retrying is waste."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.side_effect = openai.LengthFinishReasonError(
+            completion=MagicMock()
+        )
+        with pytest.raises(RuntimeError):
+            module._parse_completion(
+                client=client,
+                model="gpt-4o",
+                messages=[],
+                response_format=PredictionResult,
+                max_tokens=500,
+            )
+        assert client.beta.chat.completions.parse.call_count == 1
+
+    def test_length_error_is_not_a_value_error(self) -> None:
+        """Pin the fact that motivates the explicit branch."""
+        assert not issubclass(openai.LengthFinishReasonError, ValueError)
 
 
 class TestDeliveredPayload:

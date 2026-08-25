@@ -554,6 +554,23 @@ def _parse_completion(
                 )
 
             return parsed, counter_callback
+        except openai.LengthFinishReasonError as e:
+            # Truncation is deterministic at temperature 0: the same prompt and
+            # the same budget truncate again, so the retries below would burn
+            # three more paid calls to reproduce the failure. Fail immediately
+            # with a message naming the actual cause.
+            #
+            # This exception subclasses OpenAIError, NOT ValueError, so without
+            # this branch it bypasses the retry tuple entirely and lands in
+            # with_key_rotation's catch-all as an opaque string -- which is
+            # exactly how a 500-token budget shipped unnoticed through 97
+            # stubbed tests.
+            raise RuntimeError(
+                f"Structured completion truncated: max_tokens={max_tokens} is "
+                f"too small for the {response_format.__name__} schema "
+                f"({len(response_format.model_fields)} fields). Raise "
+                "DEFAULT_OPENAI_SETTINGS['max_tokens']."
+            ) from e
         except (
             openai.APIConnectionError,
             openai.InternalServerError,

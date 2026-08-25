@@ -164,6 +164,13 @@ def _partition_rows_by_platform(
 
 
 RELIABILITY_GATE = 0.80
+
+# Bumped whenever a NEW accumulator field is added. A restored accumulator that
+# predates the bump cannot back-fill the missing sums from its own totals, so
+# the derived metric stays None forever on the incremental path -- which is the
+# daily path. The flywheel compares this against the restored file and forces
+# one rebuild rather than silently rendering a dead column.
+SCORES_SCHEMA_VERSION = 2
 MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
@@ -177,6 +184,7 @@ _ACCUM_KEYS = (
     "outcome_yes_count",
     "log_loss_sum",
     "edge_sum",
+    "market_brier_sum",
     "edge_n",
     "edge_positive_count",
     # Diagnostic edge metrics (PROPOSAL.md Stage 4)
@@ -237,6 +245,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 
 _DIAGNOSTIC_NONE: dict[str, Any] = {
     "edge": None,
+    "market_brier": None,
     "edge_n": 0,
     "edge_positive_rate": None,
     "conditional_accuracy_rate": None,
@@ -269,6 +278,12 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     edge_avg = round(sum(edges) / len(edges), 4)
+    # Market Brier over the edge-eligible pool (see grouping._accumulate_group).
+    market_briers = [
+        (r["market_prob_at_prediction"] - (1.0 if r["final_outcome"] else 0.0)) ** 2
+        for r in edge_rows
+    ]
+    market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -306,6 +321,7 @@ def _compute_edge_diagnostics(
 
     diag: dict[str, Any] = {
         "edge": edge_avg,
+        "market_brier": market_brier_avg,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,
@@ -924,8 +940,14 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
     latency_reservoir = _score_latency_reservoir(rows)
     worst_10, best_10 = _score_extreme_predictions(rows)
 
+    # Observed bounds so the report can name its span.
+    stamps = sorted(r["predicted_at"] for r in rows if r.get("predicted_at"))
+
     return {
+        "schema_version": SCORES_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_start": stamps[0] if stamps else None,
+        "window_end": stamps[-1] if stamps else None,
         "total_rows": total,
         "valid_rows": overall["valid_n"],
         "overall": overall,
@@ -1006,12 +1028,25 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     :param scores: raw accumulator dict.
     :return: finalized dict with derived stats.
     """
+    # The version the accumulator EARNED, not the code's. A restored
+    # pre-migration accumulator carries market_brier_sum=None (never
+    # re-armed on the incremental path), and stamping it current would stop
+    # the flywheel's stale-schema check from ever firing the one rebuild
+    # that migrates it.
+    migrated = scores["overall"].get("market_brier_sum") is not None
     result: dict[str, Any] = {
+        "schema_version": (
+            SCORES_SCHEMA_VERSION if migrated else scores.get("schema_version", 1)
+        ),
         "current_month": scores["current_month"],
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     result["overall"] = _derive_group(scores["overall"])
     result["total_rows"] = scores["overall"]["n"]
+    # Carried through so the rendered report can name the span it is showing.
+    for bound in ("window_start", "window_end"):
+        if scores.get(bound):
+            result[bound] = scores[bound]
     result["valid_rows"] = scores["overall"]["valid_n"]
 
     for dim in (
@@ -1205,6 +1240,9 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     if "current_month" not in data or "brier_sum" not in data.get("overall", {}):
         return None
 
+    # Carried so _finalize_scores can preserve a pre-migration version
+    # instead of stamping the accumulator current (see the stamp comment).
+
     def _restore_group(g: dict[str, Any]) -> dict[str, Any]:
         restored = _empty_group()
         restored["n"] = g["n"]
@@ -1217,6 +1255,9 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         restored["outcome_yes_count"] = g.get("outcome_yes_count", 0)
         restored["log_loss_sum"] = g.get("log_loss_sum", 0.0)
         restored["edge_sum"] = g.get("edge_sum", 0.0)
+        # None, not 0.0, for pre-field files: edge_n restores in full, so 0.0
+        # would derive market_brier ~= 0 forever on the incremental path.
+        restored["market_brier_sum"] = g.get("market_brier_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores
@@ -1238,6 +1279,12 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     scores: dict[str, Any] = {
         "current_month": data["current_month"],
         "generated_at": data.get("generated_at", ""),
+        # Version and observed bounds ride along: the version so the stamp
+        # can preserve a pre-migration state, the bounds so an incremental
+        # update WIDENS the span instead of restarting it from this run.
+        "schema_version": data.get("schema_version", 1),
+        "window_start": data.get("window_start"),
+        "window_end": data.get("window_end"),
         "overall": _restore_group(data["overall"]),
     }
     for dim in (

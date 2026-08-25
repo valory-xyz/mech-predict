@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 from benchmark.roi_sim import MODEL_DISPLAY, _is_number, roi_display_sort_key
+from benchmark.slack_blocks import Col, context, message, section, table_block
+from benchmark.slack_tables import Column, ELLIPSIS, render_table
 
 log = logging.getLogger(__name__)
 
@@ -110,15 +112,18 @@ _FLAG_SHORT = {
     "no eligible rows in window": "no eligible",
 }
 _PARSE_RELIABILITY_RE = re.compile(r"(\d+)% parse reliability")
-_SEP = " | "
-
-_ELLIPSIS = "…"
+# Reused for the "+N more rows" continuation line below the table.
+_ELLIPSIS = ELLIPSIS
 
 # _HEADERS, _CAPS, and _row_cells() are parallel per-column tuples that
 # _render_table zips together; a length mismatch would silently drop a
 # column. Pin the header/cap coupling at import time; _render_table pins the
 # row arity at render time.
 assert len(_HEADERS) == len(_CAPS), "_HEADERS and _CAPS must stay the same length"
+
+# The shared renderer takes (header, cap) pairs; _HEADERS/_CAPS stay as the
+# declaration surface because _row_cells() is written against their order.
+_COLUMNS = tuple(Column(header, cap) for header, cap in zip(_HEADERS, _CAPS))
 
 
 def _as_int(value: object) -> int:
@@ -228,65 +233,26 @@ def _compact_flags(flags: object) -> str:
     return ", ".join(parts)
 
 
-def _fit(text: str, width: int) -> str:
-    """Truncate *text* to *width* characters, marking cuts with an ellipsis.
-
-    :param text: cell text.
-    :param width: maximum width in characters.
-    :return: text of length <= width.
-    """
-    if len(text) <= width:
-        return text
-    if width <= 1:
-        return text[:width]
-    return text[: width - 1] + _ELLIPSIS
-
-
-def _format_line(cells: tuple[str, ...], widths: list[int]) -> str:
-    """Render one table line: fitted, padded cells joined by the separator.
-
-    :param cells: one string per column.
-    :param widths: column widths (same length as cells).
-    :return: single table line (trailing whitespace stripped).
-    """
-    padded = [_fit(cell, width).ljust(width) for cell, width in zip(cells, widths)]
-    return _SEP.join(padded).rstrip()
-
-
 def _render_table(rows: list[tuple[str, ...]]) -> list[str]:
-    """Render header + divider + data lines.
+    """Render header + divider + data lines for the ROI table.
 
-    Each column width is content-driven: max(header, widest cell). The only
-    bound is the per-column ``_FLAGS_CAP`` on the free-form flags text; the tool
-    name and every numeric column render in full (Slack code blocks scroll
-    horizontally). There is NO whole-line backstop: with the tool column
-    uncapped a line-width guarantee is not achievable, and every case where
-    clipping flags could still restore MAX_LINE_WIDTH is one where a long tool
-    name -- not the flags text -- caused the overflow, so clipping would destroy
-    useful text to pay for a column that is uncapped by design.
+    Thin wrapper over :func:`benchmark.slack_tables.render_table`, which is
+    shared with the benchmark digest so both sections render identically.
+    Column widths are content-driven: only the free-form flags column carries
+    a cap (``_FLAGS_CAP``); the tool name and every numeric column render in
+    full, since Slack code blocks scroll horizontally. There is NO whole-line
+    backstop -- with the tool column uncapped a line-width guarantee is not
+    achievable, and every case where clipping flags could still restore
+    MAX_LINE_WIDTH is one where a long tool name, not the flags text, caused
+    the overflow, so clipping would destroy useful text to pay for a column
+    that is uncapped by design.
 
     :param rows: pre-formatted cell tuples, one per table row. Each tuple
         MUST have exactly ``len(_HEADERS)`` cells. An empty list returns no
         lines (callers only render the block when there are bet rows).
     :return: table lines (no code-block fences).
     """
-    if not rows:
-        return []
-    for row in rows:
-        assert len(row) == len(_HEADERS), (
-            f"row has {len(row)} cells, expected {len(_HEADERS)} "
-            "(_HEADERS / _CAPS / _row_cells out of sync)"
-        )
-    widths = []
-    for i, (header, cap) in enumerate(zip(_HEADERS, _CAPS)):
-        content = max(len(header), *(len(row[i]) for row in rows))
-        widths.append(content if cap is None else min(cap, content))
-    lines = [
-        _format_line(_HEADERS, widths),
-        _format_line(tuple("-" * width for width in widths), widths),
-    ]
-    lines.extend(_format_line(row, widths) for row in rows)
-    return lines
+    return render_table(_COLUMNS, rows)
 
 
 def _model_cell(group: dict[str, Any]) -> str:
@@ -543,3 +509,89 @@ def build_roi_section(results_path: Path, platform: str) -> str | None:
     if inactive_tools:
         lines.append(f"not deployed/active: {len(inactive_tools)} tools")
     return "\n".join(lines)
+
+
+# Native Block Kit column spec, parallel to _HEADERS/_row_cells. Slack lays the
+# columns out, so the flags column needs no cap here -- it is allowed to wrap
+# instead of being ellipsized, which is strictly more information.
+_BLOCK_COLUMNS = (
+    Col("tool"),
+    Col("mode"),
+    Col("model"),
+    Col("preds", align="right"),
+    Col("bets", align="right"),
+    Col("Brier all", align="right"),
+    Col("Brier bets", align="right"),
+    Col("staked", align="right"),
+    Col("ROI (95% CI)", align="right"),
+    Col("w/costs", align="right"),
+    Col("flags", wrap=True),
+)
+
+
+def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | None:
+    """Build the ROI companion as a native Slack ``table`` block payload.
+
+    Same data and same row selection as :func:`build_roi_section`; only the
+    rendering differs. Slack lays out the columns, so nothing is padded and the
+    free-form flags column wraps rather than being cut at ``_FLAGS_CAP``.
+
+    :param results_path: path to roi_results.json (from benchmark.roi_sim).
+    :param platform: platform key ("omen" / "polymarket").
+    :return: a webhook payload, or None when there is nothing to post.
+    """
+    text = build_roi_section(results_path, platform)
+    if text is None:
+        return None
+
+    payload = _load_results(results_path)
+    groups = (payload or {}).get("groups") or []
+    platform_groups = [
+        g
+        for g in groups
+        if isinstance(g, dict)
+        and g.get("platform") == platform
+        and g.get("active") is not False
+    ]
+    prediction_groups = [g for g in platform_groups if g.get("is_prediction_tool")]
+    bet_groups = [g for g in prediction_groups if _as_int(g.get("n_bets")) > 0]
+
+    extra = 0
+    if len(bet_groups) > MAX_TABLE_ROWS:
+        extra = len(bet_groups) - MAX_TABLE_ROWS
+        bet_groups = sorted(bet_groups, key=lambda g: -_as_float(g.get("staked")))[
+            :MAX_TABLE_ROWS
+        ]
+    bet_groups.sort(key=_display_sort_key)
+
+    # The stale marker lives on the text section's HEADER line; the block
+    # message replaces that header with its own title, so the marker must be
+    # carried over or the "roi_sim likely failed" announcement is lost.
+    notes = [line for line in text.split("\n") if line and not line.startswith("`")]
+    stale_match = re.search(r"\*\(stale[^)]*\)\*", notes[0]) if notes else None
+    stale = stale_match.group(0) if stale_match else ""
+    title = "*4. SIMULATED TRADER ROI*" + (f"  {stale}" if stale else "")
+
+    blocks: list[dict[str, Any]] = [section(title)]
+    if bet_groups:
+        blocks.append(table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]))
+
+    # The prose tails carry real information (idle tools, excluded
+    # non-prediction tools, zero-bet explanations); keep them as context.
+    # The text section's own truncation line is dropped -- its count is for
+    # the FIXED-WIDTH table's cap, and this message appends its own.
+    tail = [
+        n
+        for n in notes[1:]
+        if not n.startswith("tool ") and "|" not in n and not n.startswith(_ELLIPSIS)
+    ]
+    if extra:
+        tail.append(f"+{extra} more rows in the full report")
+    if tail:
+        blocks.append(context(" · ".join(tail)))
+
+    # A zero-bet day with nothing to explain is genuinely empty; a zero-bet
+    # day WITH tails (idle counts, staleness) still posts them.
+    if not bet_groups and not tail and not stale:
+        return None
+    return message(f"4. Simulated trader ROI ({platform})", blocks)

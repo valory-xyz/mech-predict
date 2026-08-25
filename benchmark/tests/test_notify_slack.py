@@ -28,15 +28,19 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
+from benchmark import tool_usage
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
     _LEVEL_PREFIX_FORMAT,
     _build_system_prompt,
     _compute_top_k,
+    _computed_tables_enabled,
     _configure_logging,
     _count_eligible_tools,
+    _deployed_tools_for,
     _infer_platform_label,
     _main_window_label,
+    _v1_heading,
     post_to_slack,
 )
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
@@ -521,3 +525,86 @@ class TestPostToSlack:
         monkeypatch.setattr("benchmark.notify_slack.urlopen", _fake_urlopen)
         with pytest.raises(RuntimeError, match="invalid_payload"):
             post_to_slack(self._WEBHOOK, "hello")
+
+
+class TestComputedTablesFlag:
+    """The computed tables are opt-in while the redesign is validated."""
+
+    def test_disabled_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unset variable keeps the existing digest untouched."""
+        monkeypatch.delenv("BENCHMARK_COMPUTED_TABLES", raising=False)
+        assert _computed_tables_enabled() is False
+
+    @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on", " true "])
+    def test_truthy_values_enable(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Common truthy spellings all turn the tables on.
+
+        A strict == "true" check would silently no-op on the also-idiomatic "1".
+
+        :param monkeypatch: pytest fixture.
+        :param value: environment value under test.
+        """
+        monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", value)
+        assert _computed_tables_enabled() is True
+
+    @pytest.mark.parametrize("value", ["false", "0", "off", ""])
+    def test_falsy_values_stay_off(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        """Anything else leaves the digest exactly as it is today.
+
+        :param monkeypatch: pytest fixture.
+        :param value: environment value under test.
+        """
+        monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", value)
+        assert _computed_tables_enabled() is False
+
+
+class TestV1Heading:
+    """The prose digest titles itself in the shared rule-framed style."""
+
+    def test_badge_rule_and_date_from_the_report(self) -> None:
+        """V1 badge, rules sized to the line, date read from the heading."""
+        heading = _v1_heading(
+            "Omenstrat", "# Benchmark Report (Omenstrat) \u2014 2026-08-17\n..."
+        )
+        rule, line, closing = heading.split("\n")
+        assert rule == closing and set(rule) == {"\u2501"}
+        assert line == "*OMENSTRAT  \u00b7  REPORT V1  \u00b7  2026-08-17*"
+        assert len(rule) >= len(line) - 2
+
+    def test_dateless_report_still_titles(self) -> None:
+        """No date in the heading -> badge without a stamp, never a crash."""
+        heading = _v1_heading("Polystrat", "no heading here")
+        assert "*POLYSTRAT  \u00b7  REPORT V1*" in heading
+
+
+class TestDeployedToolsForTriState:
+    """[] means nothing deployed; None means the lookup failed."""
+
+    def test_successful_empty_lookup_is_empty_not_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All deployments answered with zero tools -> [], never None.
+
+        Collapsing them let a legitimately empty roster fall back to
+        rendering every historically-scored tool.
+
+        :param monkeypatch: pytest monkeypatch.
+        """
+        monkeypatch.setattr(
+            tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": []}
+        )
+        assert _deployed_tools_for("polymarket", "") == []
+
+    def test_failed_lookup_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A deployment answering None poisons the platform to None.
+
+        :param monkeypatch: pytest monkeypatch.
+        """
+        monkeypatch.setattr(
+            tool_usage, "fetch_valid_tools", lambda: {"polystrat Pearl": None}
+        )
+        assert _deployed_tools_for("polymarket", "") is None

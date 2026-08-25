@@ -1326,7 +1326,7 @@ class TestRoiBlockMessageTails:
 
     @staticmethod
     def _write(
-        tmp_path: Path, groups: list, as_of: str = "2020-01-01T00:00:00Z"
+        tmp_path: Path, groups: list, as_of: str = "2020-01-01"
     ) -> Path:
         """Write a minimal roi_results.json.
 

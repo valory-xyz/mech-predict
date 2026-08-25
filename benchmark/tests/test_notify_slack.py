@@ -38,6 +38,7 @@ from benchmark.notify_slack import (
     _count_eligible_tools,
     _infer_platform_label,
     _main_window_label,
+    _v1_heading,
     post_to_slack,
 )
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
@@ -557,3 +558,22 @@ class TestComputedTablesFlag:
         """
         monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", value)
         assert _computed_tables_enabled() is False
+
+
+class TestV1Heading:
+    """The prose digest titles itself in the shared rule-framed style."""
+
+    def test_badge_rule_and_date_from_the_report(self) -> None:
+        """V1 badge, rules sized to the line, date read from the heading."""
+        heading = _v1_heading(
+            "Omenstrat", "# Benchmark Report (Omenstrat) \u2014 2026-08-17\n..."
+        )
+        rule, line, closing = heading.split("\n")
+        assert rule == closing and set(rule) == {"\u2501"}
+        assert line == "*OMENSTRAT  \u00b7  REPORT V1  \u00b7  2026-08-17*"
+        assert len(rule) >= len(line) - 2
+
+    def test_dateless_report_still_titles(self) -> None:
+        """No date in the heading -> badge without a stamp, never a crash."""
+        heading = _v1_heading("Polystrat", "no heading here")
+        assert "*POLYSTRAT  \u00b7  REPORT V1*" in heading

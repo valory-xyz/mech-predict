@@ -808,6 +808,7 @@ class TestTitle:
         rule, title, closing = first["text"]["text"].split("\n")
         assert rule == closing and set(rule) == {TITLE_RULE_CHAR}
         assert "POLYSTRAT" in title
+        assert "REPORT V2" in title
         assert "2026-08-11" in title
         assert len(rule) >= len(title) - 2, "rule spans the title it frames"
         assert "2026-08-11" in payload["text"]

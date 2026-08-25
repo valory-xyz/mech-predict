@@ -324,7 +324,7 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
     label = PLATFORM_TITLES.get(platform, platform.title())
     # Date inside the rules, on the title line: platform and day are one block.
     stamp = f"  \u00b7  {as_of}" if as_of else ""
-    line = f"{label.upper()}{stamp}"
+    line = f"{label.upper()}  \u00b7  REPORT V2{stamp}"
     rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
     return message(
         f"{label} {as_of or ''}".strip(),

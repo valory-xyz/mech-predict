@@ -400,6 +400,25 @@ _PLATFORM_KEY_BY_LABEL: Mapping[str, str] = MappingProxyType(
 )
 
 
+def _v1_heading(platform_label: str, report_text: str) -> str:
+    """Rule-framed title for the LLM prose digest, badged REPORT V1.
+
+    Same style as the computed tables' REPORT V2 header so the two reports
+    are tellable apart in the channel; the date comes from the report's own
+    heading rather than a clock.
+
+    :param platform_label: deployment name, e.g. ``Omenstrat``.
+    :param report_text: full markdown report; its first line carries the date.
+    :return: three-line heading (rule, bolded title, rule).
+    """
+    first_line = report_text.split("\n", 1)[0]
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})", first_line)
+    stamp = f"  \u00b7  {date_match.group(1)}" if date_match else ""
+    line = f"{platform_label.upper()}  \u00b7  REPORT V1{stamp}"
+    rule = "\u2501" * max(24, len(line))
+    return f"{rule}\n*{line}*\n{rule}"
+
+
 def _computed_tables_enabled() -> bool:
     """Check whether the computed-table messages should be posted.
 
@@ -481,11 +500,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Extract heading from report (e.g. "# Benchmark Report (Omenstrat) — 2026-04-03")
-    heading = "*Benchmark Report*"
-    first_line = report_text.split("\n", 1)[0]
-    if first_line.startswith("# "):
-        heading = f"*{first_line.lstrip('# ').strip()}*"
+    heading = _v1_heading(platform_label, report_text)
 
     log.info("Summarizing %s report with %s...", platform_label, MODEL)
     summary = f"{heading}\n\n{summarize_report(report_text, api_key, platform_label)}"

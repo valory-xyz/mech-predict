@@ -110,23 +110,21 @@ def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
 
 
-def _window_meta(path: Path) -> tuple[str | None, str | None]:
-    """Read one scores file's observed span and last-covered date.
+def _as_of_date(path: Path) -> str | None:
+    """Last date the scores file covers: window_end, else generated_at.
 
-    ``window_start``/``window_end`` are the observed bounds and the only
-    honest span source; ``current_month`` is not (see the module docstring).
+    ``window_start``/``window_end`` are the honest span source;
+    ``current_month`` is not (see the module docstring).
 
-    :param path: path to a scores json file.
-    :return: (span like "2026-07-01..2026-08-11" or None, as-of date or None).
+    :param path: scores json path.
+    :return: as-of date (YYYY-MM-DD) or None.
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None, None
-    start, end = payload.get("window_start"), payload.get("window_end")
-    span = f"{str(start)[:10]}..{str(end)[:10]}" if start and end else None
+        return None
     stamp = payload.get("window_end") or payload.get("generated_at")
-    return span, str(stamp)[:10] if stamp else None
+    return str(stamp)[:10] if stamp else None
 
 
 # ---------------------------------------------------------------------------
@@ -609,19 +607,7 @@ def build_digest_messages(
         key: _load_by_tool(results_dir / name.format(platform=platform))
         for key, name in WINDOW_FILES.items()
     }
-    # The accumulator's span is not fixed; the section line carries the
-    # observed bounds.
-    span, as_of = _window_meta(
-        results_dir / WINDOW_FILES["at"].format(platform=platform)
-    )
-    month_label = (
-        span
-        if span
-        else (
-            "an unstated span (scores file predates window stamping; "
-            "the next rebuild adds it)"
-        )
-    )
+    as_of = _as_of_date(results_dir / WINDOW_FILES["at"].format(platform=platform))
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])
@@ -664,10 +650,7 @@ def build_digest_messages(
             message(
                 "1a. Production - W-2 vs W-1",
                 [
-                    section(
-                        "*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"
-                        "  _what changed this week_"
-                    ),
+                    section("*1a. PRODUCTION W-2 vs W-1 - ranked by `Edge W-1`*"),
                     table_block(
                         _W2_COLUMNS,
                         _rows_w2(order_w2, windows["w1"], windows["w2"]),
@@ -679,11 +662,7 @@ def build_digest_messages(
             message(
                 "1b. Production - CUM vs W-1",
                 [
-                    section(
-                        f"*1b. PRODUCTION CUM vs W-1 - ranked by `Edge cum`*  "
-                        f"_how far each tool beat the market; this week "
-                        f"against {month_label}_"
-                    ),
+                    section("*1b. PRODUCTION CUM vs W-1 - ranked by `Edge cum`*"),
                     table_block(
                         _AT_COLUMNS,
                         _rows_at(order_at, windows["w1"], windows["at"]),
@@ -698,23 +677,20 @@ def build_digest_messages(
             message(
                 "2. Tournament - all-time pool",
                 [
-                    section(
-                        "*2. TOURNAMENT - RANKED BY `Edge cum`, best first*  "
-                        "_candidates; no weekly comparison available_"
-                    ),
+                    section("*2. TOURNAMENT - ranked by `Edge cum`*"),
                     table_block(
                         _AT_COLUMNS,
                         _rows_at(order, {}, windows["tournament"]),
                     ),
                     context(
-                        "Two caveats. Tournament rows carry no W-1/W-2: rolling "
-                        "scorer runs pass `--skip-tournament-output`, so no "
-                        "weekly aggregate is written for a candidate. And the "
-                        "columns headed `cum` hold the candidate's ALL-TIME "
-                        "pool here, not a month -- a different span, over much "
-                        "easier markets (`mkt` ~0.07 against ~0.18 in "
-                        "production). Candidate and incumbent numbers are NOT "
-                        "comparable row to row."
+                        "*Caveats:*\n"
+                        "\u2022 Candidates have no weekly columns: the "
+                        "rolling scorer skips tournament output, so only "
+                        "their all-time pool is scored.\n"
+                        "\u2022 Candidate rows are NOT comparable to "
+                        "production rows: candidates answer a different, "
+                        "much easier market pool (compare the *mkt* "
+                        "columns), over a different span."
                     ),
                 ],
             )

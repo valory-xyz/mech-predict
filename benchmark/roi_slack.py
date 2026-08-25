@@ -567,10 +567,7 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
     bet_groups.sort(key=_display_sort_key)
 
     blocks: list[dict[str, Any]] = [
-        section(
-            "*ROI COMPANION*  _simulated trader ROI, trailing 90d, same "
-            "decision rules for every tool_"
-        ),
+        section("*SIMULATED TRADER ROI*"),
         table_block(_BLOCK_COLUMNS, [_row_cells(g) for g in bet_groups]),
     ]
 

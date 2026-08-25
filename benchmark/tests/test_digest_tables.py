@@ -344,25 +344,6 @@ class TestW2Ranking:
         assert _cells(body, "beta", after=marker)[0] == "2"
 
 
-class TestSpanFallback:
-    """A missing window span explains itself in operator language."""
-
-    def test_unstated_span_names_the_cause_not_the_docstring(
-        self, tmp_path: Path
-    ) -> None:
-        """No window bounds -> the caption says why and what fixes it.
-
-        The fallback renders into Slack, where "see the docstring" points
-        at nothing a reader can open.
-
-        :param tmp_path: pytest temp dir.
-        """
-        results = _results_dir(tmp_path, at={"alpha": _stats()})
-        body = _body(results)
-        assert "docstring" not in body
-        assert "predates window stamping" in body
-
-
 class TestRendering:
     """Pin the presentation choices a reader depends on."""
 
@@ -638,46 +619,6 @@ class TestPlatformAlertFloor:
         one = {"alpha": _stats(edge=-0.10, brier=0.31, baseline_brier=0.24)}
         results = _results_dir(tmp_path, at=one, w1=one, w2=one)
         assert "platform below" not in _body(results)
-
-
-class TestWindowLabel:
-    """The report names the span it shows, or says it cannot."""
-
-    def test_observed_bounds_are_rendered(self, tmp_path: Path) -> None:
-        """window_start/window_end reach the section line.
-
-        :param tmp_path: pytest temp dir.
-        """
-        results = tmp_path / "r"
-        results.mkdir()
-        (results / "scores_polymarket.json").write_text(
-            json.dumps(
-                {
-                    "current_month": "2026-08",
-                    "window_start": "2026-07-01T00:00:00Z",
-                    "window_end": "2026-08-11T09:00:00Z",
-                    "by_tool": {"alpha": _stats()},
-                }
-            ),
-            encoding="utf-8",
-        )
-        _write(results, "rolling_scores_polymarket.json", {"alpha": _stats()})
-        _write(results, "prev_rolling_scores_polymarket.json", {"alpha": _stats()})
-        _write(results, "scores_tournament_polymarket.json", {})
-        assert "2026-07-01..2026-08-11" in _body(results)
-
-    def test_missing_bounds_say_so_rather_than_guess(self, results: Path) -> None:
-        """Without bounds the label admits the span is unstated.
-
-        The file's own `current_month` key does NOT describe its span -- on
-        live data it read 2026-08 over a file holding rows back to 2026-07-01
-        -- so it must never be used as a stand-in.
-
-        :param results: results-directory fixture.
-        """
-        body = _body(results)
-        assert "unstated" in body
-        assert "2026-08" not in body
 
 
 class TestCensoringAlert:

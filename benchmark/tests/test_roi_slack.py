@@ -1363,6 +1363,21 @@ class TestRoiBlockMessageTails:
             "flags": [],
         }
 
+    def test_z_suffixed_as_of_still_reads_as_stale(self, tmp_path: Path) -> None:
+        """A Z-suffixed timestamp parses on every supported Python.
+
+        3.10's fromisoformat rejects the bare Z; unnormalized it silently
+        dropped the stale marker there while 3.11+ kept it.
+
+        :param tmp_path: pytest temp dir.
+        """
+        msg = build_roi_message(
+            self._write(tmp_path, [self._group("a", 5)], as_of="2020-01-01T00:00:00Z"),
+            "polymarket",
+        )
+        assert msg is not None
+        assert "*(stale" in msg["blocks"][0]["text"]["text"]
+
     def test_stale_marker_reaches_the_block_title(self, tmp_path: Path) -> None:
         """The marker lives on the text HEADER, which the block replaces.
 

@@ -366,7 +366,8 @@ def _payload_age_days(stamp: Any) -> float | None:
     if not isinstance(stamp, str) or not stamp:
         return None
     try:
-        parsed = datetime.fromisoformat(stamp)
+        # Python 3.10 rejects a trailing Z; normalize it (3.11+ accepts it).
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     except ValueError:
         return None
     if parsed.tzinfo is None:
@@ -590,8 +591,4 @@ def build_roi_message(results_path: Path, platform: str) -> dict[str, Any] | Non
     if tail:
         blocks.append(context(" · ".join(tail)))
 
-    # A zero-bet day with nothing to explain is genuinely empty; a zero-bet
-    # day WITH tails (idle counts, staleness) still posts them.
-    if not bet_groups and not tail and not stale:
-        return None
     return message(f"4. Simulated trader ROI ({platform})", blocks)

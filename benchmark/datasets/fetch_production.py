@@ -772,11 +772,14 @@ DELIVERS_BY_IDS_QUERY = """
 """
 
 # Omen: bulk fetch markets that resolved after the cutoff, straight from
-# the market entity (one row per market). The earlier ``bets``-based proxy
-# returned one row per bet on every resolved market -- thousands of rows per
-# window -- and the subgraph proxy times out (504) once skip pagination
-# passes ~3000 rows, which stalled the daily fetch permanently. Paginated by
-# ``id`` cursor (``id_gt``) so no ``skip`` depth is ever reached.
+# the market entity (one row per market). The earlier ``bets``-based query
+# filtered through the nested ``fixedProductMarketMaker_`` relation, forcing
+# graph-node to join-scan the whole bets table on the terminal page (it must
+# prove no matches remain), which exceeds the subgraph proxy's ~15s gateway
+# timeout (504) and stalled the daily fetch on its last page every night.
+# Filtering on the market entity's own indexed columns is cheap at any
+# depth; the ``id`` cursor (``id_gt``) additionally keeps query cost flat
+# however many rows the window holds.
 OMEN_MARKETS_ENTITY = "fixedProductMarketMakerCreations"
 OMEN_RESOLVED_MARKETS_QUERY = """
 {
@@ -886,7 +889,10 @@ def _id_cursor_paginated_fetch(
     ``id_gt: "%(id_gt)s"`` filter; each page resumes after the last id of
     the previous one. Unlike :func:`_paginated_fetch` this never grows a
     ``skip`` offset, so query cost stays flat however many rows the window
-    holds (deep ``skip`` on the predict subgraphs 504s past a few thousand).
+    holds. Note the cursor alone is not what makes a query cheap: the
+    terminal page of a nested-relation filter join-scans the remaining table
+    and 504s at the proxy regardless of pagination style, so callers must
+    also filter on the entity's own indexed columns.
 
     :param url: subgraph endpoint URL.
     :param query_template: ``%``-style query with ``first``/``id_gt`` slots.

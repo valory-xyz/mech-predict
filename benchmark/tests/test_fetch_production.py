@@ -395,7 +395,9 @@ class TestFetchOmenResolvedUsesMarkets:
             "id": market_id,
             "currentAnswer": answer,
             "currentAnswerTimestamp": ts,
-            "question": f"{title}␟['Yes', 'No']␟0␟en_US",
+            "question": QUESTION_DATA_SEPARATOR.join(
+                [title, "['Yes', 'No']", "0", "en_US"]
+            ),
         }
 
     def test_uses_market_entity_with_id_cursor(

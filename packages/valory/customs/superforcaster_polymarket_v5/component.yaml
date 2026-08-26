@@ -1,0 +1,32 @@
+name: superforcaster_polymarket_v5
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets. v5 adds a base_rate_required
+  boolean commitment field to bind TYPE B base-rate fallback at the prediction-LLM-call
+  stage, and tightens the TYPE A definition to exclude outlet-name keyword matches
+  and out-of-window historical posts; targets systematic overconfident-YES on Polymarket
+  (issue
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v5.py: bafybeidp2depvwum2qec3bllzzqjqmo67lxcqzaknlve3i3gubcm4pnzru
+  tests/__init__.py: bafybeich3flegc3t2declfjn3khnot44vh35i7cyw2mvw6oaahkb6kj66m
+  tests/test_superforcaster_polymarket_v5.py: bafybeie3jka65jb66gxs2k7ano7mqznp7ypemh3fit6rrdededo3qlyzpe
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v5.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5

@@ -197,6 +197,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster-polymarket-v5": {
+      "parent": "superforcaster-polymarket-v4",
+      "reason": "add base_rate_required boolean commitment field to bind TYPE B base-rate fallback at prediction-LLM-call stage (issue #452)"
     }
   }
 }

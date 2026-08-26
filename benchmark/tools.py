@@ -139,6 +139,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v5 -- adds base_rate_required boolean
+    # commitment field to bind TYPE B base-rate fallback at the prediction-LLM-call
+    # stage; tightens TYPE A definition to exclude outlet-name keyword matches and
+    # out-of-window posts (issue #452).
+    "superforcaster-polymarket-v5": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v5"
+            ".superforcaster_polymarket_v5"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

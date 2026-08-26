@@ -158,9 +158,9 @@ class TestPredictionResultSchema:
         screen_idx = fields.index("evidence_reliability_screen")
         aggregation_idx = fields.index("aggregation")
         br_idx = fields.index("base_rate_required")
-        assert screen_idx < br_idx < aggregation_idx, (
-            "base_rate_required must sit between evidence_reliability_screen and aggregation"
-        )
+        assert (
+            screen_idx < br_idx < aggregation_idx
+        ), "base_rate_required must sit between evidence_reliability_screen and aggregation"
 
     def test_base_rate_required_is_bool(self) -> None:
         """base_rate_required must be a boolean (not a string or numeric field)."""

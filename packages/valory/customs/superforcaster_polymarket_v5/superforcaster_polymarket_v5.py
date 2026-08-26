@@ -556,7 +556,11 @@ def extract_question(prompt: str) -> str:
 
 
 @with_key_rotation
-def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:  # pylint: disable=too-many-locals,too-many-statements
+def run(
+    **kwargs: Any,
+) -> Union[
+    MaxCostResponse, MechResponse
+]:  # pylint: disable=too-many-locals,too-many-statements
     """Run the task"""
     tool = kwargs["tool"]
     if tool not in ALLOWED_TOOLS:

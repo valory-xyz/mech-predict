@@ -49,6 +49,7 @@ from benchmark.scoring_primitives import (
     disagree_bucket,
     edge_score,
     log_loss_score,
+    sample_edge_sd,
 )
 from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
     minimize,
@@ -170,7 +171,7 @@ RELIABILITY_GATE = 0.80
 # the derived metric stays None forever on the incremental path -- which is the
 # daily path. The flywheel compares this against the restored file and forces
 # one rebuild rather than silently rendering a dead column.
-SCORES_SCHEMA_VERSION = 2
+SCORES_SCHEMA_VERSION = 3
 MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
@@ -185,6 +186,7 @@ _ACCUM_KEYS = (
     "log_loss_sum",
     "edge_sum",
     "market_brier_sum",
+    "edge_sq_sum",
     "edge_n",
     "edge_positive_count",
     # Diagnostic edge metrics (PROPOSAL.md Stage 4)
@@ -246,6 +248,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 _DIAGNOSTIC_NONE: dict[str, Any] = {
     "edge": None,
     "market_brier": None,
+    "edge_sd": None,
     "edge_n": 0,
     "edge_positive_rate": None,
     "conditional_accuracy_rate": None,
@@ -284,6 +287,7 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
+    edge_sd = sample_edge_sd(sum(edges), sum(e * e for e in edges), len(edges))
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -322,6 +326,7 @@ def _compute_edge_diagnostics(
     diag: dict[str, Any] = {
         "edge": edge_avg,
         "market_brier": market_brier_avg,
+        "edge_sd": edge_sd,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,
@@ -1033,7 +1038,10 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     # re-armed on the incremental path), and stamping it current would stop
     # the flywheel's stale-schema check from ever firing the one rebuild
     # that migrates it.
-    migrated = scores["overall"].get("market_brier_sum") is not None
+    migrated = (
+        scores["overall"].get("market_brier_sum") is not None
+        and scores["overall"].get("edge_sq_sum") is not None
+    )
     result: dict[str, Any] = {
         "schema_version": (
             SCORES_SCHEMA_VERSION if migrated else scores.get("schema_version", 1)
@@ -1240,9 +1248,6 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     if "current_month" not in data or "brier_sum" not in data.get("overall", {}):
         return None
 
-    # Carried so _finalize_scores can preserve a pre-migration version
-    # instead of stamping the accumulator current (see the stamp comment).
-
     def _restore_group(g: dict[str, Any]) -> dict[str, Any]:
         restored = _empty_group()
         restored["n"] = g["n"]
@@ -1258,6 +1263,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         # None, not 0.0, for pre-field files: edge_n restores in full, so 0.0
         # would derive market_brier ~= 0 forever on the incremental path.
         restored["market_brier_sum"] = g.get("market_brier_sum")
+        restored["edge_sq_sum"] = g.get("edge_sq_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores

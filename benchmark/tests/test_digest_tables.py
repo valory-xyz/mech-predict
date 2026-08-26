@@ -30,7 +30,14 @@ from typing import Any
 
 import pytest
 from benchmark.digest_tables import (
+    RELIABILITY_GATE,
     TITLE_RULE_CHAR,
+    VERDICT_MARKER,
+    _edge_lower_bound,
+    _headline,
+    _no_replacement_note,
+    _survivors,
+    _verdict,
     build_digest_messages,
 )
 
@@ -975,3 +982,532 @@ class TestStarvedAlertRobustness:
         body = _body(results, allowed_tools={"alpha"})
         assert "sample starved" in body
         assert "n/a scored rows in W-1" in body
+
+
+class TestPromoteDemoteGate:
+    """The verdict is the policy's gate, applied once for both rosters."""
+
+    def test_promote_needs_the_lower_bound_to_clear_the_margin(self) -> None:
+        """A big edge with a big spread is NOT a promote."""
+        wide = _stats(edge=0.08, edge_sd=1.0, edge_n=100, conditional_accuracy_rate=0.6)
+        tight = _stats(
+            edge=0.08, edge_sd=0.1, edge_n=100, conditional_accuracy_rate=0.6
+        )
+        assert _verdict(wide, deployed=False).startswith("no:")
+        assert _verdict(tight, deployed=False) == "PROMOTE"
+
+    def test_losing_disagreements_blocks_a_tool_that_missed_the_margin(
+        self,
+    ) -> None:
+        """Below the margin AND losing its disagreements is a demote."""
+        row = _stats(
+            edge=0.01, edge_sd=0.05, edge_n=100, conditional_accuracy_rate=0.47
+        )
+        assert "condAcc" in _verdict(row, deployed=False)
+        assert _verdict(row, deployed=True).startswith("demote")
+
+    def test_conditional_accuracy_qualifies_a_promote_but_cannot_veto_it(
+        self,
+    ) -> None:
+        """A cleared bound is the policy's condition; condAcc annotates it."""
+        row = _stats(
+            edge=0.0825,
+            edge_sd=0.149248,
+            edge_n=100,
+            conditional_accuracy_rate=0.45,
+        )
+        lower = _edge_lower_bound(row)
+        assert lower is not None and lower > 0.04
+        verdict = _verdict(row, deployed=False)
+        assert verdict.startswith("review")
+        assert "45%" in verdict
+
+    def test_thin_sample_says_so_rather_than_guessing(self) -> None:
+        """Below the floor the answer is "not enough data", not "no improvement"."""
+        row = _stats(edge=0.09, edge_sd=0.1, edge_n=12)
+        assert _verdict(row, deployed=False).startswith("n=")
+
+    def test_below_no_skill_demotes_a_deployed_tool(self) -> None:
+        """Below no-skill in the 90d window AND a judgeable week: demote."""
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        bad_week = _stats(brier=0.30, baseline_brier=0.24, valid_n=100)
+        assert _verdict(row, deployed=True, recent=bad_week) == "demote: no-skill"
+
+    def test_unjudgeable_week_never_confirms_a_demote(self) -> None:
+        """Absent and thin weeks agree: no confirmation, no demote.
+
+        "We know nothing about last week" must give ONE answer, and never
+        the destructive one. An absent week used to demote while a 3-row
+        week kept -- opposite verdicts from the same ignorance.
+        """
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        thin_lucky = _stats(brier=0.10, baseline_brier=0.24, valid_n=3)
+        thin_bad = _stats(brier=0.40, baseline_brier=0.24, valid_n=3)
+        assert _verdict(row, deployed=True, recent=None) == "keep"
+        assert _verdict(row, deployed=True, recent=thin_lucky) == "keep"
+        assert _verdict(row, deployed=True, recent=thin_bad) == "keep"
+
+    def test_candidate_no_skill_needs_no_week(self) -> None:
+        """Candidates carry no weekly window; their "no:" is non-destructive."""
+        row = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=0.0,
+            edge_sd=0.1,
+            edge_n=100,
+            conditional_accuracy_rate=0.55,
+        )
+        assert _verdict(row, deployed=False) == "no: no-skill"
+
+
+class TestNoReplacementCounts:
+    """The note counts demotes honestly; unjudged tools are not "demoting"."""
+
+    def test_mixed_cohort_counts_demotes_not_the_roster(self) -> None:
+        """3 demotes + 1 unjudgeable reads '3 of 4', never 'all 4'."""
+        note = _no_replacement_note(
+            {
+                "a": "demote: no-skill",
+                "b": "demote: no-skill",
+                "c": "demote: no-skill",
+                "d": "n=12 < 30",
+            },
+            {},
+        )
+        assert note is not None
+        assert "3 of 4" in note
+        assert "all 4" not in note
+
+
+class TestHeadlineAnnotation:
+    """The headline must not read cleaner than the rec cell it summarizes."""
+
+    def test_promote_detail_carries_the_rel_annotation(self) -> None:
+        """PROMOTE (rel 60%) reaches the headline detail, not just the table."""
+        msg = _headline({}, {"cand": "PROMOTE (rel 60%)"}, "polymarket")
+        detail = msg["blocks"][1]["text"]["text"]
+        assert "(rel 60%)" in detail
+
+    def test_no_data_lands_in_the_unjudged_bucket(self) -> None:
+        """A ran-but-unscored tool is reported, not silently dropped."""
+        msg = _headline({"ghost": "no data"}, {}, "polymarket")
+        detail = msg["blocks"][1]["text"]["text"]
+        assert "too little data to judge" in detail and "ghost" in detail
+
+
+class TestNoReplacementGuard:
+    """The report must never recommend leaving a platform with no tool."""
+
+    def test_all_demote_becomes_a_flagged_call(self) -> None:
+        """When every tool demotes, each verdict carries the consequence."""
+        note = _no_replacement_note(
+            {"a": "demote: no-skill", "b": "demote: condAcc 42%"}
+        )
+        assert note is not None and "NO REPLACEMENT" in note
+
+    def test_a_survivor_leaves_the_demotes_alone(self) -> None:
+        """One tool worth keeping means the demotes are actionable as written."""
+        assert _no_replacement_note({"a": "demote: no-skill", "b": "keep"}) is None
+
+
+class TestSustainedDemote:
+    """A demote needs a sustained signal, not one hairline reading."""
+
+    def test_hairline_gap_is_not_a_demote(self) -> None:
+        """0.0003 above the floor is noise, whatever the sample size.
+
+        Taken from live data: a tool sat 0.2478 against a 0.2475 floor on
+        2,055 markets while winning 65% of its 1,968 disagreements.
+        """
+        hairline = _stats(
+            brier=0.2478,
+            baseline_brier=0.2475,
+            edge=-0.046,
+            edge_sd=0.29,
+            edge_n=2055,
+            conditional_accuracy_rate=0.6524,
+        )
+        assert _verdict(hairline, deployed=True) == "keep"
+
+    def test_material_gap_in_both_windows_demotes(self) -> None:
+        """Below the floor by a real margin, in the month AND the week."""
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.55,
+        )
+        assert _verdict(bad, deployed=True, recent=bad) == "demote: no-skill"
+
+    def test_one_bad_window_alone_does_not_demote(self) -> None:
+        """The month is bad but the week has recovered: not sustained."""
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.55,
+        )
+        good = _stats(brier=0.22, baseline_brier=0.24)
+        assert _verdict(bad, deployed=True, recent=good) == "keep"
+
+
+class TestMigrationState:
+    """An accumulator predating this PR must say so, not read as thin data."""
+
+    def test_missing_edge_sd_asks_for_a_rebuild(self) -> None:
+        """None edge_sd means the field was never accumulated, not no spread."""
+        stale = _stats(edge_sd=None)
+        assert _verdict(stale, deployed=True) == "needs --rebuild"
+
+    def test_unjudgeable_tool_is_not_a_replacement(self) -> None:
+        """Three demotes plus one unjudgeable is still no replacement.
+
+        Otherwise the report can recommend retiring every tool it could assess
+        and leave the platform holding only the one it just said it cannot.
+        """
+        note = _no_replacement_note(
+            {
+                "a": "demote: no-skill",
+                "b": "demote: no-skill",
+                "c": "demote: no-skill",
+                "d": "n=12 < 30",
+            }
+        )
+        assert note is not None and "NO REPLACEMENT" in note
+
+
+class TestFloorIsVisible:
+    """The number that decides the ranking and the verdict must be on screen."""
+
+    def test_floor_column_renders_the_bound(self, tmp_path: Path) -> None:
+        """The rendered value equals the bound the gate tests.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        row = _stats(edge=0.09, edge_sd=0.10, edge_n=100)
+        for name in (
+            "trailing_scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": row})
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        assert "floor" in body
+        expected = f"{_edge_lower_bound(row):+.4f}"
+        assert expected in _cells(body, "alpha", after="1b. PRODUCTION"), expected
+
+    def test_floor_is_shown_beside_the_edge_it_qualifies(self, tmp_path: Path) -> None:
+        """A leading Edge with a negative floor renders both, side by side.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        cohort = {
+            "wide": _stats(edge=0.30, edge_sd=3.0, edge_n=100),
+            "solid": _stats(edge=0.09, edge_sd=0.10, edge_n=100),
+        }
+        for name in (
+            "trailing_scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", {})
+        body = _body(results)
+        top = _cells(body, "wide", after="1b. PRODUCTION")
+        assert top[0] == "1", "best Edge leads"
+        assert "-0.1935" in top, "and its floor shows why it is not promotable"
+        assert not top[-1].startswith("PROMOTE")
+
+
+class TestHeadlineSafety:
+    """The NO ACTION headline must not depend on verdict wording."""
+
+    def test_all_demote_still_says_no_action(self, tmp_path: Path) -> None:
+        """Every tool demoting yields NO ACTION, never "DEMOTE n".
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "r"
+        results.mkdir()
+        bad = _stats(
+            brier=0.30,
+            baseline_brier=0.24,
+            edge=-0.05,
+            edge_sd=0.2,
+            edge_n=500,
+            conditional_accuracy_rate=0.40,
+        )
+        for name in (
+            "trailing_scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"a": bad, "b": bad})
+        _write(results, "scores_tournament_polymarket.json", {})
+        headline = build_digest_messages(results, "polymarket")[0]
+        title = headline["blocks"][0]["text"]["text"]
+        assert "NO ACTION" in title
+        assert "DEMOTE" not in title
+        assert VERDICT_MARKER["blocked"] in title
+
+
+class TestVerdictMarker:
+    """The title's marker is derived from the verdict, never hardcoded."""
+
+    def _headline_title(self, tmp_path: Path, cohort: dict, tourn: dict) -> str:
+        """Render one platform and return its title text.
+
+        :param tmp_path: pytest temp dir.
+        :param cohort: production by_tool stats.
+        :param tourn: tournament by_tool stats.
+        :return: the header text.
+        """
+        results = tmp_path / "r"
+        results.mkdir(exist_ok=True)
+        for name in (
+            "trailing_scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, cohort)
+        _write(results, "scores_tournament_polymarket.json", tourn)
+        messages = build_digest_messages(results, "polymarket")
+        return messages[0]["blocks"][0]["text"]["text"]
+
+    def test_a_promotable_candidate_turns_the_marker_green(
+        self, tmp_path: Path
+    ) -> None:
+        """A candidate clearing the margin is the one green outcome.
+
+        :param tmp_path: pytest temp dir.
+        """
+        good = _stats(
+            edge=0.20,
+            edge_sd=0.10,
+            edge_n=200,
+            conditional_accuracy_rate=0.70,
+            brier=0.18,
+            baseline_brier=0.24,
+        )
+        title = self._headline_title(tmp_path, {"live": good}, {"cand": good})
+        assert VERDICT_MARKER["promote"] in title
+        assert "PROMOTE 1" in title
+
+    def test_nothing_to_do_is_the_neutral_marker(self, tmp_path: Path) -> None:
+        """A quiet day reads neutral, not alarming.
+
+        :param tmp_path: pytest temp dir.
+        """
+        fine = _stats(
+            edge=0.01,
+            edge_sd=0.10,
+            edge_n=200,
+            conditional_accuracy_rate=0.60,
+            brier=0.20,
+            baseline_brier=0.24,
+        )
+        title = self._headline_title(tmp_path, {"live": fine}, {})
+        assert VERDICT_MARKER["none"] in title
+        assert "NO CHANGE" in title
+
+
+class TestBlockedHeadline:
+    """The NO ACTION headline must not miscount the roster."""
+
+    def test_headline_does_not_report_demotes_as_the_whole_roster(
+        self, tmp_path: Path
+    ) -> None:
+        """A blocked roster means nothing survived, not that everything demoted.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        _write(
+            results,
+            "trailing_scores_polymarket.json",
+            {
+                "bad": _stats(
+                    brier=0.4000,
+                    baseline_brier=0.2400,
+                    edge=-0.1000,
+                    edge_sd=0.2,
+                    edge_n=400,
+                ),
+                "thin": _stats(edge_n=5, valid_n=5),
+            },
+        )
+        _write(
+            results,
+            "rolling_scores_polymarket.json",
+            {
+                "bad": _stats(
+                    brier=0.4000,
+                    baseline_brier=0.2400,
+                    edge=-0.1000,
+                    edge_sd=0.2,
+                    edge_n=400,
+                ),
+                "thin": _stats(edge_n=5, valid_n=5),
+            },
+        )
+        _write(results, "prev_rolling_scores_polymarket.json", {})
+
+        messages = build_digest_messages(
+            results, "polymarket", allowed_tools={"bad", "thin"}
+        )
+        title = messages[0]["blocks"][0]["text"]["text"]
+        detail = _flatten(messages[0])
+        assert "NO ACTION" in title
+        assert "All 1 deployed tools" not in detail
+        assert "No deployed tool clears the gate" in detail
+
+
+class TestReplacementAwareness:
+    """The no-replacement warning must look at the tournament."""
+
+    def test_note_points_at_a_promotable_candidate_when_one_exists(self) -> None:
+        """The no-forecaster claim is false when a candidate clears the gate.
+
+        Reading only the deployed cohort put that claim directly under a
+        headline announcing a promotable candidate.
+        """
+        prod = {"bad": "demote: no-skill"}
+        assert "NO REPLACEMENT" in (_no_replacement_note(prod, {}) or "")
+        with_candidate = _no_replacement_note(prod, {"cand": "PROMOTE"})
+        assert with_candidate is not None
+        assert "NO DEPLOYED REPLACEMENT" in with_candidate
+        assert "`cand`" in with_candidate
+        assert "no forecaster at all" not in with_candidate
+
+    def test_a_non_promotable_candidate_is_not_a_replacement(self) -> None:
+        """Only an exact PROMOTE counts; "review:" is not deployable."""
+        prod = {"bad": "demote: no-skill"}
+        note = _no_replacement_note(prod, {"cand": "review: floor ok, condAcc 45%"})
+        assert note is not None
+        assert "NO REPLACEMENT" in note and "1 of 1" in note
+
+
+class TestReliabilityWarning:
+    """Reliability qualifies a verdict; it never overturns one."""
+
+    def test_an_unreliable_candidate_still_promotes_but_carries_the_number(
+        self,
+    ) -> None:
+        """A warning, not a veto."""
+        strong = dict(edge=0.30, edge_sd=0.1, edge_n=200, conditional_accuracy_rate=0.7)
+        assert _verdict(_stats(reliability=0.99, **strong), deployed=False) == "PROMOTE"
+        assert (
+            _verdict(_stats(reliability=0.60, **strong), deployed=False)
+            == "PROMOTE (rel 60%)"
+        )
+
+    def test_an_annotated_promote_still_counts_as_a_promote(self) -> None:
+        """The headline matches on prefix, so the warning cannot mute it.
+
+        Exact-equality matching would have turned the annotation into a silent
+        block -- the row would read PROMOTE while the headline said NO CHANGE.
+        """
+        assert _survivors({"a": "PROMOTE (rel 60%)"}) == ["a"]
+        note = _no_replacement_note(
+            {"bad": "demote: no-skill"}, {"cand": "PROMOTE (rel 60%)"}
+        )
+        assert note is not None and "NO DEPLOYED REPLACEMENT" in note
+
+    def test_a_deployed_tool_is_not_demoted_for_reliability_alone(self) -> None:
+        """It stays a keep, and stays a survivor."""
+        sound = dict(
+            brier=0.2000, baseline_brier=0.2400, edge=0.01, edge_sd=0.1, edge_n=200
+        )
+        verdict = _verdict(_stats(reliability=0.50, **sound), deployed=True)
+        assert verdict == "keep (rel 50%)"
+        assert _survivors({"a": verdict}) == ["a"]
+
+    def test_a_demote_is_not_annotated(self) -> None:
+        """A demote needs no second reason."""
+        bad = _stats(
+            reliability=0.50,
+            edge=0.01,
+            edge_sd=0.1,
+            edge_n=200,
+            conditional_accuracy_rate=0.3,
+        )
+        assert _verdict(bad, deployed=True) == "demote: condAcc 30%"
+
+    def test_an_unjudgeable_row_is_not_annotated(self) -> None:
+        """A caveat on "n=12 < 30" adds nothing."""
+        thin = _stats(reliability=0.50, edge=0.30, edge_sd=0.1, edge_n=12)
+        assert _verdict(thin, deployed=False) == "n=12 < 30"
+
+    def test_a_missing_reliability_annotates_nothing(self) -> None:
+        """Absent data is not a failing grade."""
+        stats = _stats(edge=0.30, edge_sd=0.1, edge_n=200)
+        del stats["reliability"]
+        assert _verdict(stats, deployed=False) == "PROMOTE"
+
+    def test_the_boundary_is_inclusive(self) -> None:
+        """Exactly at the gate is clean; a hair under warns."""
+        base = dict(edge=0.30, edge_sd=0.1, edge_n=200)
+        assert (
+            _verdict(_stats(reliability=RELIABILITY_GATE, **base), False) == "PROMOTE"
+        )
+        assert _verdict(
+            _stats(reliability=RELIABILITY_GATE - 0.01, **base), False
+        ).endswith("(rel 79%)")
+
+    def test_the_headline_announces_an_annotated_promote(self, tmp_path: Path) -> None:
+        """End to end: the warning must not mute the headline.
+
+        :param tmp_path: pytest temp dir.
+        """
+        results = tmp_path / "results"
+        results.mkdir()
+        for name in (
+            "trailing_scores_polymarket.json",
+            "rolling_scores_polymarket.json",
+            "prev_rolling_scores_polymarket.json",
+        ):
+            _write(results, name, {"alpha": _stats()})
+        _write(
+            results,
+            "scores_tournament_polymarket.json",
+            {
+                "cand": _stats(
+                    reliability=0.60,
+                    edge=0.30,
+                    edge_sd=0.1,
+                    edge_n=200,
+                    conditional_accuracy_rate=0.7,
+                )
+            },
+        )
+        messages = build_digest_messages(
+            results, "polymarket", allowed_tools={"alpha", "cand"}
+        )
+        title = messages[0]["blocks"][0]["text"]["text"]
+        assert "PROMOTE 1" in title
+        assert VERDICT_MARKER["promote"] in title
+        assert "rel 60%" in _body(results, allowed_tools={"alpha", "cand"})

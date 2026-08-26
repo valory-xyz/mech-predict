@@ -868,6 +868,11 @@ def _paginated_fetch(
     return all_records
 
 
+# Template keys owned by the id-cursor pagination loop; callers must not
+# pass them in ``template_vars`` or their values would be silently ignored.
+_CURSOR_TEMPLATE_KEYS = frozenset({"first", "id_gt"})
+
+
 def _id_cursor_paginated_fetch(
     url: str,
     query_template: str,
@@ -886,10 +891,19 @@ def _id_cursor_paginated_fetch(
     :param url: subgraph endpoint URL.
     :param query_template: ``%``-style query with ``first``/``id_gt`` slots.
     :param entity_key: top-level key of the returned collection.
-    :param template_vars: extra template substitutions.
+    :param template_vars: extra template substitutions; must not contain
+        the loop-owned ``first`` / ``id_gt`` keys.
     :param batch_size: page size.
     :return: every record across all pages, in id order.
+    :raises ValueError: if ``template_vars`` carries a loop-owned key.
     """
+    clashing = _CURSOR_TEMPLATE_KEYS & set(template_vars)
+    if clashing:
+        raise ValueError(
+            f"template_vars must not contain {sorted(clashing)}: "
+            "these keys are set by the pagination loop"
+        )
+
     all_records: list[dict[str, Any]] = []
     last_id = ""
 
@@ -907,7 +921,15 @@ def _id_cursor_paginated_fetch(
         log.info("  fetched %d %s (total %d)", len(batch), entity_key, len(all_records))
         if len(batch) < batch_size:
             break
-        last_id = batch[-1]["id"]
+        last_id = batch[-1].get("id")
+        if not last_id:
+            log.warning(
+                "  %s: last record of a full page has no id; cannot advance "
+                "the cursor, stopping after %d records",
+                entity_key,
+                len(all_records),
+            )
+            break
 
     return all_records
 

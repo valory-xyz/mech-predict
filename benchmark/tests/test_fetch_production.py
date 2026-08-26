@@ -19,6 +19,7 @@
 """Tests for benchmark/datasets/fetch_production.py"""
 
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -384,14 +385,7 @@ class TestFetchPolymarketResolvedUsesQuestions:
 
 
 class TestFetchOmenResolvedUsesMarkets:
-    """Omen resolved markets come from the market entity, one row per market.
-
-    The previous ``bets``-based proxy returned one row per bet on every
-    resolved market (thousands of rows per window) and the subgraph proxy
-    504s once skip pagination passes ~3000 rows, so the daily fetch failed
-    deterministically. Querying ``fixedProductMarketMakerCreations`` returns
-    a few hundred rows and needs no nested filter.
-    """
+    """Resolved Omen markets are fetched from the market entity, cursor-paginated on id."""
 
     @staticmethod
     def _market(
@@ -522,6 +516,75 @@ class TestIdCursorPaginatedFetch:
         )
         assert not rows
         assert len(calls) == 1
+
+    def test_full_final_page_stops_on_empty_follow_up(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A full last page triggers one more request, which returns empty.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        pages = [[{"id": "a"}, {"id": "b"}], [{"id": "c"}, {"id": "d"}], []]
+        queries: list[str] = []
+
+        def fake_post(_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            queries.append(payload["query"])
+            return {"things": pages[len(queries) - 1]}
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+        rows = fp._id_cursor_paginated_fetch(  # pylint: disable=protected-access
+            "http://x", self._TEMPLATE, "things", {"ts": 5}, batch_size=2
+        )
+
+        assert [r["id"] for r in rows] == ["a", "b", "c", "d"]
+        assert len(queries) == 3
+        assert 'id_gt: "d"' in queries[2]
+
+    def test_missing_id_on_last_record_stops_with_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A record without an id cannot seed the next cursor: stop, keep rows.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param caplog: pytest log capture fixture.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        calls: list[str] = []
+
+        def fake_post(_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+            calls.append(payload["query"])
+            return {"things": [{"id": "a"}, {"name": "no-id"}]}
+
+        monkeypatch.setattr(fp, "_post_graphql", fake_post)
+        with caplog.at_level(logging.WARNING):
+            rows = fp._id_cursor_paginated_fetch(  # pylint: disable=protected-access
+                "http://x", self._TEMPLATE, "things", {"ts": 5}, batch_size=2
+            )
+
+        assert len(rows) == 2
+        assert len(calls) == 1
+        assert any("things" in r.message and "id" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("reserved", ["id_gt", "first"])
+    def test_reserved_template_vars_are_rejected(self, reserved: str) -> None:
+        """Callers cannot pass keys the pagination loop owns.
+
+        :param reserved: the reserved template key under test.
+        """
+        # pylint: disable-next=import-outside-toplevel
+        from benchmark.datasets import fetch_production as fp
+
+        with pytest.raises(ValueError, match=reserved):
+            fp._id_cursor_paginated_fetch(  # pylint: disable=protected-access
+                "http://x", self._TEMPLATE, "things", {"ts": 5, reserved: "x"}
+            )
 
 
 # ---------------------------------------------------------------------------

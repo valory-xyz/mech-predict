@@ -48,11 +48,16 @@ on:
         type: boolean
         default: true
       use_mech_analytics_rows:
-        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default off; flip on once mech-analytics is stable in production. Overrides the repo variable USE_MECH_ANALYTICS_ROWS.'
+        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default on after the mech-analytics cutover; flip off here or via the repo variable USE_MECH_ANALYTICS_ROWS=false as a rollback lever. Non-empty value overrides the repo variable; empty defers to it.'
         required: false
         type: choice
         options: ['', 'true', 'false']
         default: ''
+      resolution_lag_days:
+        description: 'Days to reach back beyond the start of the current calendar month when the mech-analytics rebuild fallback runs. Default 0 fetches only the current month, leaving prior months in scores_history.jsonl verbatim. Each 31-day increment pulls one more full calendar month into the fetch and overwrites that month row with a mech-analytics-derived summary. Only used on the rebuild fallback path; the incremental path ignores it.'
+        required: false
+        type: string
+        default: '0'
 
 jobs:
   # -----------------------------------------------------------------------
@@ -86,19 +91,15 @@ jobs:
     # the scorer below, keeping the report and the scoring step in sync.
     env:
       BENCHMARK_ROLLING_WINDOW_DAYS: ${{ github.event.inputs.rolling_window_days || '7' }}
-      # mech-analytics endpoint. Consumed by scorer's rebuild path and
-      # analyze.py when USE_MECH_ANALYTICS_ROWS is set. Set as a repo
-      # secret so it can be rotated without a workflow edit. Empty on
-      # forks / when the secret is unset: the flag defaults off anyway
-      # so the current subgraph+IPFS path continues to run.
-      MECH_ANALYTICS_URL: ${{ secrets.MECH_ANALYTICS_URL }}
       # Feature flag: when 'true', scorer's --rebuild path and analyze.py
       # source their rows from mech-analytics instead of the local log
-      # files. Default off. Flip via the workflow_dispatch input or by
-      # setting the repo variable USE_MECH_ANALYTICS_ROWS=true once the
-      # mech-analytics deploy is stable in production. See
+      # files. Default ON after the mech-analytics cutover
+      # (valory-xyz/mech-analytics#36 + placeholder repair + equivalence
+      # job pin holding row-for-row score identity). Set the repo
+      # variable USE_MECH_ANALYTICS_ROWS=false to route back to the
+      # subgraph+IPFS path as a rollback lever. See
       # docs/consumer_migration.md §6 in valory-xyz/mech-analytics.
-      USE_MECH_ANALYTICS_ROWS: ${{ github.event.inputs.use_mech_analytics_rows || vars.USE_MECH_ANALYTICS_ROWS || 'false' }}
+      USE_MECH_ANALYTICS_ROWS: ${{ github.event.inputs.use_mech_analytics_rows || vars.USE_MECH_ANALYTICS_ROWS || 'true' }}
 
     steps:
       # fetch-depth: 0 so `git show <tag>:packages/packages.json` works for
@@ -258,6 +259,13 @@ jobs:
       - name: Score
         env:
           FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
+          # Reachback for the mech-analytics rebuild fallback. 0 = only
+          # rebuild the current calendar month, prior months in
+          # scores_history.jsonl stay verbatim. Each 31-day increment
+          # pulls one more calendar month into the fetch and overwrites
+          # that month's history row with a mech-analytics-derived
+          # summary. Read once by benchmark.scorer._resolution_lag_days.
+          MECH_ANALYTICS_RESOLUTION_LAG_DAYS: ${{ github.event.inputs.resolution_lag_days || '0' }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
@@ -280,18 +288,73 @@ jobs:
           if [ "$STALE_SCHEMA" = "true" ]; then
             echo "Restored scores.json predates the current scorer schema — forcing one rebuild"
           fi
-          # Flag on: the Fetch production step is skipped, so --rebuild
-          # is the only path that produces scores.json — always run it.
-          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ] \
-             || [ ! -f benchmark/results/scores.json ] \
-             || [ "$STALE_SCHEMA" = "true" ] \
-             || [ "$FORCE_REBUILD" = "true" ]; then
-            echo "Running full rebuild (mech-analytics flag on, missing scores.json, or force_rebuild=true)"
-            python -m benchmark.scorer --rebuild \
-              --logs-dir benchmark/datasets/logs/ \
-              $TOURNAMENT_FLAG
+          # Flag on: the Fetch production step is skipped, so scores.json
+          # doesn't get updated incrementally by that path. Two ways to
+          # produce it here:
+          #   (a) ``--mech-analytics-incremental`` — merge only rows with
+          #       ``computed_at >= watermark`` from the HTTP endpoint via
+          #       the update() path. Fast (seconds) but requires a valid
+          #       baseline: existing scores.json stamped
+          #       ``source=mech_analytics`` and a
+          #       ``mech_analytics_watermark.txt`` sidecar. Exit code 2
+          #       signals "no baseline" and drops through to (b).
+          #   (b) ``--rebuild`` — full trailing-window fetch and re-score.
+          #       Slow (minutes) but bootstraps from nothing and refreshes
+          #       every prior month in the fetch window.
+          # A rebuild is also forced when scores.json is missing, its
+          # schema is stale, or FORCE_REBUILD was set (backfill, dispatch
+          # input). The subgraph rollback keeps the pre-migration
+          # behavior of a no-op on normal runs (fast path already ran in
+          # fetch_production).
+          if [ "$USE_MECH_ANALYTICS_ROWS" != "true" ]; then
+            if [ ! -f benchmark/results/scores.json ] \
+               || [ "$STALE_SCHEMA" = "true" ] \
+               || [ "$FORCE_REBUILD" = "true" ]; then
+              echo "Running full rebuild (subgraph mode, missing scores.json / stale schema / force_rebuild)"
+              python -m benchmark.scorer --rebuild \
+                --logs-dir benchmark/datasets/logs/ \
+                $TOURNAMENT_FLAG
+            else
+              echo "scores.json present and not force_rebuild — fast path already ran in fetch"
+            fi
           else
-            echo "scores.json present and not force_rebuild — fast path already ran in fetch"
+            # mech-analytics mode: incremental unless we know we need a rebuild.
+            NEEDS_REBUILD="false"
+            if [ ! -f benchmark/results/scores.json ] \
+               || [ "$STALE_SCHEMA" = "true" ] \
+               || [ "$FORCE_REBUILD" = "true" ]; then
+              NEEDS_REBUILD="true"
+              echo "Running full rebuild (mech-analytics, missing scores.json / stale schema / force_rebuild)"
+            else
+              echo "Attempting mech-analytics incremental (delta rows only, seconds not minutes)"
+              # Sentinel exit code 2 from the scorer means "no baseline to
+              # resume from" — fall through to the rebuild below rather
+              # than aborting the workflow. Any other non-zero exit
+              # (endpoint unreachable, unexpected error) propagates so
+              # the run fails visibly rather than silently missing rows.
+              # $TOURNAMENT_FLAG deliberately omitted: the incremental
+              # path fetches from mech-analytics /v1/data/scored-rows and
+              # has no tournament-input partition — passing the flag
+              # would suggest a tournament-input file was applied when
+              # it wasn't.
+              set +e
+              python -m benchmark.scorer --mech-analytics-incremental
+              INCR_EXIT=$?
+              set -e
+              if [ "$INCR_EXIT" -eq 2 ]; then
+                echo "Incremental path has no baseline (exit 2); falling back to full rebuild"
+                NEEDS_REBUILD="true"
+              elif [ "$INCR_EXIT" -ne 0 ]; then
+                echo "Incremental scorer failed with exit $INCR_EXIT"
+                exit "$INCR_EXIT"
+              fi
+            fi
+            if [ "$NEEDS_REBUILD" = "true" ]; then
+              # Neither --logs-dir nor $TOURNAMENT_FLAG applies here:
+              # rebuild_from_mech_analytics fetches from the HTTP endpoint
+              # and has no tournament-input partition.
+              python -m benchmark.scorer --rebuild
+            fi
           fi
 
       # Incrementally merge tournament-scored rows into the cumulative
@@ -436,6 +499,7 @@ jobs:
             benchmark/results/scores_tournament_polymarket.json
             benchmark/results/scores_history.jsonl
             benchmark/results/scored_row_ids.json
+            benchmark/results/mech_analytics_watermark.txt
             benchmark/results/report_omen.md
             benchmark/results/report_polymarket.md
             benchmark/results/roi_results.json

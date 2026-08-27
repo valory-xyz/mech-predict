@@ -63,6 +63,7 @@ def sample_api_row() -> dict[str, Any]:
         "directional_correct": True,
         "requested_at": "2026-07-01T00:00:00Z",
         "delivered_at": "2026-07-01T00:00:30Z",
+        "computed_at": "2026-07-01T00:00:45Z",
     }
 
 
@@ -251,7 +252,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
         """A single-page response yields each row exactly once, then stops."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         responses = [self._fake_response([sample_api_row], next_cursor=None)]
         with patch.object(
             mac.requests.Session, "get", side_effect=lambda *a, **kw: responses.pop(0)
@@ -266,7 +267,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
         """The paginator follows ``next_cursor`` across pages until it goes null."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         second_row = dict(sample_api_row, request_id="req-2")
         third_row = dict(sample_api_row, request_id="req-3")
         responses = [
@@ -304,14 +305,16 @@ class TestIterScoredRowsPaging:
         assert captured_params[2].get("cursor") == "cur-2"
         assert "since" not in captured_params[2]
 
-    def test_missing_url_raises_before_any_http(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Missing ``MECH_ANALYTICS_URL`` raises immediately, before any HTTP call."""
-        monkeypatch.delenv("MECH_ANALYTICS_URL", raising=False)
-        with pytest.raises(mac.MechAnalyticsError, match="MECH_ANALYTICS_URL"):
-            # Consume the generator so the pre-flight config check fires.
-            list(mac.iter_scored_rows(since=datetime(2026, 7, 1, tzinfo=timezone.utc)))
+    def test_hardcoded_base_url_has_no_trailing_slash(self) -> None:
+        """Hardcoded ``MECH_ANALYTICS_URL`` invariant: no trailing slash.
+
+        The client concatenates ``{base}/v1/data/...`` — a trailing
+        slash on the constant would produce ``//v1/data/...``. Since the
+        constant is edited directly (rather than an env var), this pin
+        catches an errant rewrite that adds a slash before it reaches
+        production.
+        """
+        assert not mac.MECH_ANALYTICS_URL.endswith("/")
 
     def test_non_list_rows_raises_mech_analytics_error(
         self, monkeypatch: pytest.MonkeyPatch
@@ -320,7 +323,7 @@ class TestIterScoredRowsPaging:
         # Without the isinstance guard a payload like {"rows": {}} would
         # raise an opaque AttributeError mid-iteration. The guard raises
         # a typed error at the boundary instead.
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: {"rows": {"unexpected": "dict"}, "next_cursor": None},
             raise_for_status=lambda: None,
@@ -339,7 +342,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Top-level array or non-dict payload raises instead of AttributeError."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: ["unexpected", "array"],
             raise_for_status=lambda: None,
@@ -358,7 +361,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Missing 'rows' key raises (distinct from a legitimate rows=[])."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: {"error": "something went wrong"},
             raise_for_status=lambda: None,
@@ -377,7 +380,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Explicit rows=[] with null cursor is a valid empty last page."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         empty_response = SimpleNamespace(
             json=lambda: {"rows": [], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -394,7 +397,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
         """Session is entered as a context manager and closed after iteration."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         response = SimpleNamespace(
             json=lambda: {"rows": [sample_api_row], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -418,7 +421,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
         """Retry adapter is mounted for 5xx / connection resets."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         response = SimpleNamespace(
             json=lambda: {"rows": [sample_api_row], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -447,7 +450,7 @@ class TestIterScoredRowsPaging:
         self, monkeypatch: pytest.MonkeyPatch, sample_api_row: dict
     ) -> None:
         """Paginator raises when max_pages is hit with cursor still pending."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         always_more = SimpleNamespace(
             json=lambda: {"rows": [sample_api_row], "next_cursor": "cur-x"},
             raise_for_status=lambda: None,
@@ -489,7 +492,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A single-page response yields each request_id exactly once, then stops."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         responses = [
             self._fake_response(
                 [{"request_id": "u-1"}, {"request_id": "u-2"}], next_cursor=None
@@ -509,7 +512,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The paginator follows ``next_cursor`` across pages until it goes null."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         responses = [
             self._fake_response([{"request_id": "u-1"}], next_cursor="cur-1"),
             self._fake_response([{"request_id": "u-2"}], next_cursor="cur-2"),
@@ -542,23 +545,11 @@ class TestIterUnscoredRowIdsPaging:
         assert captured_params[2].get("cursor") == "cur-2"
         assert "since" not in captured_params[2]
 
-    def test_missing_url_raises_before_any_http(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Missing ``MECH_ANALYTICS_URL`` raises immediately, before any HTTP call."""
-        monkeypatch.delenv("MECH_ANALYTICS_URL", raising=False)
-        with pytest.raises(mac.MechAnalyticsError, match="MECH_ANALYTICS_URL"):
-            list(
-                mac.iter_unscored_row_ids(
-                    since=datetime(2026, 7, 1, tzinfo=timezone.utc)
-                )
-            )
-
     def test_non_list_rows_raises_mech_analytics_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Endpoint schema drift on ``rows`` surfaces as MechAnalyticsError."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: {"rows": {"unexpected": "dict"}, "next_cursor": None},
             raise_for_status=lambda: None,
@@ -577,7 +568,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Top-level array or non-dict payload raises instead of AttributeError."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: ["unexpected", "array"],
             raise_for_status=lambda: None,
@@ -596,7 +587,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Missing 'rows' key raises (distinct from a legitimate rows=[])."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         bad_response = SimpleNamespace(
             json=lambda: {"error": "something went wrong"},
             raise_for_status=lambda: None,
@@ -615,7 +606,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Explicit rows=[] with null cursor is a valid empty last page."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         empty_response = SimpleNamespace(
             json=lambda: {"rows": [], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -648,7 +639,7 @@ class TestIterUnscoredRowIdsPaging:
         :param caplog: pytest fixture capturing log records so the
             skip warning can be asserted.
         """
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         response = self._fake_response(
             [{"request_id": "u-1"}, {"request_id": None}, {"request_id": ""}],
             next_cursor=None,
@@ -672,7 +663,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Session is entered as a context manager and closed after iteration."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         response = SimpleNamespace(
             json=lambda: {"rows": [{"request_id": "u-1"}], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -696,7 +687,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Retry adapter is mounted for 5xx / connection resets."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         response = SimpleNamespace(
             json=lambda: {"rows": [{"request_id": "u-1"}], "next_cursor": None},
             raise_for_status=lambda: None,
@@ -723,7 +714,7 @@ class TestIterUnscoredRowIdsPaging:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Paginator raises when max_pages is hit with cursor still pending."""
-        monkeypatch.setenv("MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
         always_more = SimpleNamespace(
             json=lambda: {
                 "rows": [{"request_id": "u-1"}],
@@ -741,3 +732,101 @@ class TestIterUnscoredRowIdsPaging:
                         max_pages=3,
                     )
                 )
+
+
+class TestComputedAtIncrementalParams:
+    """Pin the client-side wiring for the incremental watermark path.
+
+    Two pieces have to line up for that to work end-to-end in the
+    client:
+
+    * ``since_computed_at`` / ``until_computed_at`` reach the endpoint as
+      the ISO-8601 ``since_computed_at`` / ``until_computed_at`` query
+      params, the mech-analytics endpoint filters on those (see
+      ``etl/api/routes/data.py`` in mech-analytics).
+    * ``_map_row`` exposes ``computed_at`` on the returned row so the
+      caller can track ``max(computed_at)`` across the iteration.
+    """
+
+    def test_since_computed_at_passed_as_iso_query_param(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_api_row: dict,
+    ) -> None:
+        """``since_computed_at`` datetime lands as an ISO 8601 Z query param."""
+        # A future refactor that dropped the new param, or wired it under
+        # a different name than the endpoint expects, would silently
+        # break the incremental resume: the endpoint would return the
+        # full window every run and the watermark would go unused. This
+        # test captures the exact query params seen by the session and
+        # asserts the endpoint-facing name.
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        captured_params: list[dict] = []
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+
+        def _capturing_get(*_a: Any, **kwargs: Any) -> Any:
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return response
+
+        monkeypatch.setattr(mac.requests.Session, "get", _capturing_get)
+        watermark = datetime(2026, 7, 1, 12, 30, tzinfo=timezone.utc)
+        list(mac.iter_scored_rows(since_computed_at=watermark))
+        assert captured_params, "expected at least one request"
+        first = captured_params[0]
+        assert first.get("since_computed_at") == "2026-07-01T12:30:00Z"
+        # ``since`` (the requested_at filter) must NOT appear when the
+        # caller only asked for a computed_at window — otherwise the
+        # endpoint would additionally restrict to a request-time window
+        # the caller didn't ask for.
+        assert "since" not in first
+
+    def test_until_computed_at_passed_as_iso_query_param(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_api_row: dict,
+    ) -> None:
+        """``until_computed_at`` datetime lands as an ISO 8601 Z query param."""
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        captured_params: list[dict] = []
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+
+        def _capturing_get(*_a: Any, **kwargs: Any) -> Any:
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return response
+
+        monkeypatch.setattr(mac.requests.Session, "get", _capturing_get)
+        list(
+            mac.iter_scored_rows(
+                since_computed_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                until_computed_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+            )
+        )
+        assert captured_params[0].get("until_computed_at") == "2026-07-02T00:00:00Z"
+
+    def test_map_row_surfaces_computed_at_for_watermark_tracking(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """``_map_row`` output must include the ``computed_at`` field."""
+        # ``update_from_mech_analytics`` iterates rows and tracks
+        # ``max(computed_at)``. If ``_map_row`` drops the field the
+        # incremental path would leave the watermark unchanged after
+        # every batch and the next run would re-fetch the same delta
+        # forever. Pin the pass-through.
+        row = mac._map_row(sample_api_row)
+        assert row["computed_at"] == sample_api_row["computed_at"]
+
+    def test_map_row_computed_at_missing_stays_none(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """Missing ``computed_at`` on the endpoint payload maps to ``None``."""
+        # Absent field must map to None (not raise, not stamp a bogus
+        # value). The incremental caller's ``_parse_row_computed_at``
+        # tolerates None and leaves the watermark unchanged.
+        sample_api_row.pop("computed_at")
+        assert mac._map_row(sample_api_row)["computed_at"] is None

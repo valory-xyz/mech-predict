@@ -305,7 +305,9 @@ class TestIterScoredRowsPaging:
         assert "since" not in captured_params[2]
 
     def test_hardcoded_base_url_has_no_trailing_slash(self) -> None:
-        """The client concatenates ``{base}/v1/data/...`` — a trailing
+        """Hardcoded ``MECH_ANALYTICS_URL`` invariant: no trailing slash.
+
+        The client concatenates ``{base}/v1/data/...`` — a trailing
         slash on the constant would produce ``//v1/data/...``. Since the
         constant is edited directly (rather than an env var), this pin
         catches an errant rewrite that adds a slash before it reaches

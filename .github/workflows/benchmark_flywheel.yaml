@@ -86,12 +86,6 @@ jobs:
     # the scorer below, keeping the report and the scoring step in sync.
     env:
       BENCHMARK_ROLLING_WINDOW_DAYS: ${{ github.event.inputs.rolling_window_days || '7' }}
-      # mech-analytics endpoint. Consumed by scorer's rebuild path and
-      # analyze.py when USE_MECH_ANALYTICS_ROWS is set. Set as a repo
-      # secret so it can be rotated without a workflow edit. Empty on
-      # forks / when the secret is unset: the flag defaults off anyway
-      # so the current subgraph+IPFS path continues to run.
-      MECH_ANALYTICS_URL: ${{ secrets.MECH_ANALYTICS_URL }}
       # Feature flag: when 'true', scorer's --rebuild path and analyze.py
       # source their rows from mech-analytics instead of the local log
       # files. Default ON after the mech-analytics cutover

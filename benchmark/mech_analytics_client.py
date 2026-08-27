@@ -43,13 +43,15 @@ class MechAnalyticsError(RuntimeError):
     """Raised when the endpoint response is unusable."""
 
 
+# Production URL for mech-analytics. Hardcoded rather than read from an
+# env var so a merged consumer PR is the whole flip — no separate repo
+# secret change needed to make the switch land. If the endpoint moves,
+# update this constant in a follow-up PR.
+MECH_ANALYTICS_URL = "https://mech-analytics-api.autonolas.tech"
+
+
 def _base_url() -> str:
-    url = os.getenv("MECH_ANALYTICS_URL")
-    if not url:
-        raise MechAnalyticsError(
-            "MECH_ANALYTICS_URL is not set; cannot fetch rows from mech-analytics"
-        )
-    return url.rstrip("/")
+    return MECH_ANALYTICS_URL
 
 
 def _to_iso_z(dt: datetime) -> str:
@@ -252,8 +254,8 @@ def iter_scored_rows(
     :param timeout_s: per-request timeout in seconds.
     :param max_pages: runaway guard.
     :yield: one accumulator-shaped row per yielded value.
-    :raises MechAnalyticsError: if the endpoint is unreachable, the config
-        (``MECH_ANALYTICS_URL``) is missing, or the paginator hits ``max_pages``.
+    :raises MechAnalyticsError: if the endpoint is unreachable
+        or the paginator hits ``max_pages``.
     """
     base = _base_url()
 
@@ -369,8 +371,8 @@ def iter_unscored_row_ids(
     :param timeout_s: per-request timeout in seconds.
     :param max_pages: runaway guard.
     :yield: one request_id per yielded value.
-    :raises MechAnalyticsError: if the endpoint is unreachable, the config
-        (``MECH_ANALYTICS_URL``) is missing, or the paginator hits ``max_pages``.
+    :raises MechAnalyticsError: if the endpoint is unreachable
+        or the paginator hits ``max_pages``.
     """
     base = _base_url()
 

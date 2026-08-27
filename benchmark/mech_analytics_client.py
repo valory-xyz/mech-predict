@@ -49,10 +49,6 @@ class MechAnalyticsError(RuntimeError):
 MECH_ANALYTICS_URL = "https://mech-analytics-api.autonolas.tech"
 
 
-def _base_url() -> str:
-    return MECH_ANALYTICS_URL
-
-
 def _to_iso_z(dt: datetime) -> str:
     """ISO 8601 with a trailing Z suffix, matching the endpoint's format."""
     if dt.tzinfo is None:
@@ -277,7 +273,7 @@ def iter_scored_rows(
     :raises MechAnalyticsError: if the endpoint is unreachable
         or the paginator hits ``max_pages``.
     """
-    base = _base_url()
+    base = MECH_ANALYTICS_URL
 
     params: dict[str, Any] = {"limit": page_size}
     if since is not None:
@@ -398,7 +394,7 @@ def iter_unscored_row_ids(
     :raises MechAnalyticsError: if the endpoint is unreachable
         or the paginator hits ``max_pages``.
     """
-    base = _base_url()
+    base = MECH_ANALYTICS_URL
 
     params: dict[str, Any] = {
         "since": _to_iso_z(since),

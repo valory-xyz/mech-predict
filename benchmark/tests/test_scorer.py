@@ -3394,6 +3394,30 @@ class TestRebuildFromMechAnalytics:
     test seeds a scratch tmp_path so history / dedup files start clean.
     """
 
+    @pytest.fixture(autouse=True)
+    def _isolate_default_watermark(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Redirect the module-level watermark constant into ``tmp_path``.
+
+        Rebuild's new ``watermark_path`` default is
+        ``DEFAULT_MECH_ANALYTICS_WATERMARK``, which points at the real
+        ``benchmark/results/mech_analytics_watermark.txt`` inside the
+        checkout. Every test in this class calls ``rebuild_from_mech_analytics``
+        without an explicit ``watermark_path``, so without this
+        autouse redirect each run would write into the working tree.
+
+        :param monkeypatch: pytest monkeypatch fixture.
+        :param tmp_path: pytest tmp_path fixture root.
+        """
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setattr(
+            scorer_mod,
+            "DEFAULT_MECH_ANALYTICS_WATERMARK",
+            tmp_path / "default_wm.txt",
+        )
+
     def _write_history(self, history_path: Path) -> None:
         """Seed a minimal scores_history.jsonl so the missing-history gate passes."""
         history_path.write_text('{"month": "2026-06", "brier": 0.2, "n": 100}\n')
@@ -4060,15 +4084,13 @@ def _patch_update_captor(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace ``scorer.update`` with a captor for isolated incremental tests.
 
     :param monkeypatch: pytest monkeypatch fixture.
-    :return: captor dict with ``rows`` / ``kwargs`` captured and a
-        ``raise_on_call`` toggle used by the crash-after-fetch test.
+    :return: captor dict holding the ``rows`` and ``kwargs`` seen by the
+        replaced ``update()``.
     """
-    captured: dict[str, Any] = {"rows": None, "kwargs": None, "raise_on_call": False}
+    captured: dict[str, Any] = {"rows": None, "kwargs": None}
     import benchmark.scorer as scorer_mod
 
     def _fake_update(rows: Any, **kwargs: Any) -> dict[str, Any]:
-        if captured["raise_on_call"]:
-            raise RuntimeError("simulated accumulator crash")
         captured["rows"] = list(rows)
         captured["kwargs"] = kwargs
         return {"overall": {"brier": 0.1, "n": len(captured["rows"])}}
@@ -4210,6 +4232,7 @@ class TestUpdateFromMechAnalyticsHappyPath:
         # same delta and update()'s dedup skips the successfully
         # merged rows. This test would fail if a future refactor
         # swapped the order.
+        import benchmark.scorer as scorer_mod
         from benchmark.scorer import update_from_mech_analytics
 
         scores, history, wm = _incremental_setup(
@@ -4219,8 +4242,11 @@ class TestUpdateFromMechAnalyticsHappyPath:
         rows = [_ma_row(request_id="a")]
         rows[0]["computed_at"] = "2026-07-01T05:00:00Z"
         _patch_iter_and_classifier(monkeypatch, rows)
-        captor = _patch_update_captor(monkeypatch)
-        captor["raise_on_call"] = True
+
+        def _crashing_update(*_a: Any, **_kw: Any) -> dict[str, Any]:
+            raise RuntimeError("simulated accumulator crash")
+
+        monkeypatch.setattr(scorer_mod, "update", _crashing_update)
         with pytest.raises(RuntimeError, match="simulated accumulator crash"):
             update_from_mech_analytics(
                 scores_path=scores, history_path=history, watermark_path=wm
@@ -4262,15 +4288,15 @@ class TestRebuildStampsWatermark:
         """Seed a minimal ``scores_history.jsonl`` so the history gate passes."""
         path.write_text('{"month": "2026-06", "brier": 0.2, "n": 100}\n')
 
-    def test_rebuild_writes_watermark_next_to_scores(
+    def test_rebuild_writes_watermark_at_supplied_path(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Rebuild writes the sidecar next to ``scores.json`` at ``max(computed_at)``."""
+        """Rebuild writes the sidecar to the supplied ``watermark_path`` at ``max(computed_at)``."""
         from benchmark.scorer import rebuild_from_mech_analytics
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
-        wm_path = tmp_path / "mech_analytics_watermark.txt"
+        wm_path = tmp_path / "wm.txt"
         self._write_history(history_path)
         rows = [_ma_row(request_id="a"), _ma_row(request_id="b")]
         rows[0]["computed_at"] = "2026-07-02T00:00:00Z"
@@ -4280,6 +4306,7 @@ class TestRebuildStampsWatermark:
             since=datetime(2026, 7, 1, tzinfo=timezone.utc),
             scores_path=scores_path,
             history_path=history_path,
+            watermark_path=wm_path,
         )
         assert wm_path.exists()
         assert wm_path.read_text().strip() == "2026-07-02T00:00:00Z"
@@ -4296,7 +4323,7 @@ class TestRebuildStampsWatermark:
 
         scores_path = tmp_path / "scores.json"
         history_path = tmp_path / "scores_history.jsonl"
-        wm_path = tmp_path / "mech_analytics_watermark.txt"
+        wm_path = tmp_path / "wm.txt"
         self._write_history(history_path)
         wm_path.write_text("2020-01-01T00:00:00Z")
         _patch_iter_and_classifier(monkeypatch, [])
@@ -4304,12 +4331,46 @@ class TestRebuildStampsWatermark:
             since=datetime(2026, 7, 1, tzinfo=timezone.utc),
             scores_path=scores_path,
             history_path=history_path,
+            watermark_path=wm_path,
         )
         # Rebuild unlinks the sidecar before writing, and with no rows
         # to derive a new max_computed_at from it stays gone. The
         # incremental gate then trips and forces another rebuild —
         # which is the safe fallback.
         assert not wm_path.exists()
+
+    def test_rebuild_and_incremental_share_default_watermark_path(self) -> None:
+        """Both entry points default their ``watermark_path`` to the same constant.
+
+        Rebuild and the follow-up incremental run must resolve to the
+        SAME sidecar file, or the incremental gate reads from a location
+        the rebuild never wrote to and the workflow force-rebuilds every
+        night. Python evaluates default parameter values at import
+        time, so this pins the identity of the two defaults at import
+        against the exported module constant.
+        """
+        import inspect
+
+        import benchmark.scorer as scorer_mod
+        from benchmark.scorer import (
+            DEFAULT_MECH_ANALYTICS_WATERMARK,
+            rebuild_from_mech_analytics,
+            update_from_mech_analytics,
+        )
+
+        rebuild_default = (
+            inspect.signature(rebuild_from_mech_analytics)
+            .parameters["watermark_path"]
+            .default
+        )
+        incremental_default = (
+            inspect.signature(update_from_mech_analytics)
+            .parameters["watermark_path"]
+            .default
+        )
+        assert rebuild_default is DEFAULT_MECH_ANALYTICS_WATERMARK
+        assert incremental_default is DEFAULT_MECH_ANALYTICS_WATERMARK
+        assert rebuild_default is scorer_mod.DEFAULT_MECH_ANALYTICS_WATERMARK
 
 
 class TestParseRowComputedAt:
@@ -4413,3 +4474,184 @@ class TestCliMechAnalyticsIncrementalExitCodes:
             args, tmp_path / "scores_tournament.json"
         )
         assert rc == 2
+
+
+class TestMainMechAnalyticsIncrementalSystemExit:
+    """Pin the ``main()`` end-to-end exit code contract.
+
+    ``TestCliMechAnalyticsIncrementalExitCodes`` pins the return value
+    of ``_cli_mech_analytics_incremental`` directly, but the workflow's
+    fallback branches on the process exit code from ``main()``. A
+    mutation to the ``if exit_code != 0`` gate inside ``main()`` (say,
+    ``raise SystemExit(1)`` on any non-zero) would pass every
+    inner-CLI test while silently breaking the exit-2 contract. This
+    test drives ``main()`` end-to-end.
+    """
+
+    def test_main_raises_system_exit_2_when_baseline_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``main() --mech-analytics-incremental`` propagates exit 2 on no baseline."""
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setattr(
+            scorer_mod, "update_from_mech_analytics", lambda **_kw: None
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "scorer",
+                "--mech-analytics-incremental",
+                "--output",
+                str(tmp_path / "scores.json"),
+                "--history",
+                str(tmp_path / "scores_history.jsonl"),
+            ],
+        )
+        with pytest.raises(SystemExit) as excinfo:
+            scorer_mod.main()
+        assert excinfo.value.code == 2
+
+    def test_main_returns_normally_on_successful_incremental(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``main()`` returns without SystemExit when incremental merges."""
+        # Anchor for the "exit 0 stays quiet" side: SystemExit(0)
+        # would look identical to normal return to a shell caller but
+        # if a refactor started raising SystemExit(0) it could
+        # short-circuit any code the CLI runs after the return.
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setattr(
+            scorer_mod,
+            "update_from_mech_analytics",
+            lambda **_kw: {"overall": {"brier": 0.09, "n": 3}},
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "scorer",
+                "--mech-analytics-incremental",
+                "--output",
+                str(tmp_path / "scores.json"),
+                "--history",
+                str(tmp_path / "scores_history.jsonl"),
+            ],
+        )
+        scorer_mod.main()  # no SystemExit
+
+
+class TestCliRebuildDispatch:
+    """``_cli_rebuild`` picks legacy vs mech-analytics via the env flag.
+
+    A mutation that swaps the two branches would silently route a
+    force-rebuild through the wrong data source, and no test would
+    catch it. These pin the dispatch.
+    """
+
+    def test_dispatches_to_mech_analytics_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=true routes rebuild via mech-analytics."""
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "mech_analytics"
+            return {"overall": {"brier": 0.09, "n": 0}}
+
+        def _fake_legacy(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "legacy"
+            return {"overall": {"brier": 0.09, "n": 0}}
+
+        monkeypatch.setattr(scorer_mod, "rebuild_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(scorer_mod, "rebuild", _fake_legacy)
+        args = argparse.Namespace(
+            output=tmp_path / "scores.json",
+            history=tmp_path / "scores_history.jsonl",
+            logs_dir=tmp_path / "logs",
+            tournament_input=None,
+        )
+        scorer_mod._cli_rebuild(  # pylint: disable=protected-access
+            args, tmp_path / "scores_tournament.json"
+        )
+        assert called["which"] == "mech_analytics"
+
+    def test_dispatches_to_legacy_rebuild_when_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=false routes rebuild via the legacy log path."""
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "mech_analytics"
+            return {"overall": {"brier": 0.09, "n": 0}}
+
+        def _fake_legacy(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "legacy"
+            return {"overall": {"brier": 0.09, "n": 0}}
+
+        monkeypatch.setattr(scorer_mod, "rebuild_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(scorer_mod, "rebuild", _fake_legacy)
+        args = argparse.Namespace(
+            output=tmp_path / "scores.json",
+            history=tmp_path / "scores_history.jsonl",
+            logs_dir=tmp_path / "logs",
+            tournament_input=None,
+        )
+        scorer_mod._cli_rebuild(  # pylint: disable=protected-access
+            args, tmp_path / "scores_tournament.json"
+        )
+        assert called["which"] == "legacy"
+
+
+class TestUpdateFromMechAnalyticsMixedBatch:
+    """A batch mixing rows with and without ``computed_at``.
+
+    Unit tests pin ``_parse_row_computed_at`` and the watermark-advance
+    logic separately. This integration pin asserts both hold together:
+    a row with no ``computed_at`` still lands in ``update()``, and the
+    watermark advances only to the max of the parseable values.
+    A mutation dropping the ``is not None`` guard on the accumulator
+    branch, or gating merge on a parseable ``computed_at``, would fail
+    exactly one of the two assertions here.
+    """
+
+    def test_null_computed_at_row_still_merges_and_watermark_uses_valid_max(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rows without ``computed_at`` merge; watermark advances to valid max."""
+        from benchmark.scorer import update_from_mech_analytics
+
+        scores, history, wm = _incremental_setup(
+            tmp_path, SOURCE_MECH_ANALYTICS, "2026-07-01T00:00:00Z"
+        )
+        rows = [
+            _ma_row(request_id="a"),
+            _ma_row(request_id="b"),
+            _ma_row(request_id="c"),
+        ]
+        rows[0]["computed_at"] = "2026-07-01T03:00:00Z"
+        rows[1].pop("computed_at", None)  # null / absent
+        rows[2]["computed_at"] = "2026-07-01T05:00:00Z"
+        _patch_iter_and_classifier(monkeypatch, rows)
+        captured = _patch_update_captor(monkeypatch)
+        update_from_mech_analytics(
+            scores_path=scores, history_path=history, watermark_path=wm
+        )
+        merged = captured["rows"]
+        assert merged is not None
+        assert [r["request_id"] for r in merged] == [  # pylint: disable=not-an-iterable
+            "a",
+            "b",
+            "c",
+        ]
+        # Watermark uses the highest parseable ``computed_at``, not
+        # the last row (whose value was null) and not the row before
+        # it (which had 03:00Z).
+        assert wm.read_text().strip() == "2026-07-01T05:00:00Z"

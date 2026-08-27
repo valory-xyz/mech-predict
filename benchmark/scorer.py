@@ -1858,6 +1858,7 @@ def rebuild_from_mech_analytics(
     until: datetime | None = None,
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
+    watermark_path: Path = DEFAULT_MECH_ANALYTICS_WATERMARK,
     chain_id: int | None = None,
 ) -> dict[str, Any]:
     """Rebuild scores from mech-analytics's ``/v1/data/scored-rows`` endpoint.
@@ -1870,8 +1871,9 @@ def rebuild_from_mech_analytics(
     ``scores_<platform>.json`` files, same downstream consumers
     (``analyze.py`` needs no changes).
 
-    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer;
-    default off so nothing changes until we flip.
+    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer.
+    Default on after the mech-analytics cutover; set the env var to
+    ``false`` to fall back to the legacy log-based :func:`rebuild`.
 
     **Timestamp windowing.** The endpoint applies ``since`` / ``until``
     to ``requested_at``. Rows are bucketed into months here by the same
@@ -1891,6 +1893,11 @@ def rebuild_from_mech_analytics(
         ``None``, the endpoint returns up to now.
     :param scores_path: output path for the production ``scores.json``.
     :param history_path: output path for ``scores_history.jsonl``.
+    :param watermark_path: sidecar file the follow-up
+        ``--mech-analytics-incremental`` run resumes from. Unlinked
+        before this rebuild starts so a partial run can't advance
+        incremental past unmerged rows; stamped with
+        ``max(computed_at)`` at the end if any rows were fetched.
     :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
         ``None`` fetches every chain the endpoint serves.
     :return: finalized production scores dict.
@@ -2023,8 +2030,7 @@ def rebuild_from_mech_analytics(
     # ``--mech-analytics-incremental`` run would resume from a
     # stale ``computed_at`` and merge only the tail of what the
     # rebuild already accumulated, silently under-counting rows.
-    # Sits next to scores_path per DEFAULT_MECH_ANALYTICS_WATERMARK.
-    (scores_path.parent / "mech_analytics_watermark.txt").unlink(missing_ok=True)
+    watermark_path.unlink(missing_ok=True)
 
     # mech-analytics has no tournament partition — leave existing
     # scores_tournament*.json files untouched. Overwriting them with
@@ -2061,14 +2067,32 @@ def rebuild_from_mech_analytics(
 
     # Stamp the watermark so a subsequent
     # ``--mech-analytics-incremental`` run can pick up from here
-    # without another full rebuild. Sits next to ``scores_path``.
+    # without another full rebuild.
     if max_computed_at is not None:
-        _write_watermark(
-            scores_path.parent / "mech_analytics_watermark.txt",
-            max_computed_at,
-        )
+        _write_watermark(watermark_path, max_computed_at)
 
     return prod_result
+
+
+def _parse_iso_aware(text: str) -> datetime | None:
+    """Parse an ISO 8601 string into a timezone-aware datetime.
+
+    Accepts the ``Z`` suffix produced by ``mech_analytics_client._to_iso_z``.
+    Returns ``None`` for malformed input or a naive timestamp — the two
+    callers (:func:`_read_watermark` and :func:`_parse_row_computed_at`)
+    both treat naive as garbage rather than silently branding it as UTC,
+    because the downstream endpoint call chain rejects naive input.
+
+    :param text: string form of an ISO 8601 timestamp.
+    :return: timezone-aware datetime, or ``None``.
+    """
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
 
 
 def _read_watermark(watermark_path: Path) -> datetime | None:
@@ -2084,22 +2108,46 @@ def _read_watermark(watermark_path: Path) -> datetime | None:
     :param watermark_path: sidecar file next to ``scores.json``.
     :return: timezone-aware datetime, or ``None``.
     """
+    log = logging.getLogger(__name__)
     if not watermark_path.exists():
         return None
     try:
         raw = watermark_path.read_text().strip()
-    except OSError:
+    except OSError as exc:
+        # Missing-file is filtered above, so this is a permission /
+        # I/O problem on a file that DOES exist. Distinct from a
+        # fresh clone.
+        log.warning(
+            "watermark %s unreadable (%s); rebuilding to recover",
+            watermark_path,
+            exc,
+        )
         return None
     if not raw:
+        # Zero-byte sidecar: usually a killed process between the
+        # atomic-rename temp create and the final rename. Distinct
+        # from fresh clone so a killed run doesn't look identical
+        # to a first-time deploy in the logs.
+        log.warning("watermark %s is empty; rebuilding to recover", watermark_path)
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
+        log.warning(
+            "watermark %s not an ISO 8601 timestamp (%r); rebuilding to recover",
+            watermark_path,
+            raw,
+        )
         return None
     if parsed.tzinfo is None:
-        # Naive timestamps are ambiguous — the endpoint rejects them and
-        # so should we. Force the caller into a rebuild rather than
-        # silently branding an unknown-offset string as UTC.
+        # Naive timestamps are ambiguous. Downstream, the value is
+        # handed to ``mech_analytics_client._to_iso_z`` when we call
+        # ``iter_scored_rows(since_computed_at=...)``, and _to_iso_z
+        # raises on naive input. Reject here so the caller falls back
+        # to a rebuild instead of crashing mid-fetch.
+        logging.getLogger(__name__).warning(
+            "watermark %s is naive; rebuilding to recover", watermark_path
+        )
         return None
     return parsed
 
@@ -2138,12 +2186,15 @@ def update_from_mech_analytics(
        sidecar file.
     2. Fetches only rows with ``computed_at >= watermark`` and
        ``resolved=true`` from mech-analytics — the delta of newly
-       resolved (or late-rescored) rows since the last run. Once a
-       row is resolved its scores are stable, so incremental cannot
-       double-count from a re-serve.
+       resolved (or late-rescored) rows since the last run.
     3. Merges the delta through ``update()`` — same monthly rollover,
-       same ``scored_row_ids.json`` dedup as the legacy path — so a
-       row that shows up twice across runs is skipped the second time.
+       same ``scored_row_ids.json`` dedup as the legacy path. The
+       dedup is what prevents double-counting when a row's
+       ``computed_at`` bumps forward (mech-analytics's late-resolution
+       sweep re-scores rows that were pending at first-score time),
+       causing the same ``request_id`` to reappear in a later delta —
+       the second appearance is skipped by ``row_id`` on
+       ``scored_row_ids.json``.
     4. Advances the watermark to the highest ``computed_at`` seen in
        this batch. The watermark write is atomic and follows the
        accumulator commit so a crash mid-run re-fetches a small tail
@@ -2273,6 +2324,18 @@ def update_from_mech_analytics(
             "update_from_mech_analytics: advanced watermark to %s",
             max_computed_at.isoformat(),
         )
+    elif new_rows:
+        # We fetched rows but not one carried a parseable
+        # ``computed_at``. If we don't warn, the watermark silently
+        # stays put and every subsequent run re-fetches the same
+        # delta forever. Distinct from "empty delta" (below), which
+        # is normal on a quiet window.
+        log.warning(
+            "update_from_mech_analytics: fetched %d rows but none had a "
+            "parseable computed_at; watermark cannot advance. Endpoint "
+            "may have changed its computed_at shape.",
+            len(new_rows),
+        )
     else:
         log.info("update_from_mech_analytics: no rows in delta; watermark unchanged")
 
@@ -2291,13 +2354,7 @@ def _parse_row_computed_at(value: Any) -> datetime | None:
     """
     if not value or not isinstance(value, str):
         return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed
+    return _parse_iso_aware(value)
 
 
 def _extract_date_from_log_path(path: str) -> str:

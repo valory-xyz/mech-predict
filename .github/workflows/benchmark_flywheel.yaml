@@ -48,7 +48,7 @@ on:
         type: boolean
         default: true
       use_mech_analytics_rows:
-        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default on after the mech-analytics cutover; flip off here or via the repo variable USE_MECH_ANALYTICS_ROWS=false as a rollback lever. Overrides the repo variable.'
+        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default on after the mech-analytics cutover; flip off here or via the repo variable USE_MECH_ANALYTICS_ROWS=false as a rollback lever. Non-empty value overrides the repo variable; empty defers to it.'
         required: false
         type: choice
         options: ['', 'true', 'false']
@@ -320,9 +320,13 @@ jobs:
               # than aborting the workflow. Any other non-zero exit
               # (endpoint unreachable, unexpected error) propagates so
               # the run fails visibly rather than silently missing rows.
+              # $TOURNAMENT_FLAG deliberately omitted: the incremental
+              # path fetches from mech-analytics /v1/data/scored-rows and
+              # has no tournament-input partition — passing the flag
+              # would suggest a tournament-input file was applied when
+              # it wasn't.
               set +e
-              python -m benchmark.scorer --mech-analytics-incremental \
-                $TOURNAMENT_FLAG
+              python -m benchmark.scorer --mech-analytics-incremental
               INCR_EXIT=$?
               set -e
               if [ "$INCR_EXIT" -eq 2 ]; then
@@ -334,9 +338,10 @@ jobs:
               fi
             fi
             if [ "$NEEDS_REBUILD" = "true" ]; then
-              python -m benchmark.scorer --rebuild \
-                --logs-dir benchmark/datasets/logs/ \
-                $TOURNAMENT_FLAG
+              # Neither --logs-dir nor $TOURNAMENT_FLAG applies here:
+              # rebuild_from_mech_analytics fetches from the HTTP endpoint
+              # and has no tournament-input partition.
+              python -m benchmark.scorer --rebuild
             fi
           fi
 
@@ -482,6 +487,7 @@ jobs:
             benchmark/results/scores_tournament_polymarket.json
             benchmark/results/scores_history.jsonl
             benchmark/results/scored_row_ids.json
+            benchmark/results/mech_analytics_watermark.txt
             benchmark/results/report_omen.md
             benchmark/results/report_polymarket.md
             benchmark/results/roi_results.json

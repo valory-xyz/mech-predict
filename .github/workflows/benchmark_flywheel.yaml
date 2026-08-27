@@ -48,7 +48,7 @@ on:
         type: boolean
         default: true
       use_mech_analytics_rows:
-        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default off; flip on once mech-analytics is stable in production. Overrides the repo variable USE_MECH_ANALYTICS_ROWS.'
+        description: 'Route scorer + analyze through mech-analytics HTTP API instead of local production logs. Default on after the mech-analytics cutover; flip off here or via the repo variable USE_MECH_ANALYTICS_ROWS=false as a rollback lever. Overrides the repo variable.'
         required: false
         type: choice
         options: ['', 'true', 'false']
@@ -94,11 +94,13 @@ jobs:
       MECH_ANALYTICS_URL: ${{ secrets.MECH_ANALYTICS_URL }}
       # Feature flag: when 'true', scorer's --rebuild path and analyze.py
       # source their rows from mech-analytics instead of the local log
-      # files. Default off. Flip via the workflow_dispatch input or by
-      # setting the repo variable USE_MECH_ANALYTICS_ROWS=true once the
-      # mech-analytics deploy is stable in production. See
+      # files. Default ON after the mech-analytics cutover
+      # (valory-xyz/mech-analytics#36 + placeholder repair + equivalence
+      # job pin holding row-for-row score identity). Set the repo
+      # variable USE_MECH_ANALYTICS_ROWS=false to route back to the
+      # subgraph+IPFS path as a rollback lever. See
       # docs/consumer_migration.md §6 in valory-xyz/mech-analytics.
-      USE_MECH_ANALYTICS_ROWS: ${{ github.event.inputs.use_mech_analytics_rows || vars.USE_MECH_ANALYTICS_ROWS || 'false' }}
+      USE_MECH_ANALYTICS_ROWS: ${{ github.event.inputs.use_mech_analytics_rows || vars.USE_MECH_ANALYTICS_ROWS || 'true' }}
 
     steps:
       # fetch-depth: 0 so `git show <tag>:packages/packages.json` works for

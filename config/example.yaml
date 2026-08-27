@@ -1,0 +1,19 @@
+# Olas Mech Worker Tool Configuration
+tool_id: "polymarket_intelligence"
+name: "Polymarket Prediction Market Intelligence x402 Tool"
+description: "Retrieves live Polymarket prediction market analysis, implied probabilities, volume/liquidity metrics, and automated risk flags ($0.05 USDC on Base)."
+author: "Autonomous Crypto Intelligence Labs"
+version: "1.0.0"
+
+gateway:
+  url: "https://agent-payment-gateway.vercel.app/v1/prediction-market-analysis"
+  price_usdc: "0.05"
+  network: "eip155:8453"
+  asset_contract: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+  merchant_recipient: "0x43f9a721B59C247B6258e72A1Bf5A384b64F8A38"
+
+inputs:
+  schema: "schemas/input.json"
+
+outputs:
+  schema: "schemas/output.json"

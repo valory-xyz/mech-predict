@@ -53,6 +53,11 @@ on:
         type: choice
         options: ['', 'true', 'false']
         default: ''
+      resolution_lag_days:
+        description: 'Days to reach back beyond the start of the current calendar month when the mech-analytics rebuild fallback runs. Default 0 fetches only the current month, leaving prior months in scores_history.jsonl verbatim. Each 31-day increment pulls one more full calendar month into the fetch and overwrites that month row with a mech-analytics-derived summary. Only used on the rebuild fallback path; the incremental path ignores it.'
+        required: false
+        type: string
+        default: '0'
 
 jobs:
   # -----------------------------------------------------------------------
@@ -254,6 +259,13 @@ jobs:
       - name: Score
         env:
           FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
+          # Reachback for the mech-analytics rebuild fallback. 0 = only
+          # rebuild the current calendar month, prior months in
+          # scores_history.jsonl stay verbatim. Each 31-day increment
+          # pulls one more calendar month into the fetch and overwrites
+          # that month's history row with a mech-analytics-derived
+          # summary. Read once by benchmark.scorer._resolution_lag_days.
+          MECH_ANALYTICS_RESOLUTION_LAG_DAYS: ${{ github.event.inputs.resolution_lag_days || '0' }}
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then

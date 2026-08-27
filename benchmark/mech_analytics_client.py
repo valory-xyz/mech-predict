@@ -173,6 +173,12 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         # ``fetch_production`` stamps ``predicted_at`` on legacy log
         # rows; fall back to ``requested_at`` when delivery is missing.
         "predicted_at": api_row.get("delivered_at") or api_row.get("requested_at"),
+        # ``computed_at`` is the server-side keyset sort key and the
+        # watermark the incremental path (``update_from_mech_analytics``)
+        # advances on each run — surfaced here so the caller can track
+        # ``max(computed_at)`` across the iteration without touching the
+        # raw ``api_row`` payload. accumulate_row ignores it.
+        "computed_at": api_row.get("computed_at"),
         # Fields the endpoint doesn't carry today — left None so the
         # accumulator uses its own defaults ("unknown" / "production_replay").
         # See PR #11 on mech-analytics for the grouping-dimension sign-off.
@@ -228,9 +234,11 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 def iter_scored_rows(
-    since: datetime,
+    since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     *,
+    since_computed_at: Optional[datetime] = None,
+    until_computed_at: Optional[datetime] = None,
     platform: Optional[str] = None,
     chain_id: Optional[int] = None,
     resolved: Optional[bool] = None,
@@ -243,9 +251,22 @@ def iter_scored_rows(
     Rows come back in the shape ``accumulate_row`` expects (see ``_map_row``).
     Pagination uses the endpoint's opaque keyset cursor.
 
-    :param since: timezone-aware datetime for the ``since`` filter (inclusive).
+    :param since: timezone-aware datetime for the ``since`` filter on
+        ``requested_at`` (inclusive). Used by ``rebuild_from_mech_analytics``
+        to bucket rows by request month; omit for the incremental path
+        that watermarks on ``computed_at`` instead.
     :param until: optional timezone-aware datetime for the ``until`` filter
-        (exclusive; endpoint semantics).
+        on ``requested_at`` (exclusive; endpoint semantics).
+    :param since_computed_at: timezone-aware datetime for the
+        ``since_computed_at`` filter (inclusive). The endpoint's default
+        keyset order is ``(computed_at, request_id)`` so the incremental
+        path can advance ``since_computed_at`` to the previous run's
+        max ``computed_at`` and cleanly resume without re-fetching
+        already-seen rows.
+    :param until_computed_at: timezone-aware datetime for the
+        ``until_computed_at`` filter (exclusive). Rarely useful in
+        practice; kept symmetric with ``since_computed_at`` for tests
+        and one-shot backfills.
     :param platform: optional platform filter ("omen" | "polymarket").
     :param chain_id: optional chain filter (100 for Gnosis, 137 for Polygon).
     :param resolved: optional filter to include only resolved / unresolved rows.
@@ -258,12 +279,15 @@ def iter_scored_rows(
     """
     base = _base_url()
 
-    params: dict[str, Any] = {
-        "since": _to_iso_z(since),
-        "limit": page_size,
-    }
+    params: dict[str, Any] = {"limit": page_size}
+    if since is not None:
+        params["since"] = _to_iso_z(since)
     if until is not None:
         params["until"] = _to_iso_z(until)
+    if since_computed_at is not None:
+        params["since_computed_at"] = _to_iso_z(since_computed_at)
+    if until_computed_at is not None:
+        params["until_computed_at"] = _to_iso_z(until_computed_at)
     if platform is not None:
         params["platform"] = platform
     if chain_id is not None:
@@ -336,10 +360,11 @@ def iter_scored_rows(
                 )
 
     log.info(
-        "mech-analytics: fetched %d rows across %d page(s) since=%s",
+        "mech-analytics: fetched %d rows across %d page(s) since=%s since_computed_at=%s",
         total_rows,
         pages,
-        _to_iso_z(since),
+        _to_iso_z(since) if since is not None else None,
+        _to_iso_z(since_computed_at) if since_computed_at is not None else None,
     )
 
 

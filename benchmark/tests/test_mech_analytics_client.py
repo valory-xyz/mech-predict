@@ -63,6 +63,7 @@ def sample_api_row() -> dict[str, Any]:
         "directional_correct": True,
         "requested_at": "2026-07-01T00:00:00Z",
         "delivered_at": "2026-07-01T00:00:30Z",
+        "computed_at": "2026-07-01T00:00:45Z",
     }
 
 
@@ -731,3 +732,101 @@ class TestIterUnscoredRowIdsPaging:
                         max_pages=3,
                     )
                 )
+
+
+class TestComputedAtIncrementalParams:
+    """Pin the client-side wiring for the incremental watermark path.
+
+    Two pieces have to line up for that to work end-to-end in the
+    client:
+
+    * ``since_computed_at`` / ``until_computed_at`` reach the endpoint as
+      the ISO-8601 ``since_computed_at`` / ``until_computed_at`` query
+      params, the mech-analytics endpoint filters on those (see
+      ``etl/api/routes/data.py`` in mech-analytics).
+    * ``_map_row`` exposes ``computed_at`` on the returned row so the
+      caller can track ``max(computed_at)`` across the iteration.
+    """
+
+    def test_since_computed_at_passed_as_iso_query_param(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_api_row: dict,
+    ) -> None:
+        """``since_computed_at`` datetime lands as an ISO 8601 Z query param."""
+        # A future refactor that dropped the new param, or wired it under
+        # a different name than the endpoint expects, would silently
+        # break the incremental resume: the endpoint would return the
+        # full window every run and the watermark would go unused. This
+        # test captures the exact query params seen by the session and
+        # asserts the endpoint-facing name.
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        captured_params: list[dict] = []
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+
+        def _capturing_get(*_a: Any, **kwargs: Any) -> Any:
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return response
+
+        monkeypatch.setattr(mac.requests.Session, "get", _capturing_get)
+        watermark = datetime(2026, 7, 1, 12, 30, tzinfo=timezone.utc)
+        list(mac.iter_scored_rows(since_computed_at=watermark))
+        assert captured_params, "expected at least one request"
+        first = captured_params[0]
+        assert first.get("since_computed_at") == "2026-07-01T12:30:00Z"
+        # ``since`` (the requested_at filter) must NOT appear when the
+        # caller only asked for a computed_at window — otherwise the
+        # endpoint would additionally restrict to a request-time window
+        # the caller didn't ask for.
+        assert "since" not in first
+
+    def test_until_computed_at_passed_as_iso_query_param(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_api_row: dict,
+    ) -> None:
+        """``until_computed_at`` datetime lands as an ISO 8601 Z query param."""
+        monkeypatch.setattr(mac, "MECH_ANALYTICS_URL", "http://mech-analytics.test")
+        captured_params: list[dict] = []
+        response = SimpleNamespace(
+            json=lambda: {"rows": [sample_api_row], "next_cursor": None},
+            raise_for_status=lambda: None,
+        )
+
+        def _capturing_get(*_a: Any, **kwargs: Any) -> Any:
+            captured_params.append(dict(kwargs.get("params") or {}))
+            return response
+
+        monkeypatch.setattr(mac.requests.Session, "get", _capturing_get)
+        list(
+            mac.iter_scored_rows(
+                since_computed_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                until_computed_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+            )
+        )
+        assert captured_params[0].get("until_computed_at") == "2026-07-02T00:00:00Z"
+
+    def test_map_row_surfaces_computed_at_for_watermark_tracking(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """``_map_row`` output must include the ``computed_at`` field."""
+        # ``update_from_mech_analytics`` iterates rows and tracks
+        # ``max(computed_at)``. If ``_map_row`` drops the field the
+        # incremental path would leave the watermark unchanged after
+        # every batch and the next run would re-fetch the same delta
+        # forever. Pin the pass-through.
+        row = mac._map_row(sample_api_row)
+        assert row["computed_at"] == sample_api_row["computed_at"]
+
+    def test_map_row_computed_at_missing_stays_none(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """Missing ``computed_at`` on the endpoint payload maps to ``None``."""
+        # Absent field must map to None (not raise, not stamp a bogus
+        # value). The incremental caller's ``_parse_row_computed_at``
+        # tolerates None and leaves the watermark unchanged.
+        sample_api_row.pop("computed_at")
+        assert mac._map_row(sample_api_row)["computed_at"] is None

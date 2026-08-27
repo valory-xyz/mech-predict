@@ -276,18 +276,68 @@ jobs:
           if [ "$STALE_SCHEMA" = "true" ]; then
             echo "Restored scores.json predates the current scorer schema — forcing one rebuild"
           fi
-          # Flag on: the Fetch production step is skipped, so --rebuild
-          # is the only path that produces scores.json — always run it.
-          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ] \
-             || [ ! -f benchmark/results/scores.json ] \
-             || [ "$STALE_SCHEMA" = "true" ] \
-             || [ "$FORCE_REBUILD" = "true" ]; then
-            echo "Running full rebuild (mech-analytics flag on, missing scores.json, or force_rebuild=true)"
-            python -m benchmark.scorer --rebuild \
-              --logs-dir benchmark/datasets/logs/ \
-              $TOURNAMENT_FLAG
+          # Flag on: the Fetch production step is skipped, so scores.json
+          # doesn't get updated incrementally by that path. Two ways to
+          # produce it here:
+          #   (a) ``--mech-analytics-incremental`` — merge only rows with
+          #       ``computed_at >= watermark`` from the HTTP endpoint via
+          #       the update() path. Fast (seconds) but requires a valid
+          #       baseline: existing scores.json stamped
+          #       ``source=mech_analytics`` and a
+          #       ``mech_analytics_watermark.txt`` sidecar. Exit code 2
+          #       signals "no baseline" and drops through to (b).
+          #   (b) ``--rebuild`` — full trailing-window fetch and re-score.
+          #       Slow (minutes) but bootstraps from nothing and refreshes
+          #       every prior month in the fetch window.
+          # A rebuild is also forced when scores.json is missing, its
+          # schema is stale, or FORCE_REBUILD was set (backfill, dispatch
+          # input). The subgraph rollback keeps the pre-migration
+          # behavior of a no-op on normal runs (fast path already ran in
+          # fetch_production).
+          if [ "$USE_MECH_ANALYTICS_ROWS" != "true" ]; then
+            if [ ! -f benchmark/results/scores.json ] \
+               || [ "$STALE_SCHEMA" = "true" ] \
+               || [ "$FORCE_REBUILD" = "true" ]; then
+              echo "Running full rebuild (subgraph mode, missing scores.json / stale schema / force_rebuild)"
+              python -m benchmark.scorer --rebuild \
+                --logs-dir benchmark/datasets/logs/ \
+                $TOURNAMENT_FLAG
+            else
+              echo "scores.json present and not force_rebuild — fast path already ran in fetch"
+            fi
           else
-            echo "scores.json present and not force_rebuild — fast path already ran in fetch"
+            # mech-analytics mode: incremental unless we know we need a rebuild.
+            NEEDS_REBUILD="false"
+            if [ ! -f benchmark/results/scores.json ] \
+               || [ "$STALE_SCHEMA" = "true" ] \
+               || [ "$FORCE_REBUILD" = "true" ]; then
+              NEEDS_REBUILD="true"
+              echo "Running full rebuild (mech-analytics, missing scores.json / stale schema / force_rebuild)"
+            else
+              echo "Attempting mech-analytics incremental (delta rows only, seconds not minutes)"
+              # Sentinel exit code 2 from the scorer means "no baseline to
+              # resume from" — fall through to the rebuild below rather
+              # than aborting the workflow. Any other non-zero exit
+              # (endpoint unreachable, unexpected error) propagates so
+              # the run fails visibly rather than silently missing rows.
+              set +e
+              python -m benchmark.scorer --mech-analytics-incremental \
+                $TOURNAMENT_FLAG
+              INCR_EXIT=$?
+              set -e
+              if [ "$INCR_EXIT" -eq 2 ]; then
+                echo "Incremental path has no baseline (exit 2); falling back to full rebuild"
+                NEEDS_REBUILD="true"
+              elif [ "$INCR_EXIT" -ne 0 ]; then
+                echo "Incremental scorer failed with exit $INCR_EXIT"
+                exit "$INCR_EXIT"
+              fi
+            fi
+            if [ "$NEEDS_REBUILD" = "true" ]; then
+              python -m benchmark.scorer --rebuild \
+                --logs-dir benchmark/datasets/logs/ \
+                $TOURNAMENT_FLAG
+            fi
           fi
 
       # Incrementally merge tournament-scored rows into the cumulative

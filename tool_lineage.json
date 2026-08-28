@@ -197,6 +197,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster-polymarket-v5": {
+      "parent": "superforcaster-polymarket-v4",
+      "reason": "Fix the free-text input contract (issue #455): derive a short Serper search query from free-text prompts instead of passing the full prompt, and add an explicit empty-retrieval guard that returns a null prediction instead of a silent prior-only forecast."
     }
   }
 }

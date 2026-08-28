@@ -139,6 +139,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_polymarket_v5 -- fixes the free-text input contract
+    # (issue #455): derive_search_query() compresses long prompts before Serper so
+    # non-trader callers get real retrieval; empty-retrieval guard returns an
+    # explicit null prediction instead of a silent prior-only forecast.
+    "superforcaster-polymarket-v5": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_polymarket_v5"
+            ".superforcaster_polymarket_v5"
+        ),
+        family="superforcaster",
+    ),
     # napthaai/prediction_request_reasoning_v1
     "prediction-request-reasoning-v1": ToolSpec(
         module="packages.napthaai.customs.prediction_request_reasoning_v1.prediction_request_reasoning_v1",

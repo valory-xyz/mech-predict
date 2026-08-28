@@ -507,6 +507,9 @@ def extract_question(prompt: str) -> str:
     returns the concise extracted question. On a mismatch (free-text input),
     returns the full prompt so the LLM receives complete resolution context.
     Use derive_search_query() separately to get a short Serper search query.
+
+    :param prompt: the raw prompt passed to run().
+    :return: the extracted question (trader-template short form if matched, else the full prompt).
     """
     # Issue #455: v4 fell back to `question = prompt` on a regex mismatch,
     # which passed a 500+ char prompt as the Serper query and deterministically

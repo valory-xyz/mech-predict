@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
-from benchmark import roi_sim
+from benchmark import mech_analytics_client, roi_sim
 from benchmark.roi_sim import (
     Bet,
     CLAUDE_HARDCODED_MODEL,
@@ -1923,3 +1923,131 @@ class TestActiveFilter:
         assert _active_tools_for_platform(
             fixtures[0], "omen", benchmarked
         ) == frozenset({"tool_a", "tool-b"})
+
+
+class TestLoadInputRowsFromMechAnalytics:
+    """Cover the roi_sim mech-analytics fetch path.
+
+    Same downstream shape as the log-based loader so the rest of roi_sim
+    reads unchanged. Two shape shims matter and are pinned below:
+    ``predicted_at`` aliased from ``requested_at``, and ``row_id``
+    defaulted from ``request_id`` for dedup compatibility.
+    """
+
+    def test_fetches_with_since_until_and_resolved_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Window bounds + ``resolved=True`` reach ``iter_scored_rows``."""
+        captured: list[dict[str, Any]] = []
+
+        def _fake_iter(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+            yield from []
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 8, tzinfo=timezone.utc)
+        roi_sim.load_input_rows_from_mech_analytics(start, end)
+        assert len(captured) == 1
+        call = captured[0]
+        assert call["since"] == start
+        assert call["until"] == end
+        # resolved=True is load-bearing: unresolved rows have no
+        # final_outcome, so simulate() would drop them anyway, but
+        # asking for them wastes bandwidth and confuses log counts.
+        assert call["resolved"] is True
+
+    def test_aliases_requested_at_to_predicted_at(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Row's ``requested_at`` gets aliased into ``predicted_at``."""
+        # The rest of roi_sim keys on ``predicted_at`` (see
+        # ``_parse_predicted_at``), and mech-analytics returns
+        # ``requested_at``. If a refactor dropped the alias, every row
+        # would fail the window check and simulate() would return zero
+        # groups.
+        raw = {
+            "request_id": "req-1",
+            "requested_at": "2026-08-05T00:00:00Z",
+            "p_yes": 0.7,
+            "market_prob_at_prediction": 0.5,
+            "final_outcome": True,
+            "prediction_parse_status": "valid",
+            "tool_name": "superforcaster",
+            "platform": "omen",
+            "market_id": "0xabc",
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert len(rows) == 1
+        assert rows[0]["predicted_at"] == "2026-08-05T00:00:00Z"
+
+    def test_defaults_row_id_from_request_id(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``row_id`` defaults to ``request_id`` for dedup in simulate()."""
+        raw = {
+            "request_id": "req-42",
+            "requested_at": "2026-08-05T00:00:00Z",
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert rows[0]["row_id"] == "req-42"
+
+    def test_existing_predicted_at_or_row_id_are_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the row already carries ``predicted_at`` or ``row_id``, keep them."""
+        # Guards against a future endpoint change that starts returning
+        # ``predicted_at`` directly: the alias must not overwrite.
+        raw = {
+            "request_id": "req-1",
+            "predicted_at": "2026-08-05T12:00:00Z",
+            "requested_at": "2026-08-05T00:00:00Z",
+            "row_id": "custom-row",
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert rows[0]["predicted_at"] == "2026-08-05T12:00:00Z"  # not overwritten
+        assert rows[0]["row_id"] == "custom-row"  # not overwritten
+
+
+# pylint: disable=protected-access
+class TestRoiSimUseMechAnalyticsFlag:
+    """Pin the env-var dispatch inside ``roi_sim`` matches the scorer's."""
+
+    def test_flag_true_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_use_mech_analytics_rows`` returns True when USE_MECH_ANALYTICS_ROWS=true."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        assert roi_sim._use_mech_analytics_rows() is True
+
+    def test_flag_false_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_use_mech_analytics_rows`` returns False when USE_MECH_ANALYTICS_ROWS=false."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        assert roi_sim._use_mech_analytics_rows() is False
+
+    def test_flag_unset_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset env var falls through to the legacy log path (safe default)."""
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        assert roi_sim._use_mech_analytics_rows() is False

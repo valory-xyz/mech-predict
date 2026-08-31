@@ -373,42 +373,61 @@ jobs:
       # (--period-days, --period-offset-days) is driven by the
       # BENCHMARK_ROLLING_WINDOW_DAYS env var declared at the job level
       # so the scorer and the Python ROLLING_WINDOW_DAYS constant stay in
-      # sync from a single source.
+      # sync from a single source. Under USE_MECH_ANALYTICS_ROWS=true
+      # the scorer's --period-days path routes internally through
+      # score_period_split_by_platform_from_mech_analytics: same output
+      # shape, but fetches the window from /v1/data/scored-rows instead
+      # of reading local log files. --logs-dir and --tournament-input
+      # are ignored on that path (mech-analytics carries production rows
+      # only), so we omit them to avoid implying they applied.
       - name: Score current rolling window
-        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
-          fi
           # --skip-tournament-output: the analyzer renders tournament
           # all-time only (never day-gated), so rolling tournament files
           # would just sit unread in results/.
-          python -m benchmark.scorer \
-            --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/rolling_scores.json \
-            --skip-tournament-output \
-            $TOURNAMENT_FLAG
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.scorer \
+              --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --output benchmark/results/rolling_scores.json \
+              --skip-tournament-output
+          else
+            TOURNAMENT_FLAG=""
+            if [ -f benchmark/results/tournament_scored.jsonl ]; then
+              TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+            fi
+            python -m benchmark.scorer \
+              --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --logs-dir benchmark/datasets/logs/ \
+              --output benchmark/results/rolling_scores.json \
+              --skip-tournament-output \
+              $TOURNAMENT_FLAG
+          fi
         continue-on-error: true
 
       # Score the preceding non-overlapping window (offset by the same
       # window length so Current and Prev never overlap). Feeds the
       # "Δ vs Prev Nd" columns in the three-window comparison tables.
       - name: Score previous rolling window (non-overlapping)
-        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.scorer \
+              --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --output benchmark/results/prev_rolling_scores.json \
+              --skip-tournament-output
+          else
+            TOURNAMENT_FLAG=""
+            if [ -f benchmark/results/tournament_scored.jsonl ]; then
+              TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+            fi
+            python -m benchmark.scorer \
+              --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
+              --logs-dir benchmark/datasets/logs/ \
+              --output benchmark/results/prev_rolling_scores.json \
+              --skip-tournament-output \
+              $TOURNAMENT_FLAG
           fi
-          python -m benchmark.scorer \
-            --period-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
-            --period-offset-days "$BENCHMARK_ROLLING_WINDOW_DAYS" \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/prev_rolling_scores.json \
-            --skip-tournament-output \
-            $TOURNAMENT_FLAG
         continue-on-error: true
 
       # Trailing 90-day window: the digest's third column set. A fixed
@@ -417,18 +436,24 @@ jobs:
       # NOTE: the 90 below must match the digest's literal 90d labels
       # (benchmark/digest_tables.py _AT_COLUMNS + captions) -- change both.
       - name: Score trailing 90d window
-        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.scorer \
+              --period-days 90 \
+              --output benchmark/results/trailing_scores.json \
+              --skip-tournament-output
+          else
+            TOURNAMENT_FLAG=""
+            if [ -f benchmark/results/tournament_scored.jsonl ]; then
+              TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+            fi
+            python -m benchmark.scorer \
+              --period-days 90 \
+              --logs-dir benchmark/datasets/logs/ \
+              --output benchmark/results/trailing_scores.json \
+              --skip-tournament-output \
+              $TOURNAMENT_FLAG
           fi
-          python -m benchmark.scorer \
-            --period-days 90 \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/trailing_scores.json \
-            --skip-tournament-output \
-            $TOURNAMENT_FLAG
         continue-on-error: true
 
       - name: Analyze (Omenstrat)
@@ -452,18 +477,25 @@ jobs:
       # fetched/scored. continue-on-error: the companion must not fail the
       # flywheel -- when it breaks, the daily Slack posts simply go out
       # without the ROI section (notify_slack degrades gracefully when
-      # roi_results.json is missing).
+      # roi_results.json is missing). Under USE_MECH_ANALYTICS_ROWS=true
+      # the roi_sim CLI routes internally through
+      # load_input_rows_from_mech_analytics; --logs-dir and
+      # --tournament-input are ignored on that path, so we omit them.
       - name: Simulate trader ROI (companion)
-        if: always() && !cancelled() && env.USE_MECH_ANALYTICS_ROWS != 'true'
+        if: always() && !cancelled()
         continue-on-error: true
         run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.roi_sim
+          else
+            TOURNAMENT_FLAG=""
+            if [ -f benchmark/results/tournament_scored.jsonl ]; then
+              TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+            fi
+            python -m benchmark.roi_sim \
+              --logs-dir benchmark/datasets/logs/ \
+              $TOURNAMENT_FLAG
           fi
-          python -m benchmark.roi_sim \
-            --logs-dir benchmark/datasets/logs/ \
-            $TOURNAMENT_FLAG
           for report in benchmark/results/report_roi_omen.md benchmark/results/report_roi_polymarket.md; do
             if [ -f "$report" ]; then
               cat "$report" >> "$GITHUB_STEP_SUMMARY"

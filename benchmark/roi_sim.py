@@ -399,6 +399,70 @@ def _input_error(message: str) -> NoReturn:
     sys.exit(1)
 
 
+def _use_mech_analytics_rows() -> bool:
+    """Return True when USE_MECH_ANALYTICS_ROWS routes reads via the endpoint.
+
+    Wraps :func:`benchmark.scoring_primitives.use_mech_analytics_rows` so
+    the roi_sim CLI shares the same env-var contract as the scorer's
+    --rebuild / --period-days paths.
+
+    :return: True when the env var routes reads via mech-analytics.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark.scoring_primitives import use_mech_analytics_rows
+
+    return use_mech_analytics_rows()
+
+
+def load_input_rows_from_mech_analytics(
+    window_start: datetime,
+    window_end: datetime,
+    chain_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Load input rows from mech-analytics's ``/v1/data/scored-rows``.
+
+    Endpoint filters on ``requested_at`` server-side; we alias it to
+    ``predicted_at`` on each row so the downstream code (which keys on
+    ``predicted_at`` throughout — see :func:`_parse_predicted_at`) reads
+    unchanged. ``row_id`` is defaulted from ``request_id`` so the dedup
+    upstream of :func:`simulate` behaves identically to the log path.
+
+    Tournament rows are always empty on this path: mech-analytics only
+    serves production scored rows.
+
+    :param window_start: start of the trailing window (inclusive, UTC-aware).
+    :param window_end: end of the trailing window (exclusive, UTC-aware).
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        ``None`` fetches every chain the endpoint serves.
+    :return: rows in fetch order, already shaped for :func:`simulate`.
+    """
+    # pylint: disable=import-outside-toplevel
+    from benchmark.mech_analytics_client import iter_scored_rows
+
+    rows: list[dict[str, Any]] = []
+    for row in iter_scored_rows(
+        since=window_start,
+        until=window_end,
+        chain_id=chain_id,
+        resolved=True,
+    ):
+        # roi_sim keys on predicted_at throughout; mech-analytics
+        # returns requested_at. Alias in place — cheaper than teaching
+        # every downstream call site about the new field name.
+        row["predicted_at"] = row.get("predicted_at") or row.get("requested_at")
+        # Legacy row_id compatibility for dedup in simulate().
+        row["row_id"] = row.get("row_id") or row.get("request_id")
+        rows.append(row)
+    log.info(
+        "load_input_rows_from_mech_analytics: fetched %d rows "
+        "(window: %s <= requested_at < %s)",
+        len(rows),
+        window_start.isoformat(),
+        window_end.isoformat(),
+    )
+    return rows
+
+
 def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, Any]]:
     """Load and dedup all input rows from the benchmark artifacts.
 
@@ -1443,7 +1507,13 @@ def main() -> None:
         window_start.isoformat(),
         window_end.isoformat(),
     )
-    rows = load_input_rows(args.logs_dir, args.tournament_input)
+    # Route source based on USE_MECH_ANALYTICS_ROWS. Same env var the
+    # scorer's --rebuild / --period-days paths key off — keep the two
+    # in sync so a workflow flip flips every consumer at once.
+    if _use_mech_analytics_rows():
+        rows = load_input_rows_from_mech_analytics(window_start, window_end)
+    else:
+        rows = load_input_rows(args.logs_dir, args.tournament_input)
     if not rows:
         # Defense-in-depth: the CI workflow's benchmark-data download already
         # uses if_no_artifact_found: fail, but an artifact-layout drift (e.g.

@@ -2452,6 +2452,80 @@ def score_period_split_by_platform(
     return _score_rows_by_platform(prod_rows, tourn_rows)
 
 
+def score_period_split_by_platform_from_mech_analytics(
+    days: int = 1,
+    offset_days: int = 0,
+    chain_id: int | None = None,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score a windowed slice of rows fetched from mech-analytics.
+
+    Same return shape as :func:`score_period_split_by_platform` so the CLI
+    can substitute one for the other. Tournament rows are always empty on
+    this path: mech-analytics only serves production scored rows, so the
+    tournament half of every returned tuple is ``score([])`` — the same
+    shape rendered by the legacy path when a rolling-window log range
+    happens to contain no tournament rows.
+
+    :param days: score rows from a window ``days`` days wide.
+    :param offset_days: number of days to shift the window back from "now".
+        ``0`` means the trailing window ending at "now" (current window);
+        ``days`` means the immediately-preceding non-overlapping window.
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        ``None`` fetches every chain the endpoint serves.
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Unknown-platform rows stay in
+        ``"all"`` only.
+    :raises ValueError: when ``days`` or ``offset_days`` is negative.
+    :raises MechAnalyticsError: if the endpoint is unreachable.
+    """
+    if days < 0 or offset_days < 0:
+        raise ValueError(
+            f"days and offset_days must be >= 0 (got days={days},"
+            f" offset_days={offset_days})"
+        )
+
+    # pylint: disable=import-outside-toplevel
+    import importlib
+
+    from benchmark.mech_analytics_client import (
+        MechAnalyticsError,
+        iter_scored_rows,
+    )
+
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    now = datetime.now(timezone.utc)
+    window_end = now - timedelta(days=offset_days)
+    window_start = window_end - timedelta(days=days)
+
+    prod_rows: list[dict[str, Any]] = []
+    for row in iter_scored_rows(
+        since=window_start, until=window_end, chain_id=chain_id, resolved=True
+    ):
+        # Same shaping as ``rebuild_from_mech_analytics``: derive
+        # ``category`` from the question title locally (endpoint only
+        # carries the title), require ``request_id``, default
+        # ``row_id`` from it for update() dedup compatibility. Kept in
+        # sync so a rebuild and a period-fetch produce structurally
+        # identical rows against the same endpoint response.
+        question_text = row.get("question_text")
+        platform = row.get("platform")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        request_id = row.get("request_id")
+        if not request_id:
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
+        row["row_id"] = row.get("row_id") or request_id
+        prod_rows.append(row)
+
+    # mech-analytics has no tournament partition — the endpoint serves
+    # only production-mode scored rows. Return empty tournament rows so
+    # the return shape matches the legacy path exactly.
+    return _score_rows_by_platform(prod_rows, [])
+
+
 def _parse_predicted_at(value: Any) -> datetime | None:
     """Parse a row's ``predicted_at`` field into a UTC-aware ``datetime``.
 
@@ -2670,13 +2744,35 @@ def _cli_update(args: argparse.Namespace, output_tournament: Path) -> None:
 
 
 def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
-    """Handle the ``--period-days`` CLI mode."""
-    results = score_period_split_by_platform(
-        logs_dir=args.logs_dir,
-        days=args.period_days,
-        tournament_input=args.tournament_input,
-        offset_days=args.period_offset_days,
-    )
+    """Handle the ``--period-days`` CLI mode.
+
+    Under ``USE_MECH_ANALYTICS_ROWS=true`` in the environment, reroutes to
+    :func:`score_period_split_by_platform_from_mech_analytics` — the
+    endpoint fetch replaces the local-log scan. Off-chain migration: the
+    workflow's Fetch step is skipped when the flag is on, so ``logs_dir``
+    is empty and the legacy path would produce zero-row output. Same
+    return shape either side of the branch so the downstream write
+    code stays untouched.
+
+    :param args: parsed CLI namespace.
+    :param output_tournament: derived path for the tournament scores json.
+    """
+    if _use_mech_analytics_rows():
+        print(
+            f"Scoring period ({args.period_days}d, offset={args.period_offset_days}d)"
+            " from mech-analytics"
+        )
+        results = score_period_split_by_platform_from_mech_analytics(
+            days=args.period_days,
+            offset_days=args.period_offset_days,
+        )
+    else:
+        results = score_period_split_by_platform(
+            logs_dir=args.logs_dir,
+            days=args.period_days,
+            tournament_input=args.tournament_input,
+            offset_days=args.period_offset_days,
+        )
     prod_result, tourn_result = results["all"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

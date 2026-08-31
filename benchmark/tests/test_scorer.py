@@ -4655,3 +4655,256 @@ class TestUpdateFromMechAnalyticsMixedBatch:
         # the last row (whose value was null) and not the row before
         # it (which had 03:00Z).
         assert wm.read_text().strip() == "2026-07-01T05:00:00Z"
+
+
+class TestScorePeriodFromMechAnalytics:
+    """Cover the rolling-window fetch path against ``/v1/data/scored-rows``.
+
+    Same return shape as :func:`score_period_split_by_platform` so the CLI
+    can substitute one for the other. Tournament rows are always empty
+    on this path — mech-analytics has no tournament partition.
+    """
+
+    def test_returns_same_shape_as_log_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Return dict has ``all`` plus every entry in ``PLATFORMS`` — same as legacy."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        _patch_iter_and_classifier(monkeypatch, [_ma_row(request_id="a")])
+        result = score_period_split_by_platform_from_mech_analytics(days=7)
+        assert set(result.keys()) == {"all", *PLATFORMS}
+        for _key, (prod, tourn) in result.items():
+            assert "overall" in prod
+            assert "overall" in tourn
+
+    def test_tournament_half_is_always_empty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """mech-analytics has no tournament rows; tournament half is score([])."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        _patch_iter_and_classifier(
+            monkeypatch,
+            [_ma_row(request_id="a"), _ma_row(request_id="b")],
+        )
+        result = score_period_split_by_platform_from_mech_analytics(days=7)
+        for _key, (_prod, tourn) in result.items():
+            assert tourn["overall"]["n"] == 0
+
+    def test_since_and_until_bound_the_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Window is ``[now-days-offset, now-offset]`` on the endpoint call."""
+        # A future refactor that reversed the offset direction or dropped
+        # `until` would silently pull today's data into the "previous
+        # week" bucket and break the Δ vs Prev columns in the digest.
+        # Pin the shape of the endpoint call so that class of regression
+        # trips a test.
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        captured_kwargs = _patch_iter_and_classifier(monkeypatch, [])
+        score_period_split_by_platform_from_mech_analytics(days=7, offset_days=7)
+        assert len(captured_kwargs) == 1
+        call = captured_kwargs[0]
+        # since / until are datetimes; the client converts to ISO Z at
+        # the wire boundary. Assert types + relative positions rather
+        # than exact timestamps (test is non-deterministic on the second).
+        since = call["since"]
+        until = call["until"]
+        assert isinstance(since, datetime)
+        assert isinstance(until, datetime)
+        window = until - since
+        # 7-day window, offset 7 days back — so until is roughly 7d ago
+        # and since is roughly 14d ago. Window duration = 7d exactly.
+        assert abs(window.total_seconds() - 7 * 86400) < 5  # sub-5s slack
+        # ``resolved=True`` is load-bearing: unresolved rows carry no
+        # brier and would just pull down the accumulator's n without
+        # contributing to any metric.
+        assert call.get("resolved") is True
+
+    def test_current_window_has_zero_offset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Current window (offset=0) ends at ~now; previous window ends earlier."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        captured_kwargs = _patch_iter_and_classifier(monkeypatch, [])
+        score_period_split_by_platform_from_mech_analytics(days=7, offset_days=0)
+        call = captured_kwargs[0]
+        now = datetime.now(timezone.utc)
+        # until must be within a couple of seconds of "now" for the
+        # current window; a regression that shifted it back would leak
+        # into the digest as a stale Current 7d column.
+        assert (now - call["until"]).total_seconds() < 5
+
+    def test_negative_days_raises(self) -> None:
+        """Negative window sizes are rejected before hitting the endpoint."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        with pytest.raises(ValueError, match="days and offset_days must be"):
+            score_period_split_by_platform_from_mech_analytics(days=-1)
+        with pytest.raises(ValueError, match="days and offset_days must be"):
+            score_period_split_by_platform_from_mech_analytics(days=7, offset_days=-1)
+
+    def test_row_missing_request_id_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same discipline as rebuild: a row without request_id raises loudly."""
+        # Same reason as the rebuild path: no request_id means the row
+        # is dedup-invisible in downstream update() calls and would
+        # silently double-count on every subsequent run.
+        from benchmark.mech_analytics_client import MechAnalyticsError
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        bad = _ma_row()
+        bad["request_id"] = None
+        _patch_iter_and_classifier(monkeypatch, [bad])
+        with pytest.raises(MechAnalyticsError, match="missing request_id"):
+            score_period_split_by_platform_from_mech_analytics(days=7)
+
+    def test_chain_id_passes_through_to_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``chain_id`` reaches ``iter_scored_rows`` when supplied."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        captured_kwargs = _patch_iter_and_classifier(monkeypatch, [])
+        score_period_split_by_platform_from_mech_analytics(days=7, chain_id=100)
+        assert captured_kwargs[0].get("chain_id") == 100
+
+    def test_rows_are_scored_and_land_in_correct_platform_bucket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Omen rows land in the omen bucket, polymarket in polymarket, both in all."""
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        omen_row = _ma_row(request_id="omen-1")
+        omen_row["platform"] = "omen"
+        poly_row = _ma_row(request_id="poly-1")
+        poly_row["platform"] = "polymarket"
+        _patch_iter_and_classifier(monkeypatch, [omen_row, poly_row])
+        result = score_period_split_by_platform_from_mech_analytics(days=7)
+        # All bucket sees both rows.
+        assert result["all"][0]["overall"]["n"] == 2
+        # Per-platform buckets partition them.
+        assert result["omen"][0]["overall"]["n"] == 1
+        assert result["polymarket"][0]["overall"]["n"] == 1
+
+
+class TestCliPeriodDispatchesOnEnvVar:
+    """``_cli_period`` routes through mech-analytics under the flag.
+
+    Same env-var contract as ``_cli_rebuild``: flag on routes via the
+    endpoint fetch, flag off (or unset) routes via the legacy log scan.
+    A mutation that swapped the two branches would silently return the
+    wrong window data to the digest.
+    """
+
+    def test_routes_to_mech_analytics_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=true routes via mech-analytics fetch."""
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "mech_analytics"
+            empty = {"overall": {"n": 0, "brier": 0.0}}
+            return {
+                "all": (empty, empty),
+                "omen": (empty, empty),
+                "polymarket": (empty, empty),
+            }
+
+        def _fake_legacy(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "legacy"
+            empty = {"overall": {"n": 0, "brier": 0.0}}
+            return {
+                "all": (empty, empty),
+                "omen": (empty, empty),
+                "polymarket": (empty, empty),
+            }
+
+        monkeypatch.setattr(
+            scorer_mod,
+            "score_period_split_by_platform_from_mech_analytics",
+            _fake_ma,
+        )
+        monkeypatch.setattr(scorer_mod, "score_period_split_by_platform", _fake_legacy)
+        args = argparse.Namespace(
+            output=tmp_path / "rolling_scores.json",
+            logs_dir=tmp_path / "logs",
+            period_days=7,
+            period_offset_days=0,
+            tournament_input=None,
+            skip_tournament_output=True,
+        )
+        scorer_mod._cli_period(  # pylint: disable=protected-access
+            args, tmp_path / "scores_tournament.json"
+        )
+        assert called["which"] == "mech_analytics"
+
+    def test_routes_to_legacy_when_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=false routes via the legacy log scan."""
+        import benchmark.scorer as scorer_mod
+
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "mech_analytics"
+            empty = {"overall": {"n": 0, "brier": 0.0}}
+            return {
+                "all": (empty, empty),
+                "omen": (empty, empty),
+                "polymarket": (empty, empty),
+            }
+
+        def _fake_legacy(**_kw: Any) -> dict[str, Any]:
+            called["which"] = "legacy"
+            empty = {"overall": {"n": 0, "brier": 0.0}}
+            return {
+                "all": (empty, empty),
+                "omen": (empty, empty),
+                "polymarket": (empty, empty),
+            }
+
+        monkeypatch.setattr(
+            scorer_mod,
+            "score_period_split_by_platform_from_mech_analytics",
+            _fake_ma,
+        )
+        monkeypatch.setattr(scorer_mod, "score_period_split_by_platform", _fake_legacy)
+        args = argparse.Namespace(
+            output=tmp_path / "rolling_scores.json",
+            logs_dir=tmp_path / "logs",
+            period_days=7,
+            period_offset_days=0,
+            tournament_input=None,
+            skip_tournament_output=True,
+        )
+        scorer_mod._cli_period(  # pylint: disable=protected-access
+            args, tmp_path / "scores_tournament.json"
+        )
+        assert called["which"] == "legacy"

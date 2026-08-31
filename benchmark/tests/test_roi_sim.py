@@ -1935,10 +1935,10 @@ class TestLoadInputRowsFromMechAnalytics:
     defaulted from ``request_id`` for dedup compatibility.
     """
 
-    def test_fetches_with_since_until_and_resolved_true(
+    def test_fetches_with_since_until_and_resolved_none(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Window bounds + ``resolved=True`` reach ``iter_scored_rows``."""
+        """Window bounds reach ``iter_scored_rows`` with ``resolved=None``."""
         captured: list[dict[str, Any]] = []
 
         def _fake_iter(**kwargs: Any) -> Any:
@@ -1953,41 +1953,83 @@ class TestLoadInputRowsFromMechAnalytics:
         call = captured[0]
         assert call["since"] == start
         assert call["until"] == end
-        # resolved=True is load-bearing: unresolved rows have no
-        # final_outcome, so simulate() would drop them anyway, but
-        # asking for them wastes bandwidth and confuses log counts.
-        assert call["resolved"] is True
+        # resolved=None (not True) so pending rows still reach
+        # simulate() and land in n_pending / drive parse_reliability.
+        # Filtering server-side would zero n_pending and lag the
+        # ``⚠ parse NN%`` regression signal by weeks.
+        assert call["resolved"] is None
 
-    def test_aliases_requested_at_to_predicted_at(
+    def test_predicted_at_is_set_by_map_row_not_by_this_loader(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Row's ``requested_at`` gets aliased into ``predicted_at``."""
-        # The rest of roi_sim keys on ``predicted_at`` (see
-        # ``_parse_predicted_at``), and mech-analytics returns
-        # ``requested_at``. If a refactor dropped the alias, every row
-        # would fail the window check and simulate() would return zero
-        # groups.
-        raw = {
+        """``predicted_at`` lands on rows via ``_map_row``, not by any alias here."""
+        # Reshaped from an earlier test that fed raw dicts past
+        # ``_map_row``: production rows always flow through
+        # ``_map_row`` first (``iter_scored_rows`` yields its output
+        # unconditionally), so any aliasing in this loader is dead
+        # code. Pins the shape of ``_map_row``'s output that
+        # ``simulate`` reads.
+        # Real endpoint row (no ``predicted_at`` key; ``_map_row``
+        # derives it from ``delivered_at`` or ``requested_at``).
+        api_row = {
             "request_id": "req-1",
-            "requested_at": "2026-08-05T00:00:00Z",
-            "p_yes": 0.7,
-            "market_prob_at_prediction": 0.5,
-            "final_outcome": True,
-            "prediction_parse_status": "valid",
-            "tool_name": "superforcaster",
+            "tool": "superforcaster",
             "platform": "omen",
-            "market_id": "0xabc",
+            "question_title": "Q",
+            "p_yes": 0.7,
+            "p_no": 0.3,
+            "prediction_parse_status": "valid",
+            "market_prob_at_prediction": 0.5,
+            "requested_at": "2026-08-05T00:00:00Z",
+            "delivered_at": "2026-08-05T00:00:30Z",
         }
-
-        def _fake_iter(**_kw: Any) -> Any:
-            yield raw
-
-        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        # Route through the real ``_map_row`` -> ``iter_scored_rows``
+        # yield to catch drift between what production returns and
+        # what the loader sees.
+        monkeypatch.setattr(
+            mech_analytics_client,
+            "iter_scored_rows",
+            lambda **_kw: iter(
+                [mech_analytics_client._map_row(api_row)]  # pylint: disable=protected-access
+            ),
+        )
         rows = roi_sim.load_input_rows_from_mech_analytics(
             datetime(2026, 8, 1, tzinfo=timezone.utc),
             datetime(2026, 8, 8, tzinfo=timezone.utc),
         )
         assert len(rows) == 1
+        # ``_map_row`` prefers ``delivered_at`` (the semantic match to
+        # legacy log rows' ``predicted_at``). Falls back to
+        # ``requested_at`` only when delivery is missing.
+        assert rows[0]["predicted_at"] == "2026-08-05T00:00:30Z"
+
+    def test_predicted_at_falls_back_to_requested_at_when_delivery_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_map_row``'s ``predicted_at`` fallback: ``requested_at`` when no delivery."""
+        api_row = {
+            "request_id": "req-1",
+            "tool": "superforcaster",
+            "platform": "omen",
+            "question_title": "Q",
+            "p_yes": 0.7,
+            "p_no": 0.3,
+            "prediction_parse_status": "valid",
+            "market_prob_at_prediction": 0.5,
+            "requested_at": "2026-08-05T00:00:00Z",
+            "delivered_at": None,
+        }
+        monkeypatch.setattr(
+            mech_analytics_client,
+            "iter_scored_rows",
+            lambda **_kw: iter(
+                [mech_analytics_client._map_row(api_row)]  # pylint: disable=protected-access
+            ),
+        )
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
         assert rows[0]["predicted_at"] == "2026-08-05T00:00:00Z"
 
     def test_row_id_not_defaulted_on_this_path(
@@ -2013,30 +2055,6 @@ class TestLoadInputRowsFromMechAnalytics:
             datetime(2026, 8, 8, tzinfo=timezone.utc),
         )
         assert "row_id" not in rows[0]
-
-    def test_existing_predicted_at_or_row_id_are_preserved(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """If the row already carries ``predicted_at`` or ``row_id``, keep them."""
-        # Guards against a future endpoint change that starts returning
-        # ``predicted_at`` directly: the alias must not overwrite.
-        raw = {
-            "request_id": "req-1",
-            "predicted_at": "2026-08-05T12:00:00Z",
-            "requested_at": "2026-08-05T00:00:00Z",
-            "row_id": "custom-row",
-        }
-
-        def _fake_iter(**_kw: Any) -> Any:
-            yield raw
-
-        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
-        rows = roi_sim.load_input_rows_from_mech_analytics(
-            datetime(2026, 8, 1, tzinfo=timezone.utc),
-            datetime(2026, 8, 8, tzinfo=timezone.utc),
-        )
-        assert rows[0]["predicted_at"] == "2026-08-05T12:00:00Z"  # not overwritten
-        assert rows[0]["row_id"] == "custom-row"  # not overwritten
 
     def test_missing_request_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A row without ``request_id`` raises MechAnalyticsError."""
@@ -2128,13 +2146,16 @@ class TestRoiSimMainDispatchesOnEnvVar:
         # tournament rows must come from the local
         # ``tournament_scored.jsonl`` even under the flag. Otherwise the
         # ROI report silently loses every ``mode=tournament`` row.
+        # Production loader returns a non-empty stub so the outage
+        # guard doesn't short-circuit before the tournament loader is
+        # reached — that guard is covered by its own test below.
         monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
         called_ma = {"count": 0}
         called_tourn = {"count": 0}
 
         def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
             called_ma["count"] += 1
-            return []
+            return [{"row_id": "p-1", "mode": "production", "p_yes": 0.5}]
 
         def _fake_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
             called_tourn["count"] += 1
@@ -2142,9 +2163,16 @@ class TestRoiSimMainDispatchesOnEnvVar:
 
         monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
         monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _fake_tourn)
-        monkeypatch.setattr("sys.argv", ["roi_sim"])
-        with pytest.raises(SystemExit):
+        monkeypatch.setattr("sys.argv", ["roi_sim", "--skip-deployment-fetch"])
+        # Non-empty rows means main() runs past the outage guard and
+        # continues into simulate + report generation. That work isn't
+        # stubbed here, so main() may exit or return depending on
+        # what those downstream paths do; either is fine — this test
+        # only cares that both loaders got called first.
+        try:
             roi_sim.main()
+        except SystemExit:
+            pass
         assert called_ma["count"] == 1
         assert called_tourn["count"] == 1
 
@@ -2170,6 +2198,36 @@ class TestRoiSimMainDispatchesOnEnvVar:
         with pytest.raises(SystemExit):
             roi_sim.main()
         assert called_tourn["count"] == 0
+
+    def test_flag_on_zero_endpoint_rows_exits_even_when_tournament_nonempty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty endpoint + non-empty tournament under the flag = ``_input_error``."""
+        # Regression pin for the outage-guard scope. Before the split,
+        # ``if not rows`` would only trip when BOTH production AND
+        # tournament were empty. Since the tournament-run job is not
+        # flag-gated and produces tournament_scored.jsonl every run,
+        # a total mech-analytics outage silently exited 0 with a
+        # tournament-only ROI report — the exact "well-formed no-data
+        # report nobody's alerted to" failure mode the guard exists
+        # to prevent.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+
+        def _empty_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def _nonempty_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return [{"row_id": "t-1", "mode": "tournament", "p_yes": 0.5}]
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _empty_ma)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _nonempty_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit) as excinfo:
+            roi_sim.main()
+        # _input_error exits 1; the workflow's continue-on-error masks
+        # the return code but the missing roi_results.json makes the
+        # gap visible in the Slack section.
+        assert excinfo.value.code == 1
 
 
 class TestLoadTournamentRowsFromFile:

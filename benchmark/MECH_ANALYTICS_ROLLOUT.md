@@ -30,9 +30,9 @@ M's last run because still unresolved, out of window from M+1's first run).
 - Score current / previous rolling window — `analyze.py` rebuilds these
   in-memory from mech-analytics rows and writes them to
   `rolling_scores_<platform>.json` / `prev_rolling_scores_<platform>.json`
-  itself via `_write_rolling_json` (analyze.py:3144-3157). Running the
-  Score steps under the flag would produce combined-file outputs that
-  analyze then unconditionally overwrites and no reader consumes.
+  itself via `_write_rolling_json`. Running the Score steps under the
+  flag would produce combined-file outputs that analyze then
+  unconditionally overwrites and no reader consumes.
 
 ## Steps that route via mech-analytics when the flag is on
 
@@ -41,6 +41,19 @@ M's last run because still unresolved, out of window from M+1's first run).
   Under the flag it fetches `[now-90d, now]` from `/v1/data/scored-rows`
   via `score_period_split_by_platform_from_mech_analytics`; under
   legacy it scans `logs/`. Same output shape either side.
+- **`n_pending`, `parse_reliability`, `is_prediction_tool` asymmetry
+  under the flag.** roi_sim under the flag fetches with
+  `resolved=None` so pending rows still land in `simulate()` and drive
+  `n_pending` / `parse_reliability` (`⚠ parse NN%` in the Slack ROI
+  table) exactly like the legacy path. But the two streams have
+  different scoping for `is_prediction_tool` (which requires "at least
+  one valid-parse row anywhere in loaded data"): legacy sees ~30 days
+  of out-of-window shard history (shards retained ~120 days,
+  `DEFAULT_WINDOW_DAYS=90`); mech-analytics sees only in-window rows
+  because the fetch is bounded. Narrow trigger: a production tool
+  whose in-window rows all fail to parse but had valid parses months
+  back flips from the prediction bucket to "not a prediction tool"
+  under the flag. Not worth restructuring the fetch for.
 - Simulate trader ROI (`benchmark.roi_sim`) — under the flag,
   production rows come from mech-analytics via
   `load_input_rows_from_mech_analytics`; tournament rows still come

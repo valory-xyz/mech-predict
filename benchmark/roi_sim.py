@@ -29,10 +29,16 @@ and a market-clustered bootstrap CI with fixed seeds.
 
 Inputs are the benchmark's own accumulated artifacts (daily production log
 shards plus the scored tournament predictions) -- no new data capture, no
-LLM calls. The only network access is the deployment-status resolution (the
-same trader service.yaml valid_mechs -> mech metadata procedure the daily
-report uses; disable with --skip-deployment-fetch). Stdlib only by design so
-light CI jobs can run it without the full dependency stack.
+LLM calls -- on the legacy path. Under ``USE_MECH_ANALYTICS_ROWS=true``,
+production rows are fetched from mech-analytics's ``/v1/data/scored-rows``
+endpoint over HTTP instead; tournament rows still come from the local file.
+Network access on the legacy path is limited to the deployment-status
+resolution (the same trader service.yaml valid_mechs -> mech metadata
+procedure the daily report uses; disable with --skip-deployment-fetch). The
+mech-analytics path additionally hits ``/v1/data/scored-rows``. Stdlib only
+on the legacy path so light CI jobs can run it install-free; the
+mech-analytics path pulls in ``benchmark.mech_analytics_client``, which
+requires ``requests``.
 
 Tool policy (data-driven, mirroring the accuracy benchmark's no-allowlist +
 reliability-flag approach): every (platform, tool, mode, model) group
@@ -421,13 +427,31 @@ def load_input_rows_from_mech_analytics(
 ) -> list[dict[str, Any]]:
     """Load production input rows from mech-analytics's ``/v1/data/scored-rows``.
 
-    Endpoint filters on ``requested_at`` server-side; we alias it to
-    ``predicted_at`` on each row so the downstream code (which keys on
-    ``predicted_at`` throughout — see :func:`_parse_predicted_at`) reads
-    unchanged. mech-analytics has no tournament partition, so tournament
-    rows must come from the local ``tournament_scored.jsonl`` file (see
+    ``iter_scored_rows`` yields rows already shaped by
+    ``mech_analytics_client._map_row``, which sets ``predicted_at``
+    from ``delivered_at or requested_at`` — matching the semantic
+    ``fetch_production`` stamps on legacy log rows. No further
+    aliasing needed here.
+
+    Window semantic worth calling out: the endpoint filters ``since``
+    / ``until`` on ``requested_at`` server-side, while ``simulate()``
+    and ``eligibility_reason`` window on ``predicted_at``
+    (= ``delivered_at``). A row requested just before ``window_start``
+    but delivered inside the window is excluded server-side even
+    though the legacy path would have counted it. It's a
+    delivery-latency-wide sliver on a 90d window, so the impact is
+    negligible, but the asymmetry is real.
+
+    mech-analytics has no tournament partition, so tournament rows
+    must come from the local ``tournament_scored.jsonl`` file (see
     :func:`load_tournament_rows_from_file`); this loader only returns
     production rows.
+
+    Passes ``resolved=None`` (not ``True``) so pending rows still
+    reach ``simulate()`` and land in ``n_pending`` / drive
+    ``parse_reliability``. Filtering to resolved-only server-side
+    would zero ``n_pending`` and lag the ``⚠ parse NN%`` regression
+    signal by weeks (until markets resolve).
 
     :func:`simulate` doesn't dedup by row_id, so no dedup discipline
     is needed here — the endpoint's keyset pagination is trusted not
@@ -451,7 +475,9 @@ def load_input_rows_from_mech_analytics(
         since=window_start,
         until=window_end,
         chain_id=chain_id,
-        resolved=True,
+        # Not resolved=True: pending rows still contribute to
+        # n_pending, n_rows_seen, and parse_reliability accounting.
+        resolved=None,
     ):
         # Require request_id: a row with no identifier is unusable —
         # we lose the ability to cross-reference to on-chain
@@ -462,14 +488,6 @@ def load_input_rows_from_mech_analytics(
         # ``score_period_split_by_platform_from_mech_analytics``.
         if not row.get("request_id"):
             raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
-        # roi_sim keys on predicted_at throughout; mech-analytics
-        # returns requested_at. Alias in place — cheaper than teaching
-        # every downstream call site about the new field name. ``is
-        # not None`` so an explicit empty string on the endpoint (a
-        # future schema drift) doesn't silently get overwritten with
-        # requested_at.
-        if row.get("predicted_at") is None:
-            row["predicted_at"] = row.get("requested_at")
         rows.append(row)
     log.info(
         "load_input_rows_from_mech_analytics: fetched %d rows "
@@ -1575,8 +1593,23 @@ def main() -> None:
     # Slack ROI table). Merge both streams so no tournament rows are
     # silently dropped from the ROI report under the flag.
     if _use_mech_analytics_rows():
-        rows = load_input_rows_from_mech_analytics(window_start, window_end)
-        rows.extend(load_tournament_rows_from_file(args.tournament_input))
+        production_rows = load_input_rows_from_mech_analytics(window_start, window_end)
+        # Check production BEFORE merging tournament rows. The
+        # tournament-run job is not flag-gated and produces
+        # tournament_scored.jsonl every run, so a total mech-analytics
+        # outage would otherwise slip through: production=0,
+        # tournament>0, ``if not rows`` below never trips, and the
+        # step exits 0 with a plausible tournament-only ROI report
+        # that gets posted to Slack as normal. Reproduce that failure
+        # mode as an explicit error the workflow's continue-on-error
+        # notes rather than a silent success.
+        if not production_rows:
+            _input_error(
+                "mech-analytics returned no production rows for the "
+                f"window {window_start.isoformat()} <= requested_at < "
+                f"{window_end.isoformat()}"
+            )
+        rows = production_rows + load_tournament_rows_from_file(args.tournament_input)
     else:
         rows = load_input_rows(args.logs_dir, args.tournament_input)
     if not rows:

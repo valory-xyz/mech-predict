@@ -394,8 +394,8 @@ jobs:
       # in sync from a single source. These two 7d Score steps stay
       # gated to legacy mode only: under USE_MECH_ANALYTICS_ROWS=true,
       # analyze.py rebuilds and writes the same rolling_scores_<plat>
-      # and prev_rolling_scores_<plat> files in-memory (see
-      # analyze.py:3144-3157). Running these steps under the flag would
+      # and prev_rolling_scores_<plat> files in-memory via
+      # _write_rolling_json. Running these steps under the flag would
       # cost two extra HTTP fetches per run whose output analyze then
       # unconditionally overwrites.
       - name: Score current rolling window

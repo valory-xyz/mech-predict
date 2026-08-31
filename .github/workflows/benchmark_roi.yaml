@@ -61,8 +61,12 @@ jobs:
           python-version: '3.10'
 
       # No `pip install` step: benchmark/roi_sim.py deliberately imports only
-      # the standard library (same zero-dep policy as benchmark/tournament_tools.py)
-      # so this job stays install-free and fast.
+      # the standard library on the legacy path (same zero-dep policy as
+      # benchmark/tournament_tools.py) so this job stays install-free and
+      # fast. This workflow never sets USE_MECH_ANALYTICS_ROWS, so the
+      # mech-analytics branch (which needs `requests` via
+      # benchmark.mech_analytics_client) is not reached — if that ever
+      # changes, add `pip install requests` here alongside the flag flip.
 
       # Validate dispatch inputs before anything else runs. Inputs are routed
       # through env (not ${{ }} interpolation in the shell script) to prevent

@@ -29,6 +29,7 @@ from typing import Any, get_args
 
 import pytest
 from benchmark import mech_analytics_client, roi_sim
+from benchmark.mech_analytics_client import MechAnalyticsError
 from benchmark.roi_sim import (
     Bet,
     CLAUDE_HARDCODED_MODEL,
@@ -2031,6 +2032,88 @@ class TestLoadInputRowsFromMechAnalytics:
         )
         assert rows[0]["predicted_at"] == "2026-08-05T12:00:00Z"  # not overwritten
         assert rows[0]["row_id"] == "custom-row"  # not overwritten
+
+    def test_missing_request_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row without ``request_id`` raises MechAnalyticsError."""
+        # Matches the discipline of rebuild_from_mech_analytics and
+        # score_period_split_by_platform_from_mech_analytics. Rows
+        # without request_id would be dedup-invisible in simulate()
+        # and silently double-count on every re-fetch of the same
+        # window.
+        raw = {
+            "requested_at": "2026-08-05T00:00:00Z",
+            # request_id deliberately absent
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        with pytest.raises(MechAnalyticsError, match="missing request_id"):
+            roi_sim.load_input_rows_from_mech_analytics(
+                datetime(2026, 8, 1, tzinfo=timezone.utc),
+                datetime(2026, 8, 8, tzinfo=timezone.utc),
+            )
+
+
+class TestRoiSimMainDispatchesOnEnvVar:
+    """``main()`` picks the loader based on ``USE_MECH_ANALYTICS_ROWS``.
+
+    Same env-var contract as the scorer's ``_cli_period`` dispatch. Pin
+    end-to-end so a mutation that swapped the branches or made the
+    flag a no-op inside ``main()`` trips a test — the four
+    ``load_input_rows_from_mech_analytics`` unit tests and three
+    ``_use_mech_analytics_rows`` unit tests don't cover the wiring at
+    the call site.
+
+    Loaders are stubbed to return ``[]``, which trips
+    ``_input_error`` -> ``sys.exit(1)``. We catch the SystemExit and
+    assert which loader was invoked before it triggered.
+    """
+
+    def test_main_routes_to_mech_analytics_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=true routes ``main()`` via the endpoint loader."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "mech_analytics"
+            return []
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "legacy"
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called["which"] == "mech_analytics"
+
+    def test_main_routes_to_legacy_when_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=false routes ``main()`` via the legacy loader."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "mech_analytics"
+            return []
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "legacy"
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called["which"] == "legacy"
 
 
 # pylint: disable=protected-access

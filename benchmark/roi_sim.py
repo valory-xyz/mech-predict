@@ -435,9 +435,13 @@ def load_input_rows_from_mech_analytics(
     :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
         ``None`` fetches every chain the endpoint serves.
     :return: rows in fetch order, already shaped for :func:`simulate`.
+    :raises MechAnalyticsError: if a row is missing ``request_id``.
     """
     # pylint: disable=import-outside-toplevel
-    from benchmark.mech_analytics_client import iter_scored_rows
+    from benchmark.mech_analytics_client import (
+        MechAnalyticsError,
+        iter_scored_rows,
+    )
 
     rows: list[dict[str, Any]] = []
     for row in iter_scored_rows(
@@ -446,12 +450,25 @@ def load_input_rows_from_mech_analytics(
         chain_id=chain_id,
         resolved=True,
     ):
+        # Same discipline as rebuild_from_mech_analytics /
+        # score_period_split_by_platform_from_mech_analytics: a row
+        # without request_id would be dedup-invisible in simulate()
+        # and silently double-count on every run that re-fetches the
+        # same window. Fail loudly rather than absorb the corruption.
+        request_id = row.get("request_id")
+        if not request_id:
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
         # roi_sim keys on predicted_at throughout; mech-analytics
         # returns requested_at. Alias in place — cheaper than teaching
-        # every downstream call site about the new field name.
-        row["predicted_at"] = row.get("predicted_at") or row.get("requested_at")
+        # every downstream call site about the new field name. ``is
+        # not None`` so an explicit empty string on the endpoint (a
+        # future schema drift) doesn't silently get overwritten with
+        # requested_at.
+        if row.get("predicted_at") is None:
+            row["predicted_at"] = row.get("requested_at")
         # Legacy row_id compatibility for dedup in simulate().
-        row["row_id"] = row.get("row_id") or row.get("request_id")
+        if row.get("row_id") is None:
+            row["row_id"] = request_id
         rows.append(row)
     log.info(
         "load_input_rows_from_mech_analytics: fetched %d rows "

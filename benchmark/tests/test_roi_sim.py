@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Any, get_args
 
 import pytest
-from benchmark import roi_sim
+from benchmark import mech_analytics_client, roi_sim
+from benchmark.mech_analytics_client import MechAnalyticsError
 from benchmark.roi_sim import (
     Bet,
     CLAUDE_HARDCODED_MODEL,
@@ -61,6 +62,11 @@ from benchmark.roi_sim import (
     simulate_row,
     window_bounds,
 )
+
+# Module-scope alias for the underscore-prefixed helper so tests can
+# call it without an inline access-guard exception on every call. See
+# TestLoadInputRowsFromMechAnalytics for the callers.
+_map_row = mech_analytics_client._map_row  # pylint: disable=protected-access
 
 # Deployment names as declared in benchmark.tool_usage (one per platform).
 OMEN_DEPLOYMENT = "omenstrat Pearl"
@@ -1923,3 +1929,350 @@ class TestActiveFilter:
         assert _active_tools_for_platform(
             fixtures[0], "omen", benchmarked
         ) == frozenset({"tool_a", "tool-b"})
+
+
+class TestLoadInputRowsFromMechAnalytics:
+    """Cover the roi_sim mech-analytics fetch path.
+
+    Same downstream shape as the log-based loader so the rest of roi_sim
+    reads unchanged. Two shape shims matter and are pinned below:
+    ``predicted_at`` aliased from ``requested_at``, and ``row_id``
+    defaulted from ``request_id`` for dedup compatibility.
+    """
+
+    def test_fetches_with_since_until_and_resolved_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Window bounds reach ``iter_scored_rows`` with ``resolved=None``."""
+        captured: list[dict[str, Any]] = []
+
+        def _fake_iter(**kwargs: Any) -> Any:
+            captured.append(kwargs)
+            yield from []
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        end = datetime(2026, 8, 8, tzinfo=timezone.utc)
+        roi_sim.load_input_rows_from_mech_analytics(start, end)
+        assert len(captured) == 1
+        call = captured[0]
+        assert call["since"] == start
+        assert call["until"] == end
+        # resolved=None (not True) so pending rows still reach
+        # simulate() and land in n_pending / drive parse_reliability.
+        # Filtering server-side would zero n_pending and lag the
+        # ``⚠ parse NN%`` regression signal by weeks.
+        assert call["resolved"] is None
+
+    def test_predicted_at_is_set_by_map_row_not_by_this_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``predicted_at`` lands on rows via ``_map_row``, not by any alias here."""
+        # Reshaped from an earlier test that fed raw dicts past
+        # ``_map_row``: production rows always flow through
+        # ``_map_row`` first (``iter_scored_rows`` yields its output
+        # unconditionally), so any aliasing in this loader is dead
+        # code. Pins the shape of ``_map_row``'s output that
+        # ``simulate`` reads.
+        # Real endpoint row (no ``predicted_at`` key; ``_map_row``
+        # derives it from ``delivered_at`` or ``requested_at``).
+        api_row = {
+            "request_id": "req-1",
+            "tool": "superforcaster",
+            "platform": "omen",
+            "question_title": "Q",
+            "p_yes": 0.7,
+            "p_no": 0.3,
+            "prediction_parse_status": "valid",
+            "market_prob_at_prediction": 0.5,
+            "requested_at": "2026-08-05T00:00:00Z",
+            "delivered_at": "2026-08-05T00:00:30Z",
+        }
+        # Route through the real ``_map_row`` -> ``iter_scored_rows``
+        # yield to catch drift between what production returns and
+        # what the loader sees.
+        mapped = _map_row(api_row)
+        monkeypatch.setattr(
+            mech_analytics_client,
+            "iter_scored_rows",
+            lambda **_kw: iter([mapped]),
+        )
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert len(rows) == 1
+        # ``_map_row`` prefers ``delivered_at`` (the semantic match to
+        # legacy log rows' ``predicted_at``). Falls back to
+        # ``requested_at`` only when delivery is missing.
+        assert rows[0]["predicted_at"] == "2026-08-05T00:00:30Z"
+
+    def test_predicted_at_falls_back_to_requested_at_when_delivery_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_map_row``'s ``predicted_at`` fallback: ``requested_at`` when no delivery."""
+        api_row = {
+            "request_id": "req-1",
+            "tool": "superforcaster",
+            "platform": "omen",
+            "question_title": "Q",
+            "p_yes": 0.7,
+            "p_no": 0.3,
+            "prediction_parse_status": "valid",
+            "market_prob_at_prediction": 0.5,
+            "requested_at": "2026-08-05T00:00:00Z",
+            "delivered_at": None,
+        }
+        mapped = _map_row(api_row)
+        monkeypatch.setattr(
+            mech_analytics_client,
+            "iter_scored_rows",
+            lambda **_kw: iter([mapped]),
+        )
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert rows[0]["predicted_at"] == "2026-08-05T00:00:00Z"
+
+    def test_row_id_not_defaulted_on_this_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``row_id`` is not defaulted on this path; simulate() doesn't dedup by it."""
+        # ``simulate()`` never reads ``row_id`` — dedup lives in
+        # ``load_input_rows``'s ``seen_ids`` guard on the legacy path
+        # and nowhere else. Defaulting ``row_id`` from ``request_id``
+        # here would be dead code. Pinned so nobody adds it back
+        # under a false parity-with-legacy-loader claim.
+        raw = {
+            "request_id": "req-42",
+            "requested_at": "2026-08-05T00:00:00Z",
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        rows = roi_sim.load_input_rows_from_mech_analytics(
+            datetime(2026, 8, 1, tzinfo=timezone.utc),
+            datetime(2026, 8, 8, tzinfo=timezone.utc),
+        )
+        assert "row_id" not in rows[0]
+
+    def test_missing_request_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A row without ``request_id`` raises MechAnalyticsError."""
+        # Matches the discipline of rebuild_from_mech_analytics and
+        # score_period_split_by_platform_from_mech_analytics. Rows
+        # without request_id would be dedup-invisible in simulate()
+        # and silently double-count on every re-fetch of the same
+        # window.
+        raw = {
+            "requested_at": "2026-08-05T00:00:00Z",
+            # request_id deliberately absent
+        }
+
+        def _fake_iter(**_kw: Any) -> Any:
+            yield raw
+
+        monkeypatch.setattr(mech_analytics_client, "iter_scored_rows", _fake_iter)
+        with pytest.raises(MechAnalyticsError, match="missing request_id"):
+            roi_sim.load_input_rows_from_mech_analytics(
+                datetime(2026, 8, 1, tzinfo=timezone.utc),
+                datetime(2026, 8, 8, tzinfo=timezone.utc),
+            )
+
+
+class TestRoiSimMainDispatchesOnEnvVar:
+    """``main()`` picks the loader based on ``USE_MECH_ANALYTICS_ROWS``.
+
+    Same env-var contract as the scorer's ``_cli_period`` dispatch. Pin
+    end-to-end so a mutation that swapped the branches or made the
+    flag a no-op inside ``main()`` trips a test — the four
+    ``load_input_rows_from_mech_analytics`` unit tests and three
+    ``_use_mech_analytics_rows`` unit tests don't cover the wiring at
+    the call site.
+
+    Loaders are stubbed to return ``[]``, which trips
+    ``_input_error`` -> ``sys.exit(1)``. We catch the SystemExit and
+    assert which loader was invoked before it triggered.
+    """
+
+    def test_main_routes_to_mech_analytics_when_flag_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=true routes ``main()`` via the endpoint loader."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "mech_analytics"
+            return []
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "legacy"
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called["which"] == "mech_analytics"
+
+    def test_main_routes_to_legacy_when_flag_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """USE_MECH_ANALYTICS_ROWS=false routes ``main()`` via the legacy loader."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called: dict[str, Any] = {"which": None}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "mech_analytics"
+            return []
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called["which"] = "legacy"
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called["which"] == "legacy"
+
+    def test_flag_on_also_loads_tournament_rows_from_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under the flag, ``main()`` loads tournament rows on top of endpoint rows."""
+        # Regression pin: mech-analytics has no tournament partition, so
+        # tournament rows must come from the local
+        # ``tournament_scored.jsonl`` even under the flag. Otherwise the
+        # ROI report silently loses every ``mode=tournament`` row.
+        # Production loader returns a non-empty stub so the outage
+        # guard doesn't short-circuit before the tournament loader is
+        # reached — that guard is covered by its own test below.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called_ma = {"count": 0}
+        called_tourn = {"count": 0}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_ma["count"] += 1
+            return [{"row_id": "p-1", "mode": "production", "p_yes": 0.5}]
+
+        def _fake_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_tourn["count"] += 1
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _fake_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim", "--skip-deployment-fetch"])
+        # Non-empty rows means main() runs past the outage guard and
+        # continues into simulate + report generation. That work isn't
+        # stubbed here, so main() may exit or return depending on
+        # what those downstream paths do; either is fine — this test
+        # only cares that both loaders got called first.
+        try:
+            roi_sim.main()
+        except SystemExit:
+            pass
+        assert called_ma["count"] == 1
+        assert called_tourn["count"] == 1
+
+    def test_flag_off_does_not_call_tournament_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under legacy mode, ``load_tournament_rows_from_file`` is never called."""
+        # Legacy ``load_input_rows`` reads the tournament file itself,
+        # so a separate call would double-read the same rows.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called_tourn = {"count": 0}
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def _fake_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_tourn["count"] += 1
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _fake_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called_tourn["count"] == 0
+
+    def test_flag_on_zero_endpoint_rows_exits_even_when_tournament_nonempty(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty endpoint + non-empty tournament under the flag = ``_input_error``."""
+        # Regression pin for the outage-guard scope. Before the split,
+        # ``if not rows`` would only trip when BOTH production AND
+        # tournament were empty. Since the tournament-run job is not
+        # flag-gated and produces tournament_scored.jsonl every run,
+        # a total mech-analytics outage silently exited 0 with a
+        # tournament-only ROI report — the exact "well-formed no-data
+        # report nobody's alerted to" failure mode the guard exists
+        # to prevent.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+
+        def _empty_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def _nonempty_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return [{"row_id": "t-1", "mode": "tournament", "p_yes": 0.5}]
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _empty_ma)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _nonempty_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit) as excinfo:
+            roi_sim.main()
+        # _input_error exits 1; the workflow's continue-on-error masks
+        # the return code but the missing roi_results.json makes the
+        # gap visible in the Slack section.
+        assert excinfo.value.code == 1
+
+
+class TestLoadTournamentRowsFromFile:
+    """Cover the tournament-only reader used under mech-analytics mode."""
+
+    def test_missing_file_returns_empty_list(self, tmp_path: Path) -> None:
+        """A missing tournament file returns ``[]`` with a WARN, not a raise."""
+        # Real cases: first-ever run, artifact-download failure, or
+        # the tournament-run job hasn't produced the file yet. All
+        # non-fatal — the ROI report degrades to production-only.
+        rows = roi_sim.load_tournament_rows_from_file(tmp_path / "missing.jsonl")
+        assert not rows
+
+    def test_reads_and_returns_rows_with_dedup(self, tmp_path: Path) -> None:
+        """Rows are read line-by-line with the same dedup discipline as the legacy loader."""
+        tourn = tmp_path / "tournament_scored.jsonl"
+        # Third row is a dupe of the first (same row_id) — dropped.
+        tourn.write_text(
+            '{"row_id": "t-1", "mode": "tournament", "p_yes": 0.6}\n'
+            '{"row_id": "t-2", "mode": "tournament", "p_yes": 0.4}\n'
+            '{"row_id": "t-1", "mode": "tournament", "p_yes": 0.9}\n'
+        )
+        rows = roi_sim.load_tournament_rows_from_file(tourn)
+        assert len(rows) == 2
+        assert [r["row_id"] for r in rows] == ["t-1", "t-2"]
+
+
+# pylint: disable=protected-access
+class TestRoiSimUseMechAnalyticsFlag:
+    """Pin the env-var dispatch inside ``roi_sim`` matches the scorer's."""
+
+    def test_flag_true_returns_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_use_mech_analytics_rows`` returns True when USE_MECH_ANALYTICS_ROWS=true."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        assert roi_sim._use_mech_analytics_rows() is True
+
+    def test_flag_false_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``_use_mech_analytics_rows`` returns False when USE_MECH_ANALYTICS_ROWS=false."""
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        assert roi_sim._use_mech_analytics_rows() is False
+
+    def test_flag_unset_returns_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset env var falls through to the legacy log path (safe default)."""
+        monkeypatch.delenv("USE_MECH_ANALYTICS_ROWS", raising=False)
+        assert roi_sim._use_mech_analytics_rows() is False

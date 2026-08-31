@@ -136,6 +136,7 @@ def _map_row(api_row: dict[str, Any]) -> dict[str, Any]:
         "request_id": api_row.get("request_id"),
         "tool_name": api_row.get("tool"),
         "tool_version": api_row.get("tool_version"),
+        "model": api_row.get("model"),
         "platform": api_row.get("platform"),
         "question_text": api_row.get("question_title"),
         # Prediction fields.

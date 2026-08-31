@@ -115,6 +115,24 @@ jobs:
       - name: Install dependencies
         run: pip install requests scipy numpy
 
+      # Normalize USE_MECH_ANALYTICS_ROWS to a single lowercase,
+      # whitespace-trimmed form for every downstream shell + Python
+      # comparison. Shell `[ "$X" = "true" ]` and YAML `if:` are
+      # case-sensitive exact-match; python's `scoring_primitives.
+      # parse_truthy_env` strips + lowercases. Without this
+      # normalization, a repo Variable set to `True` / `TRUE` /
+      # `true ` splits the two sides — shell reads off, Python reads
+      # on — which lets stale ROI outputs get posted as live when the
+      # HTTP fetch fails (Clear stale ROI outputs step is shell-gated
+      # so it doesn't run, roi_sim main() takes the mech-analytics
+      # branch anyway, continue-on-error masks any endpoint failure,
+      # yesterday's roi_results.json survives).
+      - name: Normalize USE_MECH_ANALYTICS_ROWS
+        run: |
+          normalized="$(printf '%s' "$USE_MECH_ANALYTICS_ROWS" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          echo "USE_MECH_ANALYTICS_ROWS=$normalized" >> "$GITHUB_ENV"
+          echo "Normalized USE_MECH_ANALYTICS_ROWS='$normalized'"
+
       # Download previous run's state + scores (if they exist)
       - name: Download previous benchmark data
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
@@ -372,8 +390,14 @@ jobs:
       # Score recent periods for diff reporting. The window length
       # (--period-days, --period-offset-days) is driven by the
       # BENCHMARK_ROLLING_WINDOW_DAYS env var declared at the job level
-      # so the scorer and the Python ROLLING_WINDOW_DAYS constant stay in
-      # sync from a single source.
+      # so the scorer and the Python ROLLING_WINDOW_DAYS constant stay
+      # in sync from a single source. These two 7d Score steps stay
+      # gated to legacy mode only: under USE_MECH_ANALYTICS_ROWS=true,
+      # analyze.py rebuilds and writes the same rolling_scores_<plat>
+      # and prev_rolling_scores_<plat> files in-memory via
+      # _write_rolling_json. Running these steps under the flag would
+      # cost two extra HTTP fetches per run whose output analyze then
+      # unconditionally overwrites.
       - name: Score current rolling window
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
@@ -395,6 +419,8 @@ jobs:
       # Score the preceding non-overlapping window (offset by the same
       # window length so Current and Prev never overlap). Feeds the
       # "Δ vs Prev Nd" columns in the three-window comparison tables.
+      # Same flag gate as the "current" step above and for the same
+      # reason: analyze.py handles the flag-on writes itself.
       - name: Score previous rolling window (non-overlapping)
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
@@ -416,19 +442,30 @@ jobs:
       # with rollover/rebuild history, so the digest no longer reads it.
       # NOTE: the 90 below must match the digest's literal 90d labels
       # (benchmark/digest_tables.py _AT_COLUMNS + captions) -- change both.
+      # Unlike the two 7d rolling steps, nothing else produces
+      # trailing_scores_<platform>.json — analyze.py only writes the
+      # 7d files. So this step runs under both modes: legacy scans
+      # local logs; mech-analytics fetches [now-90d, now] via
+      # score_period_split_by_platform_from_mech_analytics.
       - name: Score trailing 90d window
-        if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         run: |
-          TOURNAMENT_FLAG=""
-          if [ -f benchmark/results/tournament_scored.jsonl ]; then
-            TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.scorer \
+              --period-days 90 \
+              --output benchmark/results/trailing_scores.json \
+              --skip-tournament-output
+          else
+            TOURNAMENT_FLAG=""
+            if [ -f benchmark/results/tournament_scored.jsonl ]; then
+              TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
+            fi
+            python -m benchmark.scorer \
+              --period-days 90 \
+              --logs-dir benchmark/datasets/logs/ \
+              --output benchmark/results/trailing_scores.json \
+              --skip-tournament-output \
+              $TOURNAMENT_FLAG
           fi
-          python -m benchmark.scorer \
-            --period-days 90 \
-            --logs-dir benchmark/datasets/logs/ \
-            --output benchmark/results/trailing_scores.json \
-            --skip-tournament-output \
-            $TOURNAMENT_FLAG
         continue-on-error: true
 
       - name: Analyze (Omenstrat)
@@ -452,18 +489,27 @@ jobs:
       # fetched/scored. continue-on-error: the companion must not fail the
       # flywheel -- when it breaks, the daily Slack posts simply go out
       # without the ROI section (notify_slack degrades gracefully when
-      # roi_results.json is missing).
+      # roi_results.json is missing). Under USE_MECH_ANALYTICS_ROWS=true
+      # the roi_sim CLI fetches production rows from mech-analytics;
+      # --logs-dir is ignored on that path so we omit it. --tournament-input
+      # stays because tournament_scored.jsonl is still produced by the
+      # tournament-run job (not flag-gated), and roi_sim renders tournament
+      # rows in its output (mode=tournament column in the ROI Slack table).
       - name: Simulate trader ROI (companion)
-        if: always() && !cancelled() && env.USE_MECH_ANALYTICS_ROWS != 'true'
+        if: always() && !cancelled()
         continue-on-error: true
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
             TOURNAMENT_FLAG="--tournament-input benchmark/results/tournament_scored.jsonl"
           fi
-          python -m benchmark.roi_sim \
-            --logs-dir benchmark/datasets/logs/ \
-            $TOURNAMENT_FLAG
+          if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
+            python -m benchmark.roi_sim $TOURNAMENT_FLAG
+          else
+            python -m benchmark.roi_sim \
+              --logs-dir benchmark/datasets/logs/ \
+              $TOURNAMENT_FLAG
+          fi
           for report in benchmark/results/report_roi_omen.md benchmark/results/report_roi_polymarket.md; do
             if [ -f "$report" ]; then
               cat "$report" >> "$GITHUB_STEP_SUMMARY"

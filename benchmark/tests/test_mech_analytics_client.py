@@ -45,6 +45,7 @@ def sample_api_row() -> dict[str, Any]:
         "request_id": "req-1",
         "tool": "superforcaster",
         "tool_version": "abc123",
+        "model": "gpt-4-turbo-2024-04-09",
         "platform": "omen",
         "question_title": "Will X happen by 2026?",
         "p_yes": 0.7,
@@ -159,6 +160,24 @@ class TestMapRow:
         assert row["mode"] is None
         assert row["config_hash"] is None
         assert row["prediction_lead_time_days"] is None
+
+    def test_model_passes_through_from_endpoint(
+        self, sample_api_row: dict[str, Any]
+    ) -> None:
+        """The endpoint's ``model`` field is mapped through as ``model``."""
+        # roi_sim's simulate() groups on (platform, tool_name, mode,
+        # model), so a missing mapping collapses every model bucket
+        # per (platform, tool) into a single "unknown" row and the
+        # aggregate ROI numbers change. Regression pin for the model
+        # mapping so a future _map_row rewrite can't silently drop it.
+        row = mac._map_row(sample_api_row)
+        assert row["model"] == "gpt-4-turbo-2024-04-09"
+
+    def test_model_absent_maps_to_none(self, sample_api_row: dict) -> None:
+        """Absent ``model`` on the endpoint row maps to ``None`` (not KeyError)."""
+        sample_api_row.pop("model")
+        row = mac._map_row(sample_api_row)
+        assert row["model"] is None
 
 
 class TestValidatedProbability:

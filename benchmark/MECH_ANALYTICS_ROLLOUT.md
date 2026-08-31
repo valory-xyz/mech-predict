@@ -27,15 +27,31 @@ M's last run because still unresolved, out of window from M+1's first run).
 - Backfill (`benchmark.datasets.backfill_responses`) — the flag-on path
   doesn't write to `logs/`, so nothing to repair.
 - Fetch production data (`benchmark.datasets.fetch_production`) — same.
-- Score current / previous rolling window — `analyze.py` builds these
-  in-memory and writes them to disk for the triage step.
-- Simulate trader ROI (`benchmark.roi_sim`) — runs against `logs/`, which
-  is frozen; outputs are cleared each run so the Slack section degrades
-  gracefully. Note: the standalone `benchmark_roi.yaml` workflow keeps
-  running against the frozen `logs/` from the artifact while the flag is
-  on. Its output is a job summary + artifact only, no Slack post, so
-  low-stakes — but readers of that job should ignore the numbers while
-  the flag is on.
+- Score current / previous rolling window — `analyze.py` rebuilds these
+  in-memory from mech-analytics rows and writes them to
+  `rolling_scores_<platform>.json` / `prev_rolling_scores_<platform>.json`
+  itself via `_write_rolling_json` (analyze.py:3144-3157). Running the
+  Score steps under the flag would produce combined-file outputs that
+  analyze then unconditionally overwrites and no reader consumes.
+
+## Steps that route via mech-analytics when the flag is on
+
+- Score trailing 90d window — no other producer writes
+  `trailing_scores_<platform>.json`, so this step runs under both modes.
+  Under the flag it fetches `[now-90d, now]` from `/v1/data/scored-rows`
+  via `score_period_split_by_platform_from_mech_analytics`; under
+  legacy it scans `logs/`. Same output shape either side.
+- Simulate trader ROI (`benchmark.roi_sim`) — under the flag,
+  production rows come from mech-analytics via
+  `load_input_rows_from_mech_analytics`; tournament rows still come
+  from the local `tournament_scored.jsonl` (produced by the
+  tournament-run job, which is not flag-gated). The two streams merge
+  in `main()` so no rows are dropped from the ROI report.
+- The standalone `benchmark_roi.yaml` workflow does not check the flag
+  and always runs against the frozen `logs/` from the artifact. Its
+  output is a job summary + artifact only, no Slack post, so
+  low-stakes — but readers of that job should ignore the numbers
+  while the flag is on.
 
 ## Rolling back to the legacy path
 

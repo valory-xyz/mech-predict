@@ -4795,10 +4795,20 @@ class TestScorePeriodFromMechAnalytics:
             score_period_split_by_platform_from_mech_analytics,
         )
 
+        # ``requested_at`` must be inside the window that
+        # ``score_period_split_by_platform_from_mech_analytics``
+        # computes (``[now-days, now]``), otherwise the defensive
+        # per-row re-filter drops the row before it reaches the
+        # accumulator. Use "1 minute ago" so this stays inside every
+        # sane window without racing the clock.
+        now = datetime.now(timezone.utc)
+        in_window = (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
         omen_row = _ma_row(request_id="omen-1")
         omen_row["platform"] = "omen"
+        omen_row["requested_at"] = in_window
         poly_row = _ma_row(request_id="poly-1")
         poly_row["platform"] = "polymarket"
+        poly_row["requested_at"] = in_window
         _patch_iter_and_classifier(monkeypatch, [omen_row, poly_row])
         result = score_period_split_by_platform_from_mech_analytics(days=7)
         # All bucket sees both rows.
@@ -4806,6 +4816,32 @@ class TestScorePeriodFromMechAnalytics:
         # Per-platform buckets partition them.
         assert result["omen"][0]["overall"]["n"] == 1
         assert result["polymarket"][0]["overall"]["n"] == 1
+
+    def test_rows_outside_window_are_dropped_by_defensive_refilter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Defensive re-filter drops rows whose ``requested_at`` is outside the window."""
+        # ``iter_scored_rows`` pops ``since`` on page 2+ but keeps
+        # ``until``, ``platform``, ``chain_id``, ``resolved``. If the
+        # opaque cursor ever fails to carry the lower bound (endpoint
+        # schema drift), a multi-page fetch could silently widen the
+        # window backwards. The per-row re-filter closes it. Simulate
+        # a page-2 leak by yielding one in-window row and one
+        # far-outside-window row, and assert only the first lands.
+        from benchmark.scorer import (
+            score_period_split_by_platform_from_mech_analytics,
+        )
+
+        now = datetime.now(timezone.utc)
+        in_window = (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        far_before = (now - timedelta(days=365)).isoformat().replace("+00:00", "Z")
+        keep = _ma_row(request_id="keep")
+        keep["requested_at"] = in_window
+        drop = _ma_row(request_id="drop")
+        drop["requested_at"] = far_before
+        _patch_iter_and_classifier(monkeypatch, [keep, drop])
+        result = score_period_split_by_platform_from_mech_analytics(days=7)
+        assert result["all"][0]["overall"]["n"] == 1
 
 
 class TestCliPeriodDispatchesOnEnvVar:

@@ -2504,20 +2504,34 @@ def score_period_split_by_platform_from_mech_analytics(
     for row in iter_scored_rows(
         since=window_start, until=window_end, chain_id=chain_id, resolved=True
     ):
-        # Same shaping as ``rebuild_from_mech_analytics``: derive
-        # ``category`` from the question title locally (endpoint only
-        # carries the title), require ``request_id``, default
-        # ``row_id`` from it for update() dedup compatibility. Kept in
-        # sync so a rebuild and a period-fetch produce structurally
-        # identical rows against the same endpoint response.
+        # Derive ``category`` from the question title locally: the
+        # endpoint only carries the title, but ``accumulate_row``
+        # groups on the classified category. Same shaping as
+        # ``rebuild_from_mech_analytics`` so the two produce
+        # structurally identical rows against the same endpoint
+        # response.
         question_text = row.get("question_text")
         platform = row.get("platform")
         if question_text:
             row["category"] = classify_category(question_text, platform)
-        request_id = row.get("request_id")
-        if not request_id:
+        # Require ``request_id``: this path routes rows through
+        # ``score()``, which doesn't dedup, but a row with no
+        # identifier is unusable anyway — we lose the ability to
+        # cross-reference it with settlement events or map back to a
+        # mech request for any per-row triage. Fail loudly at the
+        # boundary rather than absorb a malformed row.
+        if not row.get("request_id"):
             raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
-        row["row_id"] = row.get("row_id") or request_id
+        # Defensive re-filter on requested_at: iter_scored_rows keeps
+        # ``until`` but pops ``since`` on page 2+, so if the opaque
+        # cursor ever fails to carry the lower bound (schema drift on
+        # the endpoint), a multi-page fetch could silently widen the
+        # window backwards. This closes that with no bandwidth cost.
+        requested_at = _parse_predicted_at(row.get("requested_at"))
+        if requested_at is not None and (
+            requested_at < window_start or requested_at >= window_end
+        ):
+            continue
         prod_rows.append(row)
 
     # mech-analytics has no tournament partition — the endpoint serves

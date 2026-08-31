@@ -419,16 +419,19 @@ def load_input_rows_from_mech_analytics(
     window_end: datetime,
     chain_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Load input rows from mech-analytics's ``/v1/data/scored-rows``.
+    """Load production input rows from mech-analytics's ``/v1/data/scored-rows``.
 
     Endpoint filters on ``requested_at`` server-side; we alias it to
     ``predicted_at`` on each row so the downstream code (which keys on
     ``predicted_at`` throughout — see :func:`_parse_predicted_at`) reads
-    unchanged. ``row_id`` is defaulted from ``request_id`` so the dedup
-    upstream of :func:`simulate` behaves identically to the log path.
+    unchanged. mech-analytics has no tournament partition, so tournament
+    rows must come from the local ``tournament_scored.jsonl`` file (see
+    :func:`load_tournament_rows_from_file`); this loader only returns
+    production rows.
 
-    Tournament rows are always empty on this path: mech-analytics only
-    serves production scored rows.
+    :func:`simulate` doesn't dedup by row_id, so no dedup discipline
+    is needed here — the endpoint's keyset pagination is trusted not
+    to repeat rows within a single window fetch.
 
     :param window_start: start of the trailing window (inclusive, UTC-aware).
     :param window_end: end of the trailing window (exclusive, UTC-aware).
@@ -450,13 +453,14 @@ def load_input_rows_from_mech_analytics(
         chain_id=chain_id,
         resolved=True,
     ):
-        # Same discipline as rebuild_from_mech_analytics /
-        # score_period_split_by_platform_from_mech_analytics: a row
-        # without request_id would be dedup-invisible in simulate()
-        # and silently double-count on every run that re-fetches the
-        # same window. Fail loudly rather than absorb the corruption.
-        request_id = row.get("request_id")
-        if not request_id:
+        # Require request_id: a row with no identifier is unusable —
+        # we lose the ability to cross-reference to on-chain
+        # settlement events or map back to a mech request for
+        # per-row triage. Fail loudly at the boundary rather than
+        # absorb a malformed row. Matches the discipline of
+        # ``rebuild_from_mech_analytics`` and
+        # ``score_period_split_by_platform_from_mech_analytics``.
+        if not row.get("request_id"):
             raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
         # roi_sim keys on predicted_at throughout; mech-analytics
         # returns requested_at. Alias in place — cheaper than teaching
@@ -466,9 +470,6 @@ def load_input_rows_from_mech_analytics(
         # requested_at.
         if row.get("predicted_at") is None:
             row["predicted_at"] = row.get("requested_at")
-        # Legacy row_id compatibility for dedup in simulate().
-        if row.get("row_id") is None:
-            row["row_id"] = request_id
         rows.append(row)
     log.info(
         "load_input_rows_from_mech_analytics: fetched %d rows "
@@ -515,6 +516,20 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
             tournament_input,
         )
 
+    return _read_jsonl_paths_with_dedup(paths)
+
+
+def _read_jsonl_paths_with_dedup(paths: list[Path]) -> list[dict[str, Any]]:
+    """Read + dedup rows across a list of JSONL paths.
+
+    Same dedup + bad-line policy as :func:`load_input_rows`, extracted
+    so the mech-analytics path can reuse it for tournament rows (the
+    production side comes from the endpoint but tournament rows still
+    live in the local ``tournament_scored.jsonl``).
+
+    :param paths: JSONL files to read in the order given.
+    :return: deduped rows in scan order.
+    """
     rows: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     n_duplicates = 0
@@ -565,6 +580,32 @@ def load_input_rows(logs_dir: Path, tournament_input: Path) -> list[dict[str, An
         n_bad_lines,
     )
     return rows
+
+
+def load_tournament_rows_from_file(
+    tournament_input: Path,
+) -> list[dict[str, Any]]:
+    """Read tournament rows from ``tournament_scored.jsonl``.
+
+    Same read + dedup discipline as :func:`load_input_rows`'s
+    tournament branch, but without the production-log scan. Used
+    under ``USE_MECH_ANALYTICS_ROWS=true``: production rows come from
+    the endpoint, tournament rows still live in the local file.
+    Returns an empty list (with a WARN) if the file doesn't exist —
+    the tournament-run job produces it independently of the flag, but
+    a first-ever run or an artifact-download failure can still land
+    with the file missing.
+
+    :param tournament_input: path to ``tournament_scored.jsonl``.
+    :return: tournament rows, deduped by row_id.
+    """
+    if not tournament_input.is_file():
+        log.warning(
+            "Tournament input %s does not exist; no tournament rows",
+            tournament_input,
+        )
+        return []
+    return _read_jsonl_paths_with_dedup([tournament_input])
 
 
 # ---------------------------------------------------------------------------
@@ -1526,9 +1567,16 @@ def main() -> None:
     )
     # Route source based on USE_MECH_ANALYTICS_ROWS. Same env var the
     # scorer's --rebuild / --period-days paths key off — keep the two
-    # in sync so a workflow flip flips every consumer at once.
+    # in sync so a workflow flip flips every consumer at once. Under
+    # the flag, production rows come from mech-analytics but tournament
+    # rows still live in the local ``tournament_scored.jsonl`` (the
+    # tournament-run job produces it independently of the flag and
+    # roi_sim renders tournament rows as ``mode=tournament`` in the
+    # Slack ROI table). Merge both streams so no tournament rows are
+    # silently dropped from the ROI report under the flag.
     if _use_mech_analytics_rows():
         rows = load_input_rows_from_mech_analytics(window_start, window_end)
+        rows.extend(load_tournament_rows_from_file(args.tournament_input))
     else:
         rows = load_input_rows(args.logs_dir, args.tournament_input)
     if not rows:

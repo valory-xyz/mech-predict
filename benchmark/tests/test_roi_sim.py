@@ -1990,10 +1990,15 @@ class TestLoadInputRowsFromMechAnalytics:
         assert len(rows) == 1
         assert rows[0]["predicted_at"] == "2026-08-05T00:00:00Z"
 
-    def test_defaults_row_id_from_request_id(
+    def test_row_id_not_defaulted_on_this_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``row_id`` defaults to ``request_id`` for dedup in simulate()."""
+        """``row_id`` is not defaulted on this path; simulate() doesn't dedup by it."""
+        # ``simulate()`` never reads ``row_id`` — dedup lives in
+        # ``load_input_rows``'s ``seen_ids`` guard on the legacy path
+        # and nowhere else. Defaulting ``row_id`` from ``request_id``
+        # here would be dead code. Pinned so nobody adds it back
+        # under a false parity-with-legacy-loader claim.
         raw = {
             "request_id": "req-42",
             "requested_at": "2026-08-05T00:00:00Z",
@@ -2007,7 +2012,7 @@ class TestLoadInputRowsFromMechAnalytics:
             datetime(2026, 8, 1, tzinfo=timezone.utc),
             datetime(2026, 8, 8, tzinfo=timezone.utc),
         )
-        assert rows[0]["row_id"] == "req-42"
+        assert "row_id" not in rows[0]
 
     def test_existing_predicted_at_or_row_id_are_preserved(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2114,6 +2119,82 @@ class TestRoiSimMainDispatchesOnEnvVar:
         with pytest.raises(SystemExit):
             roi_sim.main()
         assert called["which"] == "legacy"
+
+    def test_flag_on_also_loads_tournament_rows_from_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under the flag, ``main()`` loads tournament rows on top of endpoint rows."""
+        # Regression pin: mech-analytics has no tournament partition, so
+        # tournament rows must come from the local
+        # ``tournament_scored.jsonl`` even under the flag. Otherwise the
+        # ROI report silently loses every ``mode=tournament`` row.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "true")
+        called_ma = {"count": 0}
+        called_tourn = {"count": 0}
+
+        def _fake_ma(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_ma["count"] += 1
+            return []
+
+        def _fake_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_tourn["count"] += 1
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows_from_mech_analytics", _fake_ma)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _fake_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called_ma["count"] == 1
+        assert called_tourn["count"] == 1
+
+    def test_flag_off_does_not_call_tournament_loader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Under legacy mode, ``load_tournament_rows_from_file`` is never called."""
+        # Legacy ``load_input_rows`` reads the tournament file itself,
+        # so a separate call would double-read the same rows.
+        monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+        called_tourn = {"count": 0}
+
+        def _fake_legacy(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            return []
+
+        def _fake_tourn(*_a: Any, **_kw: Any) -> list[dict[str, Any]]:
+            called_tourn["count"] += 1
+            return []
+
+        monkeypatch.setattr(roi_sim, "load_input_rows", _fake_legacy)
+        monkeypatch.setattr(roi_sim, "load_tournament_rows_from_file", _fake_tourn)
+        monkeypatch.setattr("sys.argv", ["roi_sim"])
+        with pytest.raises(SystemExit):
+            roi_sim.main()
+        assert called_tourn["count"] == 0
+
+
+class TestLoadTournamentRowsFromFile:
+    """Cover the tournament-only reader used under mech-analytics mode."""
+
+    def test_missing_file_returns_empty_list(self, tmp_path: Path) -> None:
+        """A missing tournament file returns ``[]`` with a WARN, not a raise."""
+        # Real cases: first-ever run, artifact-download failure, or
+        # the tournament-run job hasn't produced the file yet. All
+        # non-fatal — the ROI report degrades to production-only.
+        rows = roi_sim.load_tournament_rows_from_file(tmp_path / "missing.jsonl")
+        assert not rows
+
+    def test_reads_and_returns_rows_with_dedup(self, tmp_path: Path) -> None:
+        """Rows are read line-by-line with the same dedup discipline as the legacy loader."""
+        tourn = tmp_path / "tournament_scored.jsonl"
+        # Third row is a dupe of the first (same row_id) — dropped.
+        tourn.write_text(
+            '{"row_id": "t-1", "mode": "tournament", "p_yes": 0.6}\n'
+            '{"row_id": "t-2", "mode": "tournament", "p_yes": 0.4}\n'
+            '{"row_id": "t-1", "mode": "tournament", "p_yes": 0.9}\n'
+        )
+        rows = roi_sim.load_tournament_rows_from_file(tourn)
+        assert len(rows) == 2
+        assert [r["row_id"] for r in rows] == ["t-1", "t-2"]
 
 
 # pylint: disable=protected-access

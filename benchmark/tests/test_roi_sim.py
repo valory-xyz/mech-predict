@@ -1986,12 +1986,11 @@ class TestLoadInputRowsFromMechAnalytics:
         # Route through the real ``_map_row`` -> ``iter_scored_rows``
         # yield to catch drift between what production returns and
         # what the loader sees.
+        mapped = mech_analytics_client._map_row(api_row)  # pylint: disable=protected-access
         monkeypatch.setattr(
             mech_analytics_client,
             "iter_scored_rows",
-            lambda **_kw: iter(
-                [mech_analytics_client._map_row(api_row)]  # pylint: disable=protected-access
-            ),
+            lambda **_kw: iter([mapped]),
         )
         rows = roi_sim.load_input_rows_from_mech_analytics(
             datetime(2026, 8, 1, tzinfo=timezone.utc),
@@ -2019,12 +2018,11 @@ class TestLoadInputRowsFromMechAnalytics:
             "requested_at": "2026-08-05T00:00:00Z",
             "delivered_at": None,
         }
+        mapped = mech_analytics_client._map_row(api_row)  # pylint: disable=protected-access
         monkeypatch.setattr(
             mech_analytics_client,
             "iter_scored_rows",
-            lambda **_kw: iter(
-                [mech_analytics_client._map_row(api_row)]  # pylint: disable=protected-access
-            ),
+            lambda **_kw: iter([mapped]),
         )
         rows = roi_sim.load_input_rows_from_mech_analytics(
             datetime(2026, 8, 1, tzinfo=timezone.utc),

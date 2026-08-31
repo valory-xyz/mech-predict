@@ -63,6 +63,11 @@ from benchmark.roi_sim import (
     window_bounds,
 )
 
+# Module-scope alias for the underscore-prefixed helper so tests can
+# call it without an inline access-guard exception on every call. See
+# TestLoadInputRowsFromMechAnalytics for the callers.
+_map_row = mech_analytics_client._map_row  # pylint: disable=protected-access
+
 # Deployment names as declared in benchmark.tool_usage (one per platform).
 OMEN_DEPLOYMENT = "omenstrat Pearl"
 POLYMARKET_DEPLOYMENT = "polystrat Pearl"
@@ -1986,7 +1991,7 @@ class TestLoadInputRowsFromMechAnalytics:
         # Route through the real ``_map_row`` -> ``iter_scored_rows``
         # yield to catch drift between what production returns and
         # what the loader sees.
-        mapped = mech_analytics_client._map_row(api_row)  # pylint: disable=protected-access
+        mapped = _map_row(api_row)
         monkeypatch.setattr(
             mech_analytics_client,
             "iter_scored_rows",
@@ -2018,7 +2023,7 @@ class TestLoadInputRowsFromMechAnalytics:
             "requested_at": "2026-08-05T00:00:00Z",
             "delivered_at": None,
         }
-        mapped = mech_analytics_client._map_row(api_row)  # pylint: disable=protected-access
+        mapped = _map_row(api_row)
         monkeypatch.setattr(
             mech_analytics_client,
             "iter_scored_rows",

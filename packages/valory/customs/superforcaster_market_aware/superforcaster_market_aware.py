@@ -136,8 +136,8 @@ def count_tokens(text: str, model: str) -> int:
 
 
 # max_tokens is 4096, not the parent's 500. The parent emits a short prose
-# JSON object; this tool emits a 12-field structured object whose eight
-# reasoning fields carry the whole chain of thought. At 500 the completion is
+# JSON object; this tool emits a 17-field structured object whose reasoning
+# fields carry the whole chain of thought. At 500 the completion is
 # truncated mid-object and `.parse()` raises "Could not parse response content
 # as the length limit was reached", which the decorator converts into
 # {"p_yes": null, ...} -- a delivery the trader rejects, i.e. silently no bet
@@ -213,7 +213,7 @@ class PredictionResult(BaseModel):
             "about how a fact influences the answer."
         ),
     )
-    researchability: Literal[
+    research_class: Literal[
         "NR-sports",
         "NR-utterance",
         "NR-price",
@@ -246,6 +246,32 @@ class PredictionResult(BaseModel):
             "events, scheduled announcements). REVIEW only when the question "
             "is too ambiguous to classify. This is an objective property of "
             "the question. It is NOT a recommendation to act or not act."
+        ),
+    )
+    research_reason: str = Field(
+        ...,
+        description=(
+            "One sentence naming the specific findable source that justifies "
+            "the class above (for R: the filing, docket, poll or record that "
+            "would move the forecast; for NR-*: why no such source can exist "
+            "for this question)."
+        ),
+    )
+    researchability: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "How much pre-resolution research can move a rational forecast on "
+            "this question, as a number consistent with the class above. "
+            "Anchor bands: NR-price and NR-numeric 0.0-0.15; NR-utterance, "
+            "NR-headline and NR-behavior 0.05-0.25; NR-sports 0.15-0.35 "
+            "(research is real but on-field randomness dominates); REVIEW "
+            "0.4-0.6; R 0.6-1.0, higher when the nameable source is scheduled "
+            "or certain to exist, lower when it is speculative. Pick a value "
+            "inside the band, not a boundary. This is an objective property "
+            "of the question, emitted for continuous downstream weighting - "
+            "never an instruction to act and never a hard filter."
         ),
     )
     evidence_quality: float = Field(
@@ -293,8 +319,16 @@ class PredictionResult(BaseModel):
             "source TYPE A (dated within the resolution window, or directly "
             "states the criterion was met) vs TYPE B (undated, outside the "
             "window, or a standing page); state the TYPE A and TYPE B counts; "
-            "if ALL sources are TYPE B, anchor on the category base rate "
-            "(20-40% YES for 'X in headlines this week'-style markets). (d) "
+            "if ALL sources are TYPE B, anchor on the base rate FOR THIS "
+            "CATEGORY OF QUESTION, which you must state explicitly before "
+            "using it. Do not carry a single default across categories: "
+            "'will someone say a specific word' markets resolve YES far "
+            "less often than 'will this asset close above a level it is "
+            "already near' markets, and a threshold already crossed at "
+            "question time is likelier still. When a market price has been "
+            "supplied, it is a better estimate of the base rate than any "
+            "figure you can recall, and you should say so rather than "
+            "anchoring below it. (d) "
             "Criterion-specificity check: does any TYPE A evidence directly "
             "confirm the exact resolution condition (not merely that the topic "
             "is active)? If not, add uncertainty toward the base rate."
@@ -487,10 +521,12 @@ Aim for information which is specific, relevant, and covers the core considerati
 to make your forecast. For this step, do not draw any conclusions about how a fact will
 influence your answer or forecast.
 
-2. `researchability` - Classify, in one token, whether pre-resolution web research can
+2. `research_class` - Classify, in one token, whether pre-resolution web research can
 genuinely inform this question. Follow that field's class list exactly; first match wins, and
 sports outcomes are always NR-sports. This is an objective property of the question, not a
-recommendation to act.
+recommendation to act. Then `research_reason` - one sentence naming the findable source that
+justifies the class (or why none can exist), and `researchability` - a 0-1 number inside that
+class's anchor band, per the field description.
 
 3. `evidence_quality` - Rate 0 to 1 how well the retrieved sources actually bear on the
 resolution criterion. Judge the evidence, not your confidence in the answer.
@@ -1113,8 +1149,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 # the forecast -- never a trade recommendation. Unknown keys
                 # are dropped by the trader and by every benchmark parser
                 # today, so these cost nothing downstream until something is
-                # taught to read them.
-                "researchability": prediction.researchability,
+                # taught to read them. researchability is the 0-1 sizing
+                # signal; research_class/research_reason preserve the
+                # categorical reasoning it was derived from.
+                "researchability": round(prediction.researchability, 4),
+                "research_class": prediction.research_class,
+                "research_reason": prediction.research_reason,
                 "evidence_quality": prediction.evidence_quality,
                 # Echoed from the request by this code, never generated by the
                 # model, so it cannot be hallucinated. Without it nothing

@@ -164,7 +164,9 @@ def _make_prediction_stub() -> PredictionResult:
     numbers = json.loads(PREDICTION_JSON)
     return PredictionResult(
         facts="some facts",
-        researchability="R",
+        research_class="R",
+        research_reason="a scheduled filing would move the forecast",
+        researchability=0.8,
         evidence_quality=0.6,
         reasons_no="reasons no",
         reasons_yes="reasons yes",
@@ -219,6 +221,8 @@ class TestPredictionResultSchema:
         first_number = order.index("p_yes")
         for name in (
             "facts",
+            "research_class",
+            "research_reason",
             "researchability",
             "evidence_quality",
             "reasons_no",
@@ -237,7 +241,9 @@ class TestPredictionResultSchema:
         with pytest.raises(ValidationError):
             PredictionResult(
                 facts="f",
-                researchability="R",
+                research_class="R",
+                research_reason="a scheduled filing",
+                researchability=0.8,
                 evidence_quality=0.5,
                 reasons_no="n",
                 reasons_yes="y",
@@ -257,7 +263,9 @@ class TestPredictionResultSchema:
         """A well-formed instance validates."""
         parsed = PredictionResult(
             facts="f",
-            researchability="R",
+            research_class="R",
+            research_reason="a scheduled filing",
+            researchability=0.8,
             evidence_quality=0.5,
             reasons_no="n",
             reasons_yes="y",
@@ -288,6 +296,7 @@ class TestPredictionResultSchema:
             "confidence",
             "info_utility",
             "evidence_quality",
+            "researchability",
             "p_independent",
         ):
             meta = PredictionResult.model_fields[name].metadata
@@ -682,13 +691,13 @@ class TestResearchabilityField:
 
     def test_schema_enum_matches_the_taxonomy_constant(self) -> None:
         """The schema's Literal and the module constant cannot drift apart."""
-        literal = get_args(PredictionResult.model_fields["researchability"].annotation)
+        literal = get_args(PredictionResult.model_fields["research_class"].annotation)
         assert set(literal) == set(module.RESEARCHABILITY_CLASSES)
 
     def test_unknown_class_is_refused(self) -> None:
         """A class outside the taxonomy fails validation."""
         with pytest.raises(ValidationError):
-            _make_prediction_stub().model_copy(update={"researchability": "NR-weather"})
+            _make_prediction_stub().model_copy(update={"research_class": "NR-weather"})
             PredictionResult.model_validate(
                 {
                     **_make_prediction_stub().model_dump(),
@@ -711,7 +720,7 @@ class TestResearchabilityField:
         defect: the classifier's failure was over-assigning R, not
         over-restricting it.
         """
-        desc = PredictionResult.model_fields["researchability"].description
+        desc = PredictionResult.model_fields["research_class"].description
         assert "residual on-field randomness dominates" in desc
         assert "even though form and news" not in desc
 
@@ -725,10 +734,35 @@ class TestResearchabilityField:
         unfalsifiable tie-break with a check it can fail. Measured effect on
         50 screening questions: R fell from ~91% of emissions to 8-16%.
         """
-        desc = PredictionResult.model_fields["researchability"].description
+        desc = PredictionResult.model_fields["research_class"].description
         assert "NAME a" in desc
         assert "cannot name one" in desc
         assert "when genuinely torn" not in desc.lower()
+
+
+class TestBaseRateAnchor:
+    """The screen must not carry one base rate across all categories."""
+
+    def test_anchor_is_category_specific_not_a_fixed_range(self) -> None:
+        """A single hardcoded range mis-prices whole question classes.
+
+        The ported wording said "anchor on the category base rate (20-40% YES
+        for 'X in headlines this week'-style markets)". It names one category
+        and is applied to every question. Measured over 231 replayed markets:
+        price-threshold questions resolve YES 63.3% of the time while every
+        arm forecast 0.43-0.48, a 15-20 point miss on a third of the sample,
+        in the direction the fixed anchor pushes.
+        """
+        desc = PredictionResult.model_fields["evidence_reliability_screen"].description
+        assert "20-40%" not in desc
+        assert "FOR THIS" in desc and "CATEGORY OF QUESTION" in desc
+        assert "state explicitly" in desc
+
+    def test_supplied_price_outranks_a_recalled_base_rate(self) -> None:
+        """When a price is given it is the better base-rate estimate."""
+        desc = PredictionResult.model_fields["evidence_reliability_screen"].description
+        assert "better estimate of the base rate" in desc
+        assert "rather than anchoring below it" in desc
 
 
 class TestForecastSignalOnly:
@@ -781,7 +815,7 @@ class TestForecastSignalOnly:
 
     def test_researchability_is_framed_as_a_property_not_a_recommendation(self) -> None:
         """The field description says so explicitly."""
-        desc = PredictionResult.model_fields["researchability"].description
+        desc = PredictionResult.model_fields["research_class"].description
         assert "objective property" in desc
         assert "NOT a recommendation" in desc
 
@@ -1000,6 +1034,8 @@ class TestDeliveredPayload:
             "confidence",
             "info_utility",
             "researchability",
+            "research_class",
+            "research_reason",
             "evidence_quality",
             "market_prob_seen",
             "p_independent",

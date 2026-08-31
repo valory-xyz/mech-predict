@@ -49,6 +49,7 @@ from benchmark.scoring_primitives import (
     disagree_bucket,
     edge_score,
     log_loss_score,
+    sample_edge_sd,
 )
 from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
     minimize,
@@ -60,6 +61,14 @@ DEFAULT_OUTPUT_TOURNAMENT = Path(__file__).parent / "results" / "scores_tourname
 DEFAULT_HISTORY = Path(__file__).parent / "results" / "scores_history.jsonl"
 DEFAULT_DEDUP = Path(__file__).parent / "results" / "scored_row_ids.json"
 DEFAULT_LOGS_DIR = Path(__file__).parent / "datasets" / "logs"
+# The incremental mech-analytics path saves the max ``computed_at`` it
+# has seen so the next run resumes cleanly with a
+# ``since_computed_at`` filter. Sidecar file rather than a scores.json
+# field so a mid-run crash after the fetch but before the accumulator
+# write can't leave the watermark ahead of the actual accumulated state.
+DEFAULT_MECH_ANALYTICS_WATERMARK = (
+    Path(__file__).parent / "results" / "mech_analytics_watermark.txt"
+)
 
 # Data-source markers written into ``scores.json``. The legacy incremental
 # path (``update``) and legacy log-based ``rebuild`` stamp
@@ -170,7 +179,7 @@ RELIABILITY_GATE = 0.80
 # the derived metric stays None forever on the incremental path -- which is the
 # daily path. The flywheel compares this against the restored file and forces
 # one rebuild rather than silently rendering a dead column.
-SCORES_SCHEMA_VERSION = 2
+SCORES_SCHEMA_VERSION = 3
 MIN_CALIBRATION_BIN_SIZE = 20
 
 # Keys that must be persisted in scores.json for incremental resume.
@@ -185,6 +194,7 @@ _ACCUM_KEYS = (
     "log_loss_sum",
     "edge_sum",
     "market_brier_sum",
+    "edge_sq_sum",
     "edge_n",
     "edge_positive_count",
     # Diagnostic edge metrics (PROPOSAL.md Stage 4)
@@ -246,6 +256,7 @@ def _is_edge_eligible(row: dict[str, Any]) -> bool:
 _DIAGNOSTIC_NONE: dict[str, Any] = {
     "edge": None,
     "market_brier": None,
+    "edge_sd": None,
     "edge_n": 0,
     "edge_positive_rate": None,
     "conditional_accuracy_rate": None,
@@ -284,6 +295,7 @@ def _compute_edge_diagnostics(
         for r in edge_rows
     ]
     market_brier_avg = round(sum(market_briers) / len(market_briers), 4)
+    edge_sd = sample_edge_sd(sum(edges), sum(e * e for e in edges), len(edges))
     edge_positive = sum(1 for e in edges if e > 0)
     edge_pos_rate = round(edge_positive / len(edges), 4)
 
@@ -322,6 +334,7 @@ def _compute_edge_diagnostics(
     diag: dict[str, Any] = {
         "edge": edge_avg,
         "market_brier": market_brier_avg,
+        "edge_sd": edge_sd,
         "edge_n": len(edge_rows),
         "edge_positive_rate": edge_pos_rate,
         "disagree_n": disagree_n,
@@ -1033,7 +1046,10 @@ def _finalize_scores(scores: dict[str, Any]) -> dict[str, Any]:
     # re-armed on the incremental path), and stamping it current would stop
     # the flywheel's stale-schema check from ever firing the one rebuild
     # that migrates it.
-    migrated = scores["overall"].get("market_brier_sum") is not None
+    migrated = (
+        scores["overall"].get("market_brier_sum") is not None
+        and scores["overall"].get("edge_sq_sum") is not None
+    )
     result: dict[str, Any] = {
         "schema_version": (
             SCORES_SCHEMA_VERSION if migrated else scores.get("schema_version", 1)
@@ -1240,9 +1256,6 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
     if "current_month" not in data or "brier_sum" not in data.get("overall", {}):
         return None
 
-    # Carried so _finalize_scores can preserve a pre-migration version
-    # instead of stamping the accumulator current (see the stamp comment).
-
     def _restore_group(g: dict[str, Any]) -> dict[str, Any]:
         restored = _empty_group()
         restored["n"] = g["n"]
@@ -1258,6 +1271,7 @@ def _load_scores_for_resume(scores_path: Path) -> dict[str, Any] | None:
         # None, not 0.0, for pre-field files: edge_n restores in full, so 0.0
         # would derive market_brier ~= 0 forever on the incremental path.
         restored["market_brier_sum"] = g.get("market_brier_sum")
+        restored["edge_sq_sum"] = g.get("edge_sq_sum")
         restored["edge_n"] = g.get("edge_n", 0)
         restored["edge_positive_count"] = g.get("edge_positive_count", 0)
         # Diagnostic edge metrics — default to 0 for pre-existing scores
@@ -1844,6 +1858,7 @@ def rebuild_from_mech_analytics(
     until: datetime | None = None,
     scores_path: Path = DEFAULT_OUTPUT,
     history_path: Path = DEFAULT_HISTORY,
+    watermark_path: Path = DEFAULT_MECH_ANALYTICS_WATERMARK,
     chain_id: int | None = None,
 ) -> dict[str, Any]:
     """Rebuild scores from mech-analytics's ``/v1/data/scored-rows`` endpoint.
@@ -1856,8 +1871,9 @@ def rebuild_from_mech_analytics(
     ``scores_<platform>.json`` files, same downstream consumers
     (``analyze.py`` needs no changes).
 
-    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer;
-    default off so nothing changes until we flip.
+    Gated by the ``USE_MECH_ANALYTICS_ROWS`` env var at the CLI layer.
+    Default on after the mech-analytics cutover; set the env var to
+    ``false`` to fall back to the legacy log-based :func:`rebuild`.
 
     **Timestamp windowing.** The endpoint applies ``since`` / ``until``
     to ``requested_at``. Rows are bucketed into months here by the same
@@ -1877,6 +1893,11 @@ def rebuild_from_mech_analytics(
         ``None``, the endpoint returns up to now.
     :param scores_path: output path for the production ``scores.json``.
     :param history_path: output path for ``scores_history.jsonl``.
+    :param watermark_path: sidecar file the follow-up
+        ``--mech-analytics-incremental`` run resumes from. Unlinked
+        before this rebuild starts so a partial run can't advance
+        incremental past unmerged rows; stamped with
+        ``max(computed_at)`` at the end if any rows were fetched.
     :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
         ``None`` fetches every chain the endpoint serves.
     :return: finalized production scores dict.
@@ -1948,6 +1969,10 @@ def rebuild_from_mech_analytics(
     all_rows: list[dict[str, Any]] = []
     prior_month_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     current_month_rows: list[dict[str, Any]] = []
+    # Track the highest ``computed_at`` seen across the whole fetch so
+    # a subsequent ``update_from_mech_analytics`` call can resume from
+    # here instead of having to bootstrap with another full rebuild.
+    max_computed_at: datetime | None = None
     for row in iter_scored_rows(
         since=effective_since, until=until, chain_id=chain_id, resolved=True
     ):
@@ -1963,6 +1988,12 @@ def rebuild_from_mech_analytics(
             raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
         row["row_id"] = row.get("row_id") or request_id
         all_rows.append(row)
+
+        row_computed_at = _parse_row_computed_at(row.get("computed_at"))
+        if row_computed_at is not None and (
+            max_computed_at is None or row_computed_at > max_computed_at
+        ):
+            max_computed_at = row_computed_at
 
         requested_at = row.get("requested_at") or ""
         row_month = requested_at[:7] if requested_at else current_month
@@ -1995,6 +2026,11 @@ def rebuild_from_mech_analytics(
     scores_path.unlink(missing_ok=True)
     for platform in ("omen", "polymarket"):
         _derive_platform_path(scores_path, platform).unlink(missing_ok=True)
+    # Wipe the incremental watermark too — otherwise a subsequent
+    # ``--mech-analytics-incremental`` run would resume from a
+    # stale ``computed_at`` and merge only the tail of what the
+    # rebuild already accumulated, silently under-counting rows.
+    watermark_path.unlink(missing_ok=True)
 
     # mech-analytics has no tournament partition — leave existing
     # scores_tournament*.json files untouched. Overwriting them with
@@ -2029,7 +2065,296 @@ def rebuild_from_mech_analytics(
             accumulate_row(month_scores, row)
         _upsert_month_snapshot(month_scores, month, history_path)
 
+    # Stamp the watermark so a subsequent
+    # ``--mech-analytics-incremental`` run can pick up from here
+    # without another full rebuild.
+    if max_computed_at is not None:
+        _write_watermark(watermark_path, max_computed_at)
+
     return prod_result
+
+
+def _parse_iso_aware(text: str) -> datetime | None:
+    """Parse an ISO 8601 string into a timezone-aware datetime.
+
+    Accepts the ``Z`` suffix produced by ``mech_analytics_client._to_iso_z``.
+    Returns ``None`` for malformed input or a naive timestamp — the two
+    callers (:func:`_read_watermark` and :func:`_parse_row_computed_at`)
+    both treat naive as garbage rather than silently branding it as UTC,
+    because the downstream endpoint call chain rejects naive input.
+
+    :param text: string form of an ISO 8601 timestamp.
+    :return: timezone-aware datetime, or ``None``.
+    """
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed
+
+
+def _read_watermark(watermark_path: Path) -> datetime | None:
+    """Read the ``max(computed_at)`` from the previous incremental run.
+
+    Sidecar to ``scores.json`` so a mid-run crash between the fetch and
+    the accumulator write cannot leave the watermark ahead of the state
+    actually merged into scores. Returns ``None`` when the file is
+    missing (first-ever run, or a rebuild wiped it) or malformed
+    (unreadable / not an ISO timestamp) — the caller falls back to the
+    full rebuild path in either case.
+
+    :param watermark_path: sidecar file next to ``scores.json``.
+    :return: timezone-aware datetime, or ``None``.
+    """
+    log = logging.getLogger(__name__)
+    if not watermark_path.exists():
+        return None
+    try:
+        raw = watermark_path.read_text().strip()
+    except OSError as exc:
+        # Missing-file is filtered above, so this is a permission /
+        # I/O problem on a file that DOES exist. Distinct from a
+        # fresh clone.
+        log.warning(
+            "watermark %s unreadable (%s); rebuilding to recover",
+            watermark_path,
+            exc,
+        )
+        return None
+    if not raw:
+        # Zero-byte sidecar: usually a killed process between the
+        # atomic-rename temp create and the final rename. Distinct
+        # from fresh clone so a killed run doesn't look identical
+        # to a first-time deploy in the logs.
+        log.warning("watermark %s is empty; rebuilding to recover", watermark_path)
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        log.warning(
+            "watermark %s not an ISO 8601 timestamp (%r); rebuilding to recover",
+            watermark_path,
+            raw,
+        )
+        return None
+    if parsed.tzinfo is None:
+        # Naive timestamps are ambiguous. Downstream, the value is
+        # handed to ``mech_analytics_client._to_iso_z`` when we call
+        # ``iter_scored_rows(since_computed_at=...)``, and _to_iso_z
+        # raises on naive input. Reject here so the caller falls back
+        # to a rebuild instead of crashing mid-fetch.
+        logging.getLogger(__name__).warning(
+            "watermark %s is naive; rebuilding to recover", watermark_path
+        )
+        return None
+    return parsed
+
+
+def _write_watermark(watermark_path: Path, computed_at: datetime) -> None:
+    """Atomically persist ``computed_at`` so the next run resumes here.
+
+    Rename over the sidecar so a crash mid-write leaves the previous
+    watermark intact — a subsequent run then re-fetches a small tail
+    rather than jumping past unmerged rows.
+
+    :param watermark_path: sidecar file next to ``scores.json``.
+    :param computed_at: timezone-aware datetime to persist as ISO 8601 Z.
+    """
+    watermark_path.parent.mkdir(parents=True, exist_ok=True)
+    iso = computed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    tmp = watermark_path.with_suffix(watermark_path.suffix + ".tmp")
+    tmp.write_text(iso)
+    os.replace(tmp, watermark_path)
+
+
+def update_from_mech_analytics(
+    scores_path: Path = DEFAULT_OUTPUT,
+    history_path: Path = DEFAULT_HISTORY,
+    dedup_path: Path | None = None,
+    tournament_scores_path: Path | None = None,
+    watermark_path: Path = DEFAULT_MECH_ANALYTICS_WATERMARK,
+    chain_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Incremental scoring against ``/v1/data/scored-rows``.
+
+    Mirrors the legacy log-based ``update()`` semantics against the
+    mech-analytics HTTP endpoint. Each run:
+
+    1. Reads the ``computed_at`` watermark from the previous run's
+       sidecar file.
+    2. Fetches only rows with ``computed_at >= watermark`` and
+       ``resolved=true`` from mech-analytics — the delta of newly
+       resolved (or late-rescored) rows since the last run.
+    3. Merges the delta through ``update()`` — same monthly rollover,
+       same ``scored_row_ids.json`` dedup as the legacy path. The
+       dedup is what prevents double-counting when a row's
+       ``computed_at`` bumps forward (mech-analytics's late-resolution
+       sweep re-scores rows that were pending at first-score time),
+       causing the same ``request_id`` to reappear in a later delta —
+       the second appearance is skipped by ``row_id`` on
+       ``scored_row_ids.json``.
+    4. Advances the watermark to the highest ``computed_at`` seen in
+       this batch. The watermark write is atomic and follows the
+       accumulator commit so a crash mid-run re-fetches a small tail
+       rather than dropping rows.
+
+    Returns ``None`` when no baseline is available (missing
+    ``scores.json``, wrong source stamp, or missing watermark). The
+    caller must fall back to ``rebuild_from_mech_analytics`` in that
+    case — the incremental path cannot bootstrap itself from an empty
+    accumulator because ``since_computed_at`` alone doesn't specify
+    the historical window.
+
+    :param scores_path: path to production ``scores.json``.
+    :param history_path: path to ``scores_history.jsonl`` (production only).
+    :param dedup_path: path to ``scored_row_ids.json`` (shared with the
+        legacy path). Defaults to ``scores.json``'s sibling.
+    :param tournament_scores_path: path to ``scores_tournament.json``.
+        Derived from ``scores_path`` when None.
+    :param watermark_path: sidecar file holding the previous run's
+        ``max(computed_at)``.
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        Passes straight through to the endpoint.
+    :return: finalized production scores dict, or ``None`` if a full
+        rebuild is required first.
+    :raises MechAnalyticsError: if the endpoint is unreachable.
+    """
+    # pylint: disable=import-outside-toplevel
+    import importlib
+
+    from benchmark.mech_analytics_client import iter_scored_rows
+
+    # Same import routing as rebuild_from_mech_analytics — see the
+    # comment there on the pylint cyclic-import workaround.
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    # Baseline gate: incremental cannot bootstrap from nothing. A
+    # missing scores.json, a scores.json stamped with the wrong
+    # source, or a missing watermark all mean the previous state is
+    # either absent or was written by a different code path — in
+    # any of those cases the caller has to rebuild first.
+    if not scores_path.exists():
+        logging.getLogger(__name__).info(
+            "update_from_mech_analytics: %s missing — full rebuild required",
+            scores_path,
+        )
+        return None
+    if _read_scores_source(scores_path) != SOURCE_MECH_ANALYTICS:
+        logging.getLogger(__name__).info(
+            "update_from_mech_analytics: %s not sourced from mech-analytics "
+            "(needs a rebuild before incremental can resume)",
+            scores_path,
+        )
+        return None
+    watermark = _read_watermark(watermark_path)
+    if watermark is None:
+        logging.getLogger(__name__).info(
+            "update_from_mech_analytics: watermark missing at %s — full rebuild required",
+            watermark_path,
+        )
+        return None
+
+    log = logging.getLogger(__name__)
+    log.info(
+        "update_from_mech_analytics: fetching rows with computed_at >= %s",
+        watermark.isoformat(),
+    )
+
+    new_rows: list[dict[str, Any]] = []
+    max_computed_at: datetime | None = None
+    for row in iter_scored_rows(
+        since_computed_at=watermark, chain_id=chain_id, resolved=True
+    ):
+        # ``rebuild_from_mech_analytics`` does the same shaping — keep
+        # them in sync so update() and rebuild produce identical rows
+        # against the same endpoint response.
+        question_text = row.get("question_text")
+        platform = row.get("platform")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        request_id = row.get("request_id")
+        if not request_id:
+            # pylint: disable=import-outside-toplevel
+            from benchmark.mech_analytics_client import MechAnalyticsError
+
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
+        row["row_id"] = row.get("row_id") or request_id
+        new_rows.append(row)
+
+        # Track the highest computed_at seen across the whole
+        # response so we can advance the watermark after the merge
+        # commits. Endpoint sort is (computed_at, request_id), but a
+        # brittle assumption on ordering isn't worth it — max() costs
+        # nothing.
+        row_computed_at = _parse_row_computed_at(row.get("computed_at"))
+        if row_computed_at is not None and (
+            max_computed_at is None or row_computed_at > max_computed_at
+        ):
+            max_computed_at = row_computed_at
+
+    log.info(
+        "update_from_mech_analytics: fetched %d delta rows",
+        len(new_rows),
+    )
+
+    # Merge through the existing update() path — dedup on row_id via
+    # scored_row_ids.json, month rollover, tournament partitioning all
+    # already handled there.
+    finalized = update(
+        new_rows,
+        scores_path=scores_path,
+        history_path=history_path,
+        dedup_path=dedup_path,
+        tournament_scores_path=tournament_scores_path,
+    )
+
+    # Watermark write comes AFTER the accumulator commit. If the merge
+    # crashes, the next run re-fetches the same delta and the update()
+    # dedup catches the re-serves; if the merge succeeds but the
+    # watermark write crashes, we re-fetch a small tail on the next
+    # run and dedup skips it. Both failure modes prefer duplicate work
+    # over lost rows.
+    if max_computed_at is not None:
+        _write_watermark(watermark_path, max_computed_at)
+        log.info(
+            "update_from_mech_analytics: advanced watermark to %s",
+            max_computed_at.isoformat(),
+        )
+    elif new_rows:
+        # We fetched rows but not one carried a parseable
+        # ``computed_at``. If we don't warn, the watermark silently
+        # stays put and every subsequent run re-fetches the same
+        # delta forever. Distinct from "empty delta" (below), which
+        # is normal on a quiet window.
+        log.warning(
+            "update_from_mech_analytics: fetched %d rows but none had a "
+            "parseable computed_at; watermark cannot advance. Endpoint "
+            "may have changed its computed_at shape.",
+            len(new_rows),
+        )
+    else:
+        log.info("update_from_mech_analytics: no rows in delta; watermark unchanged")
+
+    return finalized
+
+
+def _parse_row_computed_at(value: Any) -> datetime | None:
+    """Best-effort parse of a row's ``computed_at`` for watermark tracking.
+
+    Endpoint sends ISO 8601 with a ``Z`` suffix. Anything else — missing,
+    empty, malformed — falls through to ``None`` so the caller keeps the
+    old watermark instead of stamping garbage.
+
+    :param value: raw ``computed_at`` value off the endpoint row.
+    :return: timezone-aware datetime, or ``None`` on any wrong-shape input.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    return _parse_iso_aware(value)
 
 
 def _extract_date_from_log_path(path: str) -> str:
@@ -2125,6 +2450,94 @@ def score_period_split_by_platform(
         logs_dir, days, tournament_input, offset_days
     )
     return _score_rows_by_platform(prod_rows, tourn_rows)
+
+
+def score_period_split_by_platform_from_mech_analytics(
+    days: int = 1,
+    offset_days: int = 0,
+    chain_id: int | None = None,
+) -> dict[str, tuple[dict[str, Any], dict[str, Any]]]:
+    """Score a windowed slice of rows fetched from mech-analytics.
+
+    Same return shape as :func:`score_period_split_by_platform` so the CLI
+    can substitute one for the other. Tournament rows are always empty on
+    this path: mech-analytics only serves production scored rows, so the
+    tournament half of every returned tuple is ``score([])`` — the same
+    shape rendered by the legacy path when a rolling-window log range
+    happens to contain no tournament rows.
+
+    :param days: score rows from a window ``days`` days wide.
+    :param offset_days: number of days to shift the window back from "now".
+        ``0`` means the trailing window ending at "now" (current window);
+        ``days`` means the immediately-preceding non-overlapping window.
+    :param chain_id: optional chain filter (100 = Gnosis, 137 = Polygon).
+        ``None`` fetches every chain the endpoint serves.
+    :return: ``{"all": (prod, tourn), "omen": (prod, tourn),
+        "polymarket": (prod, tourn)}``. Unknown-platform rows stay in
+        ``"all"`` only.
+    :raises ValueError: when ``days`` or ``offset_days`` is negative.
+    :raises MechAnalyticsError: if the endpoint is unreachable.
+    """
+    if days < 0 or offset_days < 0:
+        raise ValueError(
+            f"days and offset_days must be >= 0 (got days={days},"
+            f" offset_days={offset_days})"
+        )
+
+    # pylint: disable=import-outside-toplevel
+    import importlib
+
+    from benchmark.mech_analytics_client import (
+        MechAnalyticsError,
+        iter_scored_rows,
+    )
+
+    classify_category = importlib.import_module(
+        "benchmark.datasets.fetch_production"
+    ).classify_category
+
+    now = datetime.now(timezone.utc)
+    window_end = now - timedelta(days=offset_days)
+    window_start = window_end - timedelta(days=days)
+
+    prod_rows: list[dict[str, Any]] = []
+    for row in iter_scored_rows(
+        since=window_start, until=window_end, chain_id=chain_id, resolved=True
+    ):
+        # Derive ``category`` from the question title locally: the
+        # endpoint only carries the title, but ``accumulate_row``
+        # groups on the classified category. Same shaping as
+        # ``rebuild_from_mech_analytics`` so the two produce
+        # structurally identical rows against the same endpoint
+        # response.
+        question_text = row.get("question_text")
+        platform = row.get("platform")
+        if question_text:
+            row["category"] = classify_category(question_text, platform)
+        # Require ``request_id``: this path routes rows through
+        # ``score()``, which doesn't dedup, but a row with no
+        # identifier is unusable anyway — we lose the ability to
+        # cross-reference it with settlement events or map back to a
+        # mech request for any per-row triage. Fail loudly at the
+        # boundary rather than absorb a malformed row.
+        if not row.get("request_id"):
+            raise MechAnalyticsError(f"mech-analytics row missing request_id: {row!r}")
+        # Defensive re-filter on requested_at: iter_scored_rows keeps
+        # ``until`` but pops ``since`` on page 2+, so if the opaque
+        # cursor ever fails to carry the lower bound (schema drift on
+        # the endpoint), a multi-page fetch could silently widen the
+        # window backwards. This closes that with no bandwidth cost.
+        requested_at = _parse_predicted_at(row.get("requested_at"))
+        if requested_at is not None and (
+            requested_at < window_start or requested_at >= window_end
+        ):
+            continue
+        prod_rows.append(row)
+
+    # mech-analytics has no tournament partition — the endpoint serves
+    # only production-mode scored rows. Return empty tournament rows so
+    # the return shape matches the legacy path exactly.
+    return _score_rows_by_platform(prod_rows, [])
 
 
 def _parse_predicted_at(value: Any) -> datetime | None:
@@ -2302,6 +2715,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Incrementally merge rows from PATH into scores.json via update()",
     )
     parser.add_argument(
+        "--mech-analytics-incremental",
+        action="store_true",
+        help=(
+            "Incrementally merge new / newly-resolved rows from "
+            "mech-analytics into scores.json (like --update but "
+            "sourced from the HTTP endpoint via a computed_at "
+            "watermark). Requires an existing scores.json stamped "
+            "with source=mech_analytics and a "
+            "mech_analytics_watermark.txt sidecar — falls back with "
+            "exit code 2 when either is missing so the caller can "
+            "kick off a full --rebuild first."
+        ),
+    )
+    parser.add_argument(
         "--skip-tournament-output",
         action="store_true",
         help=(
@@ -2331,13 +2758,35 @@ def _cli_update(args: argparse.Namespace, output_tournament: Path) -> None:
 
 
 def _cli_period(args: argparse.Namespace, output_tournament: Path) -> None:
-    """Handle the ``--period-days`` CLI mode."""
-    results = score_period_split_by_platform(
-        logs_dir=args.logs_dir,
-        days=args.period_days,
-        tournament_input=args.tournament_input,
-        offset_days=args.period_offset_days,
-    )
+    """Handle the ``--period-days`` CLI mode.
+
+    Under ``USE_MECH_ANALYTICS_ROWS=true`` in the environment, reroutes to
+    :func:`score_period_split_by_platform_from_mech_analytics` — the
+    endpoint fetch replaces the local-log scan. Off-chain migration: the
+    workflow's Fetch step is skipped when the flag is on, so ``logs_dir``
+    is empty and the legacy path would produce zero-row output. Same
+    return shape either side of the branch so the downstream write
+    code stays untouched.
+
+    :param args: parsed CLI namespace.
+    :param output_tournament: derived path for the tournament scores json.
+    """
+    if _use_mech_analytics_rows():
+        print(
+            f"Scoring period ({args.period_days}d, offset={args.period_offset_days}d)"
+            " from mech-analytics"
+        )
+        results = score_period_split_by_platform_from_mech_analytics(
+            days=args.period_days,
+            offset_days=args.period_offset_days,
+        )
+    else:
+        results = score_period_split_by_platform(
+            logs_dir=args.logs_dir,
+            days=args.period_days,
+            tournament_input=args.tournament_input,
+            offset_days=args.period_offset_days,
+        )
     prod_result, tourn_result = results["all"]
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2453,6 +2902,40 @@ def _cli_legacy_full_recompute(
     return result
 
 
+def _cli_mech_analytics_incremental(
+    args: argparse.Namespace, output_tournament: Path
+) -> int:
+    """Handle the ``--mech-analytics-incremental`` CLI mode.
+
+    Returns 0 on a successful incremental merge and 2 when the
+    incremental path can't run because ``scores.json`` is missing,
+    wrong-sourced, or missing its watermark sidecar. Exit code 2 is
+    the caller's signal to fall back to ``--rebuild`` — the workflow
+    Score step branches on it.
+
+    :param args: parsed CLI namespace; reads ``args.output`` and
+        ``args.history`` for the scores/history paths.
+    :param output_tournament: path to ``scores_tournament.json``.
+    :return: exit code (0 = merged, 2 = no baseline, caller must rebuild).
+    """
+    result = update_from_mech_analytics(
+        scores_path=args.output,
+        history_path=args.history,
+        tournament_scores_path=output_tournament,
+    )
+    if result is None:
+        # Sentinel exit: the workflow's Score step reads this and
+        # kicks off a full ``--rebuild`` so the first run after a
+        # rebuild-wipe or a fresh clone still produces a scores.json.
+        return 2
+    overall = result["overall"]
+    print(
+        f"mech-analytics incremental merge complete: Brier={overall['brier']},"
+        f" n={overall['n']}"
+    )
+    return 0
+
+
 def main() -> None:
     """CLI entry point for scoring."""
     args = _build_arg_parser().parse_args()
@@ -2463,6 +2946,12 @@ def main() -> None:
 
     if args.update is not None:
         _cli_update(args, output_tournament)
+        return
+
+    if args.mech_analytics_incremental:
+        exit_code = _cli_mech_analytics_incremental(args, output_tournament)
+        if exit_code != 0:
+            raise SystemExit(exit_code)
         return
 
     if args.period_days is not None:

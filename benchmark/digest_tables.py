@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any, Collection, Iterable, Sequence
 
@@ -243,29 +244,108 @@ def _delta(
 COMPLETENESS_RATIO = 0.70
 
 
+PROMOTE_DELTA = 0.04
+# A Brier this far above its own base-rate floor is a signal; less is noise.
+NO_SKILL_MARGIN = 0.01
+# One-sided 95%: the normal-approximation z. The policy specifies a bootstrap;
+# at n >= 30 on a mean this is the same call to well inside the margin, and it
+# is computable from the stored sum/sum-of-squares without per-row data.
+Z_ONE_SIDED_95 = 1.645
+
+COIN_FLIP = 0.50
+
+
 # The rule lives inside the header's own text so Slack cannot pad between
 # rule and title; its length tracks the title rather than being fixed.
+VERDICT_MARKER = {
+    "promote": "🟢",
+    "demote": "🟠",
+    "blocked": "🔴",
+    "none": "⚪",
+}
+
 TITLE_RULE_CHAR = "━"
 TITLE_RULE_MIN = 24
 
 
-def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
-    """Build the title message that opens a platform's report.
+def _headline(
+    prod: dict[str, str],
+    tourn: dict[str, str],
+    platform: str,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """Build the one-message answer: what to promote, what to demote.
 
+    The tables carry the evidence; this carries the decision. A reader who
+    stops after the first message must still leave with the right action.
+
+    :param prod: verdicts for the deployed tools.
+    :param tourn: verdicts for the candidates.
     :param platform: platform key, for the heading.
-    :param as_of: the last date the data covers -- taken from the scores file,
-        not a clock; this module has no clock.
+    :param as_of: last date the data covers, from the scores file -- this
+        module has no clock.
     :return: a webhook payload.
     """
+    promote = sorted(t for t, v in tourn.items() if v.startswith("PROMOTE"))
+    demote = sorted(t for t, v in prod.items() if v.startswith("demote"))
+    unjudged = sorted(
+        t
+        for t, v in {**prod, **tourn}.items()
+        if v.startswith(("n=", "no data", "no spread", "needs --rebuild"))
+    )
+    # Asked of the shared survivor rule, NOT of the verdict text.
+    blocked = bool(prod) and not _survivors(prod)
+
+    if promote:
+        state, token = "promote", f"PROMOTE {len(promote)}"
+        # Keep the (rel NN%) annotation: the headline must not read cleaner
+        # than the rec cell it summarizes.
+        annotated = [
+            f"`{t}`{suffix and ' ' + suffix}"
+            for t in promote
+            for suffix in [tourn[t].removeprefix("PROMOTE").strip()]
+        ]
+        detail = "Promote " + ", ".join(annotated) + "."
+    elif demote and not blocked:
+        state, token = "demote", f"DEMOTE {len(demote)}"
+        detail = "Demote " + ", ".join(f"`{t}`" for t in demote) + "."
+    elif demote:
+        state, token = "blocked", "NO ACTION"
+        # NOT len(demote): "blocked" means no tool SURVIVED, which includes
+        # the ones the gate could not judge at all.
+        detail = (
+            "No deployed tool clears the gate, so demoting the "
+            f"{len(demote)} that fail outright would leave this platform "
+            "with no forecaster. Treat as a platform-level problem, not a "
+            "tool swap."
+        )
+    else:
+        state, token = "none", "NO CHANGE"
+        detail = "No candidate clears the promote margin."
+
     label = PLATFORM_TITLES.get(platform, platform.title())
-    # Date inside the rules, on the title line: platform and day are one block.
-    stamp = f"  \u00b7  {as_of}" if as_of else ""
-    line = f"{label.upper()}  \u00b7  REPORT V2{stamp}"
+    marker = VERDICT_MARKER[state]
+    # Date inside the rules, on the title line: platform, badge, outcome and
+    # day are one block.
+    # Single-space separators: the three framed lines must fit Slack's
+    # 150-char header cap, and the verdict token pushed double-spacing over.
+    stamp = f" \u00b7 {as_of}" if as_of else ""
+    line = f"{marker} {label.upper()} \u00b7 REPORT V2 \u00b7 {token}{stamp}"
     rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
+    title = f"{rule}\n{line}\n{rule}"
+
+    lines = [detail]
+    if unjudged:
+        lines.append(
+            f"_{len(unjudged)} tool(s) had too little data to judge: "
+            + ", ".join(f"`{t}`" for t in unjudged)
+            + "._"
+        )
     return message(
-        f"{label} {as_of or ''}".strip(),
+        f"{label} {as_of or ''}: {token}".strip(),
         [
-            header(f"{rule}\n{line}\n{rule}"),
+            header(title),
+            section("\n".join(lines)),
             context(
                 "*Legend:*\n"
                 f"\u2022 {LOW_SAMPLE_MARK}: marks a window under "
@@ -281,10 +361,260 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
                 "\u2022 *base*: score of always predicting the pool's "
                 "average YES rate -- the zero-skill reference.\n"
                 "\u2022 *mkt*: score of always predicting the current "
-                "market price -- the crowd reference."
+                "market price -- the crowd reference.\n"
+                f"\u2022 *floor*: worst Edge the evidence still supports "
+                f"(one-sided 95%); the promote test is floor > "
+                f"+{PROMOTE_DELTA}.\n"
+                "\u2022 *condAcc*: win rate on the markets where the tool "
+                "DISAGREED with the price -- under 50% blocks a promote.\n"
+                "\u2022 *rec*: the verdict -- every value explained in the "
+                "<https://github.com/valory-xyz/mech-predict/blob/main/"
+                "benchmark/DAILY_REPORT_OPERATOR_GUIDE.md|operator guide>."
             ),
         ],
     )
+
+
+def _edge_lower_bound(stats: dict[str, Any] | None) -> float | None:
+    """One-sided 95% lower bound on the mean edge, or None without a spread.
+
+    :param stats: per-tool stats for the decision window.
+    :return: the bound, or None.
+    """
+    edge = _num((stats or {}).get("edge"))
+    sd = _num((stats or {}).get("edge_sd"))
+    count = _num((stats or {}).get("edge_n"))
+    if edge is None or sd is None or count is None or count < 2:
+        return None
+    return edge - Z_ONE_SIDED_95 * sd / math.sqrt(count)
+
+
+def _below_no_skill(stats: dict[str, Any] | None) -> bool:
+    """Is this window's Brier materially worse than its own base rate?
+
+    Material means >= NO_SKILL_MARGIN: a hairline gap is noise, not a demote.
+
+    :param stats: per-tool stats for one window.
+    :return: True when below no-skill by more than the margin.
+    """
+    brier = _num((stats or {}).get("brier"))
+    base = _num((stats or {}).get("baseline_brier"))
+    return brier is not None and base is not None and brier - base >= NO_SKILL_MARGIN
+
+
+def _below_reliability(stats: dict[str, Any] | None) -> bool:
+    """Did too few calls return a usable prediction this window?
+
+    :param stats: per-tool stats for one window.
+    :return: True when reliability is known and below the gate.
+    """
+    rate = _num((stats or {}).get("reliability"))
+    return rate is not None and rate < RELIABILITY_GATE
+
+
+def _verdict(
+    stats: dict[str, Any] | None,
+    deployed: bool,
+    recent: dict[str, Any] | None = None,
+) -> str:
+    """Gate verdict; low reliability annotates positive outcomes.
+
+    ``PROMOTE (rel 60%)`` -- the warning rides along, never vetoes: a tool
+    that misses calls may still be the best forecaster available.
+
+    :param stats: per-tool stats for the decision window.
+    :param deployed: True for a production tool, False for a candidate.
+    :param recent: stats for the most recent week.
+    :return: a short verdict string for the ``rec`` cell.
+    """
+    verdict = _verdict_core(stats, deployed, recent)
+    rate = _num((stats or {}).get("reliability"))
+    if _below_reliability(stats) and verdict.startswith(("PROMOTE", "keep", "review")):
+        return f"{verdict} (rel {rate:.0%})"
+    return verdict
+
+
+def _verdict_core(
+    stats: dict[str, Any] | None,
+    deployed: bool,
+    recent: dict[str, Any] | None = None,
+) -> str:
+    """Apply the promote/demote gate to one tool.
+
+    The rule is the policy's, stated once and used for both rosters:
+    promote only when the lower bound on the edge clears the margin; demote on
+    a sustained below-no-skill signal; otherwise keep. Anything the sample
+    cannot support says so rather than guessing -- "not enough data yet" is a
+    different answer from "no improvement", and the policy is explicit that
+    conflating them is the failure to avoid.
+
+    :param stats: per-tool stats for the decision window.
+    :param deployed: True for a production tool, False for a candidate.
+    :param recent: stats for the most recent week, used to confirm that a
+        below-no-skill reading is sustained rather than a single window.
+    :return: a short verdict string for the ``rec`` cell.
+    """
+    brier = _num((stats or {}).get("brier"))
+    if brier is None:
+        return "no data"
+    edge_n = _num((stats or {}).get("edge_n"))
+    if edge_n is None or edge_n < MIN_SAMPLE_SIZE:
+        shown = NA if edge_n is None else int(edge_n)
+        return f"n={shown} < {MIN_SAMPLE_SIZE}"
+
+    lower = _edge_lower_bound(stats)
+    if lower is None:
+        # An accumulator written before `edge_sd` existed restores the field as
+        # None and never re-arms on the incremental path, which is the daily
+        # path in production. That is a MIGRATION state, not a thin sample, and
+        # saying so is the difference between "run a rebuild" and "this tool
+        # has no data".
+        if (stats or {}).get("edge_sd", "missing") is None:
+            return "needs --rebuild"
+        return "no spread"
+
+    # Conditional accuracy under 50% VETOES a candidate promote (review:,
+    # never PROMOTE) but only annotates a deployed keep -- destructive
+    # actions need the stronger signal, eligibility gating is cheap.
+    # Each reason NAMES THE COLUMN that triggered it rather than describing it
+    # in prose. The reader can then check the verdict against a cell on the
+    # same row, and the cell stays the width of the other columns instead of
+    # wrapping to three lines.
+    # Reliability never vetoes: the _verdict wrapper annotates a positive
+    # verdict with (rel NN%) instead -- a tool that misses calls may still
+    # be the best forecaster available.
+    conditional = _num((stats or {}).get("conditional_accuracy_rate"))
+    if lower > PROMOTE_DELTA:
+        if conditional is not None and conditional < COIN_FLIP:
+            note = f"floor ok, condAcc {conditional:.0%}"
+            return f"keep ({note})" if deployed else f"review: {note}"
+        return "keep (floor ok)" if deployed else "PROMOTE"
+
+    if conditional is not None and conditional < COIN_FLIP:
+        reason = f"condAcc {conditional:.0%}"
+        return f"demote: {reason}" if deployed else f"no: {reason}"
+
+    # Sustained, not a one-off: both the 90d window and the latest week must agree.
+    # An absent or thin week is "we know nothing new" and must never take
+    # the destructive action; a 3-row lucky week must not erase a 500-row
+    # demote signal either -- the week counts only when it clears the same
+    # sample floor as every other cross-window comparison. Candidates carry
+    # no weekly window; their "no:" is non-destructive, so one reading is
+    # enough.
+    sustained = _below_no_skill(stats) and (
+        (_has_floor(recent) and _below_no_skill(recent))
+        if deployed
+        else (recent is None or _below_no_skill(recent))
+    )
+    if sustained:
+        return "demote: no-skill" if deployed else "no: no-skill"
+
+    return "keep" if deployed else f"no: {PROMOTE_DELTA - lower:+.3f} short"
+
+
+def _survivors(verdicts: dict[str, str]) -> list[str]:
+    """Tools that could actually replace a demoted one.
+
+    "n=12 < 30" or "no spread" is NOT a survivor: retiring every judged tool
+    must not leave the platform holding only what could not be judged.
+
+    :param verdicts: mapping of tool name to verdict.
+    :return: names of tools that survive.
+    """
+    return [
+        tool
+        for tool, verdict in verdicts.items()
+        if verdict.startswith(("keep", "PROMOTE", "review"))
+    ]
+
+
+def _no_replacement_blocks(
+    verdicts: dict[str, str], candidates: dict[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """The no-replacement warning as blocks, or nothing when it does not apply.
+
+    :param verdicts: mapping of tool name to verdict for one platform.
+    :param candidates: tournament verdicts, which may hold a replacement.
+    :return: a single context block, or an empty list.
+    """
+    note = _no_replacement_note(verdicts, candidates)
+    return [context(note)] if note else []
+
+
+def _no_replacement_note(
+    verdicts: dict[str, str], candidates: dict[str, str] | None = None
+) -> str | None:
+    """The warning under a table where every deployed tool demotes.
+
+    Names a promotable tournament candidate when one exists -- promote before
+    retiring -- and says "no forecaster at all" only when true.
+
+    :param verdicts: mapping of tool name to verdict for one platform.
+    :param candidates: tournament verdicts, which may hold a replacement.
+    :return: the warning, or None when at least one tool survives.
+    """
+    if not verdicts or _survivors(verdicts):
+        return None
+    ready = sorted(t for t, v in (candidates or {}).items() if v.startswith("PROMOTE"))
+    if ready:
+        names = ", ".join(f"`{t}`" for t in ready)
+        demoted = sum(1 for v in verdicts.values() if v.startswith("demote"))
+        return (
+            f":warning: *NO DEPLOYED REPLACEMENT* - {demoted} of "
+            f"{len(verdicts)} deployed tools demote and none survives, but "
+            f"{names} clears the promote gate in the tournament. Promote "
+            "before retiring, not after."
+        )
+    demoted = sum(1 for v in verdicts.values() if v.startswith("demote"))
+    return (
+        f":warning: *NO REPLACEMENT* - {demoted} of {len(verdicts)} deployed "
+        "tools demote and none survives. Acting on these row by row would "
+        "leave the platform with no forecaster at all; treat it as a "
+        "platform-level problem."
+    )
+
+
+def _verdicts_for(
+    tools: Sequence[str],
+    at: dict[str, dict[str, Any]],
+    deployed: bool,
+    w1: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Apply the gate to one cohort.
+
+    :param tools: tool names.
+    :param at: decision-window stats (trailing 90d, or tournament pool).
+    :param deployed: True for production tools.
+    :param w1: weekly stats, for the sustained-demote confirmation.
+    :return: mapping of tool name to verdict.
+    """
+    verdicts = {
+        t: _verdict(at.get(t), deployed=deployed, recent=(w1 or {}).get(t))
+        for t in tools
+    }
+    # No cohort-level rewrite: the every-tool-demotes case is stated once
+    # under the table by _no_replacement_note, not stamped into each row.
+    return verdicts
+
+
+def _floor(stats: dict[str, Any] | None) -> str:
+    """Format the promote bound for its column, beside the Edge it qualifies.
+
+    :param stats: per-tool stats for the decision window.
+    :return: signed 4-decimal bound, or ``n/a``.
+    """
+    lower = _edge_lower_bound(stats)
+    return NA if lower is None else f"{lower:+.4f}"
+
+
+def _conditional(stats: dict[str, Any] | None) -> str:
+    """Format the win rate on markets where the tool disagreed with the price.
+
+    :param stats: per-tool stats for that window.
+    :return: e.g. ``64%``, or ``n/a``.
+    """
+    rate = _num((stats or {}).get("conditional_accuracy_rate"))
+    return NA if rate is None else f"{rate * 100:.0f}%"
 
 
 # ---------------------------------------------------------------------------
@@ -293,12 +623,13 @@ def _headline(platform: str, as_of: str | None = None) -> dict[str, Any]:
 
 
 def _cols(names: Iterable[str]) -> tuple[Col, ...]:
-    """Column specs: ``tool`` left-aligned, every other column right-aligned.
+    """Column specs: right-aligned numerics, left ``tool``, wrapping ``rec``.
 
     :param names: column header names.
     :return: Col spec tuple for ``table_block``.
     """
-    return tuple(Col(n) if n == "tool" else Col(n, align="right") for n in names)
+    special: dict[str, dict[str, Any]] = {"tool": {}, "rec": {"wrap": True}}
+    return tuple(Col(n, **special.get(n, {"align": "right"})) for n in names)
 
 
 _W2_COLUMNS = _cols(
@@ -308,14 +639,14 @@ _W2_COLUMNS = _cols(
 
 _AT_COLUMNS = _cols(
     "#;tool;n 90d;n W-1;rel W-1;Brier 90d;Brier W-1;Δ Brier;base 90d;"
-    "mkt 90d;mkt W-1;Edge 90d;Edge W-1;Δ Edge".split(";")
+    "mkt 90d;mkt W-1;Edge 90d;floor;Edge W-1;Δ Edge;condAcc;rec".split(";")
 )
 
 # Tournament rows come from the all-time tournament accumulator, not the
 # trailing window, so its headers keep the cum label.
 _TOURN_COLUMNS = _cols(
     "#;tool;n cum;n W-1;rel W-1;Brier cum;Brier W-1;Δ Brier;base cum;"
-    "mkt cum;mkt W-1;Edge cum;Edge W-1;Δ Edge".split(";")
+    "mkt cum;mkt W-1;Edge cum;floor;Edge W-1;Δ Edge;condAcc;rec".split(";")
 )
 
 
@@ -384,6 +715,7 @@ def _rows_at(
     tools: Sequence[str],
     w1: dict[str, dict[str, Any]],
     at: dict[str, dict[str, Any]],
+    deployed: bool,
 ) -> list[tuple[str, ...]]:
     """Build the reference-window vs W-1 table rows.
 
@@ -391,9 +723,12 @@ def _rows_at(
     :param w1: by_tool stats for the last 7 days (empty for tournament).
     :param at: by_tool stats for the reference window -- trailing 90d
         for production, the all-time pool for the tournament.
+    :param deployed: True for production rows, False for candidates -- the
+        verdict wording differs (keep/demote vs PROMOTE/no).
     :return: one cell tuple per tool.
     """
     ranked = [t for t in tools if _num((at.get(t) or {}).get("edge")) is not None]
+    verdicts = _verdicts_for(tools, at, deployed, w1)
 
     rows: list[tuple[str, ...]] = []
     for tool in tools:
@@ -412,8 +747,11 @@ def _rows_at(
                 _score((b or {}).get("market_brier")),
                 _score((a or {}).get("market_brier")),
                 _score((b or {}).get("edge"), signed=True),
+                _floor(b),
                 _score((a or {}).get("edge"), signed=True),
                 _delta(a, b, "edge", lower_is_better=False),
+                _conditional(b),
+                verdicts[tool],
             )
         )
     return rows
@@ -641,7 +979,14 @@ def build_digest_messages(
         log.warning("digest: no scored tools for %s; skipping tables", platform)
         return []
 
-    messages: list[dict[str, Any]] = [_headline(platform, as_of)]
+    messages: list[dict[str, Any]] = [
+        _headline(
+            _verdicts_for(sorted(prod_tools), windows["at"], True, windows["w1"]),
+            _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
+            platform,
+            as_of,
+        )
+    ]
 
     # Degrade LOUDLY: without this, a failed window-scorer run reads as
     # "no change this week" rather than "this week was not scored".
@@ -706,9 +1051,15 @@ def build_digest_messages(
                     ),
                     table_block(
                         _AT_COLUMNS,
-                        _rows_at(order_at, windows["w1"], windows["at"]),
+                        _rows_at(order_at, windows["w1"], windows["at"], True),
                     ),
-                ],
+                ]
+                + _no_replacement_blocks(
+                    _verdicts_for(
+                        sorted(prod_tools), windows["at"], True, windows["w1"]
+                    ),
+                    _verdicts_for(sorted(tourn_tools), windows["tournament"], False),
+                ),
             )
         )
 
@@ -724,7 +1075,7 @@ def build_digest_messages(
                     ),
                     table_block(
                         _TOURN_COLUMNS,
-                        _rows_at(order, {}, windows["tournament"]),
+                        _rows_at(order, {}, windows["tournament"], False),
                     ),
                     context(
                         "*Caveats:*\n"

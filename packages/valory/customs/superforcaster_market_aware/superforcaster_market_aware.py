@@ -45,6 +45,9 @@ MaxCostResponse = float
 
 N_MODEL_CALLS = 1
 DEFAULT_DELIVERY_RATE = 100
+# Serper degrades sharply on prompt-shaped queries (instruction boilerplate,
+# JSON-format text), in the worst case to zero organic results (issue #455).
+_MAX_SEARCH_QUERY_LEN = 150
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -970,16 +973,94 @@ def _render_market_blocks(context: Dict[str, Any]) -> str:
     return suffix
 
 
-def extract_question(prompt: str) -> str:
-    """Uses regexp to extract question from the prompt"""
-    # Match from 'question "' to '" and the `yes`' to handle nested quotes
-    pattern = r'question\s+"(.+?)"\s+and\s+the\s+`yes`'
-    try:
-        question = re.findall(pattern, prompt, re.DOTALL)[0]
-    except Exception as e:  # noqa: BLE001
-        print(f"Error extracting question: {e}")
-        question = prompt
-    return question
+# Matches from 'question "' to '" and the `yes`' to handle nested quotes.
+_TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.DOTALL)
+# A question clause: anchored at a question word, running to the first '?'.
+# [^?]* tolerates embedded dots (abbreviations like "e.g.", decimals, market
+# ids), which sentence-boundary splitting would cut the clause on.
+# Preferred anchor: a CAPITALIZED question word opening a sentence or quoted
+# span. Auxiliaries also appear lowercase inside instruction boilerplate ("You
+# are being asked to provide..."), which would anchor the clause on the wrong
+# sentence.
+_QUESTION_CLAUSE_STRICT_RE = re.compile(
+    r"(?:^|[\s.!?:\"'(])"
+    r"((?:Will|Is|Are|Was|Were|Does|Do|Did|Can|Could"
+    r"|Who|What|When|Where|Which|How|Whether)\b[^?]*\?)"
+)
+_QUESTION_CLAUSE_LOOSE_RE = re.compile(
+    r"\b(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
+    r"|how|whether)\b[^?]*\?",
+    re.IGNORECASE,
+)
+
+
+def parse_prompt(prompt: str) -> Tuple[str, str]:
+    """Split a request prompt into the LLM question and the Serper search query.
+
+    Trader-template prompts carry the bare market question between known
+    delimiters: it serves as both values, keeping that path byte-identical to
+    previous releases. Any other prompt is free text under the advertised
+    input contract (issue #455): the LLM receives the WHOLE prompt (resolution
+    criteria, source, and deadline stay in context) while the search query is
+    compressed to the leading question clause, with double quotes dropped
+    (Serper treats quoted spans as exact-match terms) and the length capped.
+
+    :param prompt: the raw prompt passed to run().
+    :return: a (question_for_llm, search_query) tuple.
+    """
+    match = _TRADER_TEMPLATE_RE.findall(prompt)
+    if match:
+        question = match[0]
+        return question, question
+    clause = _QUESTION_CLAUSE_STRICT_RE.search(prompt)
+    if clause:
+        query = clause.group(1)
+    else:
+        loose = _QUESTION_CLAUSE_LOOSE_RE.search(prompt)
+        query = loose.group(0) if loose else prompt
+    query = query.replace('"', "").strip()[:_MAX_SEARCH_QUERY_LEN]
+    return prompt, query
+
+
+def _flagged_null_result(
+    model: Any,
+    temperature: Any,
+    max_tokens: Any,
+    captured_source_content: Any,
+    return_source_content: bool,
+    counter_callback: Any,
+    context: str,
+) -> MechResponse:
+    """Build the flagged null prediction returned on empty retrieval.
+
+    A VALID prediction (p_yes = p_no = 0.5) with zero confidence and
+    info_utility, so a requester can detect and discount it while the strict
+    trader consumer still parses it (issue #455).
+
+    :param model: the model name recorded in used_params.
+    :param temperature: the temperature recorded in used_params.
+    :param max_tokens: the max_tokens recorded in used_params.
+    :param captured_source_content: the (empty) retrieval capture.
+    :param return_source_content: whether to attach the capture to used_params.
+    :param counter_callback: the cost callback, threaded back unchanged.
+    :param context: short label for the log line (live vs cached replay).
+    :return: the flagged-null MechResponse tuple.
+    """
+    print(
+        f"[superforcaster-market-aware] {context}: empty retrieval"
+        " -- returning null prediction"
+    )
+    null_result = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    used_params: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if return_source_content:
+        used_params["source_content"] = captured_source_content
+    return null_result, "", None, counter_callback, used_params
 
 
 @with_key_rotation
@@ -1027,7 +1108,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         today = date.today()
         d = today.strftime("%d/%m/%Y")
 
-        question = extract_question(prompt)
+        # Trader-template prompts: question == search_query == the bare market
+        # question. Free text: the LLM gets the whole prompt, Serper a
+        # compressed question clause (issue #455).
+        question, search_query = parse_prompt(prompt)
+        if question == prompt:
+            print(f"Free-text prompt; derived search query: {search_query!r}")
 
         if source_content is not None:
             print("Using provided source content (cached replay)...")
@@ -1039,6 +1125,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 dict(it) for it in serper_data.get("organic", [])[:MAX_SOURCES]
             ]
             misc_data = serper_data.get("peopleAlsoAsk", [])
+            # Empty-retrieval guard: signal explicitly rather than letting the
+            # LLM forecast from a blank <background> block (issue #455).
+            if not organic_data and not misc_data:
+                return _flagged_null_result(
+                    model,
+                    temperature,
+                    max_tokens,
+                    captured_source_content,
+                    return_source_content,
+                    counter_callback,
+                    "cached replay",
+                )
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
@@ -1046,7 +1144,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
-            serper_response = fetch_additional_sources(question, serper_api_key)
+            # Use the compressed search_query instead of the full prompt so
+            # Serper returns organic results for free-text callers (issue #455).
+            serper_response = fetch_additional_sources(search_query, serper_api_key)
             # Surface HTTP errors with a real status code instead of crashing
             # .json() on a non-JSON 4xx/5xx body (matches the fleet pattern).
             serper_response.raise_for_status()
@@ -1058,6 +1158,19 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 dict(it) for it in sources_data.get("organic", [])[:MAX_SOURCES]
             ]
             misc_data = sources_data.get("peopleAlsoAsk", [])
+            # Empty-retrieval guard: even a correct short query can fail
+            # (e.g. very niche or recent market). Placed BEFORE the scraping
+            # step so empty retrieval wastes no page fetches (issue #455).
+            if not organic_data and not misc_data:
+                return _flagged_null_result(
+                    model,
+                    temperature,
+                    max_tokens,
+                    {"mode": source_content_mode, "serper_response": sources_data},
+                    return_source_content,
+                    counter_callback,
+                    "live search",
+                )
             print("Scraping page content for top organic results...")
             captured_pages = _scrape_pages(organic_data, source_content_mode)
             print(

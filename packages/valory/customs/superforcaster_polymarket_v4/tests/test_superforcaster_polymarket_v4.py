@@ -217,6 +217,9 @@ class TestClauseSelection:
             ),
             # Dated clarifiers must not outscore a digit-free market question:
             # the LAST market-verb-shaped clause wins (round-3 review cases).
+            # This row also pins the _NEAR_BEST_WINDOW boundary: the market
+            # clause scores exactly best - 3, so shrinking the window to 2
+            # flips the outcome (verified by mutation).
             (
                 "Resolution criteria: Does a loan count as a transfer before "
                 "September 2, 2025? Will Alexander Isak join Liverpool?",
@@ -250,6 +253,31 @@ class TestClauseSelection:
         _, query, tier = parse_prompt(prompt)
         assert query.startswith(expected_start), query
         assert tier == "clause"
+
+    def test_no_market_verb_clause_falls_back_to_best_score(self) -> None:
+        """With no market-verb candidate, the best-scoring clause wins (round-4).
+
+        Kills the fallback mutation (max -> min picks the lowercase inner
+        clause instead).
+        """
+        prompt = "How will the price move? Whether this resolves YES depends on it."
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith("How will the price move")
+        assert tier == "clause"
+
+    def test_digit_bonus_magnitude_pins_fallback_ordering(self) -> None:
+        """The digit bonus (+3) outranks capitalization (+2) in the fallback.
+
+        Both clauses lack a market verb; the digit-bearing lowercase clause
+        must beat the capitalized digit-free one. Halving the digit bonus to
+        +2 flips this outcome (verified by mutation).
+        """
+        prompt = (
+            "consider, how many of the 5 apply? What happens when the "
+            "deadline passes without an official announcement?"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("how many of the 5 apply")
 
     def test_typographic_quotes_do_not_break_the_anchor(self) -> None:
         """A market question inside typographic quotes anchors cleanly."""

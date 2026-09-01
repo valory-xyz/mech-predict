@@ -546,7 +546,16 @@ _TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.D
 # A question clause: anchored at a question word, running to the first '?'.
 # [^?]* tolerates embedded dots (abbreviations like "e.g.", decimals, market
 # ids), which sentence-boundary splitting would cut the clause on.
-_QUESTION_CLAUSE_RE = re.compile(
+# Preferred anchor: a CAPITALIZED question word opening a sentence or quoted
+# span. Auxiliaries also appear lowercase inside instruction boilerplate ("You
+# are being asked to provide..."), which would anchor the clause on the wrong
+# sentence.
+_QUESTION_CLAUSE_STRICT_RE = re.compile(
+    r"(?:^|[\s.!?:\"'(])"
+    r"((?:Will|Is|Are|Was|Were|Does|Do|Did|Can|Could"
+    r"|Who|What|When|Where|Which|How|Whether)\b[^?]*\?)"
+)
+_QUESTION_CLAUSE_LOOSE_RE = re.compile(
     r"\b(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
     r"|how|whether)\b[^?]*\?",
     re.IGNORECASE,
@@ -571,8 +580,12 @@ def parse_prompt(prompt: str) -> Tuple[str, str]:
     if match:
         question = match[0]
         return question, question
-    clause = _QUESTION_CLAUSE_RE.search(prompt)
-    query = clause.group(0) if clause else prompt
+    clause = _QUESTION_CLAUSE_STRICT_RE.search(prompt)
+    if clause:
+        query = clause.group(1)
+    else:
+        loose = _QUESTION_CLAUSE_LOOSE_RE.search(prompt)
+        query = loose.group(0) if loose else prompt
     query = query.replace('"', "").strip()[:_MAX_SEARCH_QUERY_LEN]
     return prompt, query
 

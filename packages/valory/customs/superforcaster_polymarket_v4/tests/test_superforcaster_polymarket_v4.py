@@ -130,6 +130,18 @@ class TestParsePrompt:
         assert query.endswith("?")
         assert len(query) <= _MAX_SEARCH_QUERY_LEN
 
+    def test_lowercase_auxiliary_in_boilerplate_is_not_the_anchor(self) -> None:
+        """'You are being asked...' must not anchor the clause; the real question wins."""
+        prompt = (
+            "You are being asked to provide a probability estimate for a "
+            "prediction market question. Please respond with a JSON object. "
+            "Question: Will Bitcoin reach $150,000 or higher on any major "
+            "exchange by December 31, 2026? Resolution source: TradingView."
+        )
+        _, query = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach")
+        assert query.endswith("2026?")
+
     def test_embedded_dots_do_not_cut_the_clause(self) -> None:
         """Abbreviation dots inside the question no longer truncate the query."""
         prompt = (

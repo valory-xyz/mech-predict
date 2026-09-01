@@ -131,7 +131,7 @@ class TestParsePrompt:
         assert len(query) <= _MAX_SEARCH_QUERY_LEN
 
     def test_lowercase_auxiliary_in_boilerplate_is_not_the_anchor(self) -> None:
-        """'You are being asked...' must not anchor the clause; the real question wins."""
+        """Boilerplate 'you are being asked...' must not anchor; the real question wins."""
         prompt = (
             "You are being asked to provide a probability estimate for a "
             "prediction market question. Please respond with a JSON object. "

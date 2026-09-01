@@ -17,7 +17,7 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for superforcaster-polymarket-v4's structured-output contract."""
+"""Unit tests for superforcaster-polymarket-v4's structured-output and free-text-input contract."""
 
 import inspect
 import json
@@ -30,6 +30,8 @@ from pydantic import ValidationError
 from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
     PredictionResult,
     _parse_completion,
+    derive_search_query,
+    extract_question,
     run,
 )
 
@@ -42,6 +44,8 @@ FAKE_SERPER_RESPONSE = {
     "organic": [{"title": "T", "link": "https://example.test", "snippet": "S"}],
     "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
 }
+
+EMPTY_SERPER_RESPONSE: dict = {"organic": [], "peopleAlsoAsk": []}
 
 FAKE_PREDICTION = PredictionResult(
     facts="Fact 1. Fact 2.",
@@ -59,7 +63,20 @@ FAKE_PREDICTION = PredictionResult(
     info_utility=0.4,
 )
 
-PROMPT = "Will X happen? p_yes and p_no?"
+# Trader-template format prompt (regression: previous callers must still work)
+TRADER_PROMPT = (
+    'Given the question "Will X happen?" and the `yes` answer criterion, ...'
+)
+# Free-text format prompt: the advertised contract (issue #455)
+FREE_TEXT_PROMPT = "Will Alexander Isak join Liverpool before September 2 2025?"
+# Long free-text prompt that would return empty Serper results if passed raw
+LONG_FREE_TEXT_PROMPT = (
+    "Please predict the following market: Will Alexander Isak permanently transfer "
+    "to Liverpool FC before the end of the summer 2025 transfer window (September 2, "
+    "2025 23:59 UTC)? Resolution source: official club announcements or BBC Sport. "
+    "The market resolves YES if a permanent transfer (not a loan) is confirmed by "
+    "the resolution source before the deadline."
+)
 
 
 def _make_mock_api_keys() -> MagicMock:
@@ -77,6 +94,68 @@ def _mock_parse_response() -> MagicMock:
         choices=[MagicMock(message=MagicMock(parsed=FAKE_PREDICTION, refusal=None))],
         usage=MagicMock(prompt_tokens=10, completion_tokens=5),
     )
+
+
+class TestExtractQuestion:
+    """extract_question() returns question for LLM; derive_search_query() is for Serper."""
+
+    def test_trader_template_extracts_concise_question(self) -> None:
+        """Trader-template regex match returns the extracted question."""
+        q = extract_question(TRADER_PROMPT)
+        assert q == "Will X happen?"
+
+    def test_free_text_returns_full_prompt(self) -> None:
+        """Free-text input (no template match) returns the full prompt."""
+        q = extract_question(FREE_TEXT_PROMPT)
+        assert q == FREE_TEXT_PROMPT
+
+    def test_long_free_text_returns_full_prompt(self) -> None:
+        """A long free-text prompt returns the full text for LLM context."""
+        q = extract_question(LONG_FREE_TEXT_PROMPT)
+        assert q == LONG_FREE_TEXT_PROMPT
+
+
+class TestDeriveSearchQuery:
+    """derive_search_query() compresses free-text prompts for Serper."""
+
+    def test_trader_template_uses_extracted_question(self) -> None:
+        """Trader-template path uses the concise extracted question as query."""
+        extracted = extract_question(TRADER_PROMPT)
+        query = derive_search_query(TRADER_PROMPT, extracted)
+        assert query == extracted
+        assert len(query) < 200
+
+    def test_short_free_text_with_question_mark(self) -> None:
+        """A short free-text prompt with '?' is used as-is (up to length cap)."""
+        extracted = extract_question(FREE_TEXT_PROMPT)
+        query = derive_search_query(FREE_TEXT_PROMPT, extracted)
+        # The first question sentence ends with '?' and is well under the cap.
+        assert query == FREE_TEXT_PROMPT
+        assert query.endswith("?")
+
+    def test_long_free_text_is_compressed(self) -> None:
+        """A long free-text prompt is compressed to <= _MAX_SEARCH_QUERY_LEN chars."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        extracted = extract_question(LONG_FREE_TEXT_PROMPT)
+        query = derive_search_query(LONG_FREE_TEXT_PROMPT, extracted)
+        # The query must be capped at the length limit regardless of the input.
+        assert len(query) <= _MAX_SEARCH_QUERY_LEN
+        # It must not be the full (uncapped) prompt.
+        assert query != LONG_FREE_TEXT_PROMPT
+
+    def test_no_question_mark_truncates(self) -> None:
+        """A prompt with no '?' is truncated to _MAX_SEARCH_QUERY_LEN characters."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        no_q = "x" * 300
+        extracted = extract_question(no_q)
+        query = derive_search_query(no_q, extracted)
+        assert len(query) == _MAX_SEARCH_QUERY_LEN
 
 
 class TestStructuredOutputContract:
@@ -99,7 +178,7 @@ class TestStructuredOutputContract:
         run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -127,7 +206,7 @@ class TestStructuredOutputContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -140,6 +219,118 @@ class TestStructuredOutputContract:
         # No reasoning field leaks on-chain.
         assert "facts" not in parsed and "evidence_reliability_screen" not in parsed
         assert parsed["p_yes"] == 0.32 and parsed["p_no"] == 0.68
+
+
+class TestEmptyRetrievalGuard:
+    """v4 returns a valid null prediction when Serper returns no results (issue #455)."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_empty_serper_live_returns_null_prediction(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """An empty Serper response on the live path returns p_yes=0.5, confidence=0."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert on_chain.startswith("{")
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        # The LLM must NOT be called on an empty retrieval.
+        mock_client.client.beta.chat.completions.parse.assert_not_called()
+
+    def test_empty_serper_cached_replay_returns_null_prediction(self) -> None:
+        """An empty cached source_content returns p_yes=0.5, confidence=0."""
+        empty_source_content = {
+            "mode": "cleaned",
+            "serper_response": EMPTY_SERPER_RESPONSE,
+        }
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content=empty_source_content,
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_free_text_with_results_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A free-text prompt with good Serper results still calls the LLM normally."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.32  # LLM was called and returned FAKE_PREDICTION
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_serper_query_uses_short_query_not_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """For a long free-text prompt, Serper receives a short query, not the full prompt."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        # fetch_additional_sources was called with the compressed query, not the
+        # full LONG_FREE_TEXT_PROMPT (which is >150 chars and would return organic:[]).
+        call_args = mock_fetch.call_args
+        query_sent = call_args[0][0] if call_args[0] else call_args[1]["question"]
+        assert len(query_sent) <= _MAX_SEARCH_QUERY_LEN
+        assert query_sent != LONG_FREE_TEXT_PROMPT
 
 
 class TestPredictionResultSchema:
@@ -207,7 +398,7 @@ class TestFailurePathContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -236,7 +427,7 @@ class TestFailurePathContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )

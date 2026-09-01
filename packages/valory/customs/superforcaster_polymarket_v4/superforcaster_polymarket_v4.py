@@ -75,6 +75,9 @@ MaxCostResponse = float
 
 N_MODEL_CALLS = 1
 DEFAULT_DELIVERY_RATE = 100
+# Serper degrades sharply on prompt-shaped queries (instruction boilerplate,
+# JSON-format text), in the worst case to zero organic results (issue #455).
+_MAX_SEARCH_QUERY_LEN = 150
 
 
 class PredictionResult(BaseModel):
@@ -508,6 +511,30 @@ def extract_question(prompt: str) -> str:
     return question
 
 
+def derive_search_query(prompt: str, extracted_question: str) -> str:
+    """Derive a short Serper search query from the prompt.
+
+    When the trader-template matched (extracted_question != prompt), the
+    extracted question is already concise -- use it directly. For free-text
+    inputs, compress: prefer the first question-sentence ending with '?'; if
+    none, take the first _MAX_SEARCH_QUERY_LEN characters of the prompt.
+
+    :param prompt: the raw prompt passed to run().
+    :param extracted_question: the value returned by extract_question(prompt).
+    :return: the extracted question verbatim on the trader-template path, else
+        a free-text query capped at _MAX_SEARCH_QUERY_LEN chars.
+    """
+    if extracted_question != prompt:
+        # Trader-template path: the extracted question is already concise.
+        return extracted_question
+    # Free-text path: find the first question-sentence ending with '?'.
+    match = re.search(r"([^.!?]*\?)", prompt)
+    if match:
+        return match.group(1).strip()[:_MAX_SEARCH_QUERY_LEN]
+    # No '?' found: use the leading text up to the length cap.
+    return prompt.strip()[:_MAX_SEARCH_QUERY_LEN]
+
+
 @with_key_rotation
 def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     """Run the task"""
@@ -553,7 +580,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         today = date.today()
         d = today.strftime("%d/%m/%Y")
 
+        # extract_question returns the full prompt for free-text callers so the
+        # LLM has all resolution context (criteria, source, deadline).
         question = extract_question(prompt)
+        # derive_search_query compresses long prompts to a short Serper query.
+        # For trader-template inputs (regex matched) it is identical to question.
+        search_query = derive_search_query(prompt, question)
 
         if source_content is not None:
             print("Using provided source content (cached replay)...")
@@ -561,11 +593,36 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             serper_data = source_content.get("serper_response", source_content)
             organic_data = serper_data.get("organic", [])[:MAX_SOURCES]
             misc_data = serper_data.get("peopleAlsoAsk", [])
+            # Empty-retrieval guard: signal explicitly rather than letting the
+            # LLM forecast from a blank <background> block (issue #455).
+            if not organic_data and not misc_data:
+                print(
+                    "[superforcaster-polymarket-v4] cached replay: empty retrieval"
+                    " -- returning null prediction"
+                )
+                null_result = json.dumps(
+                    {
+                        "p_yes": 0.5,
+                        "p_no": 0.5,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                    }
+                )
+                used_params: Dict[str, Any] = {
+                    "model": model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if return_source_content:
+                    used_params["source_content"] = captured_source_content
+                return null_result, "", None, counter_callback, used_params
             sources = format_sources_data(organic_data, misc_data)
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
-            serper_response = fetch_additional_sources(question, serper_api_key)
+            # Use the compressed search_query instead of the full prompt so
+            # Serper returns organic results for free-text callers (issue #455).
+            serper_response = fetch_additional_sources(search_query, serper_api_key)
             # Raise on a 4xx/5xx error body (credit / auth error) instead of
             # calling .json() on it and feeding the model an empty <background>
             # block that looks like a healthy run (matches the fleet pattern).
@@ -580,6 +637,30 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print(f"Additional sources fetched: {sources_data}")
             organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
             misc_data = sources_data.get("peopleAlsoAsk", [])
+            # Empty-retrieval guard: even a correct short query can fail
+            # (e.g. very niche or recent market). Signal explicitly rather than
+            # letting the LLM forecast from a blank <background> block.
+            if not organic_data and not misc_data:
+                print(
+                    "[superforcaster-polymarket-v4] empty retrieval"
+                    " -- returning null prediction"
+                )
+                null_result = json.dumps(
+                    {
+                        "p_yes": 0.5,
+                        "p_no": 0.5,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                    }
+                )
+                used_params = {
+                    "model": model,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if return_source_content:
+                    used_params["source_content"] = captured_source_content
+                return null_result, "", None, counter_callback, used_params
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)
 

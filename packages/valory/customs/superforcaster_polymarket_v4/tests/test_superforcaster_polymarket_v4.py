@@ -207,6 +207,14 @@ class TestClauseSelection:
                 "100k by 2026?",
                 "Will BTC hit",
             ),
+            # Mutation guard: the boilerplate clause carries digits while the
+            # market clause has none, so ONLY the meta-stem penalty makes the
+            # market clause win -- removing `score -= 3` fails this case.
+            (
+                "Can you give me 3 quick estimates with 95% confidence? "
+                "Will the ECB cut rates at the next meeting?",
+                "Will the ECB",
+            ),
         ],
     )
     def test_leading_instruction_question_does_not_win(
@@ -282,11 +290,60 @@ class TestGuardObservability:
 
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_cached_replay_missing_organic_key_is_an_error(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A corrupted cache entry raises, mirroring the live-branch shape check."""
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+            source_content={"serper_response": {"snapshot": "corrupted"}},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+        mock_fetch.assert_not_called()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_organic_empty_but_misc_present_still_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The guard needs BOTH lists empty; PAA alone keeps the LLM path."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {
+                "organic": [],
+                "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
+            }
+        )
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+        assert json.loads(result[0])["p_yes"] == 0.32
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
     def test_trader_request_sends_extracted_question_to_serper(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
         """End-to-end pin: a trader request searches the bare extracted question."""
-        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        serper_resp = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_fetch.return_value = serper_resp
         mock_client = MagicMock()
         mock_client.client.beta.chat.completions.parse.return_value = (
             _mock_parse_response()
@@ -301,6 +358,9 @@ class TestGuardObservability:
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
+        # the HTTP-error guard must actually run on the happy path (a MagicMock
+        # would silently absorb its removal otherwise)
+        serper_resp.raise_for_status.assert_called_once()
         query_sent = mock_fetch.call_args[0][0]
         assert query_sent == "Will X happen?"
         # and the LLM prompt carries the bare question, not the full template

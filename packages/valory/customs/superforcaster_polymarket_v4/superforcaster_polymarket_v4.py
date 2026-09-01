@@ -559,9 +559,10 @@ _QUESTION_WORD_RE = re.compile(
 )
 # Meta/instruction stems: a question addressed at the RESPONDER ("Can you
 # estimate...", "What is your probability...") or prompt scaffolding ("What
-# follows is..."), never the market question itself.
+# follows is..."), never the market question itself. Second-person only:
+# first-person clauses ("Will we...", "Do I...") occur in real market wording.
 _META_STEM_RE = re.compile(
-    r"^(?:(?:can|could|would|will|do|does|did|is|are)\s+(?:you|your|we|i)\b"
+    r"^(?:(?:can|could|would|will|do|does|did|is|are)\s+(?:you|your)\b"
     r"|what\s+(?:is|are)\s+(?:your|the\s+(?:respective\s+)?probabilit)"
     r"|what\s+follows\b)",
     re.IGNORECASE,
@@ -702,7 +703,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         d = today.strftime("%d/%m/%Y")
 
         question, search_query, tier = parse_prompt(prompt)
-        if tier != "template":
+        if tier == "raw":
+            print(
+                "[superforcaster-polymarket-v4] No question clause found; "
+                f"using capped prompt head as the search query: {search_query!r}"
+            )
+        elif tier != "template":
             print(
                 f"Free-text prompt (tier={tier}); derived search query: {search_query!r}"
             )
@@ -711,6 +717,14 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print("Using provided source content (cached replay)...")
             captured_source_content = source_content
             serper_data = source_content.get("serper_response", source_content)
+            # Same shape check as the live branch: a cache entry without the
+            # organic key is corrupted (or a foreign shape), not an empty
+            # retrieval -- raise instead of collapsing into the flagged null.
+            if "organic" not in serper_data:
+                raise ValueError(
+                    "Cached serper_response missing 'organic' key; got keys: "
+                    f"{sorted(serper_data)[:8]}"
+                )
             organic_data = serper_data.get("organic", [])[:MAX_SOURCES]
             misc_data = serper_data.get("peopleAlsoAsk", [])
             if not organic_data and not misc_data:

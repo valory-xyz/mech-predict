@@ -30,8 +30,7 @@ from pydantic import ValidationError
 from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
     PredictionResult,
     _parse_completion,
-    derive_search_query,
-    extract_question,
+    parse_prompt,
     run,
 )
 
@@ -96,65 +95,72 @@ def _mock_parse_response() -> MagicMock:
     )
 
 
-class TestExtractQuestion:
-    """extract_question() returns question for LLM; derive_search_query() is for Serper."""
+class TestParsePrompt:
+    """parse_prompt() -> (question_for_llm, search_query)."""
 
-    def test_trader_template_extracts_concise_question(self) -> None:
-        """Trader-template regex match returns the extracted question."""
-        q = extract_question(TRADER_PROMPT)
-        assert q == "Will X happen?"
+    def test_trader_template_uses_extracted_question_for_both(self) -> None:
+        """Trader-template path: the bare question serves as both values."""
+        question, query = parse_prompt(TRADER_PROMPT)
+        assert question == "Will X happen?"
+        assert query == question
 
-    def test_free_text_returns_full_prompt(self) -> None:
-        """Free-text input (no template match) returns the full prompt."""
-        q = extract_question(FREE_TEXT_PROMPT)
-        assert q == FREE_TEXT_PROMPT
+    def test_free_text_llm_gets_full_prompt(self) -> None:
+        """Free-text input: the LLM question is the whole prompt."""
+        question, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert question == FREE_TEXT_PROMPT
+        question, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert question == LONG_FREE_TEXT_PROMPT
 
-    def test_long_free_text_returns_full_prompt(self) -> None:
-        """A long free-text prompt returns the full text for LLM context."""
-        q = extract_question(LONG_FREE_TEXT_PROMPT)
-        assert q == LONG_FREE_TEXT_PROMPT
-
-
-class TestDeriveSearchQuery:
-    """derive_search_query() compresses free-text prompts for Serper."""
-
-    def test_trader_template_uses_extracted_question(self) -> None:
-        """Trader-template path uses the concise extracted question as query."""
-        extracted = extract_question(TRADER_PROMPT)
-        query = derive_search_query(TRADER_PROMPT, extracted)
-        assert query == extracted
-        assert len(query) < 200
-
-    def test_short_free_text_with_question_mark(self) -> None:
-        """A short free-text prompt with '?' is used as-is (up to length cap)."""
-        extracted = extract_question(FREE_TEXT_PROMPT)
-        query = derive_search_query(FREE_TEXT_PROMPT, extracted)
-        # The first question sentence ends with '?' and is well under the cap.
+    def test_short_free_text_query_is_the_question(self) -> None:
+        """A bare free-text question is its own search query."""
+        _, query = parse_prompt(FREE_TEXT_PROMPT)
         assert query == FREE_TEXT_PROMPT
         assert query.endswith("?")
 
-    def test_long_free_text_is_compressed(self) -> None:
-        """A long free-text prompt is compressed to <= _MAX_SEARCH_QUERY_LEN chars."""
+    def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
+        """The query anchors at the question word, dropping instruction text."""
         from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
             _MAX_SEARCH_QUERY_LEN,
         )
 
-        extracted = extract_question(LONG_FREE_TEXT_PROMPT)
-        query = derive_search_query(LONG_FREE_TEXT_PROMPT, extracted)
-        # The query must be capped at the length limit regardless of the input.
+        _, query = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        # "Please predict the following market: " is gone; the clause survives
+        # whole, including the deadline and the trailing '?'.
+        assert query.startswith("Will Alexander Isak")
+        assert query.endswith("?")
         assert len(query) <= _MAX_SEARCH_QUERY_LEN
-        # It must not be the full (uncapped) prompt.
-        assert query != LONG_FREE_TEXT_PROMPT
 
-    def test_no_question_mark_truncates(self) -> None:
-        """A prompt with no '?' is truncated to _MAX_SEARCH_QUERY_LEN characters."""
+    def test_embedded_dots_do_not_cut_the_clause(self) -> None:
+        """Abbreviation dots inside the question no longer truncate the query."""
+        prompt = (
+            "Will Anthropic release the next Mythos-class model (e.g. a Fable "
+            "successor in that class) AND make it available to the public by "
+            "August 31, 2026, 11:59 PM ET? Resolution source: official "
+            "announcements."
+        )
+        _, query = parse_prompt(prompt)
+        assert query.startswith("Will Anthropic release the next Mythos-class")
+
+    def test_double_quotes_are_stripped_from_query_only(self) -> None:
+        """Quoted spans become exact-match Serper terms; drop them from the query."""
+        prompt = (
+            'Will any candle have a final "High" price >= 82000 in the window? '
+            "Resolution source: Binance."
+        )
+        question, query = parse_prompt(prompt)
+        assert '"' not in query
+        assert "High" in query
+        assert '"High"' in question  # the LLM still sees the exact wording
+
+    def test_no_question_clause_truncates(self) -> None:
+        """A prompt with no question clause falls back to the capped prompt."""
         from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
             _MAX_SEARCH_QUERY_LEN,
         )
 
         no_q = "x" * 300
-        extracted = extract_question(no_q)
-        query = derive_search_query(no_q, extracted)
+        question, query = parse_prompt(no_q)
+        assert question == no_q
         assert len(query) == _MAX_SEARCH_QUERY_LEN
 
 

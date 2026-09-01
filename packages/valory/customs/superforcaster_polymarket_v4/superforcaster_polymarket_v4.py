@@ -215,6 +215,48 @@ def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWith
     return error_json, "", None, None, None, api_keys
 
 
+def _flagged_null_result(
+    model: Any,
+    temperature: Any,
+    max_tokens: Any,
+    captured_source_content: Any,
+    return_source_content: bool,
+    counter_callback: Any,
+    context: str,
+) -> MechResponse:
+    """Build the flagged null prediction returned on empty retrieval.
+
+    Unlike _null_prediction_response this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so a requester
+    can detect and discount it while the strict trader consumer still parses
+    it (issue #455).
+
+    :param model: the model name recorded in used_params.
+    :param temperature: the temperature recorded in used_params.
+    :param max_tokens: the max_tokens recorded in used_params.
+    :param captured_source_content: the (empty) retrieval capture.
+    :param return_source_content: whether to attach the capture to used_params.
+    :param counter_callback: the cost callback, threaded back unchanged.
+    :param context: short label for the log line (live vs cached replay).
+    :return: the flagged-null MechResponse tuple.
+    """
+    print(
+        f"[superforcaster-polymarket-v4] {context}: empty retrieval"
+        " -- returning null prediction"
+    )
+    null_result = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    used_params: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if return_source_content:
+        used_params["source_content"] = captured_source_content
+    return null_result, "", None, counter_callback, used_params
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -499,40 +541,40 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
     return sources
 
 
-def extract_question(prompt: str) -> str:
-    """Uses regexp to extract question from the prompt"""
-    # Match from 'question "' to '" and the `yes`' to handle nested quotes
-    pattern = r'question\s+"(.+?)"\s+and\s+the\s+`yes`'
-    try:
-        question = re.findall(pattern, prompt, re.DOTALL)[0]
-    except Exception as e:
-        print(f"Error extracting question: {e}")
-        question = prompt
-    return question
+# Matches from 'question "' to '" and the `yes`' to handle nested quotes.
+_TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.DOTALL)
+# A question clause: anchored at a question word, running to the first '?'.
+# [^?]* tolerates embedded dots (abbreviations like "e.g.", decimals, market
+# ids), which sentence-boundary splitting would cut the clause on.
+_QUESTION_CLAUSE_RE = re.compile(
+    r"\b(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
+    r"|how|whether)\b[^?]*\?",
+    re.IGNORECASE,
+)
 
 
-def derive_search_query(prompt: str, extracted_question: str) -> str:
-    """Derive a short Serper search query from the prompt.
+def parse_prompt(prompt: str) -> Tuple[str, str]:
+    """Split a request prompt into the LLM question and the Serper search query.
 
-    When the trader-template matched (extracted_question != prompt), the
-    extracted question is already concise -- use it directly. For free-text
-    inputs, compress: prefer the first question-sentence ending with '?'; if
-    none, take the first _MAX_SEARCH_QUERY_LEN characters of the prompt.
+    Trader-template prompts carry the bare market question between known
+    delimiters: it serves as both values, keeping that path byte-identical to
+    previous releases. Any other prompt is free text under the advertised
+    input contract (issue #455): the LLM receives the WHOLE prompt (resolution
+    criteria, source, and deadline stay in context) while the search query is
+    compressed to the leading question clause, with double quotes dropped
+    (Serper treats quoted spans as exact-match terms) and the length capped.
 
     :param prompt: the raw prompt passed to run().
-    :param extracted_question: the value returned by extract_question(prompt).
-    :return: the extracted question verbatim on the trader-template path, else
-        a free-text query capped at _MAX_SEARCH_QUERY_LEN chars.
+    :return: a (question_for_llm, search_query) tuple.
     """
-    if extracted_question != prompt:
-        # Trader-template path: the extracted question is already concise.
-        return extracted_question
-    # Free-text path: find the first question-sentence ending with '?'.
-    match = re.search(r"([^.!?]*\?)", prompt)
+    match = _TRADER_TEMPLATE_RE.findall(prompt)
     if match:
-        return match.group(1).strip()[:_MAX_SEARCH_QUERY_LEN]
-    # No '?' found: use the leading text up to the length cap.
-    return prompt.strip()[:_MAX_SEARCH_QUERY_LEN]
+        question = match[0]
+        return question, question
+    clause = _QUESTION_CLAUSE_RE.search(prompt)
+    query = clause.group(0) if clause else prompt
+    query = query.replace('"', "").strip()[:_MAX_SEARCH_QUERY_LEN]
+    return prompt, query
 
 
 @with_key_rotation
@@ -580,12 +622,12 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         today = date.today()
         d = today.strftime("%d/%m/%Y")
 
-        # extract_question returns the full prompt for free-text callers so the
-        # LLM has all resolution context (criteria, source, deadline).
-        question = extract_question(prompt)
-        # derive_search_query compresses long prompts to a short Serper query.
-        # For trader-template inputs (regex matched) it is identical to question.
-        search_query = derive_search_query(prompt, question)
+        # Trader-template prompts: question == search_query == the bare market
+        # question. Free text: the LLM gets the whole prompt, Serper a
+        # compressed question clause (issue #455).
+        question, search_query = parse_prompt(prompt)
+        if question == prompt:
+            print(f"Free-text prompt; derived search query: {search_query!r}")
 
         if source_content is not None:
             print("Using provided source content (cached replay)...")
@@ -596,26 +638,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             # Empty-retrieval guard: signal explicitly rather than letting the
             # LLM forecast from a blank <background> block (issue #455).
             if not organic_data and not misc_data:
-                print(
-                    "[superforcaster-polymarket-v4] cached replay: empty retrieval"
-                    " -- returning null prediction"
+                return _flagged_null_result(
+                    model,
+                    temperature,
+                    max_tokens,
+                    captured_source_content,
+                    return_source_content,
+                    counter_callback,
+                    "cached replay",
                 )
-                null_result = json.dumps(
-                    {
-                        "p_yes": 0.5,
-                        "p_no": 0.5,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                    }
-                )
-                used_params: Dict[str, Any] = {
-                    "model": model,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                if return_source_content:
-                    used_params["source_content"] = captured_source_content
-                return null_result, "", None, counter_callback, used_params
             sources = format_sources_data(organic_data, misc_data)
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
@@ -641,26 +672,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             # (e.g. very niche or recent market). Signal explicitly rather than
             # letting the LLM forecast from a blank <background> block.
             if not organic_data and not misc_data:
-                print(
-                    "[superforcaster-polymarket-v4] empty retrieval"
-                    " -- returning null prediction"
+                return _flagged_null_result(
+                    model,
+                    temperature,
+                    max_tokens,
+                    captured_source_content,
+                    return_source_content,
+                    counter_callback,
+                    "live search",
                 )
-                null_result = json.dumps(
-                    {
-                        "p_yes": 0.5,
-                        "p_no": 0.5,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                    }
-                )
-                used_params = {
-                    "model": model,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                if return_source_content:
-                    used_params["source_content"] = captured_source_content
-                return null_result, "", None, counter_callback, used_params
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)
 

@@ -215,6 +215,32 @@ class TestClauseSelection:
                 "Will the ECB cut rates at the next meeting?",
                 "Will the ECB",
             ),
+            # Dated clarifiers must not outscore a digit-free market question:
+            # the LAST market-verb-shaped clause wins (round-3 review cases).
+            (
+                "Resolution criteria: Does a loan count as a transfer before "
+                "September 2, 2025? Will Alexander Isak join Liverpool?",
+                "Will Alexander Isak",
+            ),
+            (
+                "Note: Which of the 3 listed sources is authoritative? "
+                "Will Anthropic release Claude 5?",
+                "Will Anthropic",
+            ),
+            (
+                "How many sources should you cite, 3 or 5? "
+                "Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            (
+                "What are the top 5 sources for this? Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            # ...but a TRAILING meta clause must not win by being last.
+            (
+                "Will Isak join Liverpool? What is your probability estimate?",
+                "Will Isak",
+            ),
         ],
     )
     def test_leading_instruction_question_does_not_win(
@@ -269,6 +295,32 @@ class TestGuardObservability:
         )
         used_params = result[4]
         assert used_params["empty_retrieval"] is True
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_metadata_carries_capture_when_requested(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """With return_source_content on, used_params carries marker AND capture."""
+        services = {
+            "openai": ["sk-test"],
+            "serperapi": ["serper-test"],
+            "return_source_content": ["true"],
+        }
+        api_keys = MagicMock()
+        api_keys.__getitem__ = lambda self, key: services[key][0]
+        api_keys.get = lambda key, default="": services.get(key, [default])[0]
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["source_content"]["serper_response"] == EMPTY_SERPER_RESPONSE
 
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")

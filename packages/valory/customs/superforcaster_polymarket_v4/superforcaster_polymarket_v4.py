@@ -650,7 +650,21 @@ def parse_prompt(prompt: str) -> Tuple[str, str, str]:
             (_score_clause(prompt, start, clause), len(clause), -start, clause)
         )
     if candidates:
-        query, tier = max(candidates)[3], "clause"
+        # Clarifying questions (inside resolution criteria) often carry the
+        # dates/counts that outscore a digit-free market question. In free
+        # text the market question is reliably the LAST market-verb-shaped
+        # question -- clarifiers and instructions precede it -- so among
+        # candidates near the best score, prefer the last market-verb one.
+        best_score = max(candidates)[0]
+        market_shaped = [
+            c
+            for c in candidates
+            if c[0] >= best_score - 3 and _MARKET_VERB_RE.match(c[3])
+        ]
+        chosen = (
+            min(market_shaped, key=lambda c: c[2]) if market_shaped else max(candidates)
+        )
+        query, tier = chosen[3], "clause"
     else:
         query, tier = prompt, "raw"
     query = _truncate_query(query.replace('"', "").strip())

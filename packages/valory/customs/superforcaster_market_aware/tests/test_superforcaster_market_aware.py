@@ -501,13 +501,11 @@ class TestRenderMarketBlocks:
         """The price is evidence to weigh, and may move the forecast.
 
         An earlier version instructed "Do not copy it" and pinned the final
-        answer to the pre-market estimate. Measured over 235 questions, that
-        was the worst of the three designs: the failure being corrected is a
-        MISSING PRIOR, not excessive deference. On "will TSLA close above
-        $400 on April 17" the blind tool answered 0.05 against a price of
-        0.80 and the market was right - it cannot observe the current share
-        price, and the quoted odds are the only evidence of it it will ever
-        see.
+        answer to the pre-market estimate; replay measurement (see the PR
+        body) showed that was the worst design: the failure being corrected
+        is a MISSING PRIOR, not excessive deference. The tool cannot observe
+        a current share price, and the quoted odds are the only evidence of
+        it it will ever see.
         """
         block = module._render_market_blocks({"market_prob": 0.5})
         assert "treat it as evidence" in block
@@ -946,10 +944,8 @@ class TestCommitFirstOrdering:
 
         Structured outputs generate fields in declaration order, so placing
         p_independent before market_reconciliation forces the model to commit
-        a number before it can rationalise toward a supplied price. Measured
-        on 50 screening questions: the final probability equalled
-        p_independent on 50 of 50 rows, against a prior design that moved
-        toward the price on 37 of 38.
+        a number before it can rationalise toward a supplied price (screening
+        measurements: PR body).
         """
         order = list(PredictionResult.model_fields)
         assert order.index("p_independent") < order.index("market_reconciliation")
@@ -963,12 +959,9 @@ class TestCommitFirstOrdering:
     def test_price_may_inform_the_forecast(self) -> None:
         """The price must be allowed to move the number.
 
-        Measured over 235 questions replayed three ways, every metric
-        improved monotonically with how much the tool used the price. Pinning
-        the final answer to the pre-market estimate scored Brier 0.236 and
-        -4.75% after costs; letting the price inform it scored 0.214 and
-        +0.11%. The defect being corrected is a MISSING PRIOR, not excessive
-        deference.
+        Replay measurement (see the PR body) improved monotonically with how
+        much the tool used the price. The defect being corrected is a
+        MISSING PRIOR, not excessive deference.
         """
         desc = PredictionResult.model_fields["market_reconciliation"].description
         assert "Update toward it" in desc
@@ -1644,9 +1637,24 @@ class TestEmptyRetrievalGuard:
 
         parsed = json.loads(result[0])
         assert result[0].startswith("{")
-        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        # The full key set is kept on the null path so deliveries stay
+        # schema-comparable; model-derived extras are null.
+        assert set(parsed.keys()) == {
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+            "researchability",
+            "research_class",
+            "research_reason",
+            "evidence_quality",
+            "market_prob_seen",
+            "p_independent",
+        }
         assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
         assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        assert parsed["researchability"] is None
+        assert parsed["market_prob_seen"] is None  # blind request
         mock_client.beta.chat.completions.parse.assert_not_called()
         # The guard sits BEFORE the scraping step: no page fetches are wasted.
         mock_scrape.assert_not_called()
@@ -1666,8 +1674,8 @@ class TestEmptyRetrievalGuard:
         )
 
         parsed = json.loads(result[0])
-        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
         assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+        assert parsed["research_class"] is None
 
     @patch(f"{SF_MODULE}._scrape_pages")
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -1721,6 +1729,94 @@ class TestEmptyRetrievalGuard:
         query_sent = call_args[0][0] if call_args[0] else call_args[1]["question"]
         assert len(query_sent) <= _MAX_SEARCH_QUERY_LEN
         assert query_sent != LONG_FREE_TEXT_PROMPT
+
+    def test_market_aware_null_echoes_market_prob_seen(self) -> None:
+        """An empty-retrieval delivery still records the supplied price."""
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content={
+                "mode": "cleaned",
+                "serper_response": EMPTY_SERPER_RESPONSE,
+            },
+            request_context={"market_prob": 0.77},
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["market_prob_seen"] == 0.77
+        assert parsed["p_yes"] == 0.5 and parsed["researchability"] is None
+
+    @patch(f"{SF_MODULE}._scrape_pages")
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_organic_without_people_also_ask_still_calls_llm(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+    ) -> None:
+        """Organic results with NO peopleAlsoAsk must NOT trip the guard.
+
+        Serper frequently returns organic hits and no peopleAlsoAsk block; a
+        mutated guard (`and` -> `or`) would null out most live traffic. This
+        pins the operator.
+
+        :param mock_fetch: patched Serper fetch.
+        :param mock_client_mgr: patched OpenAI client manager.
+        :param mock_scrape: patched page scraper.
+        """
+        no_paa = {k: v for k, v in FAKE_SERPER_RESPONSE.items() if k != "peopleAlsoAsk"}
+        mock_fetch.return_value = MagicMock(json=lambda: no_paa)
+        mock_scrape.return_value = {}
+        mock_client = _stub_openai(mock_client_mgr)
+
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == json.loads(PREDICTION_JSON)["p_yes"]
+        mock_client.beta.chat.completions.parse.assert_called_once()
+
+    @patch(f"{SF_MODULE}._scrape_pages")
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_counter_callback_receives_token_counts_in_the_right_slots(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        mock_scrape: MagicMock,
+    ) -> None:
+        """The cost callback gets prompt tokens as input, completion as output."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_scrape.return_value = {}
+        _stub_openai(mock_client_mgr)
+        calls: list = []
+
+        def recording_callback(**kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        run(
+            tool="superforcaster-market-aware",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=recording_callback,
+        )
+
+        assert len(calls) == 1
+        # _stub_openai wires usage as prompt_tokens=10, completion_tokens=5.
+        assert calls[0]["input_tokens"] == 10
+        assert calls[0]["output_tokens"] == 5
+        assert calls[0]["model"] == "gpt-4.1-2025-04-14"
+        assert callable(calls[0]["token_counter"])
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_trader_template_serper_query_unchanged(

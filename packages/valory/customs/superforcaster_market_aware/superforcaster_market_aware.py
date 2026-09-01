@@ -790,7 +790,17 @@ def _hydrate_organic_from_pages(
         if cached is None:
             continue
         if mode == "raw":
-            text = _clean_html(cached)
+            # Same log-and-skip contract as the live scrape: one bad cached
+            # page degrades that item to its Serper snippet, never the whole
+            # replayed request (readability raises Unparseable on empty HTML).
+            try:
+                text = _clean_html(cached)
+            except Exception as e:  # noqa: BLE001 -- best-effort, never raise
+                print(
+                    "[superforcaster-market-aware] Failed to clean cached "
+                    f"page {item.get('link', '')!r}: {e}"
+                )
+                continue
             if text:
                 item["content"] = text
         else:
@@ -939,6 +949,25 @@ def _extract_market_context(request_context: Any) -> Dict[str, Any]:
     if isinstance(rules, str) and rules.strip():
         context["resolution_rules"] = rules.strip()[:MAX_RESOLUTION_RULES_CHARS]
 
+    # A field that was SUPPLIED but rejected (wrong shape) is a supply-side
+    # bug worth its own log line: without it, a caller whose market_prob
+    # starts arriving as a string degrades to blind mode permanently and
+    # looks identical to a caller that never sent a price.
+    rejected = [
+        key
+        for key, kept in (
+            ("market_prob", "market_prob" in context),
+            ("market_close_at", "market_close_at" in context),
+            ("description", "resolution_rules" in context),
+        )
+        if request_context.get(key) is not None and not kept
+    ]
+    if rejected:
+        print(
+            "[superforcaster-market-aware] Market context fields supplied "
+            f"but rejected (wrong shape): {rejected}"
+        )
+
     return context
 
 
@@ -1030,6 +1059,7 @@ def _flagged_null_result(
     return_source_content: bool,
     counter_callback: Any,
     context: str,
+    market_context: Dict[str, Any],
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -1044,6 +1074,8 @@ def _flagged_null_result(
     :param return_source_content: whether to attach the capture to used_params.
     :param counter_callback: the cost callback, threaded back unchanged.
     :param context: short label for the log line (live vs cached replay).
+    :param market_context: the extracted market context; only
+        ``market_prob`` is echoed, as ``market_prob_seen``.
     :return: the flagged-null MechResponse tuple.
     """
     print(
@@ -1051,7 +1083,22 @@ def _flagged_null_result(
         " -- returning null prediction"
     )
     null_result = json.dumps(
-        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+        {
+            "p_yes": 0.5,
+            "p_no": 0.5,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            # Model-derived extras are null (no model ran), but the payload
+            # keeps the full key set so null deliveries stay
+            # schema-comparable, and market_prob_seen still records whether
+            # this was a market-aware request.
+            "researchability": None,
+            "research_class": None,
+            "research_reason": None,
+            "evidence_quality": None,
+            "market_prob_seen": market_context.get("market_prob"),
+            "p_independent": None,
+        }
     )
     used_params: Dict[str, Any] = {
         "model": model,
@@ -1108,6 +1155,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         today = date.today()
         d = today.strftime("%d/%m/%Y")
 
+        # Optional market context, extracted BEFORE the retrieval guards so
+        # an empty-retrieval delivery still echoes market_prob_seen and stays
+        # schema-comparable with normal deliveries.
+        market_context = _extract_market_context(kwargs.get("request_context"))
+
         # Trader-template prompts: question == search_query == the bare market
         # question. Free text: the LLM gets the whole prompt, Serper a
         # compressed question clause (issue #455).
@@ -1136,6 +1188,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     return_source_content,
                     counter_callback,
                     "cached replay",
+                    market_context,
                 )
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
@@ -1170,6 +1223,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     return_source_content,
                     counter_callback,
                     "live search",
+                    market_context,
                 )
             print("Scraping page content for top organic results...")
             captured_pages = _scrape_pages(organic_data, source_content_mode)
@@ -1188,11 +1242,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         prediction_prompt = PREDICTION_PROMPT.format(
             question=question, today=d, sources=sources
         )
-        # Optional market context. Absent or malformed -> blind mode, in which
-        # the rendered prompt is byte-identical to the parent's plus this
-        # tool's own reasoning-field instructions, and no market-derived
-        # reasoning happens at all.
-        market_context = _extract_market_context(kwargs.get("request_context"))
+        # Absent or malformed context -> blind mode, in which the rendered
+        # prompt is byte-identical to the parent's plus this tool's own
+        # reasoning-field instructions, and no market-derived reasoning
+        # happens at all.
         prediction_prompt += _render_market_blocks(market_context)
         if market_context:
             print(
@@ -1240,17 +1293,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"info_utility={prediction.info_utility}"
         )
 
-        # Delivered payload. The four standard mech fields are unchanged and
-        # stay first: the trader pops exactly those and ignores everything
-        # else, so the extras below are additive and non-breaking. Structured
-        # outputs guarantee the object is flat and strict-json.loads-parseable,
-        # so no reasoning prose can leak in.
-        #
-        # p_no is derived rather than taken from the model. The schema
-        # validator tolerates 0.01 of drift, but the trader tests
-        # `p_yes + p_no != 1` with exact float equality and treats a failure as
-        # an invalid response, so a model that answers 0.7 / 0.31 would be
-        # dropped. Deriving the complement makes the sum exact by construction.
+        # Delivered payload: the four standard mech fields first, extras
+        # additive and non-breaking. p_no is derived, not model-supplied:
+        # strict consumers require an exact p_yes + p_no sum.
         p_yes = round(prediction.p_yes, 4)
         result = json.dumps(
             {

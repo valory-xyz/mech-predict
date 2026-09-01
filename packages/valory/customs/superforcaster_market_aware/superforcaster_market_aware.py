@@ -91,13 +91,22 @@ def with_key_rotation(func: Callable) -> Callable:
                 # factual_research) so downstream tournament scoring sees
                 # an explicit error rather than treating a raw exception
                 # string as a prediction.
+                # Same key set as a normal delivery and the flagged null,
+                # so every exit path is schema-comparable downstream.
                 error_json = json.dumps(
                     {
                         "p_yes": None,
                         "p_no": None,
                         "confidence": 0.0,
                         "info_utility": 0.0,
+                        "researchability": None,
+                        "research_class": None,
+                        "research_reason": None,
+                        "evidence_quality": None,
+                        "market_prob_seen": None,
+                        "p_independent": None,
                         "error": str(e),
+                        "error_type": type(e).__name__,
                     }
                 )
                 return error_json, "", None, None, None, api_keys
@@ -971,6 +980,16 @@ def _extract_market_context(request_context: Any) -> Dict[str, Any]:
     return context
 
 
+def _format_market_prob(market_prob: float) -> str:
+    """Render a price with trailing zeros trimmed but never as a bare integer.
+
+    :param market_prob: the coerced price in [0, 1].
+    :return: e.g. 0.765 -> "0.765", 0.5 -> "0.5", 1.0 -> "1.0".
+    """
+    text = f"{market_prob:.4f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
+
+
 def _render_market_blocks(context: Dict[str, Any]) -> str:
     """Render the prompt suffix for a supplied market context.
 
@@ -991,7 +1010,7 @@ def _render_market_blocks(context: Dict[str, Any]) -> str:
             MARKET_CLOSE_LINE.format(market_close_at=close_at) if close_at else ""
         )
         suffix += MARKET_CONTEXT_BLOCK.format(
-            market_prob=f"{market_prob:.4f}".rstrip("0").rstrip("."),
+            market_prob=_format_market_prob(market_prob),
             close_line=close_line,
         )
 
@@ -1104,6 +1123,9 @@ def _flagged_null_result(
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        # Off-chain marker distinguishing a flagged null from a genuine
+        # max-uncertainty forecast (matches superforcaster-polymarket-v4).
+        "empty_retrieval": True,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -1191,7 +1213,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     market_context,
                 )
             cached_pages = source_content.get("pages", {})
-            cached_mode = source_content.get("mode", source_content_mode)
+            # Legacy captures (written before "mode" existed) stored cleaned
+            # text; defaulting to the operator's current mode would run
+            # readability over plain text under raw mode and silently drop
+            # every cached page.
+            cached_mode = source_content.get("mode", "cleaned")
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
             sources = _cap_evidence_block(organic_data, misc_data, model)
         else:

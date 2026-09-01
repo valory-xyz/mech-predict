@@ -695,13 +695,16 @@ class TestResearchabilityField:
         assert set(literal) == set(module.RESEARCHABILITY_CLASSES)
 
     def test_unknown_class_is_refused(self) -> None:
-        """A class outside the taxonomy fails validation."""
+        """A class outside the taxonomy fails validation.
+
+        model_copy skips validators by design, so validation must go through
+        model_validate, and the override must target research_class itself.
+        """
         with pytest.raises(ValidationError):
-            _make_prediction_stub().model_copy(update={"research_class": "NR-weather"})
             PredictionResult.model_validate(
                 {
                     **_make_prediction_stub().model_dump(),
-                    "researchability": "NR-weather",
+                    "research_class": "NR-weather",
                 }
             )
 
@@ -1171,6 +1174,41 @@ class TestSuperforcasterSourceContent:
         assert "<html>" not in prediction_prompt  # raw markup not dumped verbatim
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_replay_raw_mode_bad_html_degrades_to_snippet(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """An unparseable cached page degrades to its snippet, no crash.
+
+        :param mock_client_mgr: patched OpenAI client manager.
+        """
+        _stub_openai(mock_client_mgr)
+
+        source_content = {
+            "mode": "raw",
+            "serper_response": FAKE_SERPER_RESPONSE,
+            "pages": {
+                # empty: readability raises Unparseable inside _clean_html
+                "http://example.com/result": "",
+                # a good LATER page: log-and-skip must still hydrate it
+                # (a `break` instead of `continue` would drop it silently)
+                "http://example.com/second": _HTML_PAGE,
+            },
+        }
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("true"),
+            counter_callback=None,
+            source_content=source_content,
+        )
+
+        prediction_prompt = result[1]
+        assert prediction_prompt, "request must not hard-fail on one bad page"
+        assert "Test snippet content" in prediction_prompt  # bad page -> snippet
+        assert "Federal Reserve" in prediction_prompt  # later good page hydrated
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_replay_legacy_format_without_pages_still_works(
         self, mock_client_mgr: MagicMock
     ) -> None:
@@ -1450,6 +1488,9 @@ class TestErrorHandling:
         payload = json.loads(result[0])  # not None -> no downstream json.loads(None)
         assert payload["p_yes"] is None
         assert "refus" in payload["error"].lower()
+        # Pin the retry budget as a LITERAL: asserting against the module
+        # constant would move with the very change this guards against.
+        assert mock_client.beta.chat.completions.parse.call_count == 3
 
 
 class TestSerperRequest:

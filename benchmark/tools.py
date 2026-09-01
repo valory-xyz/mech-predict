@@ -103,9 +103,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     # valory/superforcaster_market_aware -- departs from
     # superforcaster_full_search (the only Polymarket-deployed tool that scrapes
-    # full pages rather than Serper snippets), adding structured outputs. Same
-    # superforcaster PREDICTION_PROMPT schema as its parent, so the family is
-    # unchanged and the derived lookup picks up its PredictionResult.
+    # full pages rather than Serper snippets), adding structured outputs. The
+    # parent is NOT a structured-output tool; this module defines its own
+    # extended 17-field PredictionResult. family="superforcaster" keeps the
+    # benchmark's family-derived lookup pointed at this module's schema.
     "superforcaster-market-aware": ToolSpec(
         module=(
             "packages.valory.customs.superforcaster_market_aware"

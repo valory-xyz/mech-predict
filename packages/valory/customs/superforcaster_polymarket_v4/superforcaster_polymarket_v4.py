@@ -216,20 +216,23 @@ def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWith
 
 
 def _flagged_null_result(
-    model: Any,
-    temperature: Any,
-    max_tokens: Any,
-    captured_source_content: Any,
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    captured_source_content: Optional[Dict[str, Any]],
     return_source_content: bool,
-    counter_callback: Any,
+    counter_callback: Optional[Callable[..., Any]],
     context: str,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
     Unlike _null_prediction_response this is a VALID prediction
-    (p_yes = p_no = 0.5) with zero confidence and info_utility, so a requester
-    can detect and discount it while the strict trader consumer still parses
-    it (issue #455).
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
+    trader consumer still parses it (issue #455). The on-chain JSON carries
+    only the four standard fields; the explicit marker for requesters lives in
+    used_params["empty_retrieval"] (off-chain metadata.params), so a flagged
+    null is distinguishable from a genuine 50/50 forecast.
 
     :param model: the model name recorded in used_params.
     :param temperature: the temperature recorded in used_params.
@@ -251,6 +254,7 @@ def _flagged_null_result(
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "empty_retrieval": True,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -543,26 +547,75 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
 
 # Matches from 'question "' to '" and the `yes`' to handle nested quotes.
 _TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.DOTALL)
-# A question clause: anchored at a question word, running to the first '?'.
-# [^?]* tolerates embedded dots (abbreviations like "e.g.", decimals, market
-# ids), which sentence-boundary splitting would cut the clause on.
-# Preferred anchor: a CAPITALIZED question word opening a sentence or quoted
-# span. Auxiliaries also appear lowercase inside instruction boilerplate ("You
-# are being asked to provide..."), which would anchor the clause on the wrong
-# sentence.
-_QUESTION_CLAUSE_STRICT_RE = re.compile(
-    r"(?:^|[\s.!?:\"'(])"
-    r"((?:Will|Is|Are|Was|Were|Does|Do|Did|Can|Could"
-    r"|Who|What|When|Where|Which|How|Whether)\b[^?]*\?)"
-)
-_QUESTION_CLAUSE_LOOSE_RE = re.compile(
-    r"\b(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
-    r"|how|whether)\b[^?]*\?",
+# Question-clause candidates: every question-word occurrence starts one, running
+# to the FIRST '?' after it ([^?]* tolerates embedded dots -- abbreviations,
+# decimals, market ids -- which sentence-boundary splitting would cut on).
+# Candidates may overlap; a feature score selects the market question among
+# them (see _score_clause).
+_QUESTION_WORD_RE = re.compile(
+    r"(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
+    r"|how|whether)\b",
     re.IGNORECASE,
 )
+# Meta/instruction stems: a question addressed at the RESPONDER ("Can you
+# estimate...", "What is your probability...") or prompt scaffolding ("What
+# follows is..."), never the market question itself.
+_META_STEM_RE = re.compile(
+    r"^(?:(?:can|could|would|will|do|does|did|is|are)\s+(?:you|your|we|i)\b"
+    r"|what\s+(?:is|are)\s+(?:your|the\s+(?:respective\s+)?probabilit)"
+    r"|what\s+follows\b)",
+    re.IGNORECASE,
+)
+_MARKET_VERB_RE = re.compile(
+    r"^(?:Will|Is|Are|Was|Were|Does|Do|Did|Which|Who|When|Whether)\b"
+)
+# Chars that may directly precede a sentence-initial question word: whitespace,
+# sentence punctuation, ASCII quotes/paren, and typographic quotes.
+_CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
 
 
-def parse_prompt(prompt: str) -> Tuple[str, str]:
+def _score_clause(prompt: str, start: int, clause: str) -> int:
+    """Score a question-clause candidate; the market question should win.
+
+    Features: digits (market questions carry deadlines/quantities; instruction
+    and clarifying questions rarely do), a market-shaped opening verb, a
+    sentence-initial capitalized start, a penalty for responder-addressed /
+    scaffolding stems, and a penalty for sweeping across a sentence boundary.
+
+    :param prompt: the full prompt (for boundary context).
+    :param start: the clause's start offset in the prompt.
+    :param clause: the candidate clause text.
+    :return: the feature score (higher = more market-question-shaped).
+    """
+    score = 0
+    if any(ch.isdigit() for ch in clause):
+        score += 3
+    if _MARKET_VERB_RE.match(clause):
+        score += 1
+    if clause[0].isupper() and (start == 0 or prompt[start - 1] in _CLAUSE_BOUNDARY):
+        score += 2
+    if _META_STEM_RE.match(clause):
+        score -= 3
+    if ". " in clause:
+        score -= 1
+    return score
+
+
+def _truncate_query(query: str) -> str:
+    """Cap the query at _MAX_SEARCH_QUERY_LEN, cutting on a word boundary.
+
+    :param query: the derived search query.
+    :return: the query, truncated without a dangling partial word.
+    """
+    if len(query) <= _MAX_SEARCH_QUERY_LEN:
+        return query
+    cut = query[:_MAX_SEARCH_QUERY_LEN]
+    if not query[_MAX_SEARCH_QUERY_LEN].isspace():
+        cut = cut.rsplit(None, 1)[0] if " " in cut.strip() else cut
+    return cut.rstrip()
+
+
+def parse_prompt(prompt: str) -> Tuple[str, str, str]:
     """Split a request prompt into the LLM question and the Serper search query.
 
     Trader-template prompts carry the bare market question between known
@@ -570,24 +623,37 @@ def parse_prompt(prompt: str) -> Tuple[str, str]:
     previous releases. Any other prompt is free text under the advertised
     input contract (issue #455): the LLM receives the WHOLE prompt (resolution
     criteria, source, and deadline stay in context) while the search query is
-    compressed to the leading question clause, with double quotes dropped
-    (Serper treats quoted spans as exact-match terms) and the length capped.
+    the best-scoring question clause (see _score_clause), with double quotes
+    dropped (Serper treats quoted spans as exact-match terms) and the length
+    capped on a word boundary.
 
     :param prompt: the raw prompt passed to run().
-    :return: a (question_for_llm, search_query) tuple.
+    :return: (question_for_llm, search_query, tier) -- tier is 'template'
+        (trader regex matched), 'clause' (a scored question clause), or 'raw'
+        (no clause found; capped prompt head).
     """
     match = _TRADER_TEMPLATE_RE.findall(prompt)
     if match:
         question = match[0]
-        return question, question
-    clause = _QUESTION_CLAUSE_STRICT_RE.search(prompt)
-    if clause:
-        query = clause.group(1)
+        return question, question, "template"
+    candidates = []
+    for word in _QUESTION_WORD_RE.finditer(prompt):
+        start = word.start()
+        if start > 0 and prompt[start - 1].isalnum():
+            continue
+        end = prompt.find("?", start)
+        if end == -1:
+            continue
+        clause = prompt[start : end + 1]
+        candidates.append(
+            (_score_clause(prompt, start, clause), len(clause), -start, clause)
+        )
+    if candidates:
+        query, tier = max(candidates)[3], "clause"
     else:
-        loose = _QUESTION_CLAUSE_LOOSE_RE.search(prompt)
-        query = loose.group(0) if loose else prompt
-    query = query.replace('"', "").strip()[:_MAX_SEARCH_QUERY_LEN]
-    return prompt, query
+        query, tier = prompt, "raw"
+    query = _truncate_query(query.replace('"', "").strip())
+    return prompt, query, tier
 
 
 @with_key_rotation
@@ -635,12 +701,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         today = date.today()
         d = today.strftime("%d/%m/%Y")
 
-        # Trader-template prompts: question == search_query == the bare market
-        # question. Free text: the LLM gets the whole prompt, Serper a
-        # compressed question clause (issue #455).
-        question, search_query = parse_prompt(prompt)
-        if question == prompt:
-            print(f"Free-text prompt; derived search query: {search_query!r}")
+        question, search_query, tier = parse_prompt(prompt)
+        if tier != "template":
+            print(
+                f"Free-text prompt (tier={tier}); derived search query: {search_query!r}"
+            )
 
         if source_content is not None:
             print("Using provided source content (cached replay)...")
@@ -648,30 +713,35 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             serper_data = source_content.get("serper_response", source_content)
             organic_data = serper_data.get("organic", [])[:MAX_SOURCES]
             misc_data = serper_data.get("peopleAlsoAsk", [])
-            # Empty-retrieval guard: signal explicitly rather than letting the
-            # LLM forecast from a blank <background> block (issue #455).
             if not organic_data and not misc_data:
                 return _flagged_null_result(
-                    model,
-                    temperature,
-                    max_tokens,
-                    captured_source_content,
-                    return_source_content,
-                    counter_callback,
-                    "cached replay",
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=captured_source_content,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="cached replay",
                 )
             sources = format_sources_data(organic_data, misc_data)
         else:
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
-            # Use the compressed search_query instead of the full prompt so
-            # Serper returns organic results for free-text callers (issue #455).
             serper_response = fetch_additional_sources(search_query, serper_api_key)
             # Raise on a 4xx/5xx error body (credit / auth error) instead of
             # calling .json() on it and feeding the model an empty <background>
             # block that looks like a healthy run (matches the fleet pattern).
             serper_response.raise_for_status()
             sources_data = serper_response.json()
+            # A 200 whose body lacks the organic key entirely is a broken or
+            # reshaped Serper integration (quota-error body, renamed key), not
+            # a genuine zero-hit -- raise so it surfaces as an error null with
+            # error_type instead of collapsing into the flagged null.
+            if "organic" not in sources_data:
+                raise ValueError(
+                    "Serper response missing 'organic' key; got keys: "
+                    f"{sorted(sources_data)[:8]}"
+                )
             # mode tag included for consistency across tools; content is identical
             # regardless of mode since Serper returns structured JSON, not HTML
             captured_source_content = {
@@ -681,18 +751,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print(f"Additional sources fetched: {sources_data}")
             organic_data = sources_data.get("organic", [])[:MAX_SOURCES]
             misc_data = sources_data.get("peopleAlsoAsk", [])
-            # Empty-retrieval guard: even a correct short query can fail
-            # (e.g. very niche or recent market). Signal explicitly rather than
-            # letting the LLM forecast from a blank <background> block.
             if not organic_data and not misc_data:
                 return _flagged_null_result(
-                    model,
-                    temperature,
-                    max_tokens,
-                    captured_source_content,
-                    return_source_content,
-                    counter_callback,
-                    "live search",
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=captured_source_content,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="live search",
                 )
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)

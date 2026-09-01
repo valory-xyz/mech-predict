@@ -100,20 +100,20 @@ class TestParsePrompt:
 
     def test_trader_template_uses_extracted_question_for_both(self) -> None:
         """Trader-template path: the bare question serves as both values."""
-        question, query = parse_prompt(TRADER_PROMPT)
+        question, query, _ = parse_prompt(TRADER_PROMPT)
         assert question == "Will X happen?"
         assert query == question
 
     def test_free_text_llm_gets_full_prompt(self) -> None:
         """Free-text input: the LLM question is the whole prompt."""
-        question, _ = parse_prompt(FREE_TEXT_PROMPT)
+        question, _, _ = parse_prompt(FREE_TEXT_PROMPT)
         assert question == FREE_TEXT_PROMPT
-        question, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        question, _, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
         assert question == LONG_FREE_TEXT_PROMPT
 
     def test_short_free_text_query_is_the_question(self) -> None:
         """A bare free-text question is its own search query."""
-        _, query = parse_prompt(FREE_TEXT_PROMPT)
+        _, query, _ = parse_prompt(FREE_TEXT_PROMPT)
         assert query == FREE_TEXT_PROMPT
         assert query.endswith("?")
 
@@ -123,7 +123,7 @@ class TestParsePrompt:
             _MAX_SEARCH_QUERY_LEN,
         )
 
-        _, query = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        _, query, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
         # "Please predict the following market: " is gone; the clause survives
         # whole, including the deadline and the trailing '?'.
         assert query.startswith("Will Alexander Isak")
@@ -138,7 +138,7 @@ class TestParsePrompt:
             "Question: Will Bitcoin reach $150,000 or higher on any major "
             "exchange by December 31, 2026? Resolution source: TradingView."
         )
-        _, query = parse_prompt(prompt)
+        _, query, _ = parse_prompt(prompt)
         assert query.startswith("Will Bitcoin reach")
         assert query.endswith("2026?")
 
@@ -150,7 +150,7 @@ class TestParsePrompt:
             "August 31, 2026, 11:59 PM ET? Resolution source: official "
             "announcements."
         )
-        _, query = parse_prompt(prompt)
+        _, query, _ = parse_prompt(prompt)
         assert query.startswith("Will Anthropic release the next Mythos-class")
 
     def test_double_quotes_are_stripped_from_query_only(self) -> None:
@@ -159,7 +159,7 @@ class TestParsePrompt:
             'Will any candle have a final "High" price >= 82000 in the window? '
             "Resolution source: Binance."
         )
-        question, query = parse_prompt(prompt)
+        question, query, _ = parse_prompt(prompt)
         assert '"' not in query
         assert "High" in query
         assert '"High"' in question  # the LLM still sees the exact wording
@@ -171,9 +171,144 @@ class TestParsePrompt:
         )
 
         no_q = "x" * 300
-        question, query = parse_prompt(no_q)
+        question, query, _ = parse_prompt(no_q)
         assert question == no_q
         assert len(query) == _MAX_SEARCH_QUERY_LEN
+
+
+class TestClauseSelection:
+    """The scored selector must pick the market question, not boilerplate."""
+
+    @pytest.mark.parametrize(
+        "prompt, expected_start",
+        [
+            (
+                "Can you estimate the probability of the following market? "
+                "Will Alexander Isak join Liverpool before September 2, 2025?",
+                "Will Alexander Isak",
+            ),
+            (
+                "What is your probability estimate for this market? "
+                "Will the Fed cut rates in March 2026?",
+                "Will the Fed",
+            ),
+            (
+                "Could you analyse this? Will Bitcoin reach $150,000 by "
+                "December 31, 2026?",
+                "Will Bitcoin",
+            ),
+            (
+                "Resolution criteria: What counts as a launch? Will Anthropic "
+                "release Claude 5 by 2026-12-31?",
+                "Will Anthropic",
+            ),
+            (
+                "What follows is a prediction market question. Will BTC hit "
+                "100k by 2026?",
+                "Will BTC hit",
+            ),
+        ],
+    )
+    def test_leading_instruction_question_does_not_win(
+        self, prompt: str, expected_start: str
+    ) -> None:
+        """A responder-addressed or scaffolding question must not be the query."""
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith(expected_start), query
+        assert tier == "clause"
+
+    def test_typographic_quotes_do_not_break_the_anchor(self) -> None:
+        """A market question inside typographic quotes anchors cleanly."""
+        prompt = (
+            "This market is about crypto. \u201cWill Bitcoin reach 100k by "
+            "March 2027?\u201d"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach 100k")
+
+    def test_truncation_cuts_on_a_word_boundary(self) -> None:
+        """An over-long clause is capped without a dangling partial word."""
+        prompt = "Will " + "a very long qualifying clause " * 8 + "happen by 2026?"
+        _, query, _ = parse_prompt(prompt)
+        assert len(query) <= 150
+        assert not query.endswith(" ")
+        # the cut must land between words, not inside one
+        assert query.split()[-1] in prompt.split()
+
+    def test_tier_is_reported(self) -> None:
+        """The tier tags template / clause / raw explicitly."""
+        assert parse_prompt(TRADER_PROMPT)[2] == "template"
+        assert parse_prompt(FREE_TEXT_PROMPT)[2] == "clause"
+        assert parse_prompt("no question mark here at all")[2] == "raw"
+
+
+class TestGuardObservability:
+    """The flagged null must be distinguishable and Serper breakage must raise."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_carries_empty_retrieval_marker(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """used_params marks the guard result so requesters can discount it."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A 200 body without the organic key must surface as an error null."""
+        mock_fetch.return_value = MagicMock(json=lambda: {"message": "quota exceeded"})
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None  # error null, not the 0.5 flagged null
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_trader_request_sends_extracted_question_to_serper(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """End-to-end pin: a trader request searches the bare extracted question."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=TRADER_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        query_sent = mock_fetch.call_args[0][0]
+        assert query_sent == "Will X happen?"
+        # and the LLM prompt carries the bare question, not the full template
+        llm_prompt = mock_client.client.beta.chat.completions.parse.call_args[1][
+            "messages"
+        ][1]["content"]
+        assert "Will X happen?" in llm_prompt
+        assert "`yes` answer criterion" not in llm_prompt
 
 
 class TestStructuredOutputContract:

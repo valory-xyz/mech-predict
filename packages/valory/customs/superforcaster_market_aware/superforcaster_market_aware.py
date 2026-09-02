@@ -1065,14 +1065,14 @@ _MARKET_VERB_RE = re.compile(
 _CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
 # Candidate scanning is bounded to the prompt head: every question-word
 # occurrence starts a candidate and each candidate scans forward for '?', so
-# an unbounded scan is quadratic (a ~100KB prompt -- the mech's
-# MAX_PROMPT_BYTES cap -- costs seconds; benchmark/direct calls are not even
-# capped). Market questions sit in the prompt head in practice (the longest
-# observed production prompt is under 1KB), so a 10KB window loses nothing.
+# an unbounded scan is quadratic. Measured cost is small at the mech's cap
+# (~6.6ms unbounded at 100KB, the MAX_PROMPT_BYTES limit in the mech repo's
+# valory/task_execution skill) but grows ~4x per 2x and benchmark/direct
+# calls are not capped at all (multi-MB prompts reach seconds) -- the window
+# is defence-in-depth for those paths. Market questions sit in the prompt
+# head in practice (the longest observed production prompt is under 1KB), so
+# a 10KB window loses nothing on real traffic.
 _MAX_SCAN_CHARS = 10_000
-# Quote characters with no searchable content of their own: ASCII double and
-# single quotes plus typographic quotes.
-_QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 # Near-best window for the last-market-verb tiebreaker. Equals the largest
 # single-feature weight (the digit bonus in _score_clause) so a market clause
 # can never be pushed out of contention by one feature alone.
@@ -1125,7 +1125,13 @@ def _shape_serper_sources(
             f"{context}: Serper response missing or malformed 'organic' key; "
             f"got keys: {sorted(raw)[:8]}"
         )
-    return raw["organic"][:MAX_SOURCES], raw.get("peopleAlsoAsk", [])
+    misc = raw.get("peopleAlsoAsk", [])
+    if not isinstance(misc, list):
+        raise ValueError(
+            f"{context}: Serper response has a malformed 'peopleAlsoAsk' key; "
+            f"got {type(misc).__name__}"
+        )
+    return raw["organic"][:MAX_SOURCES], misc
 
 
 def _truncate_query(query: str) -> str:
@@ -1238,7 +1244,9 @@ def _flagged_null_result(
     :param captured_source_content: the (empty) retrieval capture.
     :param return_source_content: whether to attach the capture to used_params.
     :param counter_callback: the cost callback, threaded back unchanged.
-    :param context: short label for the log line (live vs cached replay).
+    :param context: why the null was produced; recorded unconditionally in
+        used_params["null_reason"] so a skipped Serper call ("empty query")
+        stays distinguishable from a genuine zero-hit ("live search").
     :param tier: the parse_prompt tier that produced the search query.
     :param scan_truncated: whether the candidate scan window was exhausted on
         a longer prompt (raw tier only).
@@ -1276,6 +1284,7 @@ def _flagged_null_result(
         # max-uncertainty forecast and recording the derivation tier
         # (matches superforcaster-polymarket-v4).
         "empty_retrieval": True,
+        "null_reason": context,
         "parse_tier": tier,
         "scan_truncated": scan_truncated,
     }
@@ -1335,16 +1344,17 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         market_context = _extract_market_context(kwargs.get("request_context"))
 
         question, search_query, tier = parse_prompt(prompt)
-        # A truncated-scan raw tier is a different situation from a genuinely
-        # question-free prompt: the question may simply sit past the window.
-        scan_truncated = tier == "raw" and len(prompt) > _MAX_SCAN_CHARS
+        # The scan window not covering the whole prompt is observable on its
+        # own: even a clause-tier pick may have missed the real question
+        # sitting past the window (not only the raw-tier no-clause case).
+        scan_truncated = len(prompt) > _MAX_SCAN_CHARS
         if scan_truncated:
             print(
-                "[superforcaster-market-aware] Scan window exhausted: no question "
-                "clause within the first _MAX_SCAN_CHARS chars of a longer "
-                f"prompt; using capped prompt head: {search_query!r}"
+                f"[superforcaster-market-aware] Scan window exhausted: "
+                f"prompt is {len(prompt)} chars, scanned the first "
+                f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
             )
-        elif tier == "raw":
+        if tier == "raw":
             print(
                 "[superforcaster-market-aware] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
@@ -1387,9 +1397,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
             sources = _cap_evidence_block(organic_data, misc_data, model)
         else:
-            if not search_query.strip(_QUOTE_CHARS).strip():
-                # Nothing searchable: empty, whitespace-only, or quote-only
-                # (double, single, or typographic quotes) -- skip the wasted
+            if not any(ch.isalnum() for ch in search_query):
+                # Nothing searchable: no alphanumeric character at all (empty,
+                # whitespace, quotes, or bare punctuation) -- skip the wasted
                 # Serper call and return the flagged null directly.
                 return _flagged_null_result(
                     model=model,

@@ -331,7 +331,19 @@ class TestDegeneratePromptsAndScanBounds:
     """Degenerate prompts never send an empty query; the scan is bounded."""
 
     @pytest.mark.parametrize(
-        "degenerate", ["", "   ", '"""', "'''", "\u201c\u201d\u2018\u2019"]
+        "degenerate",
+        [
+            "",
+            "   ",
+            '"""',
+            "'''",
+            "\u201c\u201d\u2018\u2019",
+            "?",
+            "...",
+            "---",
+            "#",
+            "()",
+        ],
     )
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")
@@ -350,6 +362,8 @@ class TestDegeneratePromptsAndScanBounds:
         mock_fetch.assert_not_called()
         assert json.loads(result[0])["p_yes"] == 0.5
         assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "empty query"
+        assert result[4]["scan_truncated"] is False
 
     def test_quote_only_prompt_falls_back_to_unstripped_head(self) -> None:
         """Quote stripping must not strip the query down to nothing."""
@@ -411,6 +425,82 @@ class TestDegeneratePromptsAndScanBounds:
 
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_truncation_with_in_window_clause_is_marked(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = (
+            "Can I clarify the resolution source by 2025? "
+            + "filler " * (_MAX_SCAN_CHARS // 6)
+            + "Will the ECB cut rates at the next meeting?"
+        )
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_zero_hit_null_reason_is_live_search(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A genuine zero-hit records null_reason='live search' (not skipped)."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "live search"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+        ],
+    )
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_bodies_raise_typed_errors(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, body: dict
+    ) -> None:
+        """Non-list organic OR peopleAlsoAsk surfaces as the shape ValueError."""
+        mock_fetch.return_value = MagicMock(json=lambda: body)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
     def test_scan_truncation_is_observable(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
@@ -439,25 +529,50 @@ class TestDegeneratePromptsAndScanBounds:
         assert result[4]["parse_tier"] == "raw"
         assert result[4]["scan_truncated"] is True
 
-    def test_candidate_scan_is_bounded(self) -> None:
-        """A huge prompt parses fast: the scan reads only the head window.
+    def test_scan_window_bounds_candidate_search(self) -> None:
+        """The scan must not see past the window (deterministic cap killer).
 
-        Kills the cap mutation: without _MAX_SCAN_CHARS the quadratic scan
-        takes minutes at this size (measured ~4x per 2x).
+        The only question clause sits beyond _MAX_SCAN_CHARS: a bounded scan
+        finds nothing (raw tier); removing the cap finds the clause and flips
+        the tier, failing this test with no reliance on wall-clock.
         """
-        import time
-
         from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
             _MAX_SCAN_CHARS,
         )
 
-        prompt = "Will the market resolve YES by 2027? " + "This is a report. " * 20000
-        assert len(prompt) > 4 * _MAX_SCAN_CHARS
+        prompt = "x" * (3 * _MAX_SCAN_CHARS) + " Will X happen by 2027?"
+        question, query, tier = parse_prompt(prompt)
+        assert tier == "raw"
+        assert question == prompt  # the LLM still gets everything
+
+    def test_candidate_scan_is_bounded_timing_smoke(self) -> None:
+        """Smoke: a multi-MB prompt parses in well under the task budget.
+
+        (Unbounded, this size measures ~1.7s and grows ~4x per 2x; bounded it
+        is sub-millisecond. The deterministic cap killer is the test above.)
+        """
+        import time
+
+        prompt = "Will the market resolve YES by 2027? " + "This is a report. " * 160000
         t0 = time.monotonic()
         question, query, tier = parse_prompt(prompt)
         assert time.monotonic() - t0 < 2.0
-        assert question == prompt  # the LLM still gets everything
         assert query.startswith("Will the market resolve YES")
+
+    def test_meta_penalty_decides_the_fallback(self) -> None:
+        """The -3 meta penalty must flip a fallback-path winner on its own.
+
+        Both clauses lack a capitalized market verb, so neither reaches the
+        market-shaped pool; only the score penalty demotes the
+        responder-addressed clause. Neutering the penalty flips the winner
+        (verified by mutation).
+        """
+        prompt = (
+            "What is your probability estimate for the 5 outcomes? "
+            "consider, how many of the 5 apply?"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("how many of the 5 apply")
 
 
 class TestGuardObservability:

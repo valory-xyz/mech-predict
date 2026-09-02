@@ -1738,6 +1738,52 @@ class TestDegeneratePromptsAndScanBounds:
         _, query, _ = parse_prompt('"""')
         assert query == '"""'
 
+    def test_cap_on_a_space_keeps_the_last_word(self) -> None:
+        """A cap landing exactly on a space must not drop a full token."""
+        from packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware import (
+            _truncate_query,
+        )
+
+        query = "aa " * 50 + "bcdef"
+        assert len(_truncate_query(query)) == 149
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_null_organic_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """organic: null must surface as the shape error, not a TypeError."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {"organic": None, "peopleAlsoAsk": []}
+        )
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_free_text_llm_receives_the_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Integration pin: the LLM gets the WHOLE prompt, not the derived query."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        assert "official club announcements or BBC Sport" in result[1]
+
     def test_candidate_scan_is_bounded(self) -> None:
         """A huge prompt parses fast: the scan reads only the head window.
 

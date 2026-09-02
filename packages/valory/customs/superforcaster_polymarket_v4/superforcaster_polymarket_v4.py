@@ -582,6 +582,9 @@ _META_STEM_RE = re.compile(
     r"|what\s+follows\b)",
     re.IGNORECASE,
 )
+# Deliberately case-sensitive (unlike the IGNORECASE _QUESTION_WORD_RE): a
+# capitalized market verb marks a sentence-initial market question, and adding
+# IGNORECASE here would double-count lowercase occurrences via the +1 bonus.
 _MARKET_VERB_RE = re.compile(
     r"^(?:Will|Is|Are|Was|Were|Does|Do|Did|Which|Who|When|Whether)\b"
 )
@@ -642,12 +645,12 @@ def _shape_serper_sources(
     :param context: short label for the error message (live vs cached replay).
     :return: the (organic, peopleAlsoAsk) lists, organic capped at MAX_SOURCES.
     """
-    if "organic" not in raw:
+    if not isinstance(raw.get("organic"), list):
         raise ValueError(
-            f"{context}: Serper response missing 'organic' key; "
+            f"{context}: Serper response missing or malformed 'organic' key; "
             f"got keys: {sorted(raw)[:8]}"
         )
-    return raw.get("organic", [])[:MAX_SOURCES], raw.get("peopleAlsoAsk", [])
+    return raw["organic"][:MAX_SOURCES], raw.get("peopleAlsoAsk", [])
 
 
 def _truncate_query(query: str) -> str:
@@ -659,8 +662,8 @@ def _truncate_query(query: str) -> str:
     if len(query) <= _MAX_SEARCH_QUERY_LEN:
         return query
     cut = query[:_MAX_SEARCH_QUERY_LEN]
-    if not query[_MAX_SEARCH_QUERY_LEN].isspace():
-        cut = cut.rsplit(None, 1)[0] if " " in cut.strip() else cut
+    if not query[_MAX_SEARCH_QUERY_LEN].isspace() and not cut.endswith(" "):
+        cut = cut.rsplit(None, 1)[0] if " " in cut else cut
     return cut.rstrip()
 
 
@@ -786,7 +789,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "[superforcaster-polymarket-v4] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
             )
-        elif tier != "template":
+        elif tier == "clause":
             print(
                 f"[superforcaster-polymarket-v4] Free-text prompt (tier={tier}); "
                 f"derived search query: {search_query!r}"

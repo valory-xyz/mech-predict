@@ -207,9 +207,10 @@ class TestClauseSelection:
                 "100k by 2026?",
                 "Will BTC hit",
             ),
-            # Mutation guard: the boilerplate clause carries digits while the
-            # market clause has none, so ONLY the meta-stem penalty makes the
-            # market clause win -- removing `score -= 3` fails this case.
+            # The boilerplate clause carries digits while the market clause
+            # has none; the responder-addressed clause is excluded from the
+            # market-shaped pool by the _META_STEM_RE filter (the score
+            # penalty alone no longer decides this case).
             (
                 "Can you give me 3 quick estimates with 95% confidence? "
                 "Will the ECB cut rates at the next meeting?",
@@ -352,6 +353,59 @@ class TestDegeneratePromptsAndScanBounds:
         """Quote stripping must not strip the query down to nothing."""
         _, query, _ = parse_prompt('"""')
         assert query == '"""'
+
+    def test_cap_on_a_space_keeps_the_last_word(self) -> None:
+        """A cap landing exactly on a space must not drop a full token."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _truncate_query,
+        )
+
+        query = "aa " * 50 + "bcdef"  # char 150 is 'b', char 149 is a space
+        assert len(_truncate_query(query)) == 149
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_null_organic_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """organic: null must surface as the shape error, not a TypeError."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {"organic": None, "peopleAlsoAsk": []}
+        )
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_free_text_llm_receives_the_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Integration pin: the LLM gets the WHOLE prompt, not the derived query."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # criteria text that the derived query drops must still reach the LLM
+        assert "official club announcements or BBC Sport" in result[1]
 
     def test_candidate_scan_is_bounded(self) -> None:
         """A huge prompt parses fast: the scan reads only the head window.

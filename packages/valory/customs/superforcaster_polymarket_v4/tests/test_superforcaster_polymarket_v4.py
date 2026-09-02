@@ -244,6 +244,28 @@ class TestClauseSelection:
                 "Will Isak join Liverpool? What is your probability estimate?",
                 "Will Isak",
             ),
+            # Trailing responder-addressed questions with market verbs and
+            # digits must be EXCLUDED from the market-shaped pool, not just
+            # penalized (round-5 review cases -- the digit bonus exactly
+            # cancels the meta penalty at the window edge).
+            (
+                "Will BTC hit 100k by 2026? Is your answer calibrated to 2 "
+                "decimals?",
+                "Will BTC",
+            ),
+            (
+                "Will Isak join Liverpool? Are your sources dated within 7 " "days?",
+                "Will Isak",
+            ),
+            (
+                "Will the Fed cut rates in March 2026? Do you have access to "
+                "news after 2025?",
+                "Will the Fed",
+            ),
+            (
+                "Will Anthropic release Claude 5? Did you check all 3 " "sources?",
+                "Will Anthropic",
+            ),
         ],
     )
     def test_leading_instruction_question_does_not_win(
@@ -323,6 +345,7 @@ class TestGuardObservability:
         )
         used_params = result[4]
         assert used_params["empty_retrieval"] is True
+        assert used_params["parse_tier"] == "clause"
 
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")

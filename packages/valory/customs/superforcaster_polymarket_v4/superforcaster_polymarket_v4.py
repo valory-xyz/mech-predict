@@ -234,6 +234,7 @@ def _flagged_null_result(
     return_source_content: bool,
     counter_callback: Optional[Callable[..., Any]],
     context: str,
+    tier: str,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -252,6 +253,7 @@ def _flagged_null_result(
     :param return_source_content: whether to attach the capture to used_params.
     :param counter_callback: the cost callback, threaded back unchanged.
     :param context: short label for the log line (live vs cached replay).
+    :param tier: the parse_prompt tier that produced the search query.
     :return: the flagged-null MechResponse tuple.
     """
     print(
@@ -266,6 +268,7 @@ def _flagged_null_result(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "empty_retrieval": True,
+        "parse_tier": tier,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -706,7 +709,9 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
         market_shaped = [
             c
             for c in candidates
-            if c[0] >= best_score - _NEAR_BEST_WINDOW and _MARKET_VERB_RE.match(c[3])
+            if c[0] >= best_score - _NEAR_BEST_WINDOW
+            and _MARKET_VERB_RE.match(c[3])
+            and not _META_STEM_RE.match(c[3])
         ]
         chosen = (
             min(market_shaped, key=lambda c: c[2]) if market_shaped else max(candidates)
@@ -791,6 +796,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     return_source_content=return_source_content,
                     counter_callback=counter_callback,
                     context="cached replay",
+                    tier=tier,
                 )
             sources = format_sources_data(organic_data, misc_data)
         else:
@@ -819,6 +825,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     return_source_content=return_source_content,
                     counter_callback=counter_callback,
                     context="live search",
+                    tier=tier,
                 )
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)

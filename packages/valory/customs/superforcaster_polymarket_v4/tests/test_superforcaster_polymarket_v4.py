@@ -326,6 +326,54 @@ class TestClauseSelection:
         assert parse_prompt("no question mark here at all")[2] == "raw"
 
 
+class TestDegeneratePromptsAndScanBounds:
+    """Degenerate prompts never send an empty query; the scan is bounded."""
+
+    @pytest.mark.parametrize("degenerate", ["", "   ", '"""'])
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_degenerate_prompt_never_sends_an_empty_query(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, degenerate: str
+    ) -> None:
+        """Prompts with no searchable content never reach Serper at all."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=degenerate,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        mock_fetch.assert_not_called()
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+
+    def test_quote_only_prompt_falls_back_to_unstripped_head(self) -> None:
+        """Quote stripping must not strip the query down to nothing."""
+        _, query, _ = parse_prompt('"""')
+        assert query == '"""'
+
+    def test_candidate_scan_is_bounded(self) -> None:
+        """A huge prompt parses fast: the scan reads only the head window.
+
+        Kills the cap mutation: without _MAX_SCAN_CHARS the quadratic scan
+        takes minutes at this size (measured ~4x per 2x).
+        """
+        import time
+
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        prompt = "Will the market resolve YES by 2027? " + "This is a report. " * 20000
+        assert len(prompt) > 4 * _MAX_SCAN_CHARS
+        t0 = time.monotonic()
+        question, query, tier = parse_prompt(prompt)
+        assert time.monotonic() - t0 < 2.0
+        assert question == prompt  # the LLM still gets everything
+        assert query.startswith("Will the market resolve YES")
+
+
 class TestGuardObservability:
     """The flagged null must be distinguishable and Serper breakage must raise."""
 

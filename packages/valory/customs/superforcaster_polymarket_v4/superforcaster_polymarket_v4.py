@@ -588,6 +588,13 @@ _MARKET_VERB_RE = re.compile(
 # Chars that may directly precede a sentence-initial question word: whitespace,
 # sentence punctuation, ASCII quotes/paren, and typographic quotes.
 _CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
+# Candidate scanning is bounded to the prompt head: every question-word
+# occurrence starts a candidate and each candidate scans forward for '?', so
+# an unbounded scan is quadratic (a ~100KB prompt -- the mech's
+# MAX_PROMPT_BYTES cap -- costs seconds; benchmark/direct calls are not even
+# capped). Market questions sit in the prompt head in practice (the longest
+# observed production prompt is under 1KB), so a 10KB window loses nothing.
+_MAX_SCAN_CHARS = 10_000
 # Near-best window for the last-market-verb tiebreaker. Equals the largest
 # single-feature weight (the digit bonus in _score_clause) so a market clause
 # can never be pushed out of contention by one feature alone.
@@ -686,17 +693,18 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
     if match:
         question = match[0]
         return ParsedPrompt(question, question, "template")
+    scan = prompt[:_MAX_SCAN_CHARS]
     candidates = []
-    for word in _QUESTION_WORD_RE.finditer(prompt):
+    for word in _QUESTION_WORD_RE.finditer(scan):
         start = word.start()
-        if start > 0 and prompt[start - 1].isalnum():
+        if start > 0 and scan[start - 1].isalnum():
             continue
-        end = prompt.find("?", start)
+        end = scan.find("?", start)
         if end == -1:
             continue
-        clause = prompt[start : end + 1]
+        clause = scan[start : end + 1]
         candidates.append(
-            (_score_clause(prompt, start, clause), len(clause), -start, clause)
+            (_score_clause(scan, start, clause), len(clause), -start, clause)
         )
     tier: Literal["template", "clause", "raw"]
     if candidates:
@@ -718,8 +726,12 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
         )
         query, tier = chosen[3], "clause"
     else:
-        query, tier = prompt, "raw"
+        query, tier = scan, "raw"
     query = _truncate_query(query.replace('"', "").strip())
+    if not query:
+        # Degenerate prompts (only quotes/whitespace) must not strip down to
+        # an empty Serper query -- fall back to the unstripped prompt head.
+        query = _truncate_query(prompt.strip())
     return ParsedPrompt(prompt, query, tier)
 
 
@@ -800,6 +812,20 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 )
             sources = format_sources_data(organic_data, misc_data)
         else:
+            if not search_query.strip('"').strip():
+                # Nothing searchable (empty, whitespace-only, or quotes-only
+                # query): skip the wasted Serper call and return the flagged
+                # null directly.
+                return _flagged_null_result(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=None,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="empty query",
+                    tier=tier,
+                )
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
             serper_response = fetch_additional_sources(search_query, serper_api_key)

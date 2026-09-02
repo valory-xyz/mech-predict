@@ -425,6 +425,36 @@ class TestDegeneratePromptsAndScanBounds:
 
     @patch(f"{V4_MODULE}.OpenAIClientManager")
     @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_long_template_prompt_is_not_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Template past the window is NOT flagged: question precedes the scan."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = TRADER_PROMPT + " filler" * (_MAX_SCAN_CHARS // 3)
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "template"
+        assert result[4]["scan_truncated"] is False
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
     def test_truncation_with_in_window_clause_is_marked(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:

@@ -1802,6 +1802,31 @@ class TestDegeneratePromptsAndScanBounds:
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_long_template_prompt_is_not_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Template past the window is NOT flagged: question precedes the scan."""
+        from packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _stub_openai(mock_client_mgr)
+
+        prompt = PREDICTION_PROMPT + " filler" * (_MAX_SCAN_CHARS // 3)
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "template"
+        assert result[4]["scan_truncated"] is False
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_truncation_with_in_window_clause_is_marked(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:

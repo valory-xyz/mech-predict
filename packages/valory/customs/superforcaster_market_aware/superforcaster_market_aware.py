@@ -1248,8 +1248,9 @@ def _flagged_null_result(
         used_params["null_reason"] so a skipped Serper call ("empty query")
         stays distinguishable from a genuine zero-hit ("live search").
     :param tier: the parse_prompt tier that produced the search query.
-    :param scan_truncated: whether the candidate scan window was exhausted on
-        a longer prompt (raw tier only).
+    :param scan_truncated: whether the scan window did not cover the whole
+        prompt (any non-template tier; a template match returns before the
+        window can matter).
     :param market_context: the extracted market context; only
         ``market_prob`` is echoed, as ``market_prob_seen``.
     :return: the flagged-null MechResponse tuple.
@@ -1347,14 +1348,16 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # The scan window not covering the whole prompt is observable on its
         # own: even a clause-tier pick may have missed the real question
         # sitting past the window (not only the raw-tier no-clause case).
-        scan_truncated = len(prompt) > _MAX_SCAN_CHARS
+        # A template match is exempt: it returns the exact question before
+        # the window plays any role, so nothing can have been missed.
+        scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
         if scan_truncated:
             print(
                 f"[superforcaster-market-aware] Scan window exhausted: "
                 f"prompt is {len(prompt)} chars, scanned the first "
                 f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
             )
-        if tier == "raw":
+        elif tier == "raw":
             print(
                 "[superforcaster-market-aware] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"

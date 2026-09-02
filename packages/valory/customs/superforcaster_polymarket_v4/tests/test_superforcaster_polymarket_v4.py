@@ -17,7 +17,7 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Unit tests for superforcaster-polymarket-v4's structured-output contract."""
+"""Unit tests for superforcaster-polymarket-v4's structured-output and free-text-input contract."""
 
 import inspect
 import json
@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
     PredictionResult,
     _parse_completion,
+    parse_prompt,
     run,
 )
 
@@ -42,6 +43,8 @@ FAKE_SERPER_RESPONSE = {
     "organic": [{"title": "T", "link": "https://example.test", "snippet": "S"}],
     "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
 }
+
+EMPTY_SERPER_RESPONSE: dict = {"organic": [], "peopleAlsoAsk": []}
 
 FAKE_PREDICTION = PredictionResult(
     facts="Fact 1. Fact 2.",
@@ -59,7 +62,20 @@ FAKE_PREDICTION = PredictionResult(
     info_utility=0.4,
 )
 
-PROMPT = "Will X happen? p_yes and p_no?"
+# Trader-template format prompt (regression: previous callers must still work)
+TRADER_PROMPT = (
+    'Given the question "Will X happen?" and the `yes` answer criterion, ...'
+)
+# Free-text format prompt: the advertised contract (issue #455)
+FREE_TEXT_PROMPT = "Will Alexander Isak join Liverpool before September 2 2025?"
+# Long free-text prompt that would return empty Serper results if passed raw
+LONG_FREE_TEXT_PROMPT = (
+    "Please predict the following market: Will Alexander Isak permanently transfer "
+    "to Liverpool FC before the end of the summer 2025 transfer window (September 2, "
+    "2025 23:59 UTC)? Resolution source: official club announcements or BBC Sport. "
+    "The market resolves YES if a permanent transfer (not a loan) is confirmed by "
+    "the resolution source before the deadline."
+)
 
 
 def _make_mock_api_keys() -> MagicMock:
@@ -77,6 +93,385 @@ def _mock_parse_response() -> MagicMock:
         choices=[MagicMock(message=MagicMock(parsed=FAKE_PREDICTION, refusal=None))],
         usage=MagicMock(prompt_tokens=10, completion_tokens=5),
     )
+
+
+class TestParsePrompt:
+    """parse_prompt() -> (question_for_llm, search_query)."""
+
+    def test_trader_template_uses_extracted_question_for_both(self) -> None:
+        """Trader-template path: the bare question serves as both values."""
+        question, query, _ = parse_prompt(TRADER_PROMPT)
+        assert question == "Will X happen?"
+        assert query == question
+
+    def test_free_text_llm_gets_full_prompt(self) -> None:
+        """Free-text input: the LLM question is the whole prompt."""
+        question, _, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert question == FREE_TEXT_PROMPT
+        question, _, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert question == LONG_FREE_TEXT_PROMPT
+
+    def test_short_free_text_query_is_the_question(self) -> None:
+        """A bare free-text question is its own search query."""
+        _, query, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert query == FREE_TEXT_PROMPT
+        assert query.endswith("?")
+
+    def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
+        """The query anchors at the question word, dropping instruction text."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        _, query, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        # "Please predict the following market: " is gone; the clause survives
+        # whole, including the deadline and the trailing '?'.
+        assert query.startswith("Will Alexander Isak")
+        assert query.endswith("?")
+        assert len(query) <= _MAX_SEARCH_QUERY_LEN
+
+    def test_lowercase_auxiliary_in_boilerplate_is_not_the_anchor(self) -> None:
+        """Boilerplate 'you are being asked...' must not anchor; the real question wins."""
+        prompt = (
+            "You are being asked to provide a probability estimate for a "
+            "prediction market question. Please respond with a JSON object. "
+            "Question: Will Bitcoin reach $150,000 or higher on any major "
+            "exchange by December 31, 2026? Resolution source: TradingView."
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach")
+        assert query.endswith("2026?")
+
+    def test_embedded_dots_do_not_cut_the_clause(self) -> None:
+        """Abbreviation dots inside the question no longer truncate the query."""
+        prompt = (
+            "Will Anthropic release the next Mythos-class model (e.g. a Fable "
+            "successor in that class) AND make it available to the public by "
+            "August 31, 2026, 11:59 PM ET? Resolution source: official "
+            "announcements."
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Anthropic release the next Mythos-class")
+
+    def test_double_quotes_are_stripped_from_query_only(self) -> None:
+        """Quoted spans become exact-match Serper terms; drop them from the query."""
+        prompt = (
+            'Will any candle have a final "High" price >= 82000 in the window? '
+            "Resolution source: Binance."
+        )
+        question, query, _ = parse_prompt(prompt)
+        assert '"' not in query
+        assert "High" in query
+        assert '"High"' in question  # the LLM still sees the exact wording
+
+    def test_no_question_clause_truncates(self) -> None:
+        """A prompt with no question clause falls back to the capped prompt."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        no_q = "x" * 300
+        question, query, _ = parse_prompt(no_q)
+        assert question == no_q
+        assert len(query) == _MAX_SEARCH_QUERY_LEN
+
+
+class TestClauseSelection:
+    """The scored selector must pick the market question, not boilerplate."""
+
+    @pytest.mark.parametrize(
+        "prompt, expected_start",
+        [
+            (
+                "Can you estimate the probability of the following market? "
+                "Will Alexander Isak join Liverpool before September 2, 2025?",
+                "Will Alexander Isak",
+            ),
+            (
+                "What is your probability estimate for this market? "
+                "Will the Fed cut rates in March 2026?",
+                "Will the Fed",
+            ),
+            (
+                "Could you analyse this? Will Bitcoin reach $150,000 by "
+                "December 31, 2026?",
+                "Will Bitcoin",
+            ),
+            (
+                "Resolution criteria: What counts as a launch? Will Anthropic "
+                "release Claude 5 by 2026-12-31?",
+                "Will Anthropic",
+            ),
+            (
+                "What follows is a prediction market question. Will BTC hit "
+                "100k by 2026?",
+                "Will BTC hit",
+            ),
+            # Mutation guard: the boilerplate clause carries digits while the
+            # market clause has none, so ONLY the meta-stem penalty makes the
+            # market clause win -- removing `score -= 3` fails this case.
+            (
+                "Can you give me 3 quick estimates with 95% confidence? "
+                "Will the ECB cut rates at the next meeting?",
+                "Will the ECB",
+            ),
+            # Dated clarifiers must not outscore a digit-free market question:
+            # the LAST market-verb-shaped clause wins (round-3 review cases).
+            # This row also pins the _NEAR_BEST_WINDOW boundary: the market
+            # clause scores exactly best - 3, so shrinking the window to 2
+            # flips the outcome (verified by mutation).
+            (
+                "Resolution criteria: Does a loan count as a transfer before "
+                "September 2, 2025? Will Alexander Isak join Liverpool?",
+                "Will Alexander Isak",
+            ),
+            (
+                "Note: Which of the 3 listed sources is authoritative? "
+                "Will Anthropic release Claude 5?",
+                "Will Anthropic",
+            ),
+            (
+                "How many sources should you cite, 3 or 5? "
+                "Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            (
+                "What are the top 5 sources for this? Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            # ...but a TRAILING meta clause must not win by being last.
+            (
+                "Will Isak join Liverpool? What is your probability estimate?",
+                "Will Isak",
+            ),
+            # Trailing responder-addressed questions with market verbs and
+            # digits must be EXCLUDED from the market-shaped pool, not just
+            # penalized (round-5 review cases -- the digit bonus exactly
+            # cancels the meta penalty at the window edge).
+            (
+                "Will BTC hit 100k by 2026? Is your answer calibrated to 2 "
+                "decimals?",
+                "Will BTC",
+            ),
+            (
+                "Will Isak join Liverpool? Are your sources dated within 7 " "days?",
+                "Will Isak",
+            ),
+            (
+                "Will the Fed cut rates in March 2026? Do you have access to "
+                "news after 2025?",
+                "Will the Fed",
+            ),
+            (
+                "Will Anthropic release Claude 5? Did you check all 3 " "sources?",
+                "Will Anthropic",
+            ),
+        ],
+    )
+    def test_leading_instruction_question_does_not_win(
+        self, prompt: str, expected_start: str
+    ) -> None:
+        """A responder-addressed or scaffolding question must not be the query."""
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith(expected_start), query
+        assert tier == "clause"
+
+    def test_no_market_verb_clause_falls_back_to_best_score(self) -> None:
+        """With no market-verb candidate, the best-scoring clause wins (round-4).
+
+        Kills the fallback mutation (max -> min picks the lowercase inner
+        clause instead).
+        """
+        prompt = "How will the price move? Whether this resolves YES depends on it."
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith("How will the price move")
+        assert tier == "clause"
+
+    def test_digit_bonus_magnitude_pins_fallback_ordering(self) -> None:
+        """The digit bonus (+3) outranks capitalization (+2) in the fallback.
+
+        Both clauses lack a market verb; the digit-bearing lowercase clause
+        must beat the capitalized digit-free one. Halving the digit bonus to
+        +2 flips this outcome (verified by mutation).
+        """
+        prompt = (
+            "consider, how many of the 5 apply? What happens when the "
+            "deadline passes without an official announcement?"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("how many of the 5 apply")
+
+    def test_typographic_quotes_do_not_break_the_anchor(self) -> None:
+        """A market question inside typographic quotes anchors cleanly."""
+        prompt = (
+            "This market is about crypto. \u201cWill Bitcoin reach 100k by "
+            "March 2027?\u201d"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach 100k")
+
+    def test_truncation_cuts_on_a_word_boundary(self) -> None:
+        """An over-long clause is capped without a dangling partial word."""
+        prompt = "Will " + "a very long qualifying clause " * 8 + "happen by 2026?"
+        _, query, _ = parse_prompt(prompt)
+        assert len(query) <= 150
+        assert not query.endswith(" ")
+        # the cut must land between words, not inside one
+        assert query.split()[-1] in prompt.split()
+
+    def test_tier_is_reported(self) -> None:
+        """The tier tags template / clause / raw explicitly."""
+        assert parse_prompt(TRADER_PROMPT)[2] == "template"
+        assert parse_prompt(FREE_TEXT_PROMPT)[2] == "clause"
+        assert parse_prompt("no question mark here at all")[2] == "raw"
+
+
+class TestGuardObservability:
+    """The flagged null must be distinguishable and Serper breakage must raise."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_carries_empty_retrieval_marker(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """used_params marks the guard result so requesters can discount it."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["parse_tier"] == "clause"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_metadata_carries_capture_when_requested(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """With return_source_content on, used_params carries marker AND capture."""
+        services = {
+            "openai": ["sk-test"],
+            "serperapi": ["serper-test"],
+            "return_source_content": ["true"],
+        }
+        api_keys = MagicMock()
+        api_keys.__getitem__ = lambda self, key: services[key][0]
+        api_keys.get = lambda key, default="": services.get(key, [default])[0]
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["source_content"]["serper_response"] == EMPTY_SERPER_RESPONSE
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A 200 body without the organic key must surface as an error null."""
+        mock_fetch.return_value = MagicMock(json=lambda: {"message": "quota exceeded"})
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None  # error null, not the 0.5 flagged null
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_cached_replay_missing_organic_key_is_an_error(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A corrupted cache entry raises, mirroring the live-branch shape check."""
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+            source_content={"serper_response": {"snapshot": "corrupted"}},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+        mock_fetch.assert_not_called()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_organic_empty_but_misc_present_still_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The guard needs BOTH lists empty; PAA alone keeps the LLM path."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {
+                "organic": [],
+                "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
+            }
+        )
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+        assert json.loads(result[0])["p_yes"] == 0.32
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_trader_request_sends_extracted_question_to_serper(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """End-to-end pin: a trader request searches the bare extracted question."""
+        serper_resp = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_fetch.return_value = serper_resp
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=TRADER_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # the HTTP-error guard must actually run on the happy path (a MagicMock
+        # would silently absorb its removal otherwise)
+        serper_resp.raise_for_status.assert_called_once()
+        query_sent = mock_fetch.call_args[0][0]
+        assert query_sent == "Will X happen?"
+        # and the LLM prompt carries the bare question, not the full template
+        llm_prompt = mock_client.client.beta.chat.completions.parse.call_args[1][
+            "messages"
+        ][1]["content"]
+        assert "Will X happen?" in llm_prompt
+        assert "`yes` answer criterion" not in llm_prompt
 
 
 class TestStructuredOutputContract:
@@ -99,7 +494,7 @@ class TestStructuredOutputContract:
         run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -127,7 +522,7 @@ class TestStructuredOutputContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -140,6 +535,118 @@ class TestStructuredOutputContract:
         # No reasoning field leaks on-chain.
         assert "facts" not in parsed and "evidence_reliability_screen" not in parsed
         assert parsed["p_yes"] == 0.32 and parsed["p_no"] == 0.68
+
+
+class TestEmptyRetrievalGuard:
+    """v4 returns a valid null prediction when Serper returns no results (issue #455)."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_empty_serper_live_returns_null_prediction(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """An empty Serper response on the live path returns p_yes=0.5, confidence=0."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert on_chain.startswith("{")
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        # The LLM must NOT be called on an empty retrieval.
+        mock_client.client.beta.chat.completions.parse.assert_not_called()
+
+    def test_empty_serper_cached_replay_returns_null_prediction(self) -> None:
+        """An empty cached source_content returns p_yes=0.5, confidence=0."""
+        empty_source_content = {
+            "mode": "cleaned",
+            "serper_response": EMPTY_SERPER_RESPONSE,
+        }
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content=empty_source_content,
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_free_text_with_results_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A free-text prompt with good Serper results still calls the LLM normally."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.32  # LLM was called and returned FAKE_PREDICTION
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_serper_query_uses_short_query_not_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """For a long free-text prompt, Serper receives a short query, not the full prompt."""
+        from packages.valory.customs.superforcaster_polymarket_v4.superforcaster_polymarket_v4 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v4",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        # fetch_additional_sources was called with the compressed query, not the
+        # full LONG_FREE_TEXT_PROMPT (which is >150 chars and would return organic:[]).
+        call_args = mock_fetch.call_args
+        query_sent = call_args[0][0] if call_args[0] else call_args[1]["question"]
+        assert len(query_sent) <= _MAX_SEARCH_QUERY_LEN
+        assert query_sent != LONG_FREE_TEXT_PROMPT
 
 
 class TestPredictionResultSchema:
@@ -207,7 +714,7 @@ class TestFailurePathContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
@@ -236,7 +743,7 @@ class TestFailurePathContract:
         result = run(
             tool="superforcaster-polymarket-v4",
             model="gpt-4.1-2025-04-14",
-            prompt=PROMPT,
+            prompt=FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )

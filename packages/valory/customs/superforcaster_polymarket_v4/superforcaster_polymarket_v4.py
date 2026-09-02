@@ -235,6 +235,7 @@ def _flagged_null_result(
     counter_callback: Optional[Callable[..., Any]],
     context: str,
     tier: str,
+    scan_truncated: bool = False,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -252,8 +253,13 @@ def _flagged_null_result(
     :param captured_source_content: the (empty) retrieval capture.
     :param return_source_content: whether to attach the capture to used_params.
     :param counter_callback: the cost callback, threaded back unchanged.
-    :param context: short label for the log line (live vs cached replay).
+    :param context: why the null was produced; recorded unconditionally in
+        used_params["null_reason"] so a skipped Serper call ("empty query")
+        stays distinguishable from a genuine zero-hit ("live search").
     :param tier: the parse_prompt tier that produced the search query.
+    :param scan_truncated: whether the scan window did not cover the whole
+        prompt (any non-template tier; a template match returns before the
+        window can matter).
     :return: the flagged-null MechResponse tuple.
     """
     print(
@@ -268,7 +274,9 @@ def _flagged_null_result(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "empty_retrieval": True,
+        "null_reason": context,
         "parse_tier": tier,
+        "scan_truncated": scan_truncated,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -582,12 +590,25 @@ _META_STEM_RE = re.compile(
     r"|what\s+follows\b)",
     re.IGNORECASE,
 )
+# Deliberately case-sensitive (unlike the IGNORECASE _QUESTION_WORD_RE): a
+# capitalized market verb marks a sentence-initial market question, and adding
+# IGNORECASE here would double-count lowercase occurrences via the +1 bonus.
 _MARKET_VERB_RE = re.compile(
     r"^(?:Will|Is|Are|Was|Were|Does|Do|Did|Which|Who|When|Whether)\b"
 )
 # Chars that may directly precede a sentence-initial question word: whitespace,
 # sentence punctuation, ASCII quotes/paren, and typographic quotes.
 _CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
+# Candidate scanning is bounded to the prompt head: every question-word
+# occurrence starts a candidate and each candidate scans forward for '?', so
+# an unbounded scan is quadratic. Measured cost is small at the mech's cap
+# (~6.6ms unbounded at 100KB, the MAX_PROMPT_BYTES limit in the mech repo's
+# valory/task_execution skill) but grows ~4x per 2x and benchmark/direct
+# calls are not capped at all (multi-MB prompts reach seconds) -- the window
+# is defence-in-depth for those paths. Market questions sit in the prompt
+# head in practice (the longest observed production prompt is under 1KB), so
+# a 10KB window loses nothing on real traffic.
+_MAX_SCAN_CHARS = 10_000
 # Near-best window for the last-market-verb tiebreaker. Equals the largest
 # single-feature weight (the digit bonus in _score_clause) so a market clause
 # can never be pushed out of contention by one feature alone.
@@ -635,12 +656,18 @@ def _shape_serper_sources(
     :param context: short label for the error message (live vs cached replay).
     :return: the (organic, peopleAlsoAsk) lists, organic capped at MAX_SOURCES.
     """
-    if "organic" not in raw:
+    if not isinstance(raw.get("organic"), list):
         raise ValueError(
-            f"{context}: Serper response missing 'organic' key; "
+            f"{context}: Serper response missing or malformed 'organic' key; "
             f"got keys: {sorted(raw)[:8]}"
         )
-    return raw.get("organic", [])[:MAX_SOURCES], raw.get("peopleAlsoAsk", [])
+    misc = raw.get("peopleAlsoAsk", [])
+    if not isinstance(misc, list):
+        raise ValueError(
+            f"{context}: Serper response has a malformed 'peopleAlsoAsk' key; "
+            f"got {type(misc).__name__}"
+        )
+    return raw["organic"][:MAX_SOURCES], misc
 
 
 def _truncate_query(query: str) -> str:
@@ -652,8 +679,8 @@ def _truncate_query(query: str) -> str:
     if len(query) <= _MAX_SEARCH_QUERY_LEN:
         return query
     cut = query[:_MAX_SEARCH_QUERY_LEN]
-    if not query[_MAX_SEARCH_QUERY_LEN].isspace():
-        cut = cut.rsplit(None, 1)[0] if " " in cut.strip() else cut
+    if not query[_MAX_SEARCH_QUERY_LEN].isspace() and not cut.endswith(" "):
+        cut = cut.rsplit(None, 1)[0] if " " in cut else cut
     return cut.rstrip()
 
 
@@ -686,17 +713,18 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
     if match:
         question = match[0]
         return ParsedPrompt(question, question, "template")
+    scan = prompt[:_MAX_SCAN_CHARS]
     candidates = []
-    for word in _QUESTION_WORD_RE.finditer(prompt):
+    for word in _QUESTION_WORD_RE.finditer(scan):
         start = word.start()
-        if start > 0 and prompt[start - 1].isalnum():
+        if start > 0 and scan[start - 1].isalnum():
             continue
-        end = prompt.find("?", start)
+        end = scan.find("?", start)
         if end == -1:
             continue
-        clause = prompt[start : end + 1]
+        clause = scan[start : end + 1]
         candidates.append(
-            (_score_clause(prompt, start, clause), len(clause), -start, clause)
+            (_score_clause(scan, start, clause), len(clause), -start, clause)
         )
     tier: Literal["template", "clause", "raw"]
     if candidates:
@@ -718,8 +746,12 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
         )
         query, tier = chosen[3], "clause"
     else:
-        query, tier = prompt, "raw"
+        query, tier = scan, "raw"
     query = _truncate_query(query.replace('"', "").strip())
+    if not query:
+        # Degenerate prompts (only quotes/whitespace) must not strip down to
+        # an empty Serper query -- fall back to the unstripped prompt head.
+        query = _truncate_query(prompt.strip())
     return ParsedPrompt(prompt, query, tier)
 
 
@@ -769,12 +801,24 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         d = today.strftime("%d/%m/%Y")
 
         question, search_query, tier = parse_prompt(prompt)
-        if tier == "raw":
+        # The scan window not covering the whole prompt is observable on its
+        # own: even a clause-tier pick may have missed the real question
+        # sitting past the window (not only the raw-tier no-clause case).
+        # A template match is exempt: it returns the exact question before
+        # the window plays any role, so nothing can have been missed.
+        scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
+        if scan_truncated:
+            print(
+                f"[superforcaster-polymarket-v4] Scan window exhausted: "
+                f"prompt is {len(prompt)} chars, scanned the first "
+                f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
+            )
+        elif tier == "raw":
             print(
                 "[superforcaster-polymarket-v4] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
             )
-        elif tier != "template":
+        elif tier == "clause":
             print(
                 f"[superforcaster-polymarket-v4] Free-text prompt (tier={tier}); "
                 f"derived search query: {search_query!r}"
@@ -797,9 +841,25 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     counter_callback=counter_callback,
                     context="cached replay",
                     tier=tier,
+                    scan_truncated=scan_truncated,
                 )
             sources = format_sources_data(organic_data, misc_data)
         else:
+            if not any(ch.isalnum() for ch in search_query):
+                # Nothing searchable: no alphanumeric character at all (empty,
+                # whitespace, quotes, or bare punctuation) -- skip the wasted
+                # Serper call and return the flagged null directly.
+                return _flagged_null_result(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=None,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="empty query",
+                    tier=tier,
+                    scan_truncated=scan_truncated,
+                )
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
             serper_response = fetch_additional_sources(search_query, serper_api_key)
@@ -826,6 +886,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     counter_callback=counter_callback,
                     context="live search",
                     tier=tier,
+                    scan_truncated=scan_truncated,
                 )
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)
@@ -875,6 +936,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "parse_tier": tier,
+            "scan_truncated": scan_truncated,
         }
         if return_source_content:
             used_params["source_content"] = captured_source_content

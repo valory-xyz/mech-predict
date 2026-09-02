@@ -197,6 +197,10 @@
     "superforcaster-polymarket-v4": {
       "parent": "superforcaster-polymarket-v1",
       "reason": "Consolidate the abandoned superforcaster-polymarket v4/v5 work (PR #375) into a single v4 off v1: a PREDICTION_PROMPT step-4 evidence-reliability screen (prediction-market-odds filter, forward-looking-intent discount, TYPE A/B temporal-evidence classification, criterion-specificity) for systematic overconfident-YES."
+    },
+    "superforcaster-market-aware": {
+      "parent": "superforcaster_full_search",
+      "reason": "Market-aware variant of the full-page-search superforcaster: adds structured outputs, an optional market-context input read from request_context, and a researchability assessment."
     }
   }
 }

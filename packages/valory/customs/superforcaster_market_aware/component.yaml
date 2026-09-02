@@ -1,0 +1,41 @@
+name: superforcaster_market_aware
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on prediction markets. It estimates
+  the probability that a market question resolves Yes. Departing from superforcaster_full_search,
+  it fetches full search-result pages (top organic results) and extracts the main
+  article text via readability + markdownify, feeding the cleaned page body into the
+  forecasting prompt instead of relying on Serper snippets alone, and returns its
+  forecast via OpenAI Structured Outputs. It optionally accepts market context on
+  the request and reports objective properties of the question alongside the forecast;
+  it never advises a trade action.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
+  superforcaster_market_aware.py: bafybeif46ycbwcf2r5jenevtdkhss5ykmhchczxvjou3gfiw7qi4fp3ftm
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster_market_aware.py: bafybeie5gnvde2xwv5iluzyqi52nwuhugkv6ajxr74teinjycper3iqq4y
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_market_aware.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

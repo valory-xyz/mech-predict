@@ -1565,7 +1565,8 @@ class TestMaxCostPath:
         assert result == 0.0123
 
 
-# --- issue #455: free-text contract (ported from superforcaster-polymarket-v4) ---
+# --- issue #455: free-text contract (ported from superforcaster-polymarket-v4,
+# FINAL implementation as merged in PR #459) ---
 
 FREE_TEXT_PROMPT = "Will Alexander Isak join Liverpool before September 2 2025?"
 LONG_FREE_TEXT_PROMPT = (
@@ -1578,49 +1579,111 @@ LONG_FREE_TEXT_PROMPT = (
 EMPTY_SERPER_RESPONSE: dict = {
     "searchParameters": {"q": "x", "type": "search"},
     "organic": [],
+    "peopleAlsoAsk": [],
 }
 
 
 class TestParsePrompt:
-    """parse_prompt() -> (question_for_llm, search_query) (issue #455)."""
+    """Test parse_prompt -> ParsedPrompt(question, query, tier) (issue #455)."""
 
     def test_trader_template_uses_extracted_question_for_both(self) -> None:
         """Trader-template path: the bare question serves as both values."""
-        question, query = parse_prompt(PREDICTION_PROMPT)
+        question, query, tier = parse_prompt(PREDICTION_PROMPT)
         assert question == "Will X happen?"
         assert query == question
+        assert tier == "template"
 
     def test_free_text_llm_gets_full_prompt(self) -> None:
         """Free-text input: the LLM question is the whole prompt."""
-        question, _ = parse_prompt(FREE_TEXT_PROMPT)
+        question, _, _ = parse_prompt(FREE_TEXT_PROMPT)
         assert question == FREE_TEXT_PROMPT
-        question, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        question, _, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
         assert question == LONG_FREE_TEXT_PROMPT
 
     def test_short_free_text_query_is_the_question(self) -> None:
         """A bare free-text question is its own search query."""
-        _, query = parse_prompt(FREE_TEXT_PROMPT)
+        _, query, _ = parse_prompt(FREE_TEXT_PROMPT)
         assert query == FREE_TEXT_PROMPT
-        assert query.endswith("?")
 
     def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
-        """The query anchors at the question word, dropping instruction text."""
-        _, query = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        """The query anchors at the question clause, dropping instruction text."""
+        _, query, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
         assert query.startswith("Will Alexander Isak")
         assert query.endswith("?")
         assert len(query) <= _MAX_SEARCH_QUERY_LEN
 
-    def test_lowercase_auxiliary_in_boilerplate_is_not_the_anchor(self) -> None:
-        """Boilerplate 'you are being asked...' must not anchor the clause."""
+    def test_double_quotes_are_stripped_from_query_only(self) -> None:
+        """Quoted spans become exact-match Serper terms; drop them."""
         prompt = (
-            "You are being asked to provide a probability estimate for a "
-            "prediction market question. Please respond with a JSON object. "
-            "Question: Will Bitcoin reach $150,000 or higher on any major "
-            "exchange by December 31, 2026? Resolution source: TradingView."
+            'Will any candle have a final "High" price >= 82000 in the window? '
+            "Resolution source: Binance."
         )
-        _, query = parse_prompt(prompt)
-        assert query.startswith("Will Bitcoin reach")
-        assert query.endswith("2026?")
+        question, query, _ = parse_prompt(prompt)
+        assert '"' not in query
+        assert "High" in query
+        assert '"High"' in question
+
+    def test_no_question_clause_truncates(self) -> None:
+        """A prompt with no question clause falls back to the capped prompt."""
+        no_q = "x" * 300
+        question, query, tier = parse_prompt(no_q)
+        assert question == no_q
+        assert len(query) == _MAX_SEARCH_QUERY_LEN
+        assert tier == "raw"
+
+
+class TestClauseSelection:
+    """The scored selector must pick the market question, not boilerplate."""
+
+    @pytest.mark.parametrize(
+        "prompt, expected_start",
+        [
+            (
+                "Can you estimate the probability of the following market? "
+                "Will Alexander Isak join Liverpool before September 2, 2025?",
+                "Will Alexander Isak",
+            ),
+            (
+                "What is your probability estimate for this market? "
+                "Will the Fed cut rates in March 2026?",
+                "Will the Fed",
+            ),
+            (
+                "Resolution criteria: What counts as a launch? Will Anthropic "
+                "release Claude 5 by 2026-12-31?",
+                "Will Anthropic",
+            ),
+            (
+                "What follows is a prediction market question. Will BTC hit "
+                "100k by 2026?",
+                "Will BTC hit",
+            ),
+            (
+                "Resolution criteria: Does a loan count as a transfer before "
+                "September 2, 2025? Will Alexander Isak join Liverpool?",
+                "Will Alexander Isak",
+            ),
+            (
+                "Will Isak join Liverpool? What is your probability estimate?",
+                "Will Isak",
+            ),
+            (
+                "Will BTC hit 100k by 2026? Is your answer calibrated to 2 "
+                "decimals?",
+                "Will BTC",
+            ),
+            (
+                "Will the Fed cut rates in March 2026? Do you have access to "
+                "news after 2025?",
+                "Will the Fed",
+            ),
+        ],
+    )
+    def test_market_question_wins(self, prompt: str, expected_start: str) -> None:
+        """Leading/trailing instruction and clarifying questions must not win."""
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith(expected_start), query
+        assert tier == "clause"
 
     def test_embedded_dots_do_not_cut_the_clause(self) -> None:
         """Abbreviation dots inside the question do not truncate the query."""
@@ -1630,239 +1693,148 @@ class TestParsePrompt:
             "August 31, 2026, 11:59 PM ET? Resolution source: official "
             "announcements."
         )
-        _, query = parse_prompt(prompt)
+        _, query, _ = parse_prompt(prompt)
         assert query.startswith("Will Anthropic release the next Mythos-class")
 
-    def test_double_quotes_are_stripped_from_query_only(self) -> None:
-        """Quoted spans are exact-match Serper terms; drop them from the query."""
-        prompt = (
-            'Will any candle have a final "High" price >= 82000 in the window? '
-            "Resolution source: Binance."
-        )
-        question, query = parse_prompt(prompt)
-        assert '"' not in query
-        assert "High" in query
-        assert '"High"' in question  # the LLM still sees the exact wording
+    def test_no_market_verb_clause_falls_back_to_best_score(self) -> None:
+        """With no market-verb candidate, the best-scoring clause wins."""
+        prompt = "How will the price move? Whether this resolves YES depends on it."
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith("How will the price move")
+        assert tier == "clause"
 
-    def test_no_question_clause_truncates(self) -> None:
-        """A prompt with no question clause falls back to the capped prompt."""
-        no_q = "x" * 300
-        question, query = parse_prompt(no_q)
-        assert question == no_q
-        assert len(query) == _MAX_SEARCH_QUERY_LEN
+    def test_truncation_cuts_on_a_word_boundary(self) -> None:
+        """An over-long clause is capped without a dangling partial word."""
+        prompt = "Will " + "a very long qualifying clause " * 8 + "happen by 2026?"
+        _, query, _ = parse_prompt(prompt)
+        assert len(query) <= _MAX_SEARCH_QUERY_LEN
+        assert not query.endswith(" ")
+        assert query.split()[-1] in prompt.split()
 
 
 class TestEmptyRetrievalGuard:
-    """Empty retrieval returns a flagged, parseable null prediction (issue #455)."""
+    """Empty retrieval returns a flagged, tier-tagged null (issue #455)."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_empty_live_retrieval_returns_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Organic + PAA both empty -> null payload with markers, no LLM call."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("true"),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
+        assert parsed["confidence"] == 0.0
+        assert parsed["researchability"] is None  # market-aware extras stay null
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["parse_tier"] == "clause"
+        assert used_params["source_content"]["serper_response"] == (
+            EMPTY_SERPER_RESPONSE
+        )
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_cached_replay_empty_retrieval_returns_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The cached-replay branch fires the same guard without a live fetch."""
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": EMPTY_SERPER_RESPONSE},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["parse_tier"] == "clause"
+        mock_fetch.assert_not_called()
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A 200 body without the organic key surfaces as an error null."""
+        mock_fetch.return_value = MagicMock(json=lambda: {"message": "quota"})
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_cached_replay_missing_organic_key_is_an_error(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A corrupted cache entry raises, mirroring the live shape check."""
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": {"snapshot": "corrupted"}},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+        mock_fetch.assert_not_called()
 
     @patch(f"{SF_MODULE}._scrape_pages")
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_empty_serper_live_returns_null_prediction(
+    def test_empty_retrieval_skips_scraping(
         self,
         mock_fetch: MagicMock,
         mock_client_mgr: MagicMock,
         mock_scrape: MagicMock,
     ) -> None:
-        """Empty live Serper: p_yes=0.5, confidence=0; no LLM call, no scrape."""
+        """The guard fires BEFORE the page-scrape step (no wasted fetches)."""
         mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
-        mock_client = _stub_openai(mock_client_mgr)
-
-        result = run(
+        run(
             tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
+            model="gpt-4o",
             prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
+            api_keys=_make_mock_api_keys("false"),
             counter_callback=None,
         )
-
-        parsed = json.loads(result[0])
-        assert result[0].startswith("{")
-        # The full key set is kept on the null path so deliveries stay
-        # schema-comparable; model-derived extras are null.
-        assert set(parsed.keys()) == {
-            "p_yes",
-            "p_no",
-            "confidence",
-            "info_utility",
-            "researchability",
-            "research_class",
-            "research_reason",
-            "evidence_quality",
-            "market_prob_seen",
-            "p_independent",
-        }
-        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
-        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
-        assert parsed["researchability"] is None
-        assert parsed["market_prob_seen"] is None  # blind request
-        mock_client.beta.chat.completions.parse.assert_not_called()
-        # The guard sits BEFORE the scraping step: no page fetches are wasted.
         mock_scrape.assert_not_called()
 
-    def test_empty_serper_cached_replay_returns_null_prediction(self) -> None:
-        """An empty cached source_content returns p_yes=0.5, confidence=0."""
-        result = run(
-            tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            source_content={
-                "mode": "cleaned",
-                "serper_response": EMPTY_SERPER_RESPONSE,
-            },
-            counter_callback=None,
-        )
-
-        parsed = json.loads(result[0])
-        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
-        assert parsed["research_class"] is None
-
-    @patch(f"{SF_MODULE}._scrape_pages")
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_free_text_with_results_calls_llm(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        mock_scrape: MagicMock,
+    def test_trader_request_sends_extracted_question_to_serper(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
-        """A free-text prompt with good Serper results still calls the LLM."""
-        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_scrape.return_value = {}
-        mock_client = _stub_openai(mock_client_mgr)
-
-        result = run(
-            tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=None,
-        )
-
-        parsed = json.loads(result[0])
-        assert parsed["p_yes"] == json.loads(PREDICTION_JSON)["p_yes"]
-        mock_client.beta.chat.completions.parse.assert_called_once()
-
-    @patch(f"{SF_MODULE}._scrape_pages")
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_serper_query_uses_short_query_not_full_prompt(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        mock_scrape: MagicMock,
-    ) -> None:
-        """A long free-text prompt sends Serper a short query, not the prompt."""
-        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_scrape.return_value = {}
+        """End-to-end pin: a trader request searches the bare question."""
+        serper_resp = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_fetch.return_value = serper_resp
         _stub_openai(mock_client_mgr)
-
-        run(
-            tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=LONG_FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=None,
-        )
-
-        call_args = mock_fetch.call_args
-        query_sent = call_args[0][0] if call_args[0] else call_args[1]["question"]
-        assert len(query_sent) <= _MAX_SEARCH_QUERY_LEN
-        assert query_sent != LONG_FREE_TEXT_PROMPT
-
-    def test_market_aware_null_echoes_market_prob_seen(self) -> None:
-        """An empty-retrieval delivery still records the supplied price."""
         result = run(
             tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            source_content={
-                "mode": "cleaned",
-                "serper_response": EMPTY_SERPER_RESPONSE,
-            },
-            request_context={"market_prob": 0.77},
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
             counter_callback=None,
         )
-
-        parsed = json.loads(result[0])
-        assert parsed["market_prob_seen"] == 0.77
-        assert parsed["p_yes"] == 0.5 and parsed["researchability"] is None
-
-    @patch(f"{SF_MODULE}._scrape_pages")
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_organic_without_people_also_ask_still_calls_llm(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        mock_scrape: MagicMock,
-    ) -> None:
-        """Organic results with NO peopleAlsoAsk must NOT trip the guard.
-
-        Serper frequently returns organic hits and no peopleAlsoAsk block; a
-        mutated guard (`and` -> `or`) would null out most live traffic. This
-        pins the operator.
-
-        :param mock_fetch: patched Serper fetch.
-        :param mock_client_mgr: patched OpenAI client manager.
-        :param mock_scrape: patched page scraper.
-        """
-        no_paa = {k: v for k, v in FAKE_SERPER_RESPONSE.items() if k != "peopleAlsoAsk"}
-        mock_fetch.return_value = MagicMock(json=lambda: no_paa)
-        mock_scrape.return_value = {}
-        mock_client = _stub_openai(mock_client_mgr)
-
-        result = run(
-            tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=None,
-        )
-
-        parsed = json.loads(result[0])
-        assert parsed["p_yes"] == json.loads(PREDICTION_JSON)["p_yes"]
-        mock_client.beta.chat.completions.parse.assert_called_once()
-
-    @patch(f"{SF_MODULE}._scrape_pages")
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    @patch(f"{SF_MODULE}.fetch_additional_sources")
-    def test_counter_callback_receives_token_counts_in_the_right_slots(
-        self,
-        mock_fetch: MagicMock,
-        mock_client_mgr: MagicMock,
-        mock_scrape: MagicMock,
-    ) -> None:
-        """The cost callback gets prompt tokens as input, completion as output."""
-        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_scrape.return_value = {}
-        _stub_openai(mock_client_mgr)
-        calls: list = []
-
-        def recording_callback(**kwargs: Any) -> None:
-            calls.append(kwargs)
-
-        run(
-            tool="superforcaster-market-aware",
-            model="gpt-4.1-2025-04-14",
-            prompt=FREE_TEXT_PROMPT,
-            api_keys=_make_mock_api_keys(),
-            counter_callback=recording_callback,
-        )
-
-        assert len(calls) == 1
-        # _stub_openai wires usage as prompt_tokens=10, completion_tokens=5.
-        assert calls[0]["input_tokens"] == 10
-        assert calls[0]["output_tokens"] == 5
-        assert calls[0]["model"] == "gpt-4.1-2025-04-14"
-        assert callable(calls[0]["token_counter"])
-
-    @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_trader_template_serper_query_unchanged(
-        self, mock_client_mgr: MagicMock
-    ) -> None:
-        """Parity invariant: template path derives the same query as before."""
-        question, query = parse_prompt(PREDICTION_PROMPT)
-        assert question == "Will X happen?" and query == "Will X happen?"
+        serper_resp.raise_for_status.assert_called_once()
+        assert mock_fetch.call_args[0][0] == "Will X happen?"
+        # the LLM prompt (result[1]) carries the bare question, not the template
+        assert "Will X happen?" in result[1]
+        assert "`yes` answer criterion" not in result[1]

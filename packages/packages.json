@@ -27,8 +27,8 @@
         "custom/valory/finetuned_prediction/0.1.0": "bafybeiclpkn4sqvri7k5aiklt5fm6hnt3tgo4qxtrkzxe4fwzfs2plgbk4",
         "custom/valory/propose_question/0.1.0": "bafybeif2dmjftef7pnixwnutn42tdaxbbr77anl5ixsv6kwsxnk7sm6fni",
         "custom/valory/superforcaster_polymarket_v4/0.1.0": "bafybeifg2h2uwlyg3obkbjs67sgldfg4chhcutba7edynwf6wi2zrnzy7q",
-        "agent/valory/mech_predict/0.1.0": "bafybeiboigqauqacx34e5cxeq5uda52ihbamrpl44ehzbtgjhtuo3hqpte",
-        "service/valory/mech_predict/0.1.0": "bafybeibhhhonepw72pjly2psekm366gk2wdir2o5ak6jt34cdhs7mqy45u"
+        "agent/valory/mech_predict/0.1.0": "bafybeibcptp5rqxrfmeox5m7omqhuolhqx6weqmw3wyswkjoq6jhblu36e",
+        "service/valory/mech_predict/0.1.0": "bafybeiadxr7sg5mtm5ih3cskqvzzhgw5og5m7ty2mc7l44fcxwclx7smwy"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
@@ -69,8 +69,8 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeifrnmlscfiki7wojs6zasppefupd2wkjyq6orhdllfppjud7isrxi",
         "skill/valory/termination_abci/0.1.0": "bafybeih6sa2ttcvvjk7rcfn7ure2ws23kcfufssb4qmluzcfvednkfpvoi",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeifjiazvf3qhr2264i55u4tlvmyf6ztgak2ndqolujt4kw6jiy7l3m",
-        "skill/valory/mech_abci/0.1.0": "bafybeiaz2ljpp5xaq6e6wtq2xiuzhnf3bytnpokjlwgz47ek4v4hvzbtga",
+        "skill/valory/mech_abci/0.1.0": "bafybeiehxuzywr7ld3bosooqvhewyrpbagmz2kljep6i3mls43jmtnktie",
         "skill/valory/task_execution/0.1.0": "bafybeifbqbo5fmgxxrs4gpkuqrukg4qvt6q2l2sd4pgpqsvlmcz2zbo3fy",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeiddlfaywq6ogyicpcbaqrjz6xhswaomcwpnmbdikzhmf6g3rip7cq"
+        "skill/valory/task_submission_abci/0.1.0": "bafybeidxzddmqxhovneuxtplkdcmlbf7xlm3h75jhps7eddrwuuqnozeee"
     }
 }

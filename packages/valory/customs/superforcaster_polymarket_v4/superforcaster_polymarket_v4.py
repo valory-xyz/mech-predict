@@ -235,6 +235,7 @@ def _flagged_null_result(
     counter_callback: Optional[Callable[..., Any]],
     context: str,
     tier: str,
+    scan_truncated: bool = False,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -254,6 +255,8 @@ def _flagged_null_result(
     :param counter_callback: the cost callback, threaded back unchanged.
     :param context: short label for the log line (live vs cached replay).
     :param tier: the parse_prompt tier that produced the search query.
+    :param scan_truncated: whether the candidate scan window was exhausted on
+        a longer prompt (raw tier only).
     :return: the flagged-null MechResponse tuple.
     """
     print(
@@ -269,6 +272,7 @@ def _flagged_null_result(
         "max_tokens": max_tokens,
         "empty_retrieval": True,
         "parse_tier": tier,
+        "scan_truncated": scan_truncated,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -598,6 +602,9 @@ _CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
 # capped). Market questions sit in the prompt head in practice (the longest
 # observed production prompt is under 1KB), so a 10KB window loses nothing.
 _MAX_SCAN_CHARS = 10_000
+# Quote characters with no searchable content of their own: ASCII double and
+# single quotes plus typographic quotes.
+_QUOTE_CHARS = "\"'\u201c\u201d\u2018\u2019"
 # Near-best window for the last-market-verb tiebreaker. Equals the largest
 # single-feature weight (the digit bonus in _score_clause) so a market clause
 # can never be pushed out of contention by one feature alone.
@@ -784,7 +791,16 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         d = today.strftime("%d/%m/%Y")
 
         question, search_query, tier = parse_prompt(prompt)
-        if tier == "raw":
+        # A truncated-scan raw tier is a different situation from a genuinely
+        # question-free prompt: the question may simply sit past the window.
+        scan_truncated = tier == "raw" and len(prompt) > _MAX_SCAN_CHARS
+        if scan_truncated:
+            print(
+                "[superforcaster-polymarket-v4] Scan window exhausted: no question "
+                "clause within the first _MAX_SCAN_CHARS chars of a longer "
+                f"prompt; using capped prompt head: {search_query!r}"
+            )
+        elif tier == "raw":
             print(
                 "[superforcaster-polymarket-v4] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
@@ -812,13 +828,14 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     counter_callback=counter_callback,
                     context="cached replay",
                     tier=tier,
+                    scan_truncated=scan_truncated,
                 )
             sources = format_sources_data(organic_data, misc_data)
         else:
-            if not search_query.strip('"').strip():
-                # Nothing searchable (empty, whitespace-only, or quotes-only
-                # query): skip the wasted Serper call and return the flagged
-                # null directly.
+            if not search_query.strip(_QUOTE_CHARS).strip():
+                # Nothing searchable: empty, whitespace-only, or quote-only
+                # (double, single, or typographic quotes) -- skip the wasted
+                # Serper call and return the flagged null directly.
                 return _flagged_null_result(
                     model=model,
                     temperature=temperature,
@@ -828,6 +845,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     counter_callback=counter_callback,
                     context="empty query",
                     tier=tier,
+                    scan_truncated=scan_truncated,
                 )
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
@@ -855,6 +873,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     counter_callback=counter_callback,
                     context="live search",
                     tier=tier,
+                    scan_truncated=scan_truncated,
                 )
             print("Formating sources...")
             sources = format_sources_data(organic_data, misc_data)
@@ -904,6 +923,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "parse_tier": tier,
+            "scan_truncated": scan_truncated,
         }
         if return_source_content:
             used_params["source_content"] = captured_source_content

@@ -1715,7 +1715,9 @@ class TestClauseSelection:
 class TestDegeneratePromptsAndScanBounds:
     """Degenerate prompts never send an empty query; the scan is bounded."""
 
-    @pytest.mark.parametrize("degenerate", ["", "   ", '"""'])
+    @pytest.mark.parametrize(
+        "degenerate", ["", "   ", '"""', "'''", "\u201c\u201d\u2018\u2019"]
+    )
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_degenerate_prompt_never_sends_an_empty_query(
@@ -1783,6 +1785,31 @@ class TestDegeneratePromptsAndScanBounds:
             counter_callback=None,
         )
         assert "official club announcements or BBC Sport" in result[1]
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_scan_truncation_is_observable(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Raw tier from an exhausted scan window is marked, not silent."""
+        from packages.valory.customs.superforcaster_market_aware.superforcaster_market_aware import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _stub_openai(mock_client_mgr)
+
+        # the only '?' sits past the scan window -> raw tier via truncation
+        prompt = "word " * (_MAX_SCAN_CHARS // 4) + "Will it happen by 2027?"
+        result = run(
+            tool="superforcaster-market-aware",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
 
     def test_candidate_scan_is_bounded(self) -> None:
         """A huge prompt parses fast: the scan reads only the head window.

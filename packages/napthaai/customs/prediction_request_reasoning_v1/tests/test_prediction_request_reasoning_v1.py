@@ -45,6 +45,11 @@ from packages.napthaai.customs.prediction_request_reasoning_v1.prediction_reques
     run,
 )
 
+# Aliases for module-private caps: one disable each here, so call sites stay
+# clean and the suppression cannot drift under formatter line-wrapping.
+_QUERY_CAP = module._MAX_SEARCH_QUERY_LEN  # pylint: disable=protected-access
+_SCAN_CAP = module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+
 
 class TestLLMClientManager:
     """Verify LLMClientManager creates per-context clients without globals."""
@@ -712,9 +717,7 @@ class TestParsePromptContract:
         assert tier == "clause"
         assert query.startswith("Will Alexander Isak")
         assert query.endswith("?")
-        assert (
-            len(query) <= module._MAX_SEARCH_QUERY_LEN
-        )  # pylint: disable=protected-access
+        assert len(query) <= _QUERY_CAP
 
     def test_tier_is_reported(self) -> None:
         """The tier tags template / clause / raw explicitly."""
@@ -913,10 +916,8 @@ class TestQueryLeakFix:
             content="<p_yes>0.5</p_yes>",
             usage=MagicMock(prompt_tokens=10, completion_tokens=5),
         )
-        prompt = TRADER_PROMPT + " filler" * (
-            module._MAX_SCAN_CHARS // 3
-        )  # pylint: disable=protected-access
-        assert len(prompt) > module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+        prompt = TRADER_PROMPT + " filler" * (_SCAN_CAP // 3)
+        assert len(prompt) > _SCAN_CAP
         result = run(
             tool="prediction-request-reasoning-v1",
             model="gpt-4.1-2025-04-14",

@@ -56,8 +56,8 @@ customs:
 - valory/resolve_market_jury:0.1.0:bafybeigdv6zbbuf2flnti7hfwbotagnqz43g76v2jfhcuk4ancucxmg5gi
 - valory/prediction_request_v1:0.1.0:bafybeie23dpatwki6odlv7nnlwibuq6jbdonsmu5mszsgitlwghzpiesam
 - napthaai/resolve_market_reasoning:0.1.0:bafybeidji6or6kpmawho64tc7qetinykhrklvv2gmnqfcd6ejmg43j3i7q
-- napthaai/prediction_request_rag_v1:0.1.0:bafybeierk5iyyf3tlpjqtxi5unawhih2sd2pwkp7owaxwszrxvatecdbdy
-- napthaai/prediction_request_reasoning_v1:0.1.0:bafybeicr7zpvpbg6kktaqi4shxpyok4gboqdbuxyd25zcsof6yljlffaie
+- napthaai/prediction_request_rag_v1:0.1.0:bafybeictfszce2ftkcxrz5xkzwooqx44onb5ylicrswfdgm4westhg5dyi
+- napthaai/prediction_request_reasoning_v1:0.1.0:bafybeibvfj4v55wdlga2h6pmfylqfpdwlcgouldmfvyy2mudqsubycgrzi
 - valory/prepare_tx:0.1.0:bafybeidpvkwtn5m5yjp5mr2tn6f52btmlki32syahvkkuvlw3oq5eee3di
 - napthaai/prediction_url_cot_v1:0.1.0:bafybeife4x6syyji4jtfbg2jmxec7b2bv3z6d4lkvj6a7da5nhelrunyja
 - valory/prediction_langchain:0.1.0:bafybeieirig3irwmfubxjoxcujiwxxb7knl3c3amhqhjy7bxvo2tdvybpm

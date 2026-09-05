@@ -9,7 +9,7 @@ fingerprint:
   __init__.py: bafybeifnw5qoyshsiq2g7ulz4q3vbjpy7pxgxpop3f5dsrnfgm5w3dahz4
   prediction_request_rag_v1.py: bafybeibr34vvrq2s4morz4tr4ahn7vfuc2gegtow6rkgs44jdphfd37sx4
   tests/__init__.py: bafybeifcgilmgfwx7kaap67cfnuokrhfrabi6bnvqiudyzgf2idu64dvxq
-  tests/test_prediction_request_rag_v1.py: bafybeiayzev7seunarcbociixwqqqrajraoc3dflgesmlmgdr4o4tjp5rq
+  tests/test_prediction_request_rag_v1.py: bafybeidv3ivxgjtc7mvgwvorpuwxhu2eihrdwqnjfesp3unaioz5bge6ha
 fingerprint_ignore_patterns: []
 entry_point: prediction_request_rag_v1.py
 callable: run

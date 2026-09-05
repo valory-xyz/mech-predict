@@ -41,6 +41,11 @@ from packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_
     run,
 )
 
+# Aliases for module-private caps: one disable each here, so call sites stay
+# clean and the suppression cannot drift under formatter line-wrapping.
+_QUERY_CAP = module._MAX_SEARCH_QUERY_LEN  # pylint: disable=protected-access
+_SCAN_CAP = module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+
 
 class TestLLMClientManager:
     """Verify LLMClientManager creates per-context clients without globals."""
@@ -707,9 +712,7 @@ class TestParsePromptContract:
         _, query, _ = module.parse_prompt(LONG_FREE_TEXT_PROMPT)
         assert query.startswith("Will Alexander Isak")
         assert query.endswith("?")
-        assert (
-            len(query) <= module._MAX_SEARCH_QUERY_LEN
-        )  # pylint: disable=protected-access
+        assert len(query) <= _QUERY_CAP
 
 
 class TestDegenerateShortCircuit:
@@ -805,9 +808,7 @@ class TestEmptyRetrievalFlaggedNull:
         serper_resp.raise_for_status.return_value = None
         serper_resp.json.return_value = {"organic": [], "peopleAlsoAsk": []}
         with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
-            assert (
-                module.get_urls_from_queries_serper(["q"], api_key="k", num=5) == []
-            )  # pylint: disable=use-implicit-booleaness-not-comparison
+            assert not module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
 
 
 class TestRunParityAndParseMetadata:
@@ -844,10 +845,8 @@ class TestRunParityAndParseMetadata:
 
     def test_long_template_prompt_is_not_marked_truncated(self) -> None:
         """Template past the scan window is NOT flagged as truncated."""
-        prompt = TRADER_PROMPT + " filler" * (
-            module._MAX_SCAN_CHARS // 3
-        )  # pylint: disable=protected-access
-        assert len(prompt) > module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+        prompt = TRADER_PROMPT + " filler" * (_SCAN_CAP // 3)
+        assert len(prompt) > _SCAN_CAP
         result, _ = self._run_with_fetch_mock(prompt)
         assert result[4]["parse_tier"] == "template"
         assert result[4]["scan_truncated"] is False

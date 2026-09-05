@@ -20,6 +20,7 @@
 """Unit tests for prediction_request_reasoning: thread-safe client, offline tiktoken, and source_content."""
 
 import inspect
+import json
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,9 +38,17 @@ from packages.napthaai.customs.prediction_request_reasoning_v1.prediction_reques
     do_reasoning_with_retry,
     extract_texts,
     fetch_additional_information,
+    get_urls_from_queries_serper,
+    multi_queries,
     multi_questions_response,
+    parse_prompt,
     run,
 )
+
+# Aliases for module-private caps: one disable each here, so call sites stay
+# clean and the suppression cannot drift under formatter line-wrapping.
+_QUERY_CAP = module._MAX_SEARCH_QUERY_LEN  # pylint: disable=protected-access
+_SCAN_CAP = module._MAX_SCAN_CHARS  # pylint: disable=protected-access
 
 
 class TestLLMClientManager:
@@ -267,6 +276,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -311,6 +321,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -323,23 +334,28 @@ class TestFetchReplayPath:
         assert "http://example.com" in result
 
     @patch(f"{REASONING_MODULE}.multi_queries")
-    def test_empty_source_content_raises(self, mock_queries: MagicMock) -> None:
-        """Empty source_content raises ValueError (no valid documents)."""
+    def test_empty_source_content_returns_empty_information(
+        self, mock_queries: MagicMock
+    ) -> None:
+        """Empty source_content yields an empty information block (flagged-null path)."""
         source_content: dict = {"pages": {}, "pdfs": {}}
         mock_queries.return_value = (["test query"], None)
 
-        with pytest.raises(ValueError, match="No valid documents"):
-            fetch_additional_information(
-                client=MagicMock(),
-                client_embedding=MagicMock(),
-                prompt="test",
-                model="gpt-4.1-2025-04-14",
-                google_api_key=None,
-                google_engine_id=None,
-                serper_api_key=None,
-                search_provider="google",
-                source_content=source_content,
-            )
+        result, raw_sc, _, _ = fetch_additional_information(
+            client=MagicMock(),
+            client_embedding=MagicMock(),
+            prompt="test",
+            search_query="test",
+            model="gpt-4.1-2025-04-14",
+            google_api_key=None,
+            google_engine_id=None,
+            serper_api_key=None,
+            search_provider="google",
+            source_content=source_content,
+        )
+
+        assert result == ""
+        assert raw_sc is source_content
 
 
 def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
@@ -627,3 +643,315 @@ class TestCountTokensAnthropic:
         result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
         assert isinstance(result, int)
         assert result > 0
+
+
+# ---------------------------------------------------------------------------
+# Free-text input contract (issue #455): parse_prompt + flagged-null guards.
+# ---------------------------------------------------------------------------
+
+# Trader-template format prompt (regression: previous callers must still work)
+TRADER_PROMPT = (
+    'Given the question "Will X happen?" and the `yes` answer criterion, ...'
+)
+# Free-text format prompt: the advertised contract (issue #455)
+FREE_TEXT_PROMPT = "Will Alexander Isak join Liverpool before September 2 2025?"
+# Long free-text prompt that would return empty search results if passed raw
+LONG_FREE_TEXT_PROMPT = (
+    "Please predict the following market: Will Alexander Isak permanently transfer "
+    "to Liverpool FC before the end of the summer 2025 transfer window (September 2, "
+    "2025 23:59 UTC)? Resolution source: official club announcements or BBC Sport. "
+    "The market resolves YES if a permanent transfer (not a loan) is confirmed by "
+    "the resolution source before the deadline."
+)
+
+
+def _make_serper_api_keys() -> MagicMock:
+    """Create a mock api_keys object routed to the (patched) Serper provider."""
+    services = {
+        "openai": "sk-test",
+        "google_api_key": None,
+        "google_engine_id": None,
+        "serperapi": "serper-test",
+        "search_provider": "serper",
+        "return_source_content": "false",
+    }
+    mock_keys = MagicMock()
+    mock_keys.__getitem__ = MagicMock(side_effect=lambda k: services[k])
+    mock_keys.get = MagicMock(
+        side_effect=lambda k, default=None: services.get(k, default)
+    )
+    mock_keys.max_retries = MagicMock(
+        return_value={"openai": 0, "anthropic": 0, "google_api_key": 0, "openrouter": 0}
+    )
+    return mock_keys
+
+
+def _mock_client_manager(mock_mgr: MagicMock) -> MagicMock:
+    """Wire an LLMClientManager mock to yield (llm, embedding) client mocks."""
+    mock_llm = MagicMock()
+    mock_mgr.return_value.__enter__ = MagicMock(return_value=(mock_llm, MagicMock()))
+    mock_mgr.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_llm
+
+
+class TestParsePromptContract:
+    """parse_prompt(): trader-template parity + free-text clause derivation."""
+
+    def test_trader_template_uses_extracted_question_for_both(self) -> None:
+        """Trader-template path: the bare question serves as both values."""
+        question, query, tier = parse_prompt(TRADER_PROMPT)
+        assert tier == "template"
+        assert question == "Will X happen?"
+        assert query == question
+
+    def test_free_text_llm_gets_full_prompt(self) -> None:
+        """Free-text input: the LLM question is the whole prompt."""
+        question, _, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert question == FREE_TEXT_PROMPT
+        question, _, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert question == LONG_FREE_TEXT_PROMPT
+
+    def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
+        """The query anchors at the market question, dropping instruction text."""
+        _, query, tier = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert tier == "clause"
+        assert query.startswith("Will Alexander Isak")
+        assert query.endswith("?")
+        assert len(query) <= _QUERY_CAP
+
+    def test_tier_is_reported(self) -> None:
+        """The tier tags template / clause / raw explicitly."""
+        assert parse_prompt(TRADER_PROMPT)[2] == "template"
+        assert parse_prompt(FREE_TEXT_PROMPT)[2] == "clause"
+        assert parse_prompt("no question mark here at all")[2] == "raw"
+
+
+class TestDegenerateShortCircuit:
+    """Degenerate prompts return the flagged null with ZERO search calls."""
+
+    @pytest.mark.parametrize("degenerate", ["", "   ", "???", '"""'])
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries_serper")
+    def test_degenerate_prompt_short_circuits(
+        self,
+        mock_serper: MagicMock,
+        mock_google: MagicMock,
+        mock_mgr: MagicMock,
+        degenerate: str,
+    ) -> None:
+        """Prompts with no searchable content never reach a search provider."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=degenerate,
+            api_keys=_make_mock_api_keys(),
+        )
+        mock_serper.assert_not_called()
+        mock_google.assert_not_called()
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["null_reason"] == "empty query"
+        assert used_params["scan_truncated"] is False
+
+
+class TestEmptyRetrievalFlaggedNull:
+    """Empty retrieval yields a parseable flagged null, not an error string."""
+
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries_serper", return_value=[])
+    def test_zero_urls_returns_flagged_null_live_search(
+        self, mock_serper: MagicMock, mock_mgr: MagicMock
+    ) -> None:
+        """A live search with no usable documents records null_reason='live search'."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_serper_api_keys(),
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["null_reason"] == "live search"
+        assert used_params["parse_tier"] == "clause"
+
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_empty_cached_replay_returns_flagged_null(
+        self, mock_mgr: MagicMock
+    ) -> None:
+        """An empty cached capture records null_reason='cached replay'."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content={"pages": {}, "pdfs": {}},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "cached replay"
+
+
+class TestQueryLeakFix:
+    """The compact query, not the raw prompt, reaches the search engine."""
+
+    def test_multi_queries_appends_search_query_not_prompt(self) -> None:
+        """The direct-search append carries search_query; the LLM sees the prompt."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>alpha\nbeta</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        search_query = "Will Alexander Isak permanently transfer to Liverpool FC?"
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query=search_query,
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries[-1] == search_query
+        assert LONG_FREE_TEXT_PROMPT not in queries
+        sent = client.completions.call_args.kwargs["messages"][1]["content"]
+        assert LONG_FREE_TEXT_PROMPT in sent
+
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_run_feeds_question_to_llm_and_query_to_fetch(
+        self,
+        mock_mgr: MagicMock,
+        mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
+        mock_parser: MagicMock,
+    ) -> None:
+        """Free text: the LLM slots get the whole prompt, the search the clause."""
+        mock_llm = _mock_client_manager(mock_mgr)
+        mock_fetch.return_value = ("additional info", {"pages": {}}, ["q"], None)
+        mock_reasoning.return_value = ("reasoning result", None)
+        mock_llm.completions.return_value = MagicMock(
+            content="<p_yes>0.5</p_yes>",
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+        )
+        fetch_kwargs = mock_fetch.call_args.kwargs
+        assert fetch_kwargs["prompt"] == LONG_FREE_TEXT_PROMPT
+        assert fetch_kwargs["search_query"].startswith("Will Alexander Isak")
+        assert fetch_kwargs["search_query"] != LONG_FREE_TEXT_PROMPT
+        # LLM-input parity: criteria the query drops still reach the LLM prompts
+        assert "official club announcements or BBC Sport" in result[1]
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is False
+
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_trader_template_run_parity(
+        self,
+        mock_mgr: MagicMock,
+        mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
+        mock_parser: MagicMock,
+    ) -> None:
+        """Trader template: LLM question and search query stay the bare title."""
+        mock_llm = _mock_client_manager(mock_mgr)
+        mock_fetch.return_value = ("additional info", {"pages": {}}, ["q"], None)
+        mock_reasoning.return_value = ("reasoning result", None)
+        mock_llm.completions.return_value = MagicMock(
+            content="<p_yes>0.5</p_yes>",
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=TRADER_PROMPT,
+            api_keys=_make_mock_api_keys(),
+        )
+        fetch_kwargs = mock_fetch.call_args.kwargs
+        assert fetch_kwargs["prompt"] == "Will X happen?"
+        assert fetch_kwargs["search_query"] == "Will X happen?"
+        # exactly the old extract_question behavior: bare question, no template
+        assert "Will X happen?" in result[1]
+        assert "`yes` answer criterion" not in result[1]
+        assert result[4]["parse_tier"] == "template"
+
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_long_template_prompt_not_marked_truncated(
+        self,
+        mock_mgr: MagicMock,
+        mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
+        mock_parser: MagicMock,
+    ) -> None:
+        """Template past the window is NOT flagged: question precedes the scan."""
+        mock_llm = _mock_client_manager(mock_mgr)
+        mock_fetch.return_value = ("additional info", {"pages": {}}, ["q"], None)
+        mock_reasoning.return_value = ("reasoning result", None)
+        mock_llm.completions.return_value = MagicMock(
+            content="<p_yes>0.5</p_yes>",
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        prompt = TRADER_PROMPT + " filler" * (_SCAN_CAP // 3)
+        assert len(prompt) > _SCAN_CAP
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+        )
+        assert result[4]["parse_tier"] == "template"
+        assert result[4]["scan_truncated"] is False
+
+
+class TestSerperShapeGuard:
+    """Serper bodies are validated with the typed shape helper."""
+
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_malformed_serper_body_is_skipped_not_crashed(
+        self, mock_request: MagicMock
+    ) -> None:
+        """A 200 body without the organic key is skipped for that query."""
+        mock_request.return_value = MagicMock(
+            status_code=200, json=lambda: {"message": "quota exceeded"}
+        )
+        urls = get_urls_from_queries_serper(["q1"], api_key="k", num=3)
+        assert urls == []  # pylint: disable=use-implicit-booleaness-not-comparison
+
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_valid_serper_body_yields_links(self, mock_request: MagicMock) -> None:
+        """A well-formed organic list still yields its links."""
+        mock_request.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "organic": [
+                    {"title": "T", "link": "https://example.test", "snippet": "S"}
+                ]
+            },
+        )
+        urls = get_urls_from_queries_serper(["q1"], api_key="k", num=3)
+        assert urls == ["https://example.test"]

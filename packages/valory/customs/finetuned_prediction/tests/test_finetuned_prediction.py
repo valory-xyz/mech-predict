@@ -38,6 +38,7 @@ from packages.valory.customs.finetuned_prediction.finetuned_prediction import (
     canonical_prediction,
     gather_sources,
     parse_p_yes,
+    parse_prompt,
     resolve_model,
     run,
     with_key_rotation,
@@ -260,6 +261,10 @@ def test_run_fine_tuned_mode_calls_its_model_and_returns_canonical_json() -> Non
     assert used_params["model"] == MODEL_BY_TOOL[TOOL_FINE_TUNED]
     assert gen.call_args.kwargs["model"] == MODEL_BY_TOOL[TOOL_FINE_TUNED]
 
+    # The trader-template path records its tier and is never scan-truncated.
+    assert used_params["parse_tier"] == "template"
+    assert used_params["scan_truncated"] is False
+
     # The question is extracted from the bare prompt and web-searched, then
     # embedded in the <background> forecaster prompt as a single user message.
     gather.assert_called_once_with("Will X happen?", "serp-key")
@@ -398,7 +403,7 @@ def test_vllm_client_passes_base_url() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gather_sources — fail closed when there is no web context (OOD for the model)
+# gather_sources -- no web context (OOD for the model) yields None / an error
 # ---------------------------------------------------------------------------
 
 
@@ -417,6 +422,7 @@ def test_gather_sources_formats_results() -> None:
         return_value=_serper_response(payload),
     ):
         out = gather_sources("Will X happen?", "serp-key")
+    assert out is not None
     assert "Organic Results" in out and "T" in out
 
 
@@ -429,26 +435,151 @@ def test_gather_sources_raises_on_serper_request_failure() -> None:
             gather_sources("Will X happen?", "serp-key")
 
 
-def test_gather_sources_raises_on_zero_results() -> None:
-    """Zero usable results becomes an explanatory failure (model is OOD without sources)."""
+def test_gather_sources_returns_none_on_zero_results() -> None:
+    """Zero usable results returns None so run() can deliver the flagged null."""
     payload: dict[str, list] = {"organic": [], "peopleAlsoAsk": []}
     with patch(
         f"{MODULE_PATH}.fetch_additional_sources",
         return_value=_serper_response(payload),
     ):
-        with pytest.raises(RuntimeError, match="no results"):
-            gather_sources("Will X happen?", "serp-key")
+        assert gather_sources("Will X happen?", "serp-key") is None
 
 
-def test_run_fails_with_explanation_when_serper_returns_nothing() -> None:
-    """End-to-end: empty Serper results surface the explanatory message as the result."""
+# ---------------------------------------------------------------------------
+# parse_prompt + empty-retrieval guard (issue #455 port)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_prompt_trader_template_parity() -> None:
+    """Trader-template path: the extracted title serves as BOTH values."""
+    question, query, tier = parse_prompt(_bare_prompt("Will X happen by 2026?"))
+    assert tier == "template"
+    # LLM-input parity with the old extract_question behavior: the question
+    # fed to the LLM and the search query are both the extracted title.
+    assert question == "Will X happen by 2026?"
+    assert query == question
+
+
+def test_parse_prompt_free_text_clause_derivation() -> None:
+    """A boilerplate lead-in anchors the market question as the search query."""
+    prompt = (
+        "Please predict the following market: Will Alexander Isak permanently "
+        "transfer to Liverpool FC before September 2, 2025? Resolution source: "
+        "official club announcements or BBC Sport."
+    )
+    question, query, tier = parse_prompt(prompt)
+    assert tier == "clause"
+    # The LLM question is the WHOLE prompt; only the search query is derived.
+    assert question == prompt
+    assert query.startswith("Will Alexander Isak")
+    assert query.endswith("2025?")
+
+
+@pytest.mark.parametrize("degenerate", ["", "   ", "???", '"""'])
+def test_degenerate_prompt_short_circuits_before_search(degenerate: str) -> None:
+    """Unsearchable prompts return the flagged null with ZERO search calls."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    with (
+        patch(f"{MODULE_PATH}.fetch_additional_sources") as fetch,
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+    ):
+        out = run(tool=TOOL_BASE, prompt=degenerate, api_keys=keychain)
+    fetch.assert_not_called()
+    gen.assert_not_called()
+    result, _, tx, _, used_params, _ = out
+    assert json.loads(result) == {
+        "p_yes": 0.5,
+        "p_no": 0.5,
+        "confidence": 0.0,
+        "info_utility": 0.0,
+    }
+    assert tx is None
+    assert used_params["empty_retrieval"] is True
+    assert used_params["null_reason"] == "empty query"
+    assert used_params["scan_truncated"] is False
+
+
+def test_both_empty_retrieval_returns_flagged_null_live_search() -> None:
+    """Organic AND peopleAlsoAsk both empty -> flagged null, 'live search'."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
     payload: dict[str, list] = {"organic": [], "peopleAlsoAsk": []}
     with (
+        patch(
+            f"{MODULE_PATH}.fetch_additional_sources",
+            return_value=_serper_response(payload),
+        ),
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+    ):
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    gen.assert_not_called()
+    result, _, _, _, used_params, _ = out
+    assert json.loads(result)["p_yes"] == 0.5
+    assert used_params["empty_retrieval"] is True
+    assert used_params["null_reason"] == "live search"
+    assert used_params["parse_tier"] == "template"
+
+
+def test_template_past_scan_window_not_marked_truncated() -> None:
+    """A trader-template prompt longer than the window is NOT scan_truncated."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    scan_chars = module._MAX_SCAN_CHARS
+    prompt = _bare_prompt("Will X happen?") + " filler" * (scan_chars // 3)
+    assert len(prompt) > scan_chars
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        out = run(tool=TOOL_BASE, prompt=prompt, api_keys=keychain)
+    used_params = out[4]
+    assert used_params["parse_tier"] == "template"
+    assert used_params["scan_truncated"] is False
+
+
+def test_free_text_search_uses_derived_query_not_full_prompt() -> None:
+    """The Serper call gets the derived clause; the LLM gets the whole prompt."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    prompt = (
+        "Please predict the following market: Will Alexander Isak permanently "
+        "transfer to Liverpool FC before September 2, 2025? Resolution source: "
+        "official club announcements or BBC Sport."
+    )
+    payload = {"organic": [{"position": 1, "title": "T", "link": "L", "snippet": "S"}]}
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
         patch(f"{MODULE_PATH}.VLLMClientManager"),
         patch(
             f"{MODULE_PATH}.fetch_additional_sources",
             return_value=_serper_response(payload),
+        ) as fetch,
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        out = run(tool=TOOL_BASE, prompt=prompt, api_keys=keychain)
+    query = fetch.call_args.args[0]
+    assert query.startswith("Will Alexander Isak")
+    assert len(query) < len(prompt)
+    # The full prompt (resolution criteria included) reaches the forecaster
+    # template, not the compressed search query.
+    user_content = gen.call_args.kwargs["messages"][0]["content"]
+    assert "official club announcements or BBC Sport" in user_content
+    assert out[4]["parse_tier"] == "clause"
+
+
+def test_malformed_serper_body_is_typed_error_not_flagged_null() -> None:
+    """organic: null surfaces as the shape ValueError, not a flagged null."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    with (
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(
+            f"{MODULE_PATH}.fetch_additional_sources",
+            return_value=_serper_response({"organic": None, "peopleAlsoAsk": []}),
         ),
     ):
         out = run(
@@ -456,5 +587,5 @@ def test_run_fails_with_explanation_when_serper_returns_nothing() -> None:
             prompt=_bare_prompt("Will X happen?"),
             api_keys=keychain,
         )
-    # with_key_rotation converts the RuntimeError into an error result tuple.
-    assert "no results" in out[0]
+    # with_key_rotation converts the ValueError into an error result tuple.
+    assert "malformed 'organic'" in out[0]

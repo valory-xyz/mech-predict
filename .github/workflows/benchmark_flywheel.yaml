@@ -447,7 +447,18 @@ jobs:
       # 7d files. So this step runs under both modes: legacy scans
       # local logs; mech-analytics fetches [now-90d, now] via
       # score_period_split_by_platform_from_mech_analytics.
+      # timeout-minutes here, not just continue-on-error: a job timeout
+      # cancels the job, so continue-on-error never gets to absorb it and
+      # every later step (Analyze, the Slack posts, triage) is skipped.
+      # That is how the flywheel went dark for four nights from
+      # 2026-09-01. A step budget converts a slow scorer into a failed
+      # step, which continue-on-error does absorb, so the report still
+      # ships minus its trailing-90d section. 10 minutes is generous: the
+      # mech-analytics path runs in about 70 seconds, dominated by the
+      # fetch. Raise it only if the fetch itself grows.
       - name: Score trailing 90d window
+        id: trailing_90d
+        timeout-minutes: 10
         run: |
           if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
             python -m benchmark.scorer \
@@ -467,6 +478,15 @@ jobs:
               $TOURNAMENT_FLAG
           fi
         continue-on-error: true
+
+      # continue-on-error keeps the job green when the step above fails
+      # or trips its 10-minute budget, so the report would ship without
+      # its trailing-90d section and nothing would say so. Surface that
+      # as a run annotation so it is visible on the run summary.
+      - name: Flag a missing trailing-90d section
+        if: steps.trailing_90d.outcome == 'failure'
+        run: |
+          echo "::warning title=Trailing 90d scoring failed::'Score trailing 90d window' failed or hit its 10-minute budget; today's report has no trailing-90d section. See that step's log."
 
       - name: Analyze (Omenstrat)
         run: python -m benchmark.analyze --platform omen --include-tournament
@@ -813,3 +833,64 @@ jobs:
             benchmark/results/tournament_predictions.jsonl
             benchmark/results/tournament_scored.jsonl
           retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 4: Failure notification
+  # The success posts live inside the benchmark job and only fire when a
+  # report file exists, so a job that dies -- timeout, runner loss, an
+  # unguarded step error -- posts nothing at all and reads exactly like a
+  # quiet day. A cancelled job runs none of its own later steps, which is
+  # why this has to be a separate job rather than a final step.
+  #
+  # Plain curl rather than benchmark.notify_slack: importing that module
+  # pulls in the whole analyze/report stack, so it would need a checkout,
+  # a Python setup and a dependency install just to send one line. This
+  # job has to be the most reliable thing in the workflow.
+  # -----------------------------------------------------------------------
+  notify-failure:
+    needs: [benchmark, tournament-fetch, check-secrets, tournament-run]
+    # Same dry-run switches as the success posts, so flipping
+    # notify_slack=false or ENABLE_SLACK_NOTIFY=false still silences
+    # everything.
+    if: always() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Post failed or cancelled jobs to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # toJSON(needs) carries {"<job>": {"result": "...", ...}} for
+          # every job in `needs` above, so adding a job to that list is
+          # the only edit a new job needs.
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+
+          broken=$(printf '%s' "$NEEDS_JSON" | jq -r '
+            to_entries
+            | map(select(.value.result == "failure" or .value.result == "cancelled"))
+            | map("- \(.key): \(.value.result)")
+            | join("\n")')
+
+          if [ -z "$broken" ]; then
+            echo "All upstream jobs finished clean; nothing to report."
+            exit 0
+          fi
+
+          echo "Failed or cancelled jobs:"
+          echo "$broken"
+
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::warning::BENCHMARK_SLACK_WEBHOOK_URL is unset; skipping the Slack post."
+            exit 0
+          fi
+
+          text=$(printf 'benchmark-flywheel did not complete.\n%s\n%s' "$broken" "$RUN_URL")
+          jq -n --arg text "$text" '{text: $text}' > payload.json
+          curl -sS --fail-with-body \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data @payload.json \
+            "$SLACK_WEBHOOK_URL"

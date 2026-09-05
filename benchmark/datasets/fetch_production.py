@@ -1960,6 +1960,33 @@ def parse_tool_response(tool_response: Optional[str]) -> dict[str, Any]:
 # Category classification
 # ---------------------------------------------------------------------------
 
+# One compiled alternation per category, in CATEGORY_KEYWORDS order.
+#
+# The classifier used to build a fresh r"\b<kw>\b" pattern string per
+# keyword and hand it to re.search, relying on the interpreter's regex
+# cache to amortise compilation. CATEGORY_KEYWORDS holds exactly 512
+# keywords, which is also re._MAXCACHE, so any question that matched
+# nothing walked all 512 patterns and evicted the cache, forcing a full
+# recompile on the next row. Over a 90-day scoring window (233k rows)
+# that cost about 12 minutes of pure compile time and pushed the daily
+# flywheel past its 30-minute job timeout.
+#
+# Each keyword keeps its own \b...\b wrapper, so per-keyword boundary
+# semantics are unchanged; alternation matches exactly when at least one
+# keyword matches, which is the only thing the classifier asks. Category
+# order is preserved, so first-category-wins still holds.
+CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        category,
+        re.compile("|".join(r"\b" + re.escape(kw) + r"\b" for kw in keywords)),
+    )
+    for category, keywords in CATEGORY_KEYWORDS.items()
+    # An empty keyword list would compile to the empty pattern, which
+    # matches everything. No category is empty today; skip rather than
+    # let a future edit silently swallow every question.
+    if keywords
+)
+
 
 def classify_category(question_text: str, platform: Optional[str] = None) -> str:
     """Classify a question into a category using word-boundary keyword matching.
@@ -1980,12 +2007,9 @@ def classify_category(question_text: str, platform: Optional[str] = None) -> str
     """
     text_lower = question_text.lower()
     matched = "other"
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        for kw in keywords:
-            if re.search(r"\b" + re.escape(kw) + r"\b", text_lower):
-                matched = category
-                break
-        if matched != "other":
+    for category, pattern in CATEGORY_PATTERNS:
+        if pattern.search(text_lower):
+            matched = category
             break
 
     if platform is None:

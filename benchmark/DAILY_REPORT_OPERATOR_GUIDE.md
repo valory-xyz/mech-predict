@@ -29,6 +29,8 @@ flowchart LR
 
 🔴 `NO ACTION` = every deployed tool fails but demoting all would empty the platform → escalate, never act tool-by-tool.
 
+A failed or cancelled job posts a separate message, `benchmark-flywheel did not complete`, naming the broken jobs with a link to the run. Treat anything else posted that morning as partial - open the run before acting.
+
 ## 3. The two gates
 
 > **PROMOTE** a tournament tool: **n ≥ 30** and **`floor` > +0.04** and **`condAcc` ≥ 50%**.

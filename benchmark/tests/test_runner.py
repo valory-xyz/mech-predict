@@ -34,9 +34,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from benchmark.runner import (
     _fetch_polymarket_description,
+    build_output_row,
     build_request_context,
+    extract_extras,
     replay,
+    run_single,
 )
+from benchmark.scorer import _is_edge_eligible
 
 RUNNER = "benchmark.runner"
 
@@ -379,3 +383,189 @@ class TestReplayThreadsMarketContext:
 
         mock_ctx.assert_called_once()
         assert mock_ctx.call_args.kwargs["with_market_context"] is False
+
+
+# A replay dataset row carrying every market column the production log has.
+SCORED_ROW: dict[str, Any] = {
+    **MARKET_ROW,
+    "question_text": "Will X ship?",
+    "final_outcome": 1,
+    "resolved_at": "2026-09-01T00:00:00Z",
+    "prediction_lead_time_days": 3.5,
+    "category": "tech",
+}
+
+# What run_single returns for a clean, parseable delivery.
+VALID_RESULT: dict[str, Any] = {
+    "p_yes": 0.7,
+    "p_no": 0.3,
+    "confidence": 0.8,
+    "prediction_parse_status": "valid",
+    "latency_s": 12.0,
+    "error": None,
+    "extras": {"p_independent": 0.6, "research_class": "rich"},
+}
+
+
+class TestExtractExtras:
+    """Tests for extract_extras - the non-core payload keys a tool emits."""
+
+    def test_keeps_non_core_keys(self) -> None:
+        """Market-aware reasoning fields survive; the scored core fields do not."""
+        payload = json.dumps(
+            {
+                "p_yes": 0.7,
+                "p_no": 0.3,
+                "confidence": 0.8,
+                "info_utility": 0.5,
+                "p_independent": 0.62,
+                "researchability": "high",
+                "research_class": "rich",
+                "evidence_quality": 4,
+            }
+        )
+
+        assert extract_extras(payload) == {
+            "p_independent": 0.62,
+            "researchability": "high",
+            "research_class": "rich",
+            "evidence_quality": 4,
+        }
+
+    def test_core_only_payload_yields_empty(self) -> None:
+        """A plain predictor contributes nothing beyond the scored columns."""
+        payload = json.dumps({"p_yes": 0.7, "p_no": 0.3, "confidence": 0.8})
+
+        assert extract_extras(payload) == {}
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "not json at all",
+            "",
+            "[1, 2, 3]",
+            '"a bare string"',
+            "null",
+            None,
+            123,
+        ],
+    )
+    def test_unusable_payloads_yield_empty(self, raw: Any) -> None:
+        """Anything that is not a JSON object degrades to {} instead of raising.
+
+        :param raw: a tool response that cannot yield extras.
+        """
+        assert extract_extras(raw) == {}
+
+
+class TestRunSingleExtras:
+    """run_single must surface extras on success and on every failure path."""
+
+    @staticmethod
+    def _run(result_str: str) -> dict[str, Any]:
+        """Call run_single with a stub tool returning ``result_str``.
+
+        :param result_str: the raw tool response to feed back.
+        :return: the run_single result dict.
+        """
+        run_fn = MagicMock(return_value=(result_str, None, None, None))
+        with patch(f"{RUNNER}.load_tool_run", return_value=run_fn):
+            return run_single(
+                tool_name="superforcaster-market-aware",
+                question_text="Will X ship?",
+                source_content={"mode": "cached", "sources": []},
+                model="test-model",
+                api_keys=MagicMock(),
+            )
+
+    def test_valid_payload_carries_extras(self) -> None:
+        """A market-aware payload keeps its reasoning fields under extras."""
+        result = self._run(
+            json.dumps({"p_yes": 0.7, "p_no": 0.3, "p_independent": 0.62})
+        )
+
+        assert result["prediction_parse_status"] == "valid"
+        assert result["extras"] == {"p_independent": 0.62}
+
+    def test_extras_never_shadow_core_fields(self) -> None:
+        """parse_tool_response wins on p_yes/p_no; extras cannot overwrite them."""
+        result = self._run(json.dumps({"p_yes": 0.7, "p_no": 0.3, "note": "hi"}))
+
+        assert result["p_yes"] == 0.7
+        assert result["p_no"] == 0.3
+        assert result["extras"] == {"note": "hi"}
+
+    def test_malformed_payload_still_returns_extras(self) -> None:
+        """An unparseable response yields empty extras rather than a KeyError."""
+        result = self._run("total garbage")
+
+        assert result["prediction_parse_status"] != "valid"
+        assert result["extras"] == {}
+
+    def test_tool_exception_returns_empty_extras(self) -> None:
+        """A raising tool still produces the extras key downstream code reads."""
+        run_fn = MagicMock(side_effect=RuntimeError("boom"))
+        with patch(f"{RUNNER}.load_tool_run", return_value=run_fn):
+            result = run_single(
+                tool_name="superforcaster-market-aware",
+                question_text="Will X ship?",
+                source_content={"mode": "cached", "sources": []},
+                model="test-model",
+                api_keys=MagicMock(),
+            )
+
+        assert result["prediction_parse_status"] == "error"
+        assert result["extras"] == {}
+
+
+class TestBuildOutputRowMarketColumns:
+    """build_output_row must carry the market baseline the scorer needs."""
+
+    def test_carries_market_columns(self) -> None:
+        """Price, liquidity, close time and lead time come from the dataset row."""
+        row = build_output_row(
+            SCORED_ROW, "superforcaster-market-aware", "m", VALID_RESULT
+        )
+
+        assert row["market_prob_at_prediction"] == 0.42
+        assert row["market_liquidity_at_prediction"] == 12345.6
+        assert row["market_close_at"] == "2026-08-31T12:00:00Z"
+        assert row["prediction_lead_time_days"] == 3.5
+
+    def test_absent_columns_stay_none(self) -> None:
+        """A dataset row without market columns keeps the historical Nones."""
+        bare = {"question_text": "Will X ship?", "final_outcome": 0}
+
+        row = build_output_row(bare, "superforcaster", "m", VALID_RESULT)
+
+        assert row["market_prob_at_prediction"] is None
+        assert row["market_liquidity_at_prediction"] is None
+        assert row["market_close_at"] is None
+        assert row["prediction_lead_time_days"] is None
+
+    def test_carries_tool_extras(self) -> None:
+        """The non-core payload keys land under tool_extras."""
+        row = build_output_row(
+            SCORED_ROW, "superforcaster-market-aware", "m", VALID_RESULT
+        )
+
+        assert row["tool_extras"] == {
+            "p_independent": 0.6,
+            "research_class": "rich",
+        }
+
+    def test_missing_extras_key_yields_empty_dict(self) -> None:
+        """A run_result from older code paths must not blow up the row build."""
+        legacy = {k: v for k, v in VALID_RESULT.items() if k != "extras"}
+
+        row = build_output_row(SCORED_ROW, "superforcaster", "m", legacy)
+
+        assert row["tool_extras"] == {}
+
+    def test_scorer_sees_an_edge_row(self) -> None:
+        """The built row satisfies the scorer's edge-row predicate end to end."""
+        row = build_output_row(
+            SCORED_ROW, "superforcaster-market-aware", "m", VALID_RESULT
+        )
+
+        assert _is_edge_eligible(row)

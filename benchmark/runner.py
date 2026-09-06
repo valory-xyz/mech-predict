@@ -59,6 +59,10 @@ DEFAULT_OUTPUT = Path(__file__).parent / "results" / "replay_results.jsonl"
 DEFAULT_MODEL = "gpt-4.1-2025-04-14"
 TASK_DEADLINE = 240  # seconds, matches production
 
+# Payload keys the scored schema already carries as first-class columns; every
+# other key a tool emits is kept under ``tool_extras``.
+CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
+
 
 # ---------------------------------------------------------------------------
 # Row ID generation
@@ -77,6 +81,29 @@ def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
 # ---------------------------------------------------------------------------
 # Core: run a single tool on a single question
 # ---------------------------------------------------------------------------
+
+
+def extract_extras(result_str: Any) -> dict[str, Any]:
+    """Return the payload keys a tool emits beyond the scored core fields.
+
+    Market-aware tools carry their reasoning in extra payload keys
+    (``p_independent``, ``researchability``, ``research_class``,
+    ``evidence_quality``). ``parse_tool_response`` drops them because
+    production only scores p_yes/p_no/confidence, so the replay runner keeps
+    them here instead. Anything that is not a JSON object yields ``{}``;
+    parsing never raises, because a tool that returns junk must still be
+    scored on its parse status rather than crash the run.
+
+    :param result_str: the tool's raw response string.
+    :return: the non-core payload keys, or an empty dict.
+    """
+    try:
+        payload = json.loads(result_str)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if k not in CORE_PAYLOAD_KEYS}
 
 
 def run_single(
@@ -100,7 +127,8 @@ def run_single(
         type, …) mirroring what the trader sends in production. Forwarded to
         tools that read it (e.g. factual_research-v2); omitted when None.
     :return: dict with p_yes, p_no, confidence, prediction_parse_status,
-        latency_s, error.
+        latency_s, error and extras (the payload keys beyond the scored core
+        fields; empty on any failure).
     """
     run_fn = load_tool_run(tool_name)
 
@@ -135,6 +163,7 @@ def run_single(
         return {
             "latency_s": round(elapsed, 1),
             "error": None,
+            "extras": extract_extras(result_str),
             **parsed,
         }
     except ToolTimeout:
@@ -145,6 +174,7 @@ def run_single(
             "prediction_parse_status": "timeout",
             "latency_s": timeout,
             "error": "timeout",
+            "extras": {},
         }
     except Exception as e:
         elapsed = time.monotonic() - start
@@ -156,6 +186,7 @@ def run_single(
             "prediction_parse_status": "error",
             "latency_s": round(elapsed, 1),
             "error": str(e),
+            "extras": {},
         }
     finally:
         if use_alarm:
@@ -339,7 +370,20 @@ def build_output_row(
     model: str,
     run_result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build a production_log.jsonl-compatible row from a replay result."""
+    """Build a production_log.jsonl-compatible row from a replay result.
+
+    The market columns are carried straight over from the dataset row, which
+    replays a resolved production question and therefore already knows the
+    price, liquidity, close time and lead time that applied at prediction
+    time. Without them :mod:`benchmark.scorer` has no market baseline, so it
+    reports no edge and no conditional accuracy for a replayed candidate.
+
+    :param dataset_row: the replayed dataset row.
+    :param tool_name: registered tool name.
+    :param model: LLM model identifier.
+    :param run_result: dict returned by :func:`run_single`.
+    :return: a production_log.jsonl-compatible output row.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     question_text = dataset_row["question_text"]
 
@@ -358,18 +402,21 @@ def build_output_row(
         "p_no": run_result["p_no"],
         "prediction_parse_status": run_result["prediction_parse_status"],
         "confidence": run_result.get("confidence"),
-        "market_prob_at_prediction": None,
-        "market_liquidity_at_prediction": None,
-        "market_close_at": None,
+        "market_prob_at_prediction": dataset_row.get("market_prob_at_prediction"),
+        "market_liquidity_at_prediction": dataset_row.get(
+            "market_liquidity_at_prediction"
+        ),
+        "market_close_at": dataset_row.get("market_close_at"),
         "final_outcome": dataset_row["final_outcome"],
         "requested_at": now,
         "predicted_at": now,
         "resolved_at": dataset_row.get("resolved_at"),
         "latency_s": run_result["latency_s"],
-        "prediction_lead_time_days": None,
+        "prediction_lead_time_days": dataset_row.get("prediction_lead_time_days"),
         "category": dataset_row.get("category")
         or classify_category(question_text, dataset_row.get("platform")),
         "match_confidence": 1.0,
+        "tool_extras": run_result.get("extras") or {},
     }
 
 

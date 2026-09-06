@@ -9,6 +9,7 @@ Usage:
     python benchmark/runner.py --dataset path/to/replay.jsonl
     python benchmark/runner.py --dataset path/to/replay.jsonl --tools prediction-online,superforcaster
     python benchmark/runner.py --dataset path/to/replay.jsonl --model gpt-4.1-2025-04-14
+    python benchmark/runner.py --dataset path/to/replay.jsonl --market-context
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import signal
 import time
 from datetime import datetime, timezone
@@ -230,19 +232,83 @@ def _fetch_polymarket_description(condition_id: str) -> str | None:
     return None
 
 
-def build_request_context(dataset_row: dict[str, Any]) -> dict[str, Any] | None:
+def _bounded_number(value: Any, low: float, high: float) -> float | None:
+    """Return ``value`` as a float when it is a real number inside [low, high].
+
+    Rejects ``bool`` explicitly: ``isinstance(True, int)`` is True in Python, so
+    a stray boolean would otherwise become the number 1.0.
+
+    :param value: the raw dataset value.
+    :param low: inclusive lower bound.
+    :param high: inclusive upper bound.
+    :return: the value as a float, or None when unusable.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric) or not low <= numeric <= high:
+        return None
+    return numeric
+
+
+def _add_market_context(
+    context: dict[str, Any],
+    dataset_row: dict[str, Any],
+) -> None:
+    """Add the trader's market-context fields to a request_context in place.
+
+    Mirrors ``Bet.to_request_context()`` field-for-field: ``market_prob``,
+    ``market_close_at``, ``market_liquidity_usd`` and ``market_spread``, each
+    omitted when the dataset row has no usable value. ``amm_fee`` has no
+    counterpart in the dataset schema and is therefore never set.
+
+    :param context: the request_context being built; mutated in place.
+    :param dataset_row: one dataset row carrying the production market fields.
+    """
+    market_prob = _bounded_number(
+        dataset_row.get("market_prob_at_prediction"), 0.0, 1.0
+    )
+    if market_prob is not None:
+        context["market_prob"] = market_prob
+
+    close_at = dataset_row.get("market_close_at")
+    if isinstance(close_at, str) and close_at.strip():
+        context["market_close_at"] = close_at.strip()
+
+    liquidity = _bounded_number(
+        dataset_row.get("market_liquidity_at_prediction"), 0.0, math.inf
+    )
+    if liquidity is not None:
+        context["market_liquidity_usd"] = liquidity
+
+    spread = _bounded_number(dataset_row.get("market_spread_at_prediction"), 0.0, 1.0)
+    if spread is not None:
+        context["market_spread"] = spread
+
+
+def build_request_context(
+    dataset_row: dict[str, Any],
+    with_market_context: bool = False,
+) -> dict[str, Any] | None:
     """Build a mech-style request_context from a dataset row.
 
     Mirrors the trader's ``Bet.to_request_context()`` so tools that read it in
     production (e.g. factual_research-v2) receive the same input under replay:
     ``market_id`` + ``type``, plus the Polymarket resolution rules under
     ``description`` (Omen rows carry none). The description is taken from the
-    row when present, else fetched from Gamma the way the trader would. NO
-    market price/liquidity is ever included — those tools must never see odds.
+    row when present, else fetched from Gamma the way the trader would.
     Returns None when the row lacks a market id or platform.
+
+    Market odds (``market_prob``, ``market_close_at``, ``market_liquidity_usd``,
+    ``market_spread``) are off by default, because a tool that has not been
+    taught to reconcile a price must not see one. Tools that DO read the price
+    in production (superforcaster-market-aware) need it on, otherwise replay
+    runs them blind and scores a different tool than the one deployed.
 
     :param dataset_row: one dataset row with ``market_id`` and ``platform``
         (optionally a pre-baked ``description``).
+    :param with_market_context: when True, also forward the market fields the
+        trader sends.
     :return: request_context dict, or None.
     """
     market_id = dataset_row.get("market_id")
@@ -260,6 +326,9 @@ def build_request_context(dataset_row: dict[str, Any]) -> dict[str, Any] | None:
         )
         if description:
             context["description"] = description
+
+    if with_market_context:
+        _add_market_context(context, dataset_row)
 
     return context
 
@@ -315,8 +384,18 @@ def replay(
     tools: list[str],
     model: str,
     timeout: int = TASK_DEADLINE,
+    with_market_context: bool = False,
 ) -> None:
-    """For each dataset row x each tool, run and append output."""
+    """For each dataset row x each tool, run and append output.
+
+    :param dataset_path: input JSONL replay dataset.
+    :param output_path: JSONL file the output rows are appended to.
+    :param tools: registered tool names to run on every row.
+    :param model: LLM model identifier.
+    :param timeout: per-tool timeout in seconds.
+    :param with_market_context: forward the market odds on the request_context;
+        see :func:`build_request_context`.
+    """
     dataset = load_dataset(dataset_path)
     log.info("Loaded %d replay cases from %s", len(dataset), dataset_path)
 
@@ -381,7 +460,9 @@ def replay(
                     model=model,
                     api_keys=api_keys,
                     timeout=timeout,
-                    request_context=build_request_context(row),
+                    request_context=build_request_context(
+                        row, with_market_context=with_market_context
+                    ),
                 )
 
                 output_row = build_output_row(row, tool_name, model, result)
@@ -453,6 +534,16 @@ def main() -> None:
         default=TASK_DEADLINE,
         help=f"Per-tool timeout in seconds (default: {TASK_DEADLINE})",
     )
+    parser.add_argument(
+        "--market-context",
+        action="store_true",
+        help=(
+            "Forward market odds (price, close time, liquidity, spread) on the "
+            "request_context, as the trader does. Off by default; required by "
+            "tools that read the price in production "
+            "(superforcaster-market-aware)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.tools:
@@ -469,6 +560,7 @@ def main() -> None:
         tools=tools,
         model=args.model,
         timeout=args.timeout,
+        with_market_context=args.market_context,
     )
 
 

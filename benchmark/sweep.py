@@ -294,8 +294,19 @@ def step_replay(
     tools: list[str],
     model: str,
     timeout: int,
+    with_market_context: bool = False,
 ) -> Path:
-    """Run the replay runner."""
+    """Run the replay runner.
+
+    :param dataset: input JSONL replay dataset.
+    :param output: JSONL file the replay rows are written to.
+    :param tools: registered tool names to run.
+    :param model: LLM model identifier.
+    :param timeout: per-tool timeout in seconds.
+    :param with_market_context: forward market odds on the request_context; see
+        :func:`benchmark.runner.build_request_context`.
+    :return: the output path.
+    """
     log.info("=== REPLAY: %s on %d tools ===", model, len(tools))
     replay(
         dataset_path=dataset,
@@ -303,6 +314,7 @@ def step_replay(
         tools=tools,
         model=model,
         timeout=timeout,
+        with_market_context=with_market_context,
     )
     return output
 
@@ -418,6 +430,16 @@ def main() -> None:
         default=None,
         help="Write comparison to file (default: stdout only)",
     )
+    parser.add_argument(
+        "--market-context",
+        action="store_true",
+        help=(
+            "Forward market odds (price, close time, liquidity, spread) on the "
+            "request_context, as the trader does. Off by default; required by "
+            "tools that read the price in production "
+            "(superforcaster-market-aware)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -471,7 +493,14 @@ def main() -> None:
         results_dir / f"sweep_candidate_{candidate_model}_scores.json"
     )
 
-    step_replay(dataset_path, candidate_results, tools, candidate_model, args.timeout)
+    step_replay(
+        dataset_path,
+        candidate_results,
+        tools,
+        candidate_model,
+        args.timeout,
+        with_market_context=args.market_context,
+    )
     candidate_scores = step_score(candidate_results, candidate_scores_path)
 
     # ---------------------------------------------------------------

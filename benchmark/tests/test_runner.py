@@ -22,19 +22,27 @@
 These cover the trader-simulation logic: building a mech-style request_context
 from a dataset row, including the Polymarket resolution-rules fetch that the
 benchmark performs in the trader's place (factual_research-v2 only reads the
-forwarded ``description``; it never contacts Polymarket).
+forwarded ``description``; it never contacts Polymarket) and the opt-in market
+context (price, close time, liquidity, spread) that a market-aware tool needs.
 """
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from benchmark.runner import _fetch_polymarket_description, build_request_context
+import pytest
+from benchmark.runner import (
+    _fetch_polymarket_description,
+    build_request_context,
+    replay,
+)
 
 RUNNER = "benchmark.runner"
 
 # A Gamma `/markets` object. Deliberately carries price/volume/liquidity fields
-# so the tests can prove only the description is extracted — these are exactly
-# the "odds" the prediction tools must never see.
+# so the tests can prove only the description is extracted. Market odds reach a
+# tool from the dataset row under --market-context, never from this fetch.
 FAKE_GAMMA_MARKET = {
     "conditionId": "0xabc123",
     "question": "Will X ship?",
@@ -200,3 +208,174 @@ class TestBuildRequestContext:
         ctx = build_request_context({"market_id": "0xabc", "platform": "polymarket"})
 
         assert ctx == {"market_id": "0xabc", "type": "polymarket"}
+
+
+# A dataset row carrying every production market field, all in range.
+MARKET_ROW: dict[str, Any] = {
+    "market_id": "0xabc",
+    "platform": "polymarket",
+    "description": "pre-baked rules",
+    "market_prob_at_prediction": 0.42,
+    "market_close_at": "2026-08-31T12:00:00Z",
+    "market_liquidity_at_prediction": 12345.6,
+    "market_spread_at_prediction": 0.02,
+}
+
+
+class TestBuildRequestContextMarketContext:
+    """Tests for the opt-in market-context fields (price, close, liquidity, spread)."""
+
+    def test_off_by_default(self) -> None:
+        """Without the flag a row full of odds still yields a blind context."""
+        ctx = build_request_context(MARKET_ROW)
+
+        assert ctx == {
+            "market_id": "0xabc",
+            "type": "polymarket",
+            "description": "pre-baked rules",
+        }
+
+    def test_adds_all_trader_fields(self) -> None:
+        """With the flag on, every in-range field is forwarded under its trader name."""
+        ctx = build_request_context(MARKET_ROW, with_market_context=True)
+
+        assert ctx == {
+            "market_id": "0xabc",
+            "type": "polymarket",
+            "description": "pre-baked rules",
+            "market_prob": 0.42,
+            "market_close_at": "2026-08-31T12:00:00Z",
+            "market_liquidity_usd": 12345.6,
+            "market_spread": 0.02,
+        }
+
+    def test_omits_none_fields(self) -> None:
+        """Fields the row does not carry are omitted, never sent as None."""
+        ctx = build_request_context(
+            {
+                "market_id": "0xfpmm",
+                "platform": "omen",
+                "market_prob_at_prediction": 0.7,
+            },
+            with_market_context=True,
+        )
+
+        assert ctx == {"market_id": "0xfpmm", "type": "omen", "market_prob": 0.7}
+
+    @pytest.mark.parametrize("bad_prob", [-0.1, 1.5, float("nan"), "0.4", True, None])
+    def test_out_of_range_price_omitted(self, bad_prob: Any) -> None:
+        """A price outside [0, 1], the wrong type, or a bool is dropped."""
+        row = {**MARKET_ROW, "market_prob_at_prediction": bad_prob}
+
+        ctx = build_request_context(row, with_market_context=True)
+
+        assert ctx is not None
+        assert "market_prob" not in ctx
+
+    @pytest.mark.parametrize("bad_spread", [-0.01, 1.01, "wide", None])
+    def test_out_of_range_spread_omitted(self, bad_spread: Any) -> None:
+        """A spread outside [0, 1] is dropped, matching the trader's clamp."""
+        row = {**MARKET_ROW, "market_spread_at_prediction": bad_spread}
+
+        ctx = build_request_context(row, with_market_context=True)
+
+        assert ctx is not None
+        assert "market_spread" not in ctx
+
+    def test_negative_liquidity_omitted(self) -> None:
+        """Negative liquidity is not a real depth reading, so it is dropped."""
+        row = {**MARKET_ROW, "market_liquidity_at_prediction": -1.0}
+
+        ctx = build_request_context(row, with_market_context=True)
+
+        assert ctx is not None
+        assert "market_liquidity_usd" not in ctx
+
+    @pytest.mark.parametrize("bad_close", ["", "   ", 1756640000, None])
+    def test_blank_close_at_omitted(self, bad_close: Any) -> None:
+        """A blank or non-string close time is dropped rather than forwarded."""
+        row = {**MARKET_ROW, "market_close_at": bad_close}
+
+        ctx = build_request_context(row, with_market_context=True)
+
+        assert ctx is not None
+        assert "market_close_at" not in ctx
+
+    def test_close_at_is_stripped(self) -> None:
+        """Surrounding whitespace is trimmed off the close time."""
+        row = {**MARKET_ROW, "market_close_at": "  2026-08-31T12:00:00Z  "}
+
+        ctx = build_request_context(row, with_market_context=True)
+
+        assert ctx is not None
+        assert ctx["market_close_at"] == "2026-08-31T12:00:00Z"
+
+    def test_amm_fee_never_set(self) -> None:
+        """The dataset has no amm_fee counterpart, so it is never invented."""
+        ctx = build_request_context(MARKET_ROW, with_market_context=True)
+
+        assert ctx is not None
+        assert "amm_fee" not in ctx
+
+
+class TestReplayThreadsMarketContext:
+    """The --market-context flag must reach build_request_context from replay()."""
+
+    @staticmethod
+    def _run_replay(tmp_path: Path, with_market_context: bool) -> MagicMock:
+        """Run replay() over one synthetic row with every tool call mocked.
+
+        :param tmp_path: pytest temporary directory.
+        :param with_market_context: value to thread through replay().
+        :return: the patched build_request_context mock.
+        """
+        dataset = tmp_path / "dataset.jsonl"
+        dataset.write_text(
+            json.dumps(
+                {
+                    **MARKET_ROW,
+                    "question_text": "Will X ship?",
+                    "final_outcome": 1,
+                    "source_content": {"mode": "cached", "sources": []},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch(f"{RUNNER}.build_keychain"),
+            patch(f"{RUNNER}.build_request_context") as mock_ctx,
+            patch(f"{RUNNER}.run_single") as mock_run,
+        ):
+            mock_ctx.return_value = {"market_id": "0xabc", "type": "polymarket"}
+            mock_run.return_value = {
+                "p_yes": 0.5,
+                "p_no": 0.5,
+                "confidence": 0.5,
+                "prediction_parse_status": "valid",
+                "latency_s": 1.0,
+                "error": None,
+            }
+            replay(
+                dataset_path=dataset,
+                output_path=tmp_path / "out.jsonl",
+                tools=["superforcaster-market-aware"],
+                model="test-model",
+                with_market_context=with_market_context,
+            )
+        return mock_ctx
+
+    def test_flag_on_is_forwarded(self, tmp_path: Path) -> None:
+        """replay(with_market_context=True) asks for the market fields."""
+        mock_ctx = self._run_replay(tmp_path, with_market_context=True)
+
+        mock_ctx.assert_called_once()
+        assert mock_ctx.call_args.kwargs["with_market_context"] is True
+
+    def test_default_is_blind(self, tmp_path: Path) -> None:
+        """replay() without the flag keeps the historical blind behaviour."""
+        mock_ctx = self._run_replay(tmp_path, with_market_context=False)
+
+        mock_ctx.assert_called_once()
+        assert mock_ctx.call_args.kwargs["with_market_context"] is False

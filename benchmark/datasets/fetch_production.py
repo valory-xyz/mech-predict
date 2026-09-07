@@ -1964,12 +1964,20 @@ def parse_tool_response(tool_response: Optional[str]) -> dict[str, Any]:
 #
 # The classifier used to build a fresh r"\b<kw>\b" pattern string per
 # keyword and hand it to re.search, relying on the interpreter's regex
-# cache to amortise compilation. CATEGORY_KEYWORDS holds exactly 512
-# keywords, which is also re._MAXCACHE, so any question that matched
-# nothing walked all 512 patterns and evicted the cache, forcing a full
-# recompile on the next row. Over a 90-day scoring window (233k rows)
-# that cost about 12 minutes of pure compile time and pushed the daily
-# flywheel past its 30-minute job timeout.
+# cache to amortise compilation. That cache holds re._MAXCACHE (512)
+# entries and drops only its single oldest entry per insert. A cache
+# walked in a fixed cyclic order over a working set larger than its
+# capacity misses on every lookup, because each insert evicts exactly
+# the entry the next lookup needs. CATEGORY_KEYWORDS holds 512 keywords,
+# so the classifier alone fills the cache exactly, and any other pattern
+# compiled anywhere in the row loop tips the working set over capacity.
+# Measured on the old code: with no other traffic a second unmatched row
+# compiled nothing, with one extra pattern per row every unmatched row
+# recompiled all 513. Over a 90-day scoring window (233k rows) that
+# cost about 12 minutes of pure compile time and pushed the daily
+# flywheel past its 30-minute job timeout. Trimming the table below 512
+# would not have fixed it: the margin to the next extra pattern would
+# just be a little wider, and the per-row cost is bad well before that.
 #
 # Each keyword keeps its own \b...\b wrapper, so per-keyword boundary
 # semantics are unchanged; alternation matches exactly when at least one

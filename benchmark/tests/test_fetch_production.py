@@ -29,6 +29,8 @@ from typing import Any, Optional
 import pytest
 import requests
 from benchmark.datasets.fetch_production import (
+    CATEGORY_KEYWORDS,
+    CATEGORY_PATTERNS,
     DEDUP_LOOKBACK_DAYS,
     DELIVERS_SCHEMA_LEGACY,
     DELIVERS_SCHEMA_PARSED,
@@ -708,6 +710,124 @@ class TestClassifyCategoryPlatformAware:
         """A question with no keyword match is always ``other``."""
         assert classify_category("Will quux?", "omen") == "other"
         assert classify_category("Will quux?", "polymarket") == "other"
+
+
+class TestClassifyCategoryPrecompiled:
+    """The classifier must not recompile keyword patterns per call.
+
+    CATEGORY_KEYWORDS holds 512 keywords, which is exactly
+    ``re._MAXCACHE``. Building a pattern string per keyword and leaning
+    on the interpreter's regex cache therefore thrashed that cache on
+    every unmatched question, and a 90-day scoring window spent about
+    12 minutes inside ``re``. These tests pin the structural fix
+    (module-level compiled alternations) and the behaviour it must
+    leave untouched. Deliberately no wall-clock assertion: timing tests
+    flake in CI.
+    """
+
+    def test_patterns_are_precompiled_module_level_objects(self) -> None:
+        """Every category maps to a compiled pattern, in table order."""
+        assert isinstance(CATEGORY_PATTERNS, tuple)
+        assert [category for category, _ in CATEGORY_PATTERNS] == [
+            category for category, keywords in CATEGORY_KEYWORDS.items() if keywords
+        ]
+        for _, pattern in CATEGORY_PATTERNS:
+            assert isinstance(pattern, re.Pattern)
+
+    def test_every_keyword_matches_only_as_a_whole_word(self) -> None:
+        """Each keyword still matches on its own and never inside a longer word.
+
+        Behavioural rather than structural: any pattern shape is fine as
+        long as a keyword on its own classifies into its category (or an
+        earlier one, since the first category wins) and the same keyword
+        glued to letters on both sides does not. Keywords that are a
+        substring of another keyword are skipped for the glued check,
+        because the longer keyword may legitimately match there.
+        """
+        order = list(CATEGORY_KEYWORDS)
+        all_keywords = [kw for kws in CATEGORY_KEYWORDS.values() for kw in kws]
+        substrings = {
+            kw
+            for kw in all_keywords
+            if any(kw != other and kw in other for other in all_keywords)
+        }
+        for category, keywords in CATEGORY_KEYWORDS.items():
+            for kw in keywords:
+                bare = classify_category(f"will {kw} happen?")
+                assert bare != "other", f"{kw!r} no longer matches on its own"
+                assert order.index(bare) <= order.index(category), (
+                    f"{kw!r} classified as {bare!r}, after its own "
+                    f"category {category!r}"
+                )
+                if kw in substrings:
+                    continue
+                glued = classify_category(f"will x{kw}y happen?")
+                assert glued != category, f"{kw!r} matched inside a longer word"
+
+    def test_classify_does_not_walk_the_keyword_list_with_re_search(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``classify_category`` issues no module-level ``re.search`` calls.
+
+        A regression to the per-keyword loop would fire hundreds of
+        ``re.search`` calls here, each with a freshly built pattern
+        string.
+
+        :param monkeypatch: pytest fixture, used to count ``re.search``.
+        """
+        calls: list[Any] = []
+        original_search = re.search
+
+        def counting_search(*args: Any, **kwargs: Any) -> Any:
+            """Record the call, then delegate to the real ``re.search``.
+
+            :param args: positional arguments forwarded verbatim.
+            :param kwargs: keyword arguments forwarded verbatim.
+            :return: whatever the real ``re.search`` returns.
+            """
+            calls.append(args)
+            return original_search(*args, **kwargs)
+
+        monkeypatch.setattr(re, "search", counting_search)
+        for question in ("Will Bitcoin hit $100k?", "Will quux blorp?"):
+            classify_category(question)
+        assert not calls, (
+            f"classify_category made {len(calls)} re.search calls; "
+            "the per-keyword loop is back"
+        )
+
+    @pytest.mark.parametrize(
+        "question,platform,expected",
+        [
+            # First category wins: "business" precedes "finance" in
+            # CATEGORY_KEYWORDS, so a question carrying keywords from
+            # both buckets classifies as business.
+            ("Will the CEO comment on the bitcoin price?", None, "business"),
+            # Word boundaries: "eth" must not match inside "something",
+            # "whether" or "ethics".
+            ("Will something whether ethics matter?", None, "other"),
+            # Punctuation inside a keyword survives re.escape: the
+            # hyphen in "peer-reviewed" is required, not a wildcard.
+            ("Will the study be peer-reviewed?", None, "science"),
+            ("Will peer reviewed studies rise?", None, "other"),
+            # Platform filter drops an off-taxonomy match to other.
+            ("Will the airline launch a new flight route?", "omen", "other"),
+            ("Will the airline launch a new flight route?", None, "travel"),
+            # Nothing matches at all.
+            ("Will quux blorp frobnicate?", None, "other"),
+            ("Will quux blorp frobnicate?", "polymarket", "other"),
+        ],
+    )
+    def test_equivalence_fixture(
+        self, question: str, platform: Optional[str], expected: str
+    ) -> None:
+        """Hand-picked titles pinning the semantics precompilation preserves.
+
+        :param question: market question to classify.
+        :param platform: scorer platform key, or ``None``.
+        :param expected: category the classifier must return.
+        """
+        assert classify_category(question, platform) == expected
 
 
 # ---------------------------------------------------------------------------

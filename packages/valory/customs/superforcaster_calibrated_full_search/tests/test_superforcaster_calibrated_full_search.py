@@ -851,6 +851,64 @@ class TestEmptyRetrievalGuard:
         assert parsed["p_yes"] is None
         assert "organic" in parsed["error"]
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": "nope"},
+        ],
+    )
+    @patch(f"{SFC_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SFC_MODULE}.OpenAIClientManager")
+    @patch(f"{SFC_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_shapes_are_typed_errors(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+        body: dict,
+    ) -> None:
+        """Both shape checks covered: non-list organic AND non-list peopleAlsoAsk."""
+        mock_fetch.return_value = MagicMock(json=lambda: body)
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SFC_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SFC_MODULE}.OpenAIClientManager")
+    @patch(f"{SFC_MODULE}.fetch_additional_sources")
+    def test_raw_tier_past_window_is_marked_truncated(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+    ) -> None:
+        """Question-free prompt past the window: raw tier AND truncated."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _stub_openai(mock_client_mgr)
+        prompt = "no question words at all here. " * (_MAX_SCAN_CHARS // 10)
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["parse_tier"] == "raw"
+        assert used_params["scan_truncated"] is True
+
 
 class TestLlmInputParityAndObservability:
     """Trader-path parity pins + the parse-tier observability markers."""

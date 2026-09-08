@@ -457,6 +457,110 @@ class TestScanWindowObservability:
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_raw_tier_past_window_is_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A question-free prompt past the window: raw tier AND truncated."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = "no question words at all here. " * (_MAX_SCAN_CHARS // 10)
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["parse_tier"] == "raw"
+        assert used_params["scan_truncated"] is True
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_clause_tier_past_window_is_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
+            _MAX_SCAN_CHARS // 3
+        )
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["parse_tier"] == "clause"
+        assert used_params["scan_truncated"] is True
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"peopleAlsoAsk": []},
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": "nope"},
+        ],
+    )
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_body_is_a_typed_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, body: dict
+    ) -> None:
+        """Broken integration -> typed error null (both shape checks)."""
+        mock_fetch.return_value = MagicMock(json=lambda: body)
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_cached_replay_malformed_body_is_a_typed_error(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The cached-replay branch applies the same shape check as live."""
+        result = run(
+            tool="superforcaster",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+            source_content={"serper_response": {"message": "quota exceeded"}},
+        )
+        mock_fetch.assert_not_called()
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_trader_request_sends_extracted_question_to_serper(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:

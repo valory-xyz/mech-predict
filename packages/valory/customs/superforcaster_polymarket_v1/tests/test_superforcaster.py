@@ -316,6 +316,55 @@ class TestIssue455Guards:
         assert result[4]["null_reason"] == "cached replay"
         mock_fetch.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": "nope"},
+        ],
+    )
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_shapes_are_typed_errors(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, body: dict
+    ) -> None:
+        """Both shape checks covered: non-list organic AND non-list peopleAlsoAsk."""
+        mock_fetch.return_value = MagicMock(json=lambda: body)
+        _install_mock_client(mock_client_mgr)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_raw_tier_past_window_is_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Question-free prompt past the window: raw tier AND truncated."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr)
+        prompt = "no question words at all here. " * (module._MAX_SCAN_CHARS // 10)
+        assert len(prompt) > module._MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["parse_tier"] == "raw"
+        assert used_params["scan_truncated"] is True
+
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
@@ -331,8 +380,11 @@ class TestIssue455Guards:
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
-        # v1's failure contract returns the exception string, never 0.5/0.5.
-        assert result[0].startswith("live search:")
+        # A broken integration is a typed error null, never 0.5/0.5.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+        assert parsed["error"].startswith("live search:")
         assert "organic" in result[0]
 
 

@@ -398,8 +398,14 @@ jobs:
       # _write_rolling_json. Running these steps under the flag would
       # cost two extra HTTP fetches per run whose output analyze then
       # unconditionally overwrites.
+      # timeout-minutes for the same reason as "Score trailing 90d window"
+      # below: continue-on-error cannot absorb a job timeout, only a step
+      # failure. This step takes about 10 seconds on the legacy path, so
+      # 3 minutes is a wide margin that still fits the job budget worked
+      # out in that step's comment.
       - name: Score current rolling window
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
+        timeout-minutes: 3
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
@@ -420,9 +426,11 @@ jobs:
       # window length so Current and Prev never overlap). Feeds the
       # "Δ vs Prev Nd" columns in the three-window comparison tables.
       # Same flag gate as the "current" step above and for the same
-      # reason: analyze.py handles the flag-on writes itself.
+      # reason: analyze.py handles the flag-on writes itself. Same step
+      # budget as the "current" step, for the same reason.
       - name: Score previous rolling window (non-overlapping)
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
+        timeout-minutes: 3
         run: |
           TOURNAMENT_FLAG=""
           if [ -f benchmark/results/tournament_scored.jsonl ]; then
@@ -447,7 +455,24 @@ jobs:
       # 7d files. So this step runs under both modes: legacy scans
       # local logs; mech-analytics fetches [now-90d, now] via
       # score_period_split_by_platform_from_mech_analytics.
+      # timeout-minutes here, not just continue-on-error: a job timeout
+      # cancels the job, so continue-on-error never gets to absorb it and
+      # every later step (Analyze, the Slack posts, triage) is skipped.
+      # That is how the flywheel went dark every night from 2026-09-01
+      # (seven nights by the time the fix landed). A step budget converts
+      # a slow scorer into a failed step, which continue-on-error does
+      # absorb, so the report still ships minus its trailing-90d section.
+      # 10 minutes is generous: the mech-analytics path runs in about 70
+      # seconds, dominated by the fetch. Raise it only if the fetch itself
+      # grows, and keep the sum of every step budget in this job (this
+      # step, the two 7d rolling steps, the ROI companion) plus the
+      # roughly 13 minutes of unbounded fixed cost (setup, Score, both
+      # Analyze steps, uploads, Slack posts, triage) under the 30-minute
+      # job timeout, otherwise a run of slow steps can still cancel the
+      # job.
       - name: Score trailing 90d window
+        id: trailing_90d
+        timeout-minutes: 10
         run: |
           if [ "$USE_MECH_ANALYTICS_ROWS" = "true" ]; then
             python -m benchmark.scorer \
@@ -467,6 +492,15 @@ jobs:
               $TOURNAMENT_FLAG
           fi
         continue-on-error: true
+
+      # continue-on-error keeps the job green when the step above fails
+      # or trips its 10-minute budget, so the report would ship without
+      # its trailing-90d section and nothing would say so. Surface that
+      # as a run annotation so it is visible on the run summary.
+      - name: Flag a missing trailing-90d section
+        if: steps.trailing_90d.outcome == 'failure'
+        run: |
+          echo "::warning title=Trailing 90d scoring failed::'Score trailing 90d window' failed or hit its 10-minute budget; today's report has no trailing-90d section. See that step's log."
 
       - name: Analyze (Omenstrat)
         run: python -m benchmark.analyze --platform omen --include-tournament
@@ -495,8 +529,15 @@ jobs:
       # stays because tournament_scored.jsonl is still produced by the
       # tournament-run job (not flag-gated), and roi_sim renders tournament
       # rows in its output (mode=tournament column in the ROI Slack table).
+      # timeout-minutes: continue-on-error cannot absorb a job timeout (see
+      # "Score trailing 90d window"). Under the flag this step fetches the
+      # same 90-day window as that step, about 50 seconds, and the legacy
+      # simulation ran in about 35 seconds, so 5 minutes is generous while
+      # keeping the bounded steps (10 + 5) plus the roughly 13 minutes of
+      # fixed cost inside the 30-minute job budget.
       - name: Simulate trader ROI (companion)
         if: always() && !cancelled()
+        timeout-minutes: 5
         continue-on-error: true
         run: |
           TOURNAMENT_FLAG=""
@@ -813,3 +854,78 @@ jobs:
             benchmark/results/tournament_predictions.jsonl
             benchmark/results/tournament_scored.jsonl
           retention-days: 90
+
+  # -----------------------------------------------------------------------
+  # Job 4: Failure notification
+  # The success posts live inside the benchmark job and only fire when a
+  # report file exists, so a job that dies -- timeout, runner loss, an
+  # unguarded step error -- posts nothing at all and reads exactly like a
+  # quiet day. A cancelled job runs none of its own later steps, which is
+  # why this has to be a separate job rather than a final step.
+  #
+  # Plain curl rather than benchmark.notify_slack: importing that module
+  # pulls in the whole analyze/report stack, so it would need a checkout,
+  # a Python setup and a dependency install just to send one line. This
+  # job has to be the most reliable thing in the workflow.
+  # -----------------------------------------------------------------------
+  notify-failure:
+    needs: [benchmark, tournament-fetch, check-secrets, tournament-run]
+    # No checkout and no GitHub API call: the job reads toJSON(needs) and
+    # posts to an external webhook, so it has no use for GITHUB_TOKEN.
+    # The workflow has no top-level permissions block, so without this
+    # the job would inherit the repository default scope.
+    permissions: {}
+    # Same dry-run switches as the success posts, so flipping
+    # notify_slack=false or ENABLE_SLACK_NOTIFY=false still silences
+    # everything.
+    if: always() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Post failed or cancelled jobs to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # toJSON(needs) carries {"<job>": {"result": "...", ...}} for
+          # every job in `needs` above, so adding a job to that list is
+          # the only edit a new job needs.
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+
+          broken=$(printf '%s' "$NEEDS_JSON" | jq -r '
+            to_entries
+            | map(select(.value.result == "failure" or .value.result == "cancelled"))
+            | map("- \(.key): \(.value.result)")
+            | join("\n")')
+
+          if [ -z "$broken" ]; then
+            echo "All upstream jobs finished clean; nothing to report."
+            exit 0
+          fi
+
+          echo "Failed or cancelled jobs:"
+          echo "$broken"
+
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "::warning::BENCHMARK_SLACK_WEBHOOK_URL is unset; skipping the Slack post."
+            exit 0
+          fi
+
+          text=$(printf 'benchmark-flywheel did not complete.\n%s\n%s' "$broken" "$RUN_URL")
+          jq -n --arg text "$text" '{text: $text}' > payload.json
+          # Retry transient failures (Slack 5xx, TLS reset, DNS hiccup):
+          # a single lost POST here would reopen the silent blackout this
+          # job exists to close. --retry-all-errors covers connection-level
+          # errors as well as HTTP 5xx; --max-time bounds each attempt so
+          # a hung socket cannot eat the job budget. Worst case is
+          # 4 attempts x 30 s plus 3 x 5 s delay, about 2.5 minutes, inside
+          # the 5-minute job timeout. curl 7.81 on ubuntu-22.04 has both
+          # flags (--retry-all-errors since 7.71, --fail-with-body 7.76).
+          curl -sS --fail-with-body \
+            --retry 3 --retry-delay 5 --retry-all-errors --max-time 30 \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            --data @payload.json \
+            "$SLACK_WEBHOOK_URL"

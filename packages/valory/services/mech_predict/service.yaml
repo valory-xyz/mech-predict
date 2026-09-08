@@ -7,7 +7,7 @@ license: Apache-2.0
 fingerprint:
   README.md: bafybeifogoiwjqlb3nk2o6bbybr4safi4bfv4va7a4rq7ptse6ps7ep4zm
 fingerprint_ignore_patterns: []
-agent: valory/mech_predict:0.1.0:bafybeie6wgehowtsrgnptosufbq25kfmocwbrmg7ykoacl5k2usifyyzh4
+agent: valory/mech_predict:0.1.0:bafybeigerijcbg7z5r6unwhbkmjee2w3c5yslxfvqjdoykbnh6oee6zvrq
 number_of_agents: 1
 deployment:
   agent:
@@ -245,6 +245,7 @@ type: skill
         polygon_ledger_rpc: ${POLYGON_LEDGER_RPC_0:str:http://host.docker.internal:8545}
         base_ledger_rpc: ${BASE_LEDGER_RPC_0:str:http://host.docker.internal:8545}
         optimism_ledger_rpc: ${OPTIMISM_LEDGER_RPC_0:str:http://host.docker.internal:8545}
+        robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_0:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
@@ -270,6 +271,7 @@ type: skill
         polygon_ledger_rpc: ${POLYGON_LEDGER_RPC_1:str:http://host.docker.internal:8545}
         base_ledger_rpc: ${BASE_LEDGER_RPC_1:str:http://host.docker.internal:8545}
         optimism_ledger_rpc: ${OPTIMISM_LEDGER_RPC_1:str:http://host.docker.internal:8545}
+        robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_1:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
@@ -295,6 +297,7 @@ type: skill
         polygon_ledger_rpc: ${POLYGON_LEDGER_RPC_2:str:http://host.docker.internal:8545}
         base_ledger_rpc: ${BASE_LEDGER_RPC_2:str:http://host.docker.internal:8545}
         optimism_ledger_rpc: ${OPTIMISM_LEDGER_RPC_2:str:http://host.docker.internal:8545}
+        robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_2:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
@@ -320,6 +323,7 @@ type: skill
         polygon_ledger_rpc: ${POLYGON_LEDGER_RPC_3:str:http://host.docker.internal:8545}
         base_ledger_rpc: ${BASE_LEDGER_RPC_3:str:http://host.docker.internal:8545}
         optimism_ledger_rpc: ${OPTIMISM_LEDGER_RPC_3:str:http://host.docker.internal:8545}
+        robinhood_ledger_rpc: ${ROBINHOOD_LEDGER_RPC_3:str:http://host.docker.internal:8545}
         default_chain_id: ${DEFAULT_CHAIN_ID:str:gnosis}
         use_offchain: ${USE_OFFCHAIN:bool:false}
         mech_events_chain_id: ${MECH_EVENTS_CHAIN_ID:int:0}
@@ -361,6 +365,11 @@ type: connection
         chain_id: ${OPTIMISM_LEDGER_CHAIN_ID:int:10}
         poa_chain: ${OPTIMISM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${OPTIMISM_LEDGER_PRICING:str:eip1559}
+      robinhood:
+        address: ${ROBINHOOD_LEDGER_RPC_0:str:http://host.docker.internal:8545}
+        chain_id: ${ROBINHOOD_LEDGER_CHAIN_ID:int:4663}
+        poa_chain: ${ROBINHOOD_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${ROBINHOOD_LEDGER_PRICING:str:eip1559}
 1:
   config:
     ledger_apis:
@@ -396,6 +405,11 @@ type: connection
         chain_id: ${OPTIMISM_LEDGER_CHAIN_ID:int:10}
         poa_chain: ${OPTIMISM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${OPTIMISM_LEDGER_PRICING:str:eip1559}
+      robinhood:
+        address: ${ROBINHOOD_LEDGER_RPC_1:str:http://host.docker.internal:8545}
+        chain_id: ${ROBINHOOD_LEDGER_CHAIN_ID:int:4663}
+        poa_chain: ${ROBINHOOD_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${ROBINHOOD_LEDGER_PRICING:str:eip1559}
 2:
   config:
     ledger_apis:
@@ -431,6 +445,11 @@ type: connection
         chain_id: ${OPTIMISM_LEDGER_CHAIN_ID:int:10}
         poa_chain: ${OPTIMISM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${OPTIMISM_LEDGER_PRICING:str:eip1559}
+      robinhood:
+        address: ${ROBINHOOD_LEDGER_RPC_2:str:http://host.docker.internal:8545}
+        chain_id: ${ROBINHOOD_LEDGER_CHAIN_ID:int:4663}
+        poa_chain: ${ROBINHOOD_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${ROBINHOOD_LEDGER_PRICING:str:eip1559}
 3:
   config:
     ledger_apis:
@@ -466,6 +485,11 @@ type: connection
         chain_id: ${OPTIMISM_LEDGER_CHAIN_ID:int:10}
         poa_chain: ${OPTIMISM_LEDGER_IS_POA_CHAIN:bool:false}
         default_gas_price_strategy: ${OPTIMISM_LEDGER_PRICING:str:eip1559}
+      robinhood:
+        address: ${ROBINHOOD_LEDGER_RPC_3:str:http://host.docker.internal:8545}
+        chain_id: ${ROBINHOOD_LEDGER_CHAIN_ID:int:4663}
+        poa_chain: ${ROBINHOOD_LEDGER_IS_POA_CHAIN:bool:false}
+        default_gas_price_strategy: ${ROBINHOOD_LEDGER_PRICING:str:eip1559}
 ---
 public_id: valory/p2p_libp2p_client:0.1.0
 type: connection

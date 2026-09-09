@@ -15,7 +15,7 @@ fingerprint:
   __init__.py: bafybeif65opovmxvdk2yg56jsgauiuhjppuzrk4zvvruzklko3nmk5tjfm
   superforcaster_calibrated_full_search.py: bafybeiha62cmw35moekhtgyci2grdzxdm42cjjz3gqj7n2byy7tmeb7fsy
   tests/__init__.py: bafybeigjdbprffbvsm6xzzuuzlk7kme5pl7bfib5ce72h35vq4sajfu5hi
-  tests/test_superforcaster_calibrated_full_search.py: bafybeiacgtzeysrw2rvfrnjecrlwohysye3gidtpt2cafwnmiwreox4m7a
+  tests/test_superforcaster_calibrated_full_search.py: bafybeic2flll43aiyzze4o2heos225tuvc3c7zmtqauuxrc3wo2kk6p3re
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_calibrated_full_search.py
 callable: run

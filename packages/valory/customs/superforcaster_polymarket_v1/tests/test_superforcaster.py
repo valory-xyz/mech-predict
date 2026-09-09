@@ -342,6 +342,9 @@ class TestIssue455Guards:
         )
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -383,6 +386,9 @@ class TestIssue455Guards:
         # A broken integration is a typed error null, never 0.5/0.5.
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
         assert parsed["error"].startswith("live search:")
         assert "organic" in result[0]

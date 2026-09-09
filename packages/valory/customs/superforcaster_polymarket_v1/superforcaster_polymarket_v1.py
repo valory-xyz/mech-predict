@@ -68,11 +68,13 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    A VALID prediction (p_yes = p_no = 0.5) with zero confidence and
-    info_utility, so a requester can detect and discount it while the strict
+    Unlike _null_prediction_response this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455). The on-chain JSON carries
     only the four standard fields; the explicit marker for requesters lives in
-    used_params["empty_retrieval"] (off-chain metadata.params).
+    used_params["empty_retrieval"] (off-chain metadata.params), intended for
+    off-chain consumers (not yet wired up -- the benchmark scorer's
+    null-vs-forecast branch is a follow-up).
 
     :param model: the model name recorded in used_params.
     :param temperature: the temperature recorded in used_params.

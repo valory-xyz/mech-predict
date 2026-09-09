@@ -832,6 +832,126 @@ class TestIssue455RunWiring:
     @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_raw_tier_past_window_is_marked_truncated(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+    ) -> None:
+        """Question-free prompt past the window: raw tier AND truncated."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = FAKE_SERPER_RESPONSE
+        mock_fetch.return_value = mock_response
+        _stub_openai(mock_client_mgr)
+        prompt = "no question words at all here. " * (module._MAX_SCAN_CHARS // 10)
+        assert len(prompt) > module._MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
+
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_clause_tier_past_window_is_marked_truncated(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+    ) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = FAKE_SERPER_RESPONSE
+        mock_fetch.return_value = mock_response
+        _stub_openai(mock_client_mgr)
+        prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
+            module._MAX_SCAN_CHARS // 3
+        )
+        assert len(prompt) > module._MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"peopleAlsoAsk": []},
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": "nope"},
+        ],
+    )
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_body_is_a_typed_error_null(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+        body: dict,
+    ) -> None:
+        """Malformed Serper body -> typed error null, whole field set pinned."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = body
+        mock_fetch.return_value = mock_response
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_cached_replay_malformed_body_is_a_typed_error_null(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+    ) -> None:
+        """Cached-replay branch applies the same shape check as the live one."""
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": {"message": "quota exceeded"}},
+        )
+        mock_fetch.assert_not_called()
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
     def test_long_template_prompt_is_not_marked_truncated(
         self,
         mock_fetch: MagicMock,

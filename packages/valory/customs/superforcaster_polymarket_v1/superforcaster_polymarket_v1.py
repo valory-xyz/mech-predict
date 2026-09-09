@@ -398,7 +398,8 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
 
     # timeout matches the fleet's other Serper callers (superforcaster,
     # superforcaster_calibrated_full_search, v4, market_aware); a hung
-    # connection must not block the task until TASK_DEADLINE.
+    # connection must not hold the task slot until the mech's configured
+    # task_deadline (240s by default, 480s on these mechs).
     response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
     return response

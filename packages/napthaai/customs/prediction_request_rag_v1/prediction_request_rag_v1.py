@@ -131,9 +131,21 @@ def with_key_rotation(func: Callable) -> Callable:
                 retries_left[service] -= 1
                 api_keys.rotate(service)
                 return execute()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 print(f"Unexpected error: {type(e).__name__}: {e}")
-                return str(e), "", None, None, None, api_keys
+                # Parseable typed error null (matches market_aware /
+                # factual_research) instead of a raw exception string.
+                error_json = json.dumps(
+                    {
+                        "p_yes": None,
+                        "p_no": None,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
+                )
+                return error_json, "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response

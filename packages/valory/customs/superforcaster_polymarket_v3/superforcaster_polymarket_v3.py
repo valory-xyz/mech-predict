@@ -100,6 +100,24 @@ _MAX_SEARCH_QUERY_LEN = 150
 _ANTHROPIC_ERRORS = (anthropic.RateLimitError,)
 
 
+def _error_null(e: Exception) -> str:
+    """Serialise an exception as the parseable typed error-null payload.
+
+    :param e: the exception to report.
+    :return: the JSON payload string.
+    """
+    return json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+    )
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries on rate limits and wraps anything else as a result.
@@ -158,13 +176,13 @@ def with_key_rotation(func: Callable) -> Callable:
                         # pool-exhaustion was the only path that propagated
                         # the raw exception while every other failure became
                         # a result string.
-                        return str(e), "", None, None, None, api_keys
+                        return _error_null(e), "", None, None, None, api_keys
                     retries_left["anthropic"] -= 1
                     api_keys.rotate("anthropic")
                     return execute()
                 # OpenAI / OpenRouter branch.
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    return str(e), "", None, None, None, api_keys
+                    return _error_null(e), "", None, None, None, api_keys
                 if retries_left["openai"] > 0:
                     retries_left["openai"] -= 1
                     api_keys.rotate("openai")
@@ -172,8 +190,12 @@ def with_key_rotation(func: Callable) -> Callable:
                     retries_left["openrouter"] -= 1
                     api_keys.rotate("openrouter")
                 return execute()
-            except Exception as e:
-                return str(e), "", None, None, None, api_keys
+            except Exception as e:  # noqa: BLE001
+                # Return a parseable null-prediction JSON (matches
+                # superforcaster_market_aware / factual_research) so a caller
+                # or the tournament scorer sees an explicit, typed error
+                # rather than a raw exception string.
+                return _error_null(e), "", None, None, None, api_keys
 
         mech_response = execute()
         return mech_response
@@ -569,7 +591,9 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "Content-Type": "application/json",
     }
 
-    response = requests.request("POST", url, headers=headers, data=payload)
+    # timeout matches the fleet's other Serper callers; a hung connection
+    # must not hold the task slot until the mech's task_deadline.
+    response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
     return response
 

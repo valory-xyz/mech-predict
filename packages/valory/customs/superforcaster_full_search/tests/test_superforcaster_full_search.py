@@ -684,7 +684,72 @@ class TestIssue455ParsePrompt:
         _, query, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
         assert query.startswith("Will Alexander Isak")
         assert query.endswith("?")
+        assert len(query) < len(LONG_FREE_TEXT_PROMPT)
+
+    def test_query_cap_truncates_on_a_word_boundary(self) -> None:
+        """A clause longer than the cap is cut, and never mid-word."""
+        clause = (
+            "Will the Federal Reserve announce a reduction of the target "
+            "federal funds rate by at least 25 basis points at its scheduled "
+            "December 2026 policy meeting in Washington?"
+        )
+        assert len(clause) > module._MAX_SEARCH_QUERY_LEN
+        _, query, _ = parse_prompt(
+            "Please estimate the probability of the following market. " + clause
+        )
+        assert len(query) < len(clause)
         assert len(query) <= module._MAX_SEARCH_QUERY_LEN
+        assert clause.startswith(query)
+        assert clause[len(query)] == " "
+
+    def test_last_market_verb_clause_wins_over_digit_rich_clarifier(self) -> None:
+        """A near-best market question beats a higher-scoring clarifier."""
+        clarifier = (
+            "Will the resolution source be the official CoinGecko close at "
+            "23:59 UTC on 31 December 2026?"
+        )
+        market_q = "Will Manchester City win the Premier League?"
+        _, query, tier = parse_prompt(
+            "You are being asked to forecast an outcome. " f"{clarifier} {market_q}"
+        )
+        assert tier == "clause"
+        assert query == market_q
+        assert module._score_clause(clarifier, 0, clarifier) > module._score_clause(
+            market_q, 0, market_q
+        )
+
+    def test_score_clause_penalises_responder_addressed_stems(self) -> None:
+        """A meta stem is scored below an otherwise identical market clause."""
+        meta = "Will you provide a probability estimate?"
+        market = "Will Arsenal win the Premier League?"
+        assert module._score_clause(meta, 0, meta) < module._score_clause(
+            market, 0, market
+        )
+
+    def test_score_clause_penalises_sentence_boundary_sweep(self) -> None:
+        """A clause spanning a sentence boundary scores below a clean one."""
+        # Identical in every other scored feature, so only the boundary
+        # penalty can separate them.
+        swept = "Will Arsenal win. Will Chelsea win?"
+        clean = "Will Arsenal win, will Chelsea win?"
+        assert module._score_clause(swept, 0, swept) < module._score_clause(
+            clean, 0, clean
+        )
+
+    def test_score_clause_rewards_sentence_initial_start(self) -> None:
+        """The same clause scores lower when it starts mid-token."""
+        clause = "Will it rain?"
+        assert module._score_clause("x" + clause, 1, clause) < module._score_clause(
+            clause, 0, clause
+        )
+
+    def test_score_clause_rewards_market_shaped_opening_verb(self) -> None:
+        """A market-shaped opening verb outscores a non-market opener."""
+        market = "Will it rain?"
+        other = "Perhaps it rains?"
+        assert module._score_clause(other, 0, other) < module._score_clause(
+            market, 0, market
+        )
 
 
 class TestIssue455EmptyRetrievalGuard:

@@ -68,7 +68,7 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    Unlike _null_prediction_response this is a VALID prediction
+    Unlike the with_key_rotation error null this is a VALID prediction
     (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455). The on-chain JSON carries
     only the four standard fields; the explicit marker for requesters lives in
@@ -396,10 +396,9 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "Content-Type": "application/json",
     }
 
-    # timeout matches the fleet's other Serper callers (superforcaster,
-    # superforcaster_calibrated_full_search, v4, market_aware); a hung
-    # connection must not hold the task slot until the mech's configured
-    # task_deadline (240s by default, 480s on these mechs).
+    # timeout matches the fleet's other Serper callers; a hung connection must
+    # not hold the task slot until the mech's configured task_deadline
+    # (240s by default, per the service definition).
     response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
     return response

@@ -669,7 +669,7 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    Unlike _null_prediction_response this is a VALID prediction
+    Unlike the with_key_rotation error null this is a VALID prediction
     (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455). The on-chain JSON carries
     only the four standard fields; the explicit marker for requesters lives in

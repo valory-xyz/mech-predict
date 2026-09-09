@@ -751,6 +751,13 @@ class TestIssue455ParsePrompt:
             market, 0, market
         )
 
+    def test_default_max_tokens_admits_a_full_free_text_completion(self) -> None:
+        """The default cap clears an observed free-text completion."""
+        # Free-text prompts elicit the evidence block before the verdict.
+        # Observed production completions ran to 1016 tokens, where a 500
+        # cap truncated before any JSON was emitted at all.
+        assert module.DEFAULT_OPENAI_SETTINGS["max_tokens"] >= 2048
+
 
 class TestIssue455EmptyRetrievalGuard:
     """Degenerate prompts and zero-hit retrieval return the flagged null."""

@@ -204,8 +204,13 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
+# max_tokens matches the rest of the superforcaster fleet. At 500 a free-text
+# prompt truncates mid-reasoning and the delivery carries no parseable JSON at
+# all: the model emits its evidence block before the verdict, and observed
+# free-text completions run 786-1016 tokens. It is a ceiling, not a spend --
+# trader-template requests still complete in well under 100 tokens.
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"

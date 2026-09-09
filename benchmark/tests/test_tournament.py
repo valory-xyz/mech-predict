@@ -116,6 +116,17 @@ class TestMakeRowId:
         row_id = _make_row_id("prediction-online", "m1", "omen", "m")
         assert row_id.startswith("tourn_prediction-online_")
 
+    def test_market_context_flag_changes_id(self) -> None:
+        """A blind and a market-context run of one market are two rows."""
+        blind = _make_row_id("tool-a", "m1", "omen", "model-1")
+        priced = _make_row_id(
+            "tool-a", "m1", "omen", "model-1", with_market_context=True
+        )
+        assert blind != priced
+        assert blind == _make_row_id(
+            "tool-a", "m1", "omen", "model-1", with_market_context=False
+        )
+
 
 # ---------------------------------------------------------------------------
 # build_output_row
@@ -451,12 +462,28 @@ class TestBuildRequestContext:
         context = build_request_context(market)
 
         assert context == {
-            "market_id": "poly_0xdead",
+            "market_id": "0xabc",
             "type": "polymarket",
             "market_prob": 0.42,
             "market_close_at": "2026-10-01T00:00:00Z",
             "description": "Resolves YES if X occurs before the close date.",
         }
+
+    def test_market_id_is_the_raw_address_not_the_prefixed_row_id(self) -> None:
+        """The trader sends the bare condition id / FPMM address, not poly_/omen_."""
+        market = _market("poly_0xdead", platform="polymarket")
+        market["market_address"] = "0xdead"
+        context = build_request_context(market)
+        assert context is not None
+        assert context["market_id"] == "0xdead"
+
+    def test_market_id_falls_back_to_row_id_without_address(self) -> None:
+        """A row with no market_address still yields a usable context."""
+        market = _market("poly_0xdead", platform="polymarket")
+        market["market_address"] = None
+        context = build_request_context(market)
+        assert context is not None
+        assert context["market_id"] == "poly_0xdead"
 
     def test_omen_market(self) -> None:
         """An Omen row carries its own platform as the context type."""
@@ -700,17 +727,67 @@ class TestRunTournamentRequestContext:
             output_path,
             {"superforcaster-market-aware": "bafycid1"},
             "gpt-4.1",
+            with_market_context=True,
         )
 
         forwarded = mock_run.call_args.kwargs["request_context"]
         assert forwarded == {
-            "market_id": "poly_0x1",
+            "market_id": "0xabc",
             "type": "polymarket",
             "market_prob": 0.31,
             "market_close_at": "2026-10-01T00:00Z",
         }
         row = json.loads(output_path.read_text().strip())
         assert row["tool_extras"] == {"p_independent": 0.55}
+        assert row["market_context"] is True
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_blind_by_default(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Without --market-context no tool sees a price, and the row says so."""
+        mock_keys.return_value = MagicMock()
+        mock_run.return_value = _run_result()
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(json.dumps(_market(prob=0.31)) + "\n")
+
+        run_tournament(
+            markets_path, output_path, {"prediction-online": "bafycid1"}, "gpt-4.1"
+        )
+
+        assert mock_run.call_args.kwargs["request_context"] is None
+        row = json.loads(output_path.read_text().strip())
+        assert row["market_context"] is False
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_blind_and_priced_arms_share_one_file(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """A market predicted blind is re-run when the price is switched on."""
+        mock_keys.return_value = MagicMock()
+        mock_run.return_value = _run_result()
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(json.dumps(_market(prob=0.31)) + "\n")
+        tools = {"superforcaster-market-aware": "bafycid1"}
+
+        run_tournament(markets_path, output_path, tools, "gpt-4.1")
+        run_tournament(
+            markets_path, output_path, tools, "gpt-4.1", with_market_context=True
+        )
+
+        rows = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert [r["market_context"] for r in rows] == [False, True]
+        assert len({r["row_id"] for r in rows}) == 2
 
     @patch("benchmark.tournament.build_keychain")
     @patch("benchmark.tournament.run_single")

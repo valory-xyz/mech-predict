@@ -831,16 +831,22 @@ jobs:
           # The two-branch form keeps "$INPUT_TOOLS" quoted at expansion
           # time so a crafted workflow_dispatch input can't shell-inject.
           if [ -n "$INPUT_TOOLS" ]; then
+          # --market-context: the tournament is the promotion path, so tools
+          # must see the same request_context production sends (price, close
+          # time, description). Rows carry market_context=true.
+          if [ -n "$INPUT_TOOLS" ]; then
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
               --tools "$INPUT_TOOLS" \
               --max-markets "$INPUT_MAX_MARKETS" \
-              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS" \
+              --market-context
           else
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
               --max-markets "$INPUT_MAX_MARKETS" \
-              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS" \
+              --market-context
           fi
 
       - name: Score resolved predictions

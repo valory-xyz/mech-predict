@@ -882,6 +882,36 @@ class TestEmptyRetrievalGuard:
         )
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{SFC_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SFC_MODULE}.OpenAIClientManager")
+    @patch(f"{SFC_MODULE}.fetch_additional_sources")
+    def test_cached_replay_malformed_body_is_a_typed_error(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_page_fetch: MagicMock,
+    ) -> None:
+        """Cached-replay branch applies the same shape check as the live one."""
+        _stub_openai(mock_client_mgr)
+        result = run(
+            tool="superforcaster_calibrated_full_search",
+            model="gpt-4o",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": {"message": "quota exceeded"}},
+        )
+        mock_fetch.assert_not_called()
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
 
     @patch(f"{SFC_MODULE}._fetch_page_content", side_effect=_fake_fetch)

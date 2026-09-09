@@ -342,6 +342,9 @@ class TestIssue455Guards:
         )
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -383,9 +386,19 @@ class TestIssue455Guards:
         # A broken integration is a typed error null, never 0.5/0.5.
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
         assert parsed["error"].startswith("live search:")
         assert "organic" in result[0]
+
+    def test_default_max_tokens_admits_a_full_free_text_completion(self) -> None:
+        """The default cap clears an observed free-text completion."""
+        # Free-text prompts elicit the evidence block before the verdict.
+        # Observed production completions ran to 1016 tokens, where a 500
+        # cap truncated before any JSON was emitted at all.
+        assert module.DEFAULT_OPENAI_SETTINGS["max_tokens"] >= 2048
 
 
 class TestIssue455RunWiring:

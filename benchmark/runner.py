@@ -69,9 +69,30 @@ TASK_DEADLINE = 240  # seconds, matches production
 
 # TODO: unify _make_row_id across runner, tournament, prompt_replay
 # & fetch_production into benchmark/tools.py
-def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
-    """Deterministic row ID from tool + question + model."""
+def _make_row_id(
+    tool_name: str,
+    question_text: str,
+    model: str,
+    with_market_context: bool = False,
+) -> str:
+    """Deterministic row ID from tool + question + model (+ market-context mode).
+
+    The market-context flag is part of the identity: a blind replay and a
+    market-context replay of the same question are two different
+    experiments, and ``replay()`` resumes by row id. Without the suffix the
+    second run would find every id already present, write nothing, and the
+    comparison would silently re-score the blind rows. The suffix is only
+    added when the flag is on, so existing blind result files still resume.
+
+    :param tool_name: registered tool name.
+    :param question_text: the replayed question.
+    :param model: LLM model identifier.
+    :param with_market_context: whether the market odds were forwarded.
+    :return: the row id.
+    """
     payload = f"{tool_name}:{model}:{question_text}"
+    if with_market_context:
+        payload += ":market_context"
     h = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return f"replay_{tool_name}_{h}"
 
@@ -323,6 +344,7 @@ def build_output_row(
     tool_name: str,
     model: str,
     run_result: dict[str, Any],
+    with_market_context: bool = False,
 ) -> dict[str, Any]:
     """Build a production_log.jsonl-compatible row from a replay result.
 
@@ -336,15 +358,21 @@ def build_output_row(
     :param tool_name: registered tool name.
     :param model: LLM model identifier.
     :param run_result: dict returned by :func:`run_single`.
+    :param with_market_context: whether the market odds were forwarded on the
+        request_context; part of the row id and recorded as ``market_context``
+        so a results file says which mode produced each row.
     :return: a production_log.jsonl-compatible output row.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     question_text = dataset_row["question_text"]
 
     return {
-        "row_id": _make_row_id(tool_name, question_text, model),
+        "row_id": _make_row_id(
+            tool_name, question_text, model, with_market_context=with_market_context
+        ),
         "schema_version": "1.0",
         "mode": "cached_replay",
+        "market_context": with_market_context,
         "market_id": dataset_row.get("market_id"),
         "platform": dataset_row.get("platform", "unknown"),
         "question_text": question_text,
@@ -411,6 +439,10 @@ def replay(
     done = 0
     skipped = 0
     errors = 0
+    # F2 coverage: "asked for market context" and "the tool got a price" are
+    # different statements. Count rows whose context actually carried one.
+    replayed_rows = 0
+    priced_rows = 0
 
     with open(output_path, "a", encoding="utf-8") as out:
         for row_idx, row in enumerate(dataset):
@@ -438,8 +470,17 @@ def replay(
                 else "none"
             )
 
+            request_context = build_request_context(
+                row, with_market_context=with_market_context
+            )
+            replayed_rows += 1
+            if request_context is not None and "market_prob" in request_context:
+                priced_rows += 1
+
             for tool_name in tools:
-                row_id = _make_row_id(tool_name, question, model)
+                row_id = _make_row_id(
+                    tool_name, question, model, with_market_context=with_market_context
+                )
                 if row_id in existing_ids:
                     skipped += 1
                     done += 1
@@ -461,12 +502,16 @@ def replay(
                     model=model,
                     api_keys=api_keys,
                     timeout=timeout,
-                    request_context=build_request_context(
-                        row, with_market_context=with_market_context
-                    ),
+                    request_context=request_context,
                 )
 
-                output_row = build_output_row(row, tool_name, model, result)
+                output_row = build_output_row(
+                    row,
+                    tool_name,
+                    model,
+                    result,
+                    with_market_context=with_market_context,
+                )
                 out.write(json.dumps(output_row) + "\n")
                 out.flush()
 
@@ -492,6 +537,33 @@ def replay(
         done - skipped,
         skipped,
         errors,
+    )
+    if with_market_context:
+        _log_market_context_coverage(priced_rows, replayed_rows)
+
+
+def _log_market_context_coverage(priced_rows: int, replayed_rows: int) -> None:
+    """Report how many replayed rows actually carried a price to the tool.
+
+    ``--market-context`` degrades per row: a dataset built without market
+    columns, or rows older than request schema 2.0, produce a blind context
+    without any error. A run that asked for the price and never forwarded one
+    is a blind run wearing the wrong label, so it is logged as a warning.
+
+    :param priced_rows: rows whose request_context carried ``market_prob``.
+    :param replayed_rows: rows that reached the tool loop.
+    """
+    if replayed_rows and priced_rows == 0:
+        log.warning(
+            "market context: 0/%d rows carried a usable price; this run is "
+            "effectively blind (dataset rows lack market_prob_at_prediction)",
+            replayed_rows,
+        )
+        return
+    log.info(
+        "market context: %d/%d rows carried a usable price",
+        priced_rows,
+        replayed_rows,
     )
 
 

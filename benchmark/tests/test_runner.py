@@ -34,6 +34,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from benchmark.runner import (
     _fetch_polymarket_description,
+    _make_row_id,
     build_output_row,
     build_request_context,
     extract_extras,
@@ -569,3 +570,107 @@ class TestBuildOutputRowMarketColumns:
         )
 
         assert _is_edge_eligible(row)
+
+
+# ---------------------------------------------------------------------------
+# --market-context: row identity and coverage reporting
+# ---------------------------------------------------------------------------
+
+
+def _replay_one_row(
+    tmp_path: Path,
+    row: dict[str, Any],
+    with_market_context: bool,
+) -> Path:
+    """Run replay() over one dataset row with the tool call mocked.
+
+    build_request_context is NOT mocked here: these tests care about what the
+    real context carried, not only that the flag was threaded through.
+
+    :param tmp_path: pytest temporary directory.
+    :param row: the dataset row to replay.
+    :param with_market_context: value to pass to replay().
+    :return: the output JSONL path (shared across calls in one test).
+    """
+    dataset = tmp_path / "dataset.jsonl"
+    replay_row = {**row, "source_content": {"mode": "cached", "sources": []}}
+    dataset.write_text(json.dumps(replay_row) + "\n", encoding="utf-8")
+    output = tmp_path / "out.jsonl"
+    with (
+        patch(f"{RUNNER}.build_keychain"),
+        patch(f"{RUNNER}.run_single") as mock_run,
+    ):
+        mock_run.return_value = dict(VALID_RESULT)
+        replay(
+            dataset_path=dataset,
+            output_path=output,
+            tools=["superforcaster-market-aware"],
+            model="test-model",
+            with_market_context=with_market_context,
+        )
+    return output
+
+
+class TestMarketContextRowIdentity:
+    """The flag is part of the row id so the A/B never silently no-ops."""
+
+    def test_flag_changes_row_id(self) -> None:
+        """A blind and a market-context replay of one question get distinct ids."""
+        blind = _make_row_id("t", "Will X ship?", "m")
+        priced = _make_row_id("t", "Will X ship?", "m", with_market_context=True)
+        assert blind != priced
+
+    def test_flag_off_keeps_legacy_id(self) -> None:
+        """Existing blind result files must still resume: off means unchanged."""
+        assert _make_row_id("t", "q", "m") == _make_row_id(
+            "t", "q", "m", with_market_context=False
+        )
+
+    def test_output_row_records_mode(self) -> None:
+        """The row says which mode produced it and carries the mode-specific id."""
+        blind = build_output_row(SCORED_ROW, "t", "m", VALID_RESULT)
+        priced = build_output_row(
+            SCORED_ROW, "t", "m", VALID_RESULT, with_market_context=True
+        )
+        assert blind["market_context"] is False
+        assert priced["market_context"] is True
+        assert blind["row_id"] != priced["row_id"]
+
+    def test_second_arm_writes_into_the_same_file(self, tmp_path: Path) -> None:
+        """Blind then market-context into one output file yields two rows."""
+        _replay_one_row(tmp_path, SCORED_ROW, with_market_context=False)
+        output = _replay_one_row(tmp_path, SCORED_ROW, with_market_context=True)
+
+        rows = [json.loads(line) for line in output.read_text().splitlines()]
+        assert [r["market_context"] for r in rows] == [False, True]
+        assert len({r["row_id"] for r in rows}) == 2
+
+
+class TestMarketContextCoverageLog:
+    """--market-context reports how many rows actually carried a price."""
+
+    def test_warns_when_no_row_carried_a_price(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dataset without market columns is a blind run and says so."""
+        bare = {k: v for k, v in SCORED_ROW.items() if k != "market_prob_at_prediction"}
+        with caplog.at_level("WARNING", logger=RUNNER):
+            _replay_one_row(tmp_path, bare, with_market_context=True)
+        assert "market context: 0/1 rows carried a usable price" in caplog.text
+
+    def test_reports_coverage_when_priced(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A row that forwarded its price is counted."""
+        with caplog.at_level("INFO", logger=RUNNER):
+            _replay_one_row(tmp_path, SCORED_ROW, with_market_context=True)
+        assert "market context: 1/1 rows carried a usable price" in caplog.text
+        assert "effectively blind" not in caplog.text
+
+    def test_silent_when_flag_off(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A blind run does not report market-context coverage at all."""
+        with caplog.at_level("INFO", logger=RUNNER):
+            _replay_one_row(tmp_path, SCORED_ROW, with_market_context=False)
+        assert "market context:" not in caplog.text

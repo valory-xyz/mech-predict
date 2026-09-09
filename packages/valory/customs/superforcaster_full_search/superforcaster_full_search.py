@@ -105,6 +105,7 @@ def with_key_rotation(func: Callable) -> Callable:
                         "confidence": 0.0,
                         "info_utility": 0.0,
                         "error": str(e),
+                        "error_type": type(e).__name__,
                     }
                 )
                 return error_json, "", None, None, None, api_keys

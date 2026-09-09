@@ -433,8 +433,22 @@ def with_key_rotation(func: Callable) -> Callable:
                         retries_left[service] -= 1
                         api_keys.rotate(service)
                 return execute()
-            except Exception as e:  # noqa: BLE001 — surface any error as a result
-                return str(e), "", None, None, None, api_keys
+            except Exception as e:  # noqa: BLE001
+                # Surface any error as a parseable null-prediction JSON
+                # (matches superforcaster_market_aware / factual_research) so
+                # a caller or the tournament scorer sees an explicit, typed
+                # error rather than a raw exception string.
+                error_json = json.dumps(
+                    {
+                        "p_yes": None,
+                        "p_no": None,
+                        "confidence": 0.0,
+                        "info_utility": 0.0,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
+                )
+                return error_json, "", None, None, None, api_keys
 
         return execute()
 

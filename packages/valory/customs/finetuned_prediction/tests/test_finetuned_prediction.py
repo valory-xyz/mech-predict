@@ -171,7 +171,7 @@ def test_key_rotation_appends_api_keys_on_success() -> None:
 
 
 def test_key_rotation_converts_exception_to_error_tuple() -> None:
-    """A raising tool call is converted into an error result tuple."""
+    """A raising tool call is converted into a typed error-null result."""
     keychain = FakeKeyChain({"finetuned": "EMPTY"})
 
     @with_key_rotation
@@ -179,7 +179,14 @@ def test_key_rotation_converts_exception_to_error_tuple() -> None:
         raise RuntimeError("boom")
 
     out = tool(api_keys=keychain)
-    assert out == ("boom", "", None, None, None, keychain)
+    assert out[1:] == ("", None, None, None, keychain)
+    parsed = json.loads(out[0])
+    assert parsed["p_yes"] is None
+    assert parsed["p_no"] is None
+    assert parsed["confidence"] == 0.0
+    assert parsed["info_utility"] == 0.0
+    assert parsed["error"] == "boom"
+    assert parsed["error_type"] == "RuntimeError"
 
 
 # ---------------------------------------------------------------------------

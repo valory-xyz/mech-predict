@@ -666,8 +666,22 @@ class TestV3RunEndToEnd:
             mock_llm_client.completions.return_value = mock_response
             MockManager.return_value.__enter__.return_value = mock_llm_client
             MockManager.return_value.__exit__.return_value = None
+            # Non-empty organic results: an all-empty retrieval now returns
+            # the flagged null prediction (issue #455) instead of calling
+            # the LLM, which is covered by its own tests.
             MockFetchSources.return_value = MagicMock(
-                json=MagicMock(return_value={"organic": []})
+                json=MagicMock(
+                    return_value={
+                        "organic": [
+                            {
+                                "title": "T",
+                                "link": "https://example.test",
+                                "snippet": "S",
+                                "position": 1,
+                            }
+                        ]
+                    }
+                )
             )
 
             result = v3_module.run(

@@ -8,9 +8,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeid3gdbuetsikbutcl4i32avmicucmmrqmtnwn7gw454uizs5322se
-  finetuned_prediction.py: bafybeige7fgqpcn2qzedk5y2sp35gr32rscpobl4blnud2huo3mf3cfkku
+  finetuned_prediction.py: bafybeigaervcxvx6bdmuwgeqb7righ4ip7x5harwlqxd2m5efl5ayfnyyy
   tests/__init__.py: bafybeieut53j2sz53firzcldhpqeh2ca6rdopnywd7dnyzis4hvsprfs3m
-  tests/test_finetuned_prediction.py: bafybeidxnrj2uxwpkkdab2zp2s2qv4i6ifftlwoyy3yuirjv64yo7xcr3q
+  tests/test_finetuned_prediction.py: bafybeib6ajjmwirqu2svbsdlsbxiyi6ze75qw3uvvhrn5e2enmptb44kde
 fingerprint_ignore_patterns: []
 entry_point: finetuned_prediction.py
 callable: run

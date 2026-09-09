@@ -93,10 +93,29 @@ TASK_DEADLINE = 240  # seconds, matches production
 # TODO: unify _make_row_id across runner, tournament, prompt_replay
 # & fetch_production into benchmark/tools.py
 def _make_row_id(
-    tool_name: str, market_id: str, market_platform: str, model: str
+    tool_name: str,
+    market_id: str,
+    market_platform: str,
+    model: str,
+    with_market_context: bool = False,
 ) -> str:
-    """Deterministic row ID from tool + market + platform + model."""
+    """Deterministic row ID from tool + market + platform + model (+ mode).
+
+    The market-context flag is part of the identity so a market already
+    predicted blind is re-run when the price is switched on, and the two
+    arms never collide in one results file. The suffix is only added when
+    the flag is on, so existing blind files still resume.
+
+    :param tool_name: tournament tool name.
+    :param market_id: the open-market row id.
+    :param market_platform: the market's platform.
+    :param model: LLM model identifier.
+    :param with_market_context: whether the market price was forwarded.
+    :return: the row id.
+    """
     payload = f"{tool_name}:{model}:{market_platform}:{market_id}"
+    if with_market_context:
+        payload += ":market_context"
     h = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return f"tourn_{tool_name}_{h}"
 
@@ -266,7 +285,12 @@ def build_request_context(market: dict[str, Any]) -> Optional[dict[str, Any]]:
     if not market_id or not platform:
         return None
 
-    context: dict[str, Any] = {"market_id": market_id, "type": platform}
+    # fetch_open prefixes ``id`` (``omen_<fpmm>`` / ``poly_<condition_id>``)
+    # and keeps the raw value the trader actually sends in ``market_address``.
+    context: dict[str, Any] = {
+        "market_id": market.get("market_address") or market_id,
+        "type": platform,
+    }
 
     market_prob = bounded_number(market.get("current_prob"), 0.0, 1.0)
     if market_prob is not None:
@@ -294,6 +318,7 @@ def build_output_row(
     model: str,
     run_result: dict[str, Any],
     cid: str,
+    with_market_context: bool = False,
 ) -> dict[str, Any]:
     """Build a tournament prediction row.
 
@@ -306,6 +331,9 @@ def build_output_row(
         tool emits beyond p_yes/p_no/confidence are kept under
         ``tool_extras`` so a market-aware tool's reasoning fields survive
         into the scored row.
+    :param with_market_context: whether the market price was forwarded on the
+        request_context; part of the row id and recorded as ``market_context``
+        so the results file says which mode produced each row.
     :return: dict ready to serialize as a JSONL row.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -313,10 +341,15 @@ def build_output_row(
 
     return {
         "row_id": _make_row_id(
-            tool_name, market.get("id", ""), market.get("platform", ""), model
+            tool_name,
+            market.get("id", ""),
+            market.get("platform", ""),
+            model,
+            with_market_context=with_market_context,
         ),
         "schema_version": "1.0",
         "mode": "tournament",
+        "market_context": with_market_context,
         "market_id": market.get("id"),
         "market_address": market.get("market_address"),
         "platform": market.get("platform", "unknown"),
@@ -374,7 +407,11 @@ def load_existing_row_ids(output_path: Path) -> set[str]:
 
 
 def _skipped_global_timeout_row(
-    market: dict[str, Any], tool_name: str, model: str, cid: str
+    market: dict[str, Any],
+    tool_name: str,
+    model: str,
+    cid: str,
+    with_market_context: bool = False,
 ) -> dict[str, Any]:
     """Build a row recording that we ran out of wall-clock budget."""
     return build_output_row(
@@ -392,6 +429,7 @@ def _skipped_global_timeout_row(
             "extras": {},
         },
         cid,
+        with_market_context=with_market_context,
     )
 
 
@@ -445,6 +483,7 @@ def run_tournament(
     timeout: int = TASK_DEADLINE,
     cache_dir: Optional[Path] = None,
     global_timeout: Optional[int] = None,
+    with_market_context: bool = False,
 ) -> None:
     """Run all tool x market combos and append predictions.
 
@@ -461,6 +500,11 @@ def run_tournament(
     :param global_timeout: optional wall-clock budget (seconds) for the whole
         run. When set, unprocessed combos after the budget is exceeded are
         recorded as ``skipped_global_timeout`` rows.
+    :param with_market_context: forward a trader-shaped request_context
+        (market price, close time, description) to every tool; see
+        :func:`build_request_context`. Off by default so a tool gets the
+        price by decision, not by roster membership, and a blind arm can be
+        run to measure what the price is worth.
     """
     tools = list(tools_to_cid.keys())
     markets = _select_markets(load_markets(markets_path), max_markets)
@@ -495,7 +539,9 @@ def run_tournament(
                 log.warning("Skipping market %s: no question_text", market.get("id"))
                 continue
 
-            request_context = build_request_context(market)
+            request_context = (
+                build_request_context(market) if with_market_context else None
+            )
 
             for tool_name in tools:
                 cid = tools_to_cid[tool_name]
@@ -504,6 +550,7 @@ def run_tournament(
                     market.get("id", ""),
                     market.get("platform", ""),
                     model,
+                    with_market_context=with_market_context,
                 )
                 if row_id in existing_ids:
                     skipped += 1
@@ -520,7 +567,13 @@ def run_tournament(
                         "combos as skipped_global_timeout",
                         global_timeout,
                     )
-                    row = _skipped_global_timeout_row(market, tool_name, model, cid)
+                    row = _skipped_global_timeout_row(
+                        market,
+                        tool_name,
+                        model,
+                        cid,
+                        with_market_context=with_market_context,
+                    )
                     out.write(json.dumps(row, ensure_ascii=False) + "\n")
                     out.flush()
                     errors += 1
@@ -538,7 +591,14 @@ def run_tournament(
                     cache_dir=cache_dir,
                     request_context=request_context,
                 )
-                output_row = build_output_row(market, tool_name, model, result, cid)
+                output_row = build_output_row(
+                    market,
+                    tool_name,
+                    model,
+                    result,
+                    cid,
+                    with_market_context=with_market_context,
+                )
                 out.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 out.flush()
                 _log_result(result)
@@ -623,6 +683,17 @@ def main() -> None:
             "are recorded as skipped_global_timeout (default: unset)"
         ),
     )
+    parser.add_argument(
+        "--market-context",
+        action="store_true",
+        help=(
+            "Forward a trader-shaped request_context (market price, close "
+            "time, description) to every tool, as production does. Off by "
+            "default; required by tools that read the price in production "
+            "(superforcaster-market-aware). Rows carry market_context=true "
+            "and a distinct row_id, so a blind arm can run alongside."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -652,6 +723,7 @@ def main() -> None:
         timeout=args.timeout,
         cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         global_timeout=args.global_timeout,
+        with_market_context=args.market_context,
     )
 
 

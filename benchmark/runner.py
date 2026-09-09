@@ -34,7 +34,9 @@ from benchmark.tools import (
     ToolTimeout,
     _can_use_sigalrm,
     alarm_handler,
+    bounded_number,
     build_keychain,
+    extract_extras,
     load_tool_run,
 )
 
@@ -59,10 +61,6 @@ DEFAULT_OUTPUT = Path(__file__).parent / "results" / "replay_results.jsonl"
 DEFAULT_MODEL = "gpt-4.1-2025-04-14"
 TASK_DEADLINE = 240  # seconds, matches production
 
-# Payload keys the scored schema already carries as first-class columns; every
-# other key a tool emits is kept under ``tool_extras``.
-CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
-
 
 # ---------------------------------------------------------------------------
 # Row ID generation
@@ -81,29 +79,6 @@ def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
 # ---------------------------------------------------------------------------
 # Core: run a single tool on a single question
 # ---------------------------------------------------------------------------
-
-
-def extract_extras(result_str: Any) -> dict[str, Any]:
-    """Return the payload keys a tool emits beyond the scored core fields.
-
-    Market-aware tools carry their reasoning in extra payload keys
-    (``p_independent``, ``researchability``, ``research_class``,
-    ``evidence_quality``). ``parse_tool_response`` drops them because
-    production only scores p_yes/p_no/confidence, so the replay runner keeps
-    them here instead. Anything that is not a JSON object yields ``{}``;
-    parsing never raises, because a tool that returns junk must still be
-    scored on its parse status rather than crash the run.
-
-    :param result_str: the tool's raw response string.
-    :return: the non-core payload keys, or an empty dict.
-    """
-    try:
-        payload = json.loads(result_str)
-    except (TypeError, ValueError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {k: v for k, v in payload.items() if k not in CORE_PAYLOAD_KEYS}
 
 
 def run_single(
@@ -263,25 +238,6 @@ def _fetch_polymarket_description(condition_id: str) -> str | None:
     return None
 
 
-def _bounded_number(value: Any, low: float, high: float) -> float | None:
-    """Return ``value`` as a float when it is a real number inside [low, high].
-
-    Rejects ``bool`` explicitly: ``isinstance(True, int)`` is True in Python, so
-    a stray boolean would otherwise become the number 1.0.
-
-    :param value: the raw dataset value.
-    :param low: inclusive lower bound.
-    :param high: inclusive upper bound.
-    :return: the value as a float, or None when unusable.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    numeric = float(value)
-    if not math.isfinite(numeric) or not low <= numeric <= high:
-        return None
-    return numeric
-
-
 def _add_market_context(
     context: dict[str, Any],
     dataset_row: dict[str, Any],
@@ -296,9 +252,7 @@ def _add_market_context(
     :param context: the request_context being built; mutated in place.
     :param dataset_row: one dataset row carrying the production market fields.
     """
-    market_prob = _bounded_number(
-        dataset_row.get("market_prob_at_prediction"), 0.0, 1.0
-    )
+    market_prob = bounded_number(dataset_row.get("market_prob_at_prediction"), 0.0, 1.0)
     if market_prob is not None:
         context["market_prob"] = market_prob
 
@@ -306,13 +260,13 @@ def _add_market_context(
     if isinstance(close_at, str) and close_at.strip():
         context["market_close_at"] = close_at.strip()
 
-    liquidity = _bounded_number(
+    liquidity = bounded_number(
         dataset_row.get("market_liquidity_at_prediction"), 0.0, math.inf
     )
     if liquidity is not None:
         context["market_liquidity_usd"] = liquidity
 
-    spread = _bounded_number(dataset_row.get("market_spread_at_prediction"), 0.0, 1.0)
+    spread = bounded_number(dataset_row.get("market_spread_at_prediction"), 0.0, 1.0)
     if spread is not None:
         context["market_spread"] = spread
 

@@ -28,12 +28,13 @@ from typing import Any, Optional
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 from benchmark.io import load_jsonl as load_markets
 from benchmark.ipfs_loader import IpfsFetchError
-from benchmark.runner import _bounded_number, extract_extras
 from benchmark.tools import (
     ToolTimeout,
     _can_use_sigalrm,
     alarm_handler,
+    bounded_number,
     build_keychain,
+    extract_extras,
     load_tool_run,
 )
 
@@ -267,7 +268,7 @@ def build_request_context(market: dict[str, Any]) -> Optional[dict[str, Any]]:
 
     context: dict[str, Any] = {"market_id": market_id, "type": platform}
 
-    market_prob = _bounded_number(market.get("current_prob"), 0.0, 1.0)
+    market_prob = bounded_number(market.get("current_prob"), 0.0, 1.0)
     if market_prob is not None:
         context["market_prob"] = market_prob
 

@@ -8,6 +8,8 @@ helpers used by runner.py, tournament.py, sweep.py, and notify_slack.py.
 from __future__ import annotations
 
 import importlib
+import json
+import math
 import os
 import platform
 import threading
@@ -337,6 +339,57 @@ def load_tool_run(
     run_fn = module.run
     _tool_cache[tool_name] = run_fn
     return run_fn
+
+
+# ---------------------------------------------------------------------------
+# Payload helpers shared by the replay and tournament runners
+# ---------------------------------------------------------------------------
+
+# Payload keys the scored schema already carries as first-class columns; every
+# other key a tool emits is kept under ``tool_extras``.
+CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
+
+
+def bounded_number(value: Any, low: float, high: float) -> Optional[float]:
+    """Return ``value`` as a float when it is a real number inside [low, high].
+
+    Rejects ``bool`` explicitly: ``isinstance(True, int)`` is True in Python, so
+    a stray boolean would otherwise become the number 1.0.
+
+    :param value: the raw dataset value.
+    :param low: inclusive lower bound.
+    :param high: inclusive upper bound.
+    :return: the value as a float, or None when unusable.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric) or not low <= numeric <= high:
+        return None
+    return numeric
+
+
+def extract_extras(result_str: Any) -> dict[str, Any]:
+    """Return the payload keys a tool emits beyond the scored core fields.
+
+    Market-aware tools carry their reasoning in extra payload keys
+    (``p_independent``, ``researchability``, ``research_class``,
+    ``evidence_quality``). ``parse_tool_response`` drops them because
+    production only scores p_yes/p_no/confidence, so the runners keep them
+    here instead. Anything that is not a JSON object yields ``{}``; parsing
+    never raises, because a tool that returns junk must still be scored on
+    its parse status rather than crash the run.
+
+    :param result_str: the tool's raw response string.
+    :return: the non-core payload keys, or an empty dict.
+    """
+    try:
+        payload = json.loads(result_str)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if k not in CORE_PAYLOAD_KEYS}
 
 
 # ---------------------------------------------------------------------------

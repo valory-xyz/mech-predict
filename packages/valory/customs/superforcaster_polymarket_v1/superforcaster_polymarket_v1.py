@@ -402,7 +402,7 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "Content-Type": "application/json",
     }
 
-# timeout matches the fleet's other Serper callers (superforcaster,
+    # timeout matches the fleet's other Serper callers (superforcaster,
     # superforcaster_calibrated_full_search, v4, market_aware); a hung
     # connection must not hold the task slot until the mech's configured
     # task_deadline (240s by default, 480s on these mechs).

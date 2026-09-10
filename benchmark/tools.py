@@ -295,12 +295,8 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         "finetuned": [os.environ.get("VLLM_API_KEY", "")],
         "finetuned_endpoint": [os.environ.get("VLLM_ENDPOINT", "")],
         # vLLM-backed Olas-Predict R1 14B tool
-        "vllm_server_api_key": [
-            os.environ.get("OLAS_PREDICT_R1_14B_API_KEY", "")
-        ],
-        "vllm_server_url": [
-            os.environ.get("OLAS_PREDICT_R1_14B_ENDPOINT", "")
-        ],
+        "vllm_server_api_key": [os.environ.get("OLAS_PREDICT_R1_14B_API_KEY", "")],
+        "vllm_server_url": [os.environ.get("OLAS_PREDICT_R1_14B_ENDPOINT", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
         "return_source_content": ["true" if return_source_content else "false"],
     }

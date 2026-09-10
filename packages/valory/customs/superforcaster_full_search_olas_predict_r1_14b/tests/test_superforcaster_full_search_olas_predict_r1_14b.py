@@ -25,9 +25,9 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 import requests
-import openai
 
 import packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b as module
 from packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b import (
@@ -86,9 +86,7 @@ class TestOpenAIClientManager:
         assert params[0] == "client"
 
 
-SF_MODULE = (
-    "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b"
-)
+SF_MODULE = "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b"
 
 FAKE_SERPER_RESPONSE = {
     "searchParameters": {"q": "test query", "type": "search"},
@@ -1053,15 +1051,15 @@ class TestOlasPredictWiring:
         assert module.DEFAULT_MODEL_SETTINGS["max_tokens"] == 1024
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_endpoint_comes_from_keychain(
-        self, mock_client_mgr: MagicMock
-    ) -> None:
+    def test_endpoint_comes_from_keychain(self, mock_client_mgr: MagicMock) -> None:
         """The vLLM base URL comes from the KeyChain (olas_predict_r1_14b_endpoint).
 
         The mech forwards the endpoint via the KeyChain, mirroring the
         finetuned_prediction pattern. The mock KeyChain has the endpoint
         service, so a successful run proves the URL reached the client from
         the KeyChain.
+
+        :param mock_client_mgr: Mocked OpenAIClientManager.
         """
         _stub_openai(mock_client_mgr)
         result = run(
@@ -1142,4 +1140,3 @@ class TestOlasPredictWiring:
     def test_unparseable_reasoning_completion_is_rejected(self) -> None:
         """A completion without prediction JSON does not produce a delivery."""
         assert canonical_prediction("Reasoning only.") is None
-

@@ -16,12 +16,38 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Contains the job definitions"""
+"""Olas-Predict-R1-14B forecasting tool.
+
+A sibling of `superforcaster_full_search` that keeps its evidence pipeline and
+prompt byte-for-byte and swaps the forecaster for Olas-Predict-R1-14B, a
+fine-tuned DeepSeek-R1-Distill-Qwen-14B served from a self-hosted vLLM
+endpoint (OpenAI-compatible, so the client differs only by `base_url`).
+
+WHY THE PARENT. The out-of-time evaluation scored this model on a vendored,
+byte-identical copy of `superforcaster_full_search`, swapping only the model.
+Forking it therefore ships the configuration that was measured rather than a
+new combination. On that evidence the model is level with GPT-4.1 on Omen and
+ahead of it on Polymarket; on snippet-only evidence it is behind, which is why
+this tool is full-search and has no snippet variant.
+
+WHAT DIFFERS FROM THE PARENT
+  * `base_url` on the OpenAI client, taken from the `endpoint` kwarg that the
+    mech forwards from its deployment config (env vars never reach a component
+    running as bytes published from IPFS).
+  * `max_tokens` 1024, not 500 -- a reasoning model needs room for its
+    <think> block before the four numeric fields, and at 500 the completion is
+    truncated before `p_yes` exists.
+  * `params.default_model` in component.yaml pins the served model; the mech
+    passes it through as the `model` kwarg, so no model branching lives here.
+
+Everything else -- search, page extraction, prompt, parsing -- is the parent's.
+"""
 
 import functools
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import (
     Any,
@@ -37,6 +63,8 @@ from typing import (
 
 import openai
 import requests
+from markdownify import markdownify as md
+from readability import Document as ReadabilityDocument
 from tiktoken import encoding_for_model
 
 MechResponseWithKeys = Tuple[
@@ -54,64 +82,6 @@ DEFAULT_DELIVERY_RATE = 100
 _MAX_SEARCH_QUERY_LEN = 150
 
 
-def _flagged_null_result(
-    *,
-    model: str,
-    temperature: float,
-    max_tokens: int,
-    captured_source_content: Optional[Dict[str, Any]],
-    return_source_content: bool,
-    counter_callback: Optional[Callable[..., Any]],
-    context: str,
-    tier: str,
-    scan_truncated: bool = False,
-) -> MechResponse:
-    """Build the flagged null prediction returned on empty retrieval.
-
-    Unlike the with_key_rotation error null this is a VALID prediction
-    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
-    trader consumer still parses it (issue #455). The on-chain JSON carries
-    only the four standard fields; the explicit marker for requesters lives in
-    used_params["empty_retrieval"] (off-chain metadata.params), intended for
-    off-chain consumers (not yet wired up -- the benchmark scorer's
-    null-vs-forecast branch is a follow-up).
-
-    :param model: the model name recorded in used_params.
-    :param temperature: the temperature recorded in used_params.
-    :param max_tokens: the max_tokens recorded in used_params.
-    :param captured_source_content: the (empty) retrieval capture.
-    :param return_source_content: whether to attach the capture to used_params.
-    :param counter_callback: the cost callback, threaded back unchanged.
-    :param context: why the null was produced; recorded unconditionally in
-        used_params["null_reason"] so a skipped Serper call ("empty query")
-        stays distinguishable from a genuine zero-hit ("live search").
-    :param tier: the parse_prompt tier that produced the search query.
-    :param scan_truncated: whether the scan window did not cover the whole
-        prompt (any non-template tier; a template match returns before the
-        window can matter).
-    :return: the flagged-null MechResponse tuple.
-    """
-    print(
-        f"[superforcaster-polymarket-v1] {context}: empty retrieval"
-        " -- returning null prediction"
-    )
-    null_result = json.dumps(
-        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
-    )
-    used_params: Dict[str, Any] = {
-        "model": model,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "empty_retrieval": True,
-        "null_reason": context,
-        "parse_tier": tier,
-        "scan_truncated": scan_truncated,
-    }
-    if return_source_content:
-        used_params["source_content"] = captured_source_content
-    return null_result, "", None, counter_callback, used_params
-
-
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -122,33 +92,35 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 # try with a new key again
-                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                if retries_left[VLLM_SERVER_API_KEY] <= 0:
                     raise e
-                retries_left["openai"] -= 1
-                retries_left["openrouter"] -= 1
-                api_keys.rotate("openai")
-                api_keys.rotate("openrouter")
+                retries_left[VLLM_SERVER_API_KEY] -= 1
+                api_keys.rotate(VLLM_SERVER_API_KEY)
                 return execute()
             except Exception as e:  # noqa: BLE001
                 # Return a parseable null-prediction JSON (matches
-                # superforcaster_market_aware / factual_research) so a caller
-                # or the tournament scorer sees an explicit, typed error
-                # rather than a raw exception string. Same key set as a normal
-                # delivery and the flagged null, so every exit path is
-                # schema-comparable downstream.
+                # factual_research) so downstream tournament scoring sees
+                # an explicit error rather than treating a raw exception
+                # string as a prediction.
                 error_json = json.dumps(
                     {
                         "p_yes": None,
@@ -161,23 +133,44 @@ def with_key_rotation(func: Callable) -> Callable:
                 )
                 return error_json, "", None, None, None, api_keys
 
-        mech_response = execute()
-        return mech_response
+        return execute()
 
     return wrapper
+
+
+# Self-hosted vLLM endpoint (OpenAI-compatible). The endpoint URL and API key
+# are deployment inputs passed via the KeyChain. The KeyChain carries the
+# vLLM server URL, the vLLM server API key, and the non-secret settings the
+# parent already routes through it: return_source_content, source_content_mode.
+#
+# The endpoint is AUTHENTICATED -- it is not an open vLLM. The evaluation
+# supplied the endpoint URL, API key, and authorization type and
+# built the client with an EXPLICIT Authorization header, because the gateway in
+# front of vLLM does not necessarily accept the SDK's own plain `Bearer`. We
+# mirror that here rather than relying on the SDK default.
+VLLM_SERVER_URL = "vllm_server_url"
+VLLM_SERVER_API_KEY = "vllm_server_api_key"
+DEFAULT_AUTH_TYPE = "Bearer"
 
 
 class OpenAIClientManager:
     """Client context manager for OpenAI."""
 
-    def __init__(self, api_key: str):
-        """Initializes with API keys"""
+    def __init__(self, api_key: str, base_url: str,
+                 auth_type: str = DEFAULT_AUTH_TYPE):  # noqa: DAR101
+        """Initializes with the vLLM key, base URL and auth scheme"""
         self.api_key = api_key
+        self.base_url = base_url
+        self.auth_type = auth_type
         self._client: Optional["OpenAIClient"] = None
 
     def __enter__(self) -> "OpenAIClient":
         """Initializes and returns LLM client."""
-        self._client = OpenAIClient(api_key=self.api_key)
+        self._client = OpenAIClient(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            auth_type=self.auth_type,
+        )
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
@@ -206,16 +199,28 @@ class OpenAIResponse:
     def __init__(self, content: Optional[str] = None, usage: Optional[Usage] = None):
         """Initializes with content and usage class."""
         self.content = content
-        self.usage = Usage()
+        self.usage = usage if usage is not None else Usage()
 
 
 class OpenAIClient:
     """OpenAI Client"""
 
-    def __init__(self, api_key: str):
-        """Initializes with API keys and client."""
+    def __init__(self, api_key: str, base_url: str,
+                 auth_type: str = DEFAULT_AUTH_TYPE):
+        """Initializes a client bound to the authenticated vLLM endpoint.
+
+        :param api_key: API key for the vLLM gateway.
+        :param base_url: OpenAI-compatible vLLM endpoint URL.
+        :param auth_type: Authorization scheme expected by the gateway.
+        """
         self.api_key = api_key
-        self.client = openai.OpenAI(api_key=self.api_key)
+        self.base_url = base_url
+        self.auth_type = auth_type
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+            default_headers={"Authorization": f"{auth_type} {api_key}"},
+        )
 
     def completions(
         self,
@@ -235,7 +240,7 @@ class OpenAIClient:
             temperature=temperature,
             max_tokens=max_tokens,
             n=1,
-            timeout=150,
+            timeout=timeout if timeout is not None else 150,
             stop=None,
         )
         response = OpenAIResponse()
@@ -247,34 +252,68 @@ class OpenAIClient:
 
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
-    enc = encoding_for_model(model)
+    try:
+        enc = encoding_for_model(model)
+    except KeyError:
+        from tiktoken import get_encoding  # pylint: disable=import-outside-toplevel
+
+        enc = get_encoding("o200k_base")
     return len(enc.encode(text))
 
 
-# max_tokens matches the rest of the superforcaster fleet and this tool's own
-# limit_max_tokens. At 500 a free-text prompt truncates mid-reasoning and the
-# delivery carries no parseable JSON at all: the model emits its evidence
-# block before the verdict, and observed free-text completions run 786-1016
-# tokens. It is a ceiling, not a spend -- trader-template requests still
-# complete in well under 100 tokens.
-DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 4096,
-    "limit_max_tokens": 4096,
+# max_tokens is 1024, not the parent's 500. Olas-Predict-R1-14B is a reasoning
+# model: it emits a <think> block before the four numeric fields, so at 500 the
+# completion is truncated before `p_yes` is ever written and the answer is
+# unusable. 1024 is the budget the out-of-time evaluation used.
+DEFAULT_MODEL_SETTINGS = {
+    "max_tokens": 1024,
     "temperature": 0,
 }
-DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
-ALLOWED_TOOLS = ["superforcaster-polymarket-v1"]
-ALLOWED_MODELS = [DEFAULT_OPENAI_MODEL]
+# Informational only: the mech resolves the model from `params.default_model`
+# in component.yaml and passes it as the `model` kwarg.
+DEFAULT_MODEL = "qwen-14b-sft"
+# The Olas-Predict served model emits reasoning followed by JSON, often inside
+# a markdown fence. The delivery must contain only the validated JSON object.
+THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+JSON_RE = re.compile(r"\{[^}]*\}")
+# Two wire names, one package: the code is identical for both platforms (the
+# evaluation ran this same pipeline on Omen and Polymarket), and separate names
+# let the two be scored, promoted and served independently.
+TOOL_OMEN = "superforcaster_full_search_olas_predict_r1_14b_omen"
+TOOL_POLYMARKET = "superforcaster_full_search_olas_predict_r1_14b_polymarket"
+ALLOWED_TOOLS = [TOOL_OMEN, TOOL_POLYMARKET]
+
+
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
+
+# Evidence-gathering: fetch full page content for the top organic results so
+# the forecaster reasons over article text, not just Serper snippets.
+MAX_PAGES_TO_SCRAPE = 5
+_MAX_PAGE_WORDS = 400
+_PAGE_FETCH_TIMEOUT_S = 10
+_SCRAPE_POOL_WORKERS = 6
+_IMG_TAG_PATTERN = re.compile(r"<img[^>]*>", re.IGNORECASE)
+_SCRIPT_STYLE_PATTERN = re.compile(
+    r"<(script|style|noscript)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
+)
+
+# Cap on the rendered <background> evidence block to bound prompt size and
+# avoid lost-in-the-middle degradation when an outlier page returns a very
+# long body. Trailing organic items are dropped (Serper orders by relevance)
+# until the rendered block fits. Same trailing-drop pattern as
+# factual_research (which caps at 3000); budget set to 4000 here to fit
+# observed evidence sizes with headroom. Not load-bearing for gpt-4.1's
+# 1M context but bounds cost and guards against outlier pages.
+MAX_EVIDENCE_TOKENS = 4000
 
 
 PREDICTION_PROMPT = """
 You are an advanced AI system which has been finetuned to provide calibrated probabilistic
 forecasts under uncertainty, with your performance evaluated according to the Brier score. When
-forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly “small” probabilities,
-or 90% (9:1) and 99% (99:1) as similarly “high” probabilities. As the odds show, they are
+forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly "small" probabilities,
+or 90% (9:1) and 99% (99:1) as similarly "high" probabilities. As the odds show, they are
 markedly different, so output your probabilities accordingly.
 
 Question:
@@ -360,6 +399,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -372,11 +412,15 @@ def generate_prediction_with_retry(
                 stop=None,
             )
 
-            if (
-                response
-                and response.content is not None
-                and counter_callback is not None
-            ):
+            # A refusal / empty completion yields content=None. Surface it as
+            # an error (mirrors the calibrated sibling's `parsed is None`
+            # guard) so the decorator's error JSON carries the real reason
+            # instead of returning None as the prediction and tripping
+            # json.loads(None) downstream in tournament scoring.
+            if response is None or response.content is None:
+                raise ValueError("Model returned no content (possible refusal)")
+
+            if counter_callback is not None:
                 counter_callback(
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
@@ -384,16 +428,181 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            content = response.content if response else None
-            return content, counter_callback
-        except Exception as e:
+            return response.content, counter_callback
+        except openai.RateLimitError:
+            # Let with_key_rotation select a new Olas-Predict key and rebuild the
+            # OpenAI-compatible client before retrying.
+            raise
+        except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
-def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:
+def _coerce_unit_interval(value: Any, default: float = 0.5) -> float:
+    """Coerce a value to a float in [0, 1], falling back to `default`."""
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not 0.0 <= coerced <= 1.0:
+        return default
+    return coerced
+
+
+def canonical_prediction(completion: Optional[str]) -> Optional[str]:
+    """Build the delivery JSON from an Olas-Predict reasoning completion.
+
+    :param completion: Raw completion from the Olas-Predict endpoint.
+    :return: Clean prediction JSON, or None when no valid p_yes exists.
+    """
+    if not completion:
+        return None
+    match = JSON_RE.search(THINK_BLOCK_RE.sub("", completion))
+    if match is None:
+        return None
+    try:
+        prediction = json.loads(match.group(0))
+        p_yes = float(prediction["p_yes"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+    if not 0.0 <= p_yes <= 1.0:
+        return None
+    return json.dumps(
+        {
+            "p_yes": p_yes,
+            "p_no": round(1.0 - p_yes, 6),
+            "confidence": _coerce_unit_interval(prediction.get("confidence")),
+            "info_utility": _coerce_unit_interval(
+                prediction.get("info_utility")
+            ),
+        }
+    )
+
+
+def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
+    """Extract main article text from HTML via readability + markdownify."""
+    cleaned = _SCRIPT_STYLE_PATTERN.sub("", html)
+    cleaned = _IMG_TAG_PATTERN.sub("", cleaned)
+    article_html = ReadabilityDocument(cleaned).summary()
+    text = md(article_html, heading_style="ATX", strip=["img", "figure"])
+    if not text or not text.strip():
+        return None
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]) + " [...]"
+    return text.strip()
+
+
+def _fetch_page_content(
+    url: str,
+    mode: str = "cleaned",
+    max_words: int = _MAX_PAGE_WORDS,
+    timeout: int = _PAGE_FETCH_TIMEOUT_S,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Fetch a URL and return (cleaned_text, capture_payload).
+
+    `capture_payload` is the raw HTML when mode=="raw" (for full-fidelity
+    replay) and the cleaned text otherwise. Returns (None, None) on any
+    fetch / parse failure -- the caller falls back to the Serper snippet.
+
+    :param url: The URL to fetch.
+    :param mode: ``"cleaned"`` stores extracted text; ``"raw"`` stores HTML.
+    :param max_words: Maximum number of words to keep in the cleaned text.
+    :param timeout: Request timeout in seconds.
+    :return: Tuple of (cleaned text for the LLM prompt, payload to store
+        for replay).
+    """
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; MechBot/1.0)"},
+        )
+        if resp.status_code != 200:
+            return None, None
+        if "text/html" not in resp.headers.get("Content-Type", ""):
+            return None, None
+        text = _clean_html(resp.text, max_words=max_words)
+        if not text:
+            return None, None
+        capture = resp.text if mode == "raw" else text
+        return text, capture
+    except Exception as e:  # noqa: BLE001 -- best-effort scrape, never raise
+        print(f"[superforcaster_full_search_olas_predict_r1_14b] Failed to fetch {url}: {e}")
+        return None, None
+
+
+def _scrape_pages(
+    organic_data: List[Dict[str, Any]],
+    mode: str,
+    max_pages: int = MAX_PAGES_TO_SCRAPE,
+) -> Dict[str, str]:
+    """Concurrently scrape the top organic links and attach `content` in place.
+
+    Returns the capture dict {url: cleaned_text_or_raw_html} for replay. The
+    organic items themselves are mutated to add a `content` key when the
+    scrape succeeds, so format_sources_data() can render it alongside the
+    snippet without other plumbing.
+
+    :param organic_data: Serper organic-result dicts (mutated in place to
+        add a ``content`` key on successful scrapes).
+    :param mode: ``"cleaned"`` stores extracted text in the capture dict;
+        ``"raw"`` stores raw HTML.
+    :param max_pages: Cap on how many top results to scrape.
+    :return: Capture dict ``{url: cleaned_text_or_raw_html}`` for replay.
+    """
+    captured: Dict[str, str] = {}
+    items_to_scrape = [it for it in organic_data[:max_pages] if it.get("link")]
+    if not items_to_scrape:
+        return captured
+
+    with ThreadPoolExecutor(max_workers=_SCRAPE_POOL_WORKERS) as pool:
+        future_to_item = {
+            pool.submit(_fetch_page_content, item["link"], mode): item
+            for item in items_to_scrape
+        }
+        for fut in as_completed(future_to_item):
+            item = future_to_item[fut]
+            try:
+                text, capture = fut.result()
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[superforcaster_full_search_olas_predict_r1_14b] Scrape error for {item['link']}: {e}"
+                )
+                continue
+            if text:
+                item["content"] = text
+            if capture:
+                captured[item["link"]] = capture
+    return captured
+
+
+def _hydrate_organic_from_pages(
+    organic_data: List[Dict[str, Any]],
+    pages: Dict[str, str],
+    mode: str,
+) -> None:
+    """Replay path: re-attach cached page content to organic items in place."""
+    if not pages:
+        return
+    for item in organic_data:
+        cached = pages.get(item.get("link", ""))
+        if cached is None:
+            continue
+        if mode == "raw":
+            text = _clean_html(cached)
+            if text:
+                item["content"] = text
+        else:
+            item["content"] = cached
+
+
+def fetch_additional_sources(question: str, serper_api_key: str) -> requests.Response:
     """Fetches additional sources for the given question using the Serper API."""
     url = "https://google.serper.dev/search"
     payload = json.dumps({"q": question})
@@ -401,14 +610,9 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "X-API-KEY": serper_api_key,
         "Content-Type": "application/json",
     }
-
-# timeout matches the fleet's other Serper callers (superforcaster,
-    # superforcaster_calibrated_full_search, v4, market_aware); a hung
-    # connection must not hold the task slot until the mech's configured
-    # task_deadline (240s by default, 480s on these mechs).
-    response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
-
-    return response
+    # timeout matches the fleet's other Serper callers (factual_research,
+    # prediction_request, ...); without it a hung connection blocks the run.
+    return requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
 
 def format_sources_data(organic_data: Any, misc_data: Any) -> str:
@@ -427,6 +631,9 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
             - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
             - **Snippet:** {item.get("snippet", 'N/A')}
             """
+            content = item.get("content")
+            if content:
+                sources += f"            - **Content:** {content}\n"
 
     if len(misc_data) > 0:
         print("Adding misc data...")
@@ -442,6 +649,41 @@ def format_sources_data(organic_data: Any, misc_data: Any) -> str:
             counter += 1
 
     return sources
+
+
+def _cap_evidence_block(
+    organic_data: List[Dict[str, Any]],
+    misc_data: List[Dict[str, Any]],
+    model: str,
+    max_tokens: int = MAX_EVIDENCE_TOKENS,
+) -> str:
+    """Render the evidence block, dropping trailing organic items until it fits.
+
+    Same trailing-drop pattern as factual_research (which caps at 3000;
+    4000 here): Serper orders organic results by relevance so trailing
+    drops are cheapest. If the block still exceeds the budget once all
+    organic items are gone, the result is returned as-is (peopleAlsoAsk is
+    small and not separately trimmed).
+
+    :param organic_data: Serper organic results (already capped to MAX_SOURCES).
+    :param misc_data: Serper peopleAlsoAsk items.
+    :param model: model name for tokeniser selection.
+    :param max_tokens: target ceiling on the rendered block.
+    :return: rendered evidence string, with a truncation marker if items were dropped.
+    """
+    rendered = format_sources_data(organic_data, misc_data)
+    if count_tokens(rendered, model) <= max_tokens or not organic_data:
+        return rendered
+
+    trimmed = list(organic_data)
+    while (
+        trimmed
+        and count_tokens(format_sources_data(trimmed, misc_data), model) > max_tokens
+    ):
+        trimmed.pop()
+    rendered = format_sources_data(trimmed, misc_data)
+    rendered += "\n[... evidence truncated ...]\n"
+    return rendered
 
 
 # Matches from 'question "' to '" and the `yes`' to handle nested quotes.
@@ -632,6 +874,80 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
     return ParsedPrompt(prompt, query, tier)
 
 
+def _flagged_null_result(
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    captured_source_content: Optional[Dict[str, Any]],
+    return_source_content: bool,
+    counter_callback: Optional[Callable[..., Any]],
+    context: str,
+    tier: str,
+    scan_truncated: bool = False,
+) -> MechResponse:
+    """Build the flagged null prediction returned on empty retrieval.
+
+    Unlike _null_prediction_response this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
+    trader consumer still parses it (issue #455). The on-chain JSON carries
+    only the four standard fields; the explicit marker for requesters lives in
+    used_params["empty_retrieval"] (off-chain metadata.params), intended for
+    off-chain consumers (not yet wired up -- the benchmark scorer's
+    null-vs-forecast branch is a follow-up).
+
+    :param model: the model name recorded in used_params.
+    :param temperature: the temperature recorded in used_params.
+    :param max_tokens: the max_tokens recorded in used_params.
+    :param captured_source_content: the (empty) retrieval capture.
+    :param return_source_content: whether to attach the capture to used_params.
+    :param counter_callback: the cost callback, threaded back unchanged.
+    :param context: why the null was produced; recorded unconditionally in
+        used_params["null_reason"] so a skipped Serper call ("empty query")
+        stays distinguishable from a genuine zero-hit ("live search").
+    :param tier: the parse_prompt tier that produced the search query.
+    :param scan_truncated: whether the scan window did not cover the whole
+        prompt (any non-template tier; a template match returns before the
+        window can matter).
+    :return: the flagged-null MechResponse tuple.
+    """
+    print(
+        f"[superforcaster_full_search_olas_predict_r1_14b] {context}: empty retrieval"
+        " -- returning null prediction"
+    )
+    null_result = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    used_params: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        # Off-chain markers distinguishing a flagged null from a genuine
+        # max-uncertainty forecast and recording the derivation tier
+        # (matches superforcaster-polymarket-v4).
+        "empty_retrieval": True,
+        "null_reason": context,
+        "parse_tier": tier,
+        "scan_truncated": scan_truncated,
+    }
+    if return_source_content:
+        used_params["source_content"] = captured_source_content
+    return null_result, "", None, counter_callback, used_params
+
+
+def _optional_key(api_keys: Any, service: str) -> Optional[str]:
+    """Return the key for `service`, or None if the KeyChain lacks it.
+
+    :param api_keys: KeyChain-like mapping of service names to values.
+    :param service: Service name to retrieve.
+    :return: The configured value, or None when absent.
+    """
+    try:
+        return api_keys[service]
+    except Exception:  # noqa: BLE001 - KeyChain raises various types when absent
+        return None
+
+
 @with_key_rotation
 def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     """Run the task"""
@@ -659,7 +975,26 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         return max_cost
 
-    openai_api_key = kwargs["api_keys"]["openai"]
+    api_keys = kwargs["api_keys"]
+    # The endpoint is authenticated, so the key is REQUIRED. Failing loudly here
+    # beats sending an unauthenticated request and surfacing a 401 as a generic
+    # tool error.
+    llm_api_key = _optional_key(api_keys, VLLM_SERVER_API_KEY)
+    if not llm_api_key:
+        raise ValueError(
+            f"No API key for the forecasting endpoint: set "
+            f"'{VLLM_SERVER_API_KEY}' in the mech's API_KEYS."
+        )
+    # The endpoint is a deployment input passed via the KeyChain under
+    # `vllm_server_url`. It is required: a silent localhost
+    # fallback would hide a misconfigured deployment behind a connection error
+    # to the wrong host.
+    endpoint = _optional_key(api_keys, VLLM_SERVER_URL)
+    if not endpoint:
+        raise ValueError(
+            "No endpoint for the forecasting service: set "
+            f"'{VLLM_SERVER_URL}' in the mech's API_KEYS."
+        )
     source_content = kwargs.get("source_content", None)
     return_source_content = (
         kwargs["api_keys"].get("return_source_content", "false") == "true"
@@ -669,9 +1004,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         raise ValueError(
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
-    with OpenAIClientManager(openai_api_key) as llm_client:
-        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
-        temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
+    with OpenAIClientManager(llm_api_key, endpoint) as llm_client:
+        max_tokens = kwargs.get("max_tokens", DEFAULT_MODEL_SETTINGS["max_tokens"])
+        temperature = kwargs.get("temperature", DEFAULT_MODEL_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
         today = date.today()
@@ -686,18 +1021,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
         if scan_truncated:
             print(
-                f"[superforcaster-polymarket-v1] Scan window exhausted: "
+                f"[superforcaster_full_search_olas_predict_r1_14b] Scan window exhausted: "
                 f"prompt is {len(prompt)} chars, scanned the first "
                 f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
             )
         elif tier == "raw":
             print(
-                "[superforcaster-polymarket-v1] No question clause found; "
+                "[superforcaster_full_search_olas_predict_r1_14b] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
             )
         elif tier == "clause":
             print(
-                f"[superforcaster-polymarket-v1] Free-text prompt (tier={tier}); "
+                f"[superforcaster_full_search_olas_predict_r1_14b] Free-text prompt (tier={tier}); "
                 f"derived search query: {search_query!r}"
             )
 
@@ -708,6 +1043,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             organic_data, misc_data = _shape_serper_sources(
                 serper_data, "cached replay"
             )
+            # Shallow-copy each organic item so attaching `content` does not
+            # mutate the caller's cached source_content payload.
+            organic_data = [dict(it) for it in organic_data]
             if not organic_data and not misc_data:
                 return _flagged_null_result(
                     model=model,
@@ -720,7 +1058,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                     tier=tier,
                     scan_truncated=scan_truncated,
                 )
-            sources = format_sources_data(organic_data, misc_data)
+            cached_pages = source_content.get("pages", {})
+            cached_mode = source_content.get("mode", source_content_mode)
+            _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
+            sources = _cap_evidence_block(organic_data, misc_data, model)
         else:
             if not any(ch.isalnum() for ch in search_query):
                 # Nothing searchable: no alphanumeric character at all (empty,
@@ -739,34 +1080,48 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 )
             serper_api_key = kwargs["api_keys"]["serperapi"]
             print("Fetching additional sources...")
+            # Use the compressed search_query instead of the full prompt so
+            # Serper returns organic results for free-text callers (issue #455).
             serper_response = fetch_additional_sources(search_query, serper_api_key)
-            # Raise on a 4xx/5xx error body (credit / auth error) instead of
-            # calling .json() on it and feeding the model an empty <background>
-            # block that looks like a healthy run (matches the fleet pattern).
+            # Surface HTTP errors with a real status code instead of crashing
+            # .json() on a non-JSON 4xx/5xx body (matches the fleet pattern).
             serper_response.raise_for_status()
             sources_data = serper_response.json()
-            # mode tag included for consistency across tools; content is identical
-            # regardless of mode since Serper returns structured JSON, not HTML
-            captured_source_content = {
-                "mode": source_content_mode,
-                "serper_response": sources_data,
-            }
             print(f"Additional sources fetched: {sources_data}")
             organic_data, misc_data = _shape_serper_sources(sources_data, "live search")
+            # Shallow-copy organic items: _scrape_pages attaches `content`,
+            # and we don't want that leaking into the captured serper_response.
+            organic_data = [dict(it) for it in organic_data]
+            # Empty-retrieval guard: even a correct short query can fail
+            # (e.g. very niche or recent market). Placed BEFORE the scraping
+            # step so empty retrieval wastes no page fetches (issue #455).
             if not organic_data and not misc_data:
                 return _flagged_null_result(
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    captured_source_content=captured_source_content,
+                    captured_source_content={
+                        "mode": source_content_mode,
+                        "serper_response": sources_data,
+                    },
                     return_source_content=return_source_content,
                     counter_callback=counter_callback,
                     context="live search",
                     tier=tier,
                     scan_truncated=scan_truncated,
                 )
-            print("Formating sources...")
-            sources = format_sources_data(organic_data, misc_data)
+            print("Scraping page content for top organic results...")
+            captured_pages = _scrape_pages(organic_data, source_content_mode)
+            print(
+                f"Scraped {len(captured_pages)}/{min(MAX_SOURCES, len(organic_data))} pages."
+            )
+            captured_source_content = {
+                "mode": source_content_mode,
+                "serper_response": sources_data,
+                "pages": captured_pages,
+            }
+            print("Formatting sources...")
+            sources = _cap_evidence_block(organic_data, misc_data, model)
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(
@@ -778,7 +1133,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting prompt response...")
-        extracted_block, counter_callback = generate_prediction_with_retry(
+        completion, counter_callback = generate_prediction_with_retry(
             client=llm_client,
             model=model,
             messages=messages,
@@ -788,6 +1143,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             delay=COMPLETION_DELAY,
             counter_callback=counter_callback,
         )
+        extracted_block = canonical_prediction(completion)
+        if extracted_block is None:
+            raise ValueError("Model output did not contain a parseable p_yes.")
 
         used_params = {
             "model": model,

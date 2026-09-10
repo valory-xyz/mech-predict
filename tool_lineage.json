@@ -201,6 +201,14 @@
     "superforcaster-market-aware": {
       "parent": "superforcaster_full_search",
       "reason": "Market-aware variant of the full-page-search superforcaster: adds structured outputs, an optional market-context input read from request_context, and a researchability assessment."
+    },
+    "superforcaster_full_search_olas_predict_r1_14b_omen": {
+      "parent": "superforcaster_full_search",
+      "reason": "Model swap on superforcaster-full-search: same evidence pipeline and forecasting prompt, with the forecaster replaced by Olas-Predict-R1-14B (fine-tuned DeepSeek-R1-Distill-Qwen-14B, self-hosted vLLM). The out-of-time evaluation scored this model on a byte-identical copy of the parent, so the tool ships the configuration that was measured; max_tokens is 1024 rather than 500 to leave room for the <think> block."
+    },
+    "superforcaster_full_search_olas_predict_r1_14b_polymarket": {
+      "parent": "superforcaster_full_search_olas_predict_r1_14b_omen",
+      "reason": "Polymarket-facing wire name for the same package, so the two platforms can be scored, promoted and served independently. The code is identical: the evaluation ran one full-search pipeline across both platforms."
     }
   }
 }

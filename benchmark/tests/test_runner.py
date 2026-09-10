@@ -563,6 +563,32 @@ class TestBuildOutputRowMarketColumns:
 
         assert row["tool_extras"] == {}
 
+    @pytest.mark.parametrize(
+        "bad_prob",
+        [1.7, float("nan"), True, "0.4"],
+        ids=["range", "nan", "bool", "str"],
+    )
+    def test_row_rejects_what_the_context_rejects(self, bad_prob: Any) -> None:
+        """A price the tool never saw is not recorded as if it had."""
+        row = build_output_row(
+            {**SCORED_ROW, "market_prob_at_prediction": bad_prob},
+            "superforcaster-market-aware",
+            "m",
+            VALID_RESULT,
+        )
+        assert row["market_prob_at_prediction"] is None
+        assert not _is_edge_eligible(row)
+
+    def test_carries_market_spread(self) -> None:
+        """The spread the tool could have seen is recorded for audit."""
+        row = build_output_row(
+            {**SCORED_ROW, "market_spread_at_prediction": 0.05},
+            "superforcaster-market-aware",
+            "m",
+            VALID_RESULT,
+        )
+        assert row["market_spread_at_prediction"] == 0.05
+
     def test_scorer_sees_an_edge_row(self) -> None:
         """The built row satisfies the scorer's edge-row predicate end to end."""
         row = build_output_row(
@@ -666,6 +692,34 @@ class TestMarketContextCoverageLog:
             _replay_one_row(tmp_path, SCORED_ROW, with_market_context=True)
         assert "market context: 1/1 rows carried a usable price" in caplog.text
         assert "effectively blind" not in caplog.text
+
+    def test_warns_on_partial_coverage(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A dataset where only some rows carry a price is called out."""
+        dataset = tmp_path / "dataset.jsonl"
+        priced = {**SCORED_ROW, "source_content": {"mode": "cached", "sources": []}}
+        blind = {k: v for k, v in priced.items() if k != "market_prob_at_prediction"}
+        blind["question_text"] = "Will Y ship?"
+        dataset.write_text(
+            json.dumps(priced) + "\n" + json.dumps(blind) + "\n", encoding="utf-8"
+        )
+        with (
+            patch(f"{RUNNER}.build_keychain"),
+            patch(f"{RUNNER}.run_single") as mock_run,
+            caplog.at_level("WARNING", logger=RUNNER),
+        ):
+            mock_run.return_value = dict(VALID_RESULT)
+            replay(
+                dataset_path=dataset,
+                output_path=tmp_path / "out.jsonl",
+                tools=["superforcaster-market-aware"],
+                model="test-model",
+                with_market_context=True,
+            )
+        assert "market context: 1/2 rows carried a usable price; 1 ran blind" in (
+            caplog.text
+        )
 
     def test_silent_when_flag_off(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

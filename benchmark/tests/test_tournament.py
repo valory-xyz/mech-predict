@@ -46,7 +46,7 @@ def _market(
     market_id: str = "omen_0xabc",
     question: str = "Will X happen?",
     platform: str = "omen",
-    prob: float = 0.65,
+    prob: float | None = 0.65,
     close_date: str | None = None,
     category: str = "politics",
 ) -> dict[str, Any]:
@@ -457,7 +457,7 @@ class TestBuildRequestContext:
             prob=0.42,
             close_date="2026-10-01T00:00:00Z",
         )
-        market["description"] = "Resolves YES if X occurs before the close date."
+        market["usd_liquidity"] = 1500.5
 
         context = build_request_context(market)
 
@@ -466,8 +466,21 @@ class TestBuildRequestContext:
             "type": "polymarket",
             "market_prob": 0.42,
             "market_close_at": "2026-10-01T00:00:00Z",
-            "description": "Resolves YES if X occurs before the close date.",
+            "market_liquidity_usd": 1500.5,
         }
+
+    @pytest.mark.parametrize(
+        "liquidity",
+        [None, -1.0, "100", True],
+        ids=["none", "negative", "string", "bool"],
+    )
+    def test_unusable_liquidity_is_omitted(self, liquidity: Any) -> None:
+        """An absent or invalid liquidity is dropped, not forwarded as junk."""
+        market = _market()
+        market["usd_liquidity"] = liquidity
+        context = build_request_context(market)
+        assert context is not None
+        assert "market_liquidity_usd" not in context
 
     def test_market_id_is_the_raw_address_not_the_prefixed_row_id(self) -> None:
         """The trader sends the bare condition id / FPMM address, not poly_/omen_."""
@@ -549,13 +562,10 @@ class TestBuildRequestContext:
         assert "description" not in context
         mock_get.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "description", ["", "   ", None, 42], ids=["empty", "blank", "none", "number"]
-    )
-    def test_unusable_description_is_omitted(self, description: Any) -> None:
-        """An empty or non-string description is dropped."""
+    def test_description_is_never_forwarded(self) -> None:
+        """open_markets.jsonl carries no rules; a stray key is not forwarded either."""
         market = _market("poly_0x1", platform="polymarket")
-        market["description"] = description
+        market["description"] = "Resolves YES if X occurs."
         context = build_request_context(market)
         assert context is not None
         assert "description" not in context
@@ -788,6 +798,33 @@ class TestRunTournamentRequestContext:
         rows = [json.loads(line) for line in output_path.read_text().splitlines()]
         assert [r["market_context"] for r in rows] == [False, True]
         assert len({r["row_id"] for r in rows}) == 2
+
+    @patch("benchmark.tournament.build_keychain")
+    @patch("benchmark.tournament.run_single")
+    def test_warns_when_no_market_carried_a_price(
+        self,
+        mock_run: MagicMock,
+        mock_keys: MagicMock,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """--market-context with unpriced markets is reported, not silent."""
+        mock_keys.return_value = MagicMock()
+        mock_run.return_value = _run_result()
+        markets_path = tmp_path / "markets.jsonl"
+        output_path = tmp_path / "predictions.jsonl"
+        markets_path.write_text(json.dumps(_market(prob=None)) + "\n")
+
+        with caplog.at_level("WARNING", logger="benchmark.tournament"):
+            run_tournament(
+                markets_path,
+                output_path,
+                {"superforcaster-market-aware": "bafycid1"},
+                "gpt-4.1",
+                with_market_context=True,
+            )
+
+        assert "market context: 0/1 rows carried a usable price" in caplog.text
 
     @patch("benchmark.tournament.build_keychain")
     @patch("benchmark.tournament.run_single")

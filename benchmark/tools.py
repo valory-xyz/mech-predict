@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import math
 import os
 import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
+from typing import Any, Callable, Literal, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -350,6 +351,50 @@ def load_tool_run(
 CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
 
 
+class RequestContext(TypedDict, total=False):
+    """The mech ``request_context`` shape the trader sends (``Bet.to_request_context``).
+
+    Shared by the replay and tournament builders so the two cannot drift on a
+    key name. ``amm_fee`` is Omen-only and has no benchmark counterpart.
+    """
+
+    market_id: str
+    type: str
+    description: str
+    market_prob: float
+    market_close_at: str
+    market_liquidity_usd: float
+    market_spread: float
+
+
+def log_market_context_coverage(
+    logger: logging.Logger, priced_rows: int, total_rows: int
+) -> None:
+    """Log how many rows actually carried a price when market context was on.
+
+    :param logger: the calling module's logger.
+    :param priced_rows: rows whose request_context carried ``market_prob``.
+    :param total_rows: rows that reached the tool loop.
+    """
+    if total_rows and priced_rows == 0:
+        logger.warning(
+            "market context: 0/%d rows carried a usable price; this run is "
+            "effectively blind",
+            total_rows,
+        )
+    elif priced_rows < total_rows:
+        logger.warning(
+            "market context: %d/%d rows carried a usable price; %d ran blind",
+            priced_rows,
+            total_rows,
+            total_rows - priced_rows,
+        )
+    else:
+        logger.info(
+            "market context: %d/%d rows carried a usable price", priced_rows, total_rows
+        )
+
+
 def bounded_number(value: Any, low: float, high: float) -> Optional[float]:
     """Return ``value`` as a float when it is a real number inside [low, high].
 
@@ -370,15 +415,9 @@ def bounded_number(value: Any, low: float, high: float) -> Optional[float]:
 
 
 def extract_extras(result_str: Any) -> dict[str, Any]:
-    """Return the payload keys a tool emits beyond the scored core fields.
+    """Return the payload keys a tool emits beyond ``CORE_PAYLOAD_KEYS``.
 
-    Market-aware tools carry their reasoning in extra payload keys
-    (``p_independent``, ``researchability``, ``research_class``,
-    ``evidence_quality``). ``parse_tool_response`` drops them because
-    production only scores p_yes/p_no/confidence, so the runners keep them
-    here instead. Anything that is not a JSON object yields ``{}``; parsing
-    never raises, because a tool that returns junk must still be scored on
-    its parse status rather than crash the run.
+    Never raises: anything that is not a JSON object yields ``{}``.
 
     :param result_str: the tool's raw response string.
     :return: the non-core payload keys, or an empty dict.

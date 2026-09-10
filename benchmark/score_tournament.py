@@ -384,6 +384,34 @@ def _apply_resolution(
     return scored_row
 
 
+def drop_superseded_blind_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop blind rows that a market-context row supersedes.
+
+    Switching the tournament to ``--market-context`` re-predicts every open
+    market once with the price. Scoring both rows would count the market
+    twice for the same tool and CID and mix the arms, so the priced row wins.
+
+    :param rows: pending tournament rows.
+    :return: the rows minus blind ones that have a priced sibling.
+    """
+    priced = {
+        (r.get("tool_name"), r.get("tool_ipfs_hash"), r.get("market_address"))
+        for r in rows
+        if r.get("market_context")
+    }
+    kept = [
+        r
+        for r in rows
+        if r.get("market_context")
+        or (r.get("tool_name"), r.get("tool_ipfs_hash"), r.get("market_address"))
+        not in priced
+    ]
+    dropped = len(rows) - len(kept)
+    if dropped:
+        log.info("  %d blind rows superseded by market-context rows", dropped)
+    return kept
+
+
 def score_tournament(
     predictions_path: Path,
     output_path: Path,
@@ -392,7 +420,9 @@ def score_tournament(
     predictions = load_predictions(predictions_path)
     log.info("Loaded %d tournament predictions", len(predictions))
 
-    pending = [r for r in predictions if r.get("final_outcome") is None]
+    pending = drop_superseded_blind_rows(
+        [r for r in predictions if r.get("final_outcome") is None]
+    )
     log.info("  %d pending (no final_outcome)", len(pending))
 
     if not pending:

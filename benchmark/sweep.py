@@ -488,9 +488,12 @@ def main() -> None:
     # Step 3: Replay candidate + score
     # ---------------------------------------------------------------
     candidate_model = args.candidate_model
-    candidate_results = results_dir / f"sweep_candidate_{candidate_model}.jsonl"
+    # One candidate file per arm: a market-context run must never resume
+    # into, or be scored together with, a blind run's rows.
+    arm = "_market_context" if args.market_context else ""
+    candidate_results = results_dir / f"sweep_candidate_{candidate_model}{arm}.jsonl"
     candidate_scores_path = (
-        results_dir / f"sweep_candidate_{candidate_model}_scores.json"
+        results_dir / f"sweep_candidate_{candidate_model}{arm}_scores.json"
     )
 
     step_replay(

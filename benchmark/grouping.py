@@ -326,6 +326,9 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
     tool_version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
     mode = row.get("mode") or "production_replay"
+    if row.get("market_context"):
+        # The market-context arm never shares a bucket with the blind arm.
+        mode = f"{mode}+market_context"
     config_hash = row.get("config_hash") or "unknown"
 
     _ensure_and_accumulate(scores["by_tool"], tool, row)

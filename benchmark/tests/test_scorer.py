@@ -1005,6 +1005,27 @@ class TestToolVersionModeBreakdown:
         assert "t1 | v1 | tournament" in tourn_result["by_tool_version_mode"]
         assert tourn_result["by_tool_version_mode"]["t1 | v1 | tournament"]["n"] == 1
 
+    def test_market_context_arm_is_a_separate_mode(self, tmp_path: Path) -> None:
+        """Blind and market-context rows never share a version-mode bucket."""
+        scores_path = tmp_path / "scores.json"
+        history_path = tmp_path / "history.jsonl"
+        tournament_path = tmp_path / "scores_tournament.json"
+        blind = _row(tool="t1", tool_ipfs_hash="v1", mode="tournament")
+        priced = _row(tool="t1", tool_ipfs_hash="v1", mode="tournament")
+        priced["market_context"] = True
+        priced["row_id"] = blind["row_id"] + "_mc"
+
+        update(
+            [blind, priced],
+            scores_path,
+            history_path,
+            tournament_scores_path=tournament_path,
+        )
+        buckets = json.loads(tournament_path.read_text())["by_tool_version_mode"]
+
+        assert buckets["t1 | v1 | tournament"]["n"] == 1
+        assert buckets["t1 | v1 | tournament+market_context"]["n"] == 1
+
     def test_defaults_mode_to_production_replay(self, tmp_path: Path) -> None:
         """Rows without a mode field default to production_replay."""
         scores_path = tmp_path / "scores.json"

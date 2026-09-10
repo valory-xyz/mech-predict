@@ -9,6 +9,7 @@ Usage:
     python benchmark/runner.py --dataset path/to/replay.jsonl
     python benchmark/runner.py --dataset path/to/replay.jsonl --tools prediction-online,superforcaster
     python benchmark/runner.py --dataset path/to/replay.jsonl --model gpt-4.1-2025-04-14
+    python benchmark/runner.py --dataset path/to/replay.jsonl --market-context
 """
 
 from __future__ import annotations
@@ -17,23 +18,28 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import signal
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import requests
 from benchmark.datasets.fetch_production import classify_category, parse_tool_response
 from benchmark.io import load_existing_ids as load_existing_row_ids
 from benchmark.io import load_jsonl as load_dataset
 from benchmark.tools import (
+    RequestContext,
     TOOL_REGISTRY,
     ToolTimeout,
     _can_use_sigalrm,
     alarm_handler,
+    bounded_number,
     build_keychain,
+    extract_extras,
     load_tool_run,
+    log_market_context_coverage,
 )
 
 from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -65,9 +71,25 @@ TASK_DEADLINE = 240  # seconds, matches production
 
 # TODO: unify _make_row_id across runner, tournament, prompt_replay
 # & fetch_production into benchmark/tools.py
-def _make_row_id(tool_name: str, question_text: str, model: str) -> str:
-    """Deterministic row ID from tool + question + model."""
+def _make_row_id(
+    tool_name: str,
+    question_text: str,
+    model: str,
+    *,
+    with_market_context: bool = False,
+) -> str:
+    """Deterministic row ID from tool + question + model, plus the market-context arm.
+
+    :param tool_name: registered tool name.
+    :param question_text: the replayed question.
+    :param model: LLM model identifier.
+    :param with_market_context: the arm; a suffix is added only when True so
+        existing blind result files still resume.
+    :return: the row id.
+    """
     payload = f"{tool_name}:{model}:{question_text}"
+    if with_market_context:
+        payload += ":market_context"
     h = hashlib.sha256(payload.encode()).hexdigest()[:12]
     return f"replay_{tool_name}_{h}"
 
@@ -84,7 +106,7 @@ def run_single(
     model: str,
     api_keys: KeyChain,
     timeout: int = TASK_DEADLINE,
-    request_context: dict[str, Any] | None = None,
+    request_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one tool on one question and return parsed result.
 
@@ -98,7 +120,8 @@ def run_single(
         type, …) mirroring what the trader sends in production. Forwarded to
         tools that read it (e.g. factual_research-v2); omitted when None.
     :return: dict with p_yes, p_no, confidence, prediction_parse_status,
-        latency_s, error.
+        latency_s, error and extras (the payload keys beyond the scored core
+        fields; empty on any failure).
     """
     run_fn = load_tool_run(tool_name)
 
@@ -133,6 +156,7 @@ def run_single(
         return {
             "latency_s": round(elapsed, 1),
             "error": None,
+            "extras": extract_extras(result_str),
             **parsed,
         }
     except ToolTimeout:
@@ -143,6 +167,7 @@ def run_single(
             "prediction_parse_status": "timeout",
             "latency_s": timeout,
             "error": "timeout",
+            "extras": {},
         }
     except Exception as e:
         elapsed = time.monotonic() - start
@@ -154,6 +179,7 @@ def run_single(
             "prediction_parse_status": "error",
             "latency_s": round(elapsed, 1),
             "error": str(e),
+            "extras": {},
         }
     finally:
         if use_alarm:
@@ -230,27 +256,60 @@ def _fetch_polymarket_description(condition_id: str) -> str | None:
     return None
 
 
-def build_request_context(dataset_row: dict[str, Any]) -> dict[str, Any] | None:
-    """Build a mech-style request_context from a dataset row.
+def _add_market_context(
+    context: RequestContext,
+    dataset_row: dict[str, Any],
+) -> None:
+    """Add the trader's market fields to a request_context in place, skipping unusable values.
 
-    Mirrors the trader's ``Bet.to_request_context()`` so tools that read it in
-    production (e.g. factual_research-v2) receive the same input under replay:
-    ``market_id`` + ``type``, plus the Polymarket resolution rules under
-    ``description`` (Omen rows carry none). The description is taken from the
-    row when present, else fetched from Gamma the way the trader would. NO
-    market price/liquidity is ever included — those tools must never see odds.
-    Returns None when the row lacks a market id or platform.
+    :param context: the request_context being built; mutated in place.
+    :param dataset_row: one dataset row carrying the production market fields.
+    """
+    market_prob = bounded_number(dataset_row.get("market_prob_at_prediction"), 0.0, 1.0)
+    if market_prob is not None:
+        context["market_prob"] = market_prob
+
+    close_at = dataset_row.get("market_close_at")
+    if isinstance(close_at, str) and close_at.strip():
+        context["market_close_at"] = close_at.strip()
+
+    liquidity = bounded_number(
+        dataset_row.get("market_liquidity_at_prediction"), 0.0, math.inf
+    )
+    if liquidity is not None:
+        context["market_liquidity_usd"] = liquidity
+
+    spread = bounded_number(dataset_row.get("market_spread_at_prediction"), 0.0, 1.0)
+    if spread is not None:
+        context["market_spread"] = spread
+
+
+def build_request_context(
+    dataset_row: dict[str, Any],
+    *,
+    with_market_context: bool = False,
+) -> RequestContext | None:
+    """Build a trader-shaped request_context from a dataset row.
+
+    Mirrors ``Bet.to_request_context()``: ``market_id`` and ``type``, the
+    Polymarket resolution rules under ``description`` (from the row, else
+    fetched from Gamma), and, only when ``with_market_context`` is on, the
+    market odds (``market_prob``, ``market_close_at``, ``market_liquidity_usd``,
+    ``market_spread``).
 
     :param dataset_row: one dataset row with ``market_id`` and ``platform``
         (optionally a pre-baked ``description``).
-    :return: request_context dict, or None.
+    :param with_market_context: forward the market odds. Off by default; on
+        for tools that read the price in production
+        (superforcaster-market-aware).
+    :return: request_context, or None when the row has no market id or platform.
     """
     market_id = dataset_row.get("market_id")
     platform = dataset_row.get("platform")
     if not market_id or not platform:
         return None
 
-    context: dict[str, Any] = {"market_id": market_id, "type": platform}
+    context: RequestContext = {"market_id": str(market_id), "type": str(platform)}
 
     if platform == POLYMARKET_PLATFORM:
         # Prefer a pre-baked description (deterministic, offline); otherwise
@@ -261,6 +320,9 @@ def build_request_context(dataset_row: dict[str, Any]) -> dict[str, Any] | None:
         if description:
             context["description"] = description
 
+    if with_market_context:
+        _add_market_context(context, dataset_row)
+
     return context
 
 
@@ -269,15 +331,34 @@ def build_output_row(
     tool_name: str,
     model: str,
     run_result: dict[str, Any],
+    *,
+    with_market_context: bool = False,
 ) -> dict[str, Any]:
-    """Build a production_log.jsonl-compatible row from a replay result."""
+    """Build a production_log.jsonl-compatible row from a replay result.
+
+    The market columns pass through the same bounds checks as the
+    request_context, so the row records exactly what the tool could have
+    seen and :mod:`benchmark.scorer` scores edge against it.
+
+    :param dataset_row: the replayed dataset row.
+    :param tool_name: registered tool name.
+    :param model: LLM model identifier.
+    :param run_result: dict returned by :func:`run_single`.
+    :param with_market_context: the arm; part of the row id and recorded as
+        ``market_context``.
+    :return: a production_log.jsonl-compatible output row.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     question_text = dataset_row["question_text"]
+    close_at = dataset_row.get("market_close_at")
 
     return {
-        "row_id": _make_row_id(tool_name, question_text, model),
+        "row_id": _make_row_id(
+            tool_name, question_text, model, with_market_context=with_market_context
+        ),
         "schema_version": "1.0",
         "mode": "cached_replay",
+        "market_context": with_market_context,
         "market_id": dataset_row.get("market_id"),
         "platform": dataset_row.get("platform", "unknown"),
         "question_text": question_text,
@@ -289,18 +370,28 @@ def build_output_row(
         "p_no": run_result["p_no"],
         "prediction_parse_status": run_result["prediction_parse_status"],
         "confidence": run_result.get("confidence"),
-        "market_prob_at_prediction": None,
-        "market_liquidity_at_prediction": None,
-        "market_close_at": None,
+        "market_prob_at_prediction": bounded_number(
+            dataset_row.get("market_prob_at_prediction"), 0.0, 1.0
+        ),
+        "market_liquidity_at_prediction": bounded_number(
+            dataset_row.get("market_liquidity_at_prediction"), 0.0, math.inf
+        ),
+        "market_spread_at_prediction": bounded_number(
+            dataset_row.get("market_spread_at_prediction"), 0.0, 1.0
+        ),
+        "market_close_at": (
+            close_at.strip() if isinstance(close_at, str) and close_at.strip() else None
+        ),
         "final_outcome": dataset_row["final_outcome"],
         "requested_at": now,
         "predicted_at": now,
         "resolved_at": dataset_row.get("resolved_at"),
         "latency_s": run_result["latency_s"],
-        "prediction_lead_time_days": None,
+        "prediction_lead_time_days": dataset_row.get("prediction_lead_time_days"),
         "category": dataset_row.get("category")
         or classify_category(question_text, dataset_row.get("platform")),
         "match_confidence": 1.0,
+        "tool_extras": run_result.get("extras") or {},
     }
 
 
@@ -315,8 +406,19 @@ def replay(
     tools: list[str],
     model: str,
     timeout: int = TASK_DEADLINE,
+    *,
+    with_market_context: bool = False,
 ) -> None:
-    """For each dataset row x each tool, run and append output."""
+    """For each dataset row x each tool, run and append output.
+
+    :param dataset_path: input JSONL replay dataset.
+    :param output_path: JSONL file the output rows are appended to.
+    :param tools: registered tool names to run on every row.
+    :param model: LLM model identifier.
+    :param timeout: per-tool timeout in seconds.
+    :param with_market_context: forward the market odds on the request_context;
+        see :func:`build_request_context`.
+    """
     dataset = load_dataset(dataset_path)
     log.info("Loaded %d replay cases from %s", len(dataset), dataset_path)
 
@@ -331,6 +433,8 @@ def replay(
     done = 0
     skipped = 0
     errors = 0
+    replayed_rows = 0
+    priced_rows = 0
 
     with open(output_path, "a", encoding="utf-8") as out:
         for row_idx, row in enumerate(dataset):
@@ -358,8 +462,17 @@ def replay(
                 else "none"
             )
 
+            request_context = build_request_context(
+                row, with_market_context=with_market_context
+            )
+            replayed_rows += 1
+            if request_context is not None and "market_prob" in request_context:
+                priced_rows += 1
+
             for tool_name in tools:
-                row_id = _make_row_id(tool_name, question, model)
+                row_id = _make_row_id(
+                    tool_name, question, model, with_market_context=with_market_context
+                )
                 if row_id in existing_ids:
                     skipped += 1
                     done += 1
@@ -381,10 +494,16 @@ def replay(
                     model=model,
                     api_keys=api_keys,
                     timeout=timeout,
-                    request_context=build_request_context(row),
+                    request_context=request_context,
                 )
 
-                output_row = build_output_row(row, tool_name, model, result)
+                output_row = build_output_row(
+                    row,
+                    tool_name,
+                    model,
+                    result,
+                    with_market_context=with_market_context,
+                )
                 out.write(json.dumps(output_row) + "\n")
                 out.flush()
 
@@ -411,6 +530,8 @@ def replay(
         skipped,
         errors,
     )
+    if with_market_context:
+        log_market_context_coverage(log, priced_rows, replayed_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +574,16 @@ def main() -> None:
         default=TASK_DEADLINE,
         help=f"Per-tool timeout in seconds (default: {TASK_DEADLINE})",
     )
+    parser.add_argument(
+        "--market-context",
+        action="store_true",
+        help=(
+            "Forward market odds (price, close time, liquidity, spread) on the "
+            "request_context, as the trader does. Off by default; required by "
+            "tools that read the price in production "
+            "(superforcaster-market-aware)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.tools:
@@ -469,6 +600,7 @@ def main() -> None:
         tools=tools,
         model=args.model,
         timeout=args.timeout,
+        with_market_context=args.market_context,
     )
 
 

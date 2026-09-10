@@ -830,17 +830,21 @@ jobs:
           # in tournament_tools.json — the single source of truth.
           # The two-branch form keeps "$INPUT_TOOLS" quoted at expansion
           # time so a crafted workflow_dispatch input can't shell-inject.
+          # --market-context: the tournament is the promotion path, so tools
+          # see the request_context production sends (price and close time).
           if [ -n "$INPUT_TOOLS" ]; then
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
               --tools "$INPUT_TOOLS" \
               --max-markets "$INPUT_MAX_MARKETS" \
-              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS" \
+              --market-context
           else
             uv run python -m benchmark.tournament \
               --markets benchmark/datasets/open_markets.jsonl \
               --max-markets "$INPUT_MAX_MARKETS" \
-              --global-timeout "$GLOBAL_TIMEOUT_SECONDS"
+              --global-timeout "$GLOBAL_TIMEOUT_SECONDS" \
+              --market-context
           fi
 
       - name: Score resolved predictions

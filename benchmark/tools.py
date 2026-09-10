@@ -8,12 +8,15 @@ helpers used by runner.py, tournament.py, sweep.py, and notify_slack.py.
 from __future__ import annotations
 
 import importlib
+import json
+import logging
+import math
 import os
 import platform
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional, TYPE_CHECKING
+from typing import Any, Callable, Literal, Optional, TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from packages.valory.skills.task_execution.utils.apis import KeyChain
@@ -337,6 +340,95 @@ def load_tool_run(
     run_fn = module.run
     _tool_cache[tool_name] = run_fn
     return run_fn
+
+
+# ---------------------------------------------------------------------------
+# Payload helpers shared by the replay and tournament runners
+# ---------------------------------------------------------------------------
+
+# Payload keys the scored schema already carries as first-class columns; every
+# other key a tool emits is kept under ``tool_extras``.
+CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
+
+
+class RequestContext(TypedDict, total=False):
+    """The mech ``request_context`` shape the trader sends (``Bet.to_request_context``).
+
+    Shared by the replay and tournament builders so the two cannot drift on a
+    key name. ``amm_fee`` is Omen-only and has no benchmark counterpart.
+    """
+
+    market_id: str
+    type: str
+    description: str
+    market_prob: float
+    market_close_at: str
+    market_liquidity_usd: float
+    market_spread: float
+
+
+def log_market_context_coverage(
+    logger: logging.Logger, priced_rows: int, total_rows: int
+) -> None:
+    """Log how many rows actually carried a price when market context was on.
+
+    :param logger: the calling module's logger.
+    :param priced_rows: rows whose request_context carried ``market_prob``.
+    :param total_rows: rows that reached the tool loop.
+    """
+    if total_rows and priced_rows == 0:
+        logger.warning(
+            "market context: 0/%d rows carried a usable price; this run is "
+            "effectively blind",
+            total_rows,
+        )
+    elif priced_rows < total_rows:
+        logger.warning(
+            "market context: %d/%d rows carried a usable price; %d ran blind",
+            priced_rows,
+            total_rows,
+            total_rows - priced_rows,
+        )
+    else:
+        logger.info(
+            "market context: %d/%d rows carried a usable price", priced_rows, total_rows
+        )
+
+
+def bounded_number(value: Any, low: float, high: float) -> Optional[float]:
+    """Return ``value`` as a float when it is a real number inside [low, high].
+
+    Rejects ``bool`` explicitly: ``isinstance(True, int)`` is True in Python, so
+    a stray boolean would otherwise become the number 1.0.
+
+    :param value: the raw dataset value.
+    :param low: inclusive lower bound.
+    :param high: inclusive upper bound.
+    :return: the value as a float, or None when unusable.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if not math.isfinite(numeric) or not low <= numeric <= high:
+        return None
+    return numeric
+
+
+def extract_extras(result_str: Any) -> dict[str, Any]:
+    """Return the payload keys a tool emits beyond ``CORE_PAYLOAD_KEYS``.
+
+    Never raises: anything that is not a JSON object yields ``{}``.
+
+    :param result_str: the tool's raw response string.
+    :return: the non-core payload keys, or an empty dict.
+    """
+    try:
+        payload = json.loads(result_str)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {k: v for k, v in payload.items() if k not in CORE_PAYLOAD_KEYS}
 
 
 # ---------------------------------------------------------------------------

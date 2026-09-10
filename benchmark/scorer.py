@@ -908,6 +908,8 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
         tool = row.get("tool_name") or "unknown"
         version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
         mode = row.get("mode") or "production_replay"
+        if row.get("market_context"):
+            mode = f"{mode}+market_context"
         tv_groups[f"{tool} | {version}"].append(row)
         tvm_groups[f"{tool} | {version} | {mode}"].append(row)
     by_tool_version = {k: compute_group_stats(g) for k, g in tv_groups.items()}

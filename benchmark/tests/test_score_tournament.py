@@ -27,6 +27,7 @@ import pytest
 from benchmark.score_tournament import (
     check_omen_resolutions,
     check_polymarket_resolutions,
+    drop_superseded_blind_rows,
     load_predictions,
     score_tournament,
 )
@@ -498,3 +499,51 @@ class TestLoadPredictions:  # pylint: disable=too-few-public-methods
         rows = load_predictions(f)
         assert len(rows) == 2
         assert rows[0]["row_id"] == "r1"
+
+
+# ---------------------------------------------------------------------------
+# drop_superseded_blind_rows
+# ---------------------------------------------------------------------------
+
+
+class TestDropSupersededBlindRows:
+    """A priced row supersedes the blind row for the same tool, CID and market."""
+
+    @staticmethod
+    def _row(market_context: bool, market_address: str = "0xabc") -> dict[str, Any]:
+        """Build a pending row for one arm.
+
+        :param market_context: the arm the row was produced in.
+        :param market_address: the market the row predicts.
+        :return: a pending tournament row.
+        """
+        row = _prediction(
+            row_id=f"tourn_{market_address}_{int(market_context)}",
+            market_address=market_address,
+        )
+        row["tool_ipfs_hash"] = "bafycid1"
+        row["market_context"] = market_context
+        return row
+
+    def test_blind_row_dropped_when_priced_sibling_exists(self) -> None:
+        """The transition to --market-context does not double count a market."""
+        kept = drop_superseded_blind_rows([self._row(False), self._row(True)])
+        assert [r["market_context"] for r in kept] == [True]
+
+    def test_blind_row_kept_without_priced_sibling(self) -> None:
+        """A market only predicted blind still scores."""
+        kept = drop_superseded_blind_rows([self._row(False)])
+        assert len(kept) == 1
+
+    def test_other_market_unaffected(self) -> None:
+        """Supersession is per tool, CID and market, not global."""
+        rows = [self._row(True, "0xabc"), self._row(False, "0xdef")]
+        kept = drop_superseded_blind_rows(rows)
+        assert [r["market_address"] for r in kept] == ["0xabc", "0xdef"]
+
+    def test_legacy_rows_without_column_are_blind(self) -> None:
+        """Rows written before the column existed count as the blind arm."""
+        legacy = self._row(False)
+        del legacy["market_context"]
+        kept = drop_superseded_blind_rows([legacy, self._row(True)])
+        assert [r.get("market_context") for r in kept] == [True]

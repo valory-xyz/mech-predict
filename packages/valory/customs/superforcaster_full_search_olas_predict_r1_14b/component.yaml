@@ -11,9 +11,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
-  superforcaster_full_search_olas_predict_r1_14b.py: bafybeibqfchb75x3midwv4leu4djhpfk6xjimexm7fn4xjcgqbqw7nqocq
+  superforcaster_full_search_olas_predict_r1_14b.py: bafybeih36bhbju6g6w3ms4lio6a7glayilf4xko6gdjokyacycspt6vai4
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_full_search_olas_predict_r1_14b.py: bafybeiftnynp65ttd4fgvh24txmzqq5cum364frfvuiirgh2xr7kljuxya
+  tests/test_superforcaster_full_search_olas_predict_r1_14b.py: bafybeihqs5bq5kx7afsunoq6sn5qka4cadnlr6s4zbwn6yxj6trjpvugcm
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_full_search_olas_predict_r1_14b.py
 callable: run

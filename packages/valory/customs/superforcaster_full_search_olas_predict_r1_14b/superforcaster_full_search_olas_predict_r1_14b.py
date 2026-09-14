@@ -218,6 +218,16 @@ class OpenAIClient:
         return response
 
 
+def budget_tokens(text: str, model: str) -> int:
+    """Token count for window budgeting, scaled for the tokeniser mismatch.
+
+    :param text: the text to size.
+    :param model: model name for tokeniser selection.
+    :return: a deliberately conservative token count.
+    """
+    return int(count_tokens(text, model) * TOKENIZER_SAFETY_FACTOR) + 1
+
+
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
     try:
@@ -234,9 +244,17 @@ def count_tokens(text: str, model: str) -> int:
 # the prompt AND the completion must fit in 8k together, so the two are budgeted
 # against each other rather than capped independently.
 MODEL_CONTEXT_WINDOW = 8192
-# The chat template wraps the messages in tokens this tokeniser never sees, and
-# the tokeniser is tiktoken rather than Qwen's (measured drift: ~1%).
+# The chat template wraps the messages in tokens this tokeniser never sees.
 CONTEXT_SAFETY_MARGIN = 256
+# `count_tokens` uses tiktoken, which has no Qwen encoding and falls back to
+# o200k_base -- so every budget here is an ESTIMATE in the wrong tokeniser.
+# Measured against the endpoint's reported prompt_tokens on four prompt shapes:
+#   english news 1.058 | unicode es+jp 1.078 | bare template 1.033
+#   numeric/URL-heavy 1.158   <- market evidence is full of prices, dates, URLs
+# At 1.158 a full prompt under-counts by ~740 tokens, far past the 256 margin,
+# and the request is rejected with a 400. Scale the estimate instead of
+# trusting it; 1.25 leaves headroom above the worst shape measured.
+TOKENIZER_SAFETY_FACTOR = 1.25
 # 2048, not the fleet's 4096. Issue #455 raised the fleet value so free-text
 # completions are not truncated before the JSON, and the same reasoning applies
 # to a <think> block -- but at 4096 only 4096 remain for the prompt, which the
@@ -313,7 +331,7 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # long body. Trailing organic items are dropped (Serper orders by relevance)
 # until the rendered block fits. Same trailing-drop pattern as
 # factual_research (which caps at 3000); budget set to 4000 here to fit
-# observed evidence sizes with headroom. Not load-bearing for gpt-4.1's
+# observed evidence sizes with headroom. Binding at 8k alongside the
 # 1M context but bounds cost and guards against outlier pages.
 MAX_EVIDENCE_TOKENS = 4000
 
@@ -677,9 +695,9 @@ def _cap_evidence_block(
 ) -> str:
     """Render the evidence block, dropping trailing organic items until it fits.
 
-    Same trailing-drop pattern as factual_research (which caps at 3000;
-    4000 here): Serper orders organic results by relevance so trailing
-    drops are cheapest. If the block still exceeds the budget once all
+    Same trailing-drop pattern as factual_research: Serper orders organic
+    results by relevance so trailing drops are cheapest. The effective ceiling
+    is min(MAX_EVIDENCE_TOKENS, the window budget the caller passes). If the block still exceeds the budget once all
     organic items are gone, the result is returned as-is (peopleAlsoAsk is
     small and not separately trimmed).
 
@@ -689,8 +707,13 @@ def _cap_evidence_block(
     :param max_tokens: target ceiling on the rendered block.
     :return: rendered evidence string, with a truncation marker if items were dropped.
     """
+    # MAX_EVIDENCE_TOKENS still binds: the lost-in-the-middle rationale is about
+    # how much evidence the model reads well, independent of how much the window
+    # physically allows. The window budget is the other ceiling, whichever is
+    # tighter.
+    max_tokens = min(max_tokens, MAX_EVIDENCE_TOKENS)
     rendered = format_sources_data(organic_data, misc_data)
-    if count_tokens(rendered, model) <= max_tokens or not organic_data:
+    if budget_tokens(rendered, model) <= max_tokens or not organic_data:
         return rendered
 
     # peopleAlsoAsk goes first. The parent trimmed only organic items, which is
@@ -700,12 +723,13 @@ def _cap_evidence_block(
     misc = list(misc_data)
     while (
         misc
-        and count_tokens(format_sources_data(organic_data, misc), model) > max_tokens
+        and budget_tokens(format_sources_data(organic_data, misc), model) > max_tokens
     ):
         misc.pop()
     trimmed = list(organic_data)
     while (
-        trimmed and count_tokens(format_sources_data(trimmed, misc), model) > max_tokens
+        trimmed
+        and budget_tokens(format_sources_data(trimmed, misc), model) > max_tokens
     ):
         trimmed.pop()
     rendered = format_sources_data(trimmed, misc)
@@ -721,10 +745,10 @@ def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
     :param model: model name for tokeniser selection.
     :return: the text, shortened if it was over the limit.
     """
-    if count_tokens(text, model) <= limit:
+    if budget_tokens(text, model) <= limit:
         return text
     words = text.split()
-    while words and count_tokens(" ".join(words), model) > limit:
+    while words and budget_tokens(" ".join(words), model) > limit:
         words = words[: int(len(words) * 0.9)] or words[:-1]
     return " ".join(words)
 
@@ -747,7 +771,7 @@ def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> 
         MODEL_CONTEXT_WINDOW
         - max_tokens
         - CONTEXT_SAFETY_MARGIN
-        - count_tokens(skeleton, model),
+        - budget_tokens(skeleton, model),
     )
 
 

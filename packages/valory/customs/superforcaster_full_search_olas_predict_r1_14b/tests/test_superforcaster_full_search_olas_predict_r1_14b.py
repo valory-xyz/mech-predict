@@ -1253,6 +1253,28 @@ class TestOlasPredictWiring:
             "info_utility": 0.5,
         }
 
+    def test_prompt_matches_the_parent_byte_for_byte(self) -> None:
+        """The lineage claim depends on this staying true, so pin it."""
+        # tool_lineage.json calls this a byte-identical copy of the parent's
+        # prompt, and the out-of-time evaluation measured the parent's exact
+        # tokens. Nothing else in the repo checks it.
+        from packages.valory.customs.superforcaster_full_search.superforcaster_full_search import (  # noqa: E501
+            PREDICTION_PROMPT as PARENT_PROMPT,
+        )
+
+        assert module.PREDICTION_PROMPT == PARENT_PROMPT
+
+    def test_budget_tokens_is_conservative_about_the_tokeniser(self) -> None:
+        """Tiktoken has no Qwen encoding, so the raw count under-reads."""
+        # Measured against the endpoint's own prompt_tokens: numeric/URL-heavy
+        # evidence tokenises 1.158x denser in Qwen than in o200k_base, which on
+        # a full prompt is ~740 tokens -- far past CONTEXT_SAFETY_MARGIN.
+        text = "BTC/USD closed at $63,412.77 on 2025-09-18 (+2.3%). " * 40
+        raw = module.count_tokens(text, "olas-predict-r1-14b")
+        scaled = module.budget_tokens(text, "olas-predict-r1-14b")
+        assert scaled > raw
+        assert module.TOKENIZER_SAFETY_FACTOR >= 1.158, "below the worst measured shape"
+
     def test_unterminated_think_block_is_rejected(self) -> None:
         """An opener with no closer means the completion was cut off."""
         # Everything present is then a DRAFT written while reasoning. Harvesting

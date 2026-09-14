@@ -68,11 +68,13 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    A VALID prediction (p_yes = p_no = 0.5) with zero confidence and
-    info_utility, so a requester can detect and discount it while the strict
+    Unlike the with_key_rotation error null this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455). The on-chain JSON carries
     only the four standard fields; the explicit marker for requesters lives in
-    used_params["empty_retrieval"] (off-chain metadata.params).
+    used_params["empty_retrieval"] (off-chain metadata.params), intended for
+    off-chain consumers (not yet wired up -- the benchmark scorer's
+    null-vs-forecast branch is a follow-up).
 
     :param model: the model name recorded in used_params.
     :param temperature: the temperature recorded in used_params.
@@ -249,8 +251,14 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
+# max_tokens matches the rest of the superforcaster fleet and this tool's own
+# limit_max_tokens. At 500 a free-text prompt truncates mid-reasoning and the
+# delivery carries no parseable JSON at all: the model emits its evidence
+# block before the verdict, and observed free-text completions run 786-1016
+# tokens. It is a ceiling, not a spend -- trader-template requests still
+# complete in well under 100 tokens.
 DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 500,
+    "max_tokens": 4096,
     "limit_max_tokens": 4096,
     "temperature": 0,
 }
@@ -394,9 +402,9 @@ def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Res
         "Content-Type": "application/json",
     }
 
-    # timeout matches the fleet's other Serper callers (superforcaster,
-    # superforcaster_calibrated_full_search, v4, market_aware); a hung
-    # connection must not block the task until TASK_DEADLINE.
+    # timeout matches the fleet's other Serper callers; a hung connection must
+    # not hold the task slot until the mech's configured task_deadline
+    # (240s by default, per the service definition).
     response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
     return response

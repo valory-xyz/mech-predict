@@ -130,6 +130,21 @@ def _mock_parse_response() -> MagicMock:
     )
 
 
+def _stub_openai(mock_client_mgr: MagicMock, with_parse: bool = True) -> MagicMock:
+    """Install a mock OpenAI client into the patched context manager.
+
+    :param mock_client_mgr: the patched OpenAIClientManager.
+    :param with_parse: also stub a structured-output parse response.
+    :return: the mock client the manager yields.
+    """
+    mock_client = MagicMock()
+    if with_parse:
+        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
+    mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+    mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_client
+
+
 class TestStructuredOutputContract:
     """Verify the tool uses OpenAI Structured Outputs and returns only the 4 on-chain fields."""
 
@@ -143,10 +158,7 @@ class TestStructuredOutputContract:
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
 
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client = _stub_openai(mock_client_mgr)
 
         run(
             tool="superforcaster",
@@ -172,10 +184,7 @@ class TestStructuredOutputContract:
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
 
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         result = run(
             tool="superforcaster",
@@ -245,10 +254,7 @@ class TestSuperforcasterSourceContent:
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
 
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         result = run(
             tool="superforcaster",
@@ -269,10 +275,7 @@ class TestSuperforcasterSourceContent:
         self, mock_client_mgr: MagicMock
     ) -> None:
         """Replay with {'serper_response': ...} uses organic and peopleAlsoAsk."""
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
@@ -300,10 +303,7 @@ class TestSuperforcasterSourceContent:
         mock_response.json.return_value = FAKE_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
 
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         result = run(
             tool="superforcaster",
@@ -388,9 +388,7 @@ class TestEmptyRetrievalGuard:
     ) -> None:
         """Organic AND peopleAlsoAsk empty -> flagged null, no LLM call."""
         mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
-        mock_client = MagicMock()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client = _stub_openai(mock_client_mgr, with_parse=False)
 
         result = run(
             tool="superforcaster",
@@ -437,10 +435,7 @@ class TestScanWindowObservability:
     ) -> None:
         """Template past the window is NOT flagged: the match precedes the scan."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         prompt = PREDICTION_PROMPT + " filler" * (_MAX_SCAN_CHARS // 3)
         assert len(prompt) > _MAX_SCAN_CHARS
@@ -462,10 +457,7 @@ class TestScanWindowObservability:
     ) -> None:
         """A question-free prompt past the window: raw tier AND truncated."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         prompt = "no question words at all here. " * (_MAX_SCAN_CHARS // 10)
         assert len(prompt) > _MAX_SCAN_CHARS
@@ -487,10 +479,7 @@ class TestScanWindowObservability:
     ) -> None:
         """A clause-tier pick on a longer-than-window prompt is still marked."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
             _MAX_SCAN_CHARS // 3
@@ -524,10 +513,7 @@ class TestScanWindowObservability:
     ) -> None:
         """Broken integration -> typed error null (both shape checks)."""
         mock_fetch.return_value = MagicMock(json=lambda: body)
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         result = run(
             tool="superforcaster",
@@ -538,6 +524,9 @@ class TestScanWindowObservability:
         )
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -557,6 +546,9 @@ class TestScanWindowObservability:
         mock_fetch.assert_not_called()
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
         assert parsed["error_type"] == "ValueError"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -567,10 +559,7 @@ class TestScanWindowObservability:
         """LLM-input parity pin: the trader path is byte-identical to before."""
         serper_resp = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
         mock_fetch.return_value = serper_resp
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        mock_client = _stub_openai(mock_client_mgr)
 
         run(
             tool="superforcaster",
@@ -597,10 +586,7 @@ class TestScanWindowObservability:
     ) -> None:
         """A free-text success records parse_tier=clause, not truncated."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
-        mock_client = MagicMock()
-        mock_client.beta.chat.completions.parse.return_value = _mock_parse_response()
-        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+        _stub_openai(mock_client_mgr)
 
         result = run(
             tool="superforcaster",

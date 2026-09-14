@@ -294,9 +294,14 @@ OUTPUT_FORMAT
 # regexes and parsing logic are the same).
 
 # Strip the <think>...</think> block (non-greedy, multiline).
-THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+# The served checkpoints emit a BARE closing tag: the chat template supplies
+# the opening <think>, so it never appears in the completion. A paired-tag
+# pattern therefore strips nothing. Match greedily to the LAST closing tag
+# so everything before the final answer is discarded; a completion with no
+# closing tag is left untouched.
+THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
 # Match a flat JSON object: from the first '{' to the first '}'.
-JSON_RE = re.compile(r"\{[^}]*\}")
+JSON_RE = re.compile(r"\{[^{}]*\}")
 
 
 def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
@@ -322,13 +327,18 @@ def extract_json(
     if not text:
         return None
     stripped = THINK_BLOCK_RE.sub("", text).strip()
-    match = JSON_RE.search(stripped)
-    if not match:
-        return None
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    # Walk candidates from the END: the answer is the last object emitted, and
+    # a first-match pick returns a draft probability written mid-reasoning.
+    # Walking in reverse rather than taking [-1] outright keeps a valid earlier
+    # object when the final one is malformed.
+    for blob in reversed(JSON_RE.findall(stripped)):
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def parse_p_yes(completion: Union[str, List[Dict[str, str]]]) -> Optional[float]:

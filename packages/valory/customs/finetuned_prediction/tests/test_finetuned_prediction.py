@@ -50,6 +50,14 @@ WELL_FORMED = (
     "<think>weighing base rates and the sources</think>\n"
     '{"p_yes": 0.73, "p_no": 0.27, "confidence": 0.8, "info_utility": 0.9}'
 )
+# The served checkpoints emit a BARE closing tag -- the chat template supplies
+# the opening one, so it is absent from the completion. The reasoning that
+# precedes it contains a DRAFT probability that must not be picked.
+BARE_CLOSE = (
+    'Draft: {"p_yes": 0.9, "p_no": 0.1} but on reflection lower.\n'
+    "</think>\n"
+    '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}'
+)
 
 
 class FakeKeyChain:
@@ -82,6 +90,7 @@ class FakeKeyChain:
     ("completion", "expected"),
     [
         (WELL_FORMED, 0.73),  # think block stripped
+        (BARE_CLOSE, 0.3),  # bare </think>: answer, not the mid-reasoning draft
         ('{"p_yes": 0.4, "p_no": 0.6}', 0.4),  # bare JSON, no think
         ("<think>no json here</think> nothing", None),  # no JSON object
         ('{"p_no": 0.6}', None),  # missing p_yes
@@ -91,6 +100,7 @@ class FakeKeyChain:
     ],
     ids=[
         "think_block",
+        "bare_close_tag",
         "bare_json",
         "no_json",
         "missing",
@@ -127,6 +137,41 @@ def test_canonical_prediction_derives_p_no_and_defaults() -> None:
 def test_canonical_prediction_returns_none_on_malformed() -> None:
     """Unparseable or missing completions yield None."""
     assert canonical_prediction("<think>oops</think> not json") is None
+
+
+def test_bare_closing_tag_discards_the_reasoning_draft() -> None:
+    """A draft written before a bare </think> must not win over the answer."""
+    assert json.loads(canonical_prediction(BARE_CLOSE) or "{}")["p_yes"] == 0.3
+
+
+def test_a_reasoning_draft_is_never_delivered_as_the_answer() -> None:
+    """An unparseable answer must yield None, never a draft from the reasoning."""
+    # The draft parses; the post-</think> answer does not. Only discarding the
+    # reasoning outright keeps the draft out of the candidate pool.
+    completion = 'Draft: {"p_yes": 0.9, "p_no": 0.1}\n</think>\n{"p_yes": }'
+    assert canonical_prediction(completion) is None
+
+
+def test_malformed_final_object_falls_back_to_an_earlier_valid_one() -> None:
+    """Walking from the end must not strand a valid earlier object."""
+    completion = (
+        "</think>\n"
+        '{"p_yes": 0.25, "p_no": 0.75, "confidence": 0.5, "info_utility": 0.5}\n'
+        '{"p_yes": }'
+    )
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.25
+
+
+def test_a_stray_brace_does_not_swallow_the_answer_object() -> None:
+    """Candidate matching must not span an unclosed brace into the answer."""
+    completion = '</think>\nNote {see below\n{"p_yes": 0.31, "p_no": 0.69}'
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.31
+
+
+def test_completion_without_any_closing_tag_is_left_intact() -> None:
+    """No closing tag must not cause the whole completion to be stripped."""
+    parsed = json.loads(canonical_prediction('{"p_yes": 0.42, "p_no": 0.58}') or "{}")
+    assert parsed["p_yes"] == 0.42
     assert canonical_prediction(None) is None
 
 

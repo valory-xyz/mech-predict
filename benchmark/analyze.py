@@ -43,6 +43,7 @@ from benchmark.scoring_primitives import (
     MIN_SAMPLE_SIZE,
 )
 from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
+from benchmark.tools import base_mode
 from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 log = logging.getLogger(__name__)
@@ -2143,7 +2144,7 @@ def _most_recent_prod_cid(
     candidates: list[tuple[str, str]] = []  # (cid, label)
     for key in tvm:
         t, cid, mode = _parse_tvm_key(key)
-        if t != tool or mode != "production_replay":
+        if t != tool or base_mode(mode) != "production_replay":
             continue
         candidates.append((cid, release_map.resolve(cid, rm)))
     if not candidates:
@@ -2566,7 +2567,7 @@ def _scope_tournament_to_active(
     kept: dict[str, Any] = {}
     for key, stats in tvm_scores.get("by_tool_version_mode", {}).items():
         _tool, cid, mode = _parse_tvm_key(key)
-        if mode == "tournament" and cid not in active_cids:
+        if base_mode(mode) == "tournament" and cid not in active_cids:
             continue
         kept[key] = stats
     # Preserve any sibling top-level fields (total_rows, overall, …) the
@@ -2685,7 +2686,7 @@ def section_tournament_callouts(
 
     for key, t_stats in tournament_tvm.items():
         tool, cand_cid, mode = _parse_tvm_key(key)
-        if mode != "tournament":
+        if base_mode(mode) != "tournament":
             continue
         if active_cids is None:
             # Fail-open: scoping unavailable, so re-arm the min-n gate to

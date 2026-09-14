@@ -56,6 +56,7 @@ from benchmark.scoring_primitives import (
     log_loss_score,
     sample_edge_sd,
 )
+from benchmark.tools import arm_mode
 
 
 def _accumulate_group(group: dict[str, Any], row: dict[str, Any]) -> None:
@@ -325,10 +326,10 @@ def accumulate_row(scores: dict[str, Any], row: dict[str, Any]) -> None:
     # Production rows store the IPFS hash in `tool_version`; tournament rows
     # store it in `tool_ipfs_hash`. Normalize so both populate the same key.
     tool_version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-    mode = row.get("mode") or "production_replay"
-    if row.get("market_context"):
-        # The market-context arm never shares a bucket with the blind arm.
-        mode = f"{mode}+market_context"
+    # The market-context arm never shares a bucket with the blind arm.
+    mode = arm_mode(
+        row.get("mode") or "production_replay", bool(row.get("market_context"))
+    )
     config_hash = row.get("config_hash") or "unknown"
 
     _ensure_and_accumulate(scores["by_tool"], tool, row)

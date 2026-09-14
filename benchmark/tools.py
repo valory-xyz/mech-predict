@@ -351,15 +351,22 @@ def load_tool_run(
 CORE_PAYLOAD_KEYS = frozenset({"p_yes", "p_no", "confidence", "info_utility"})
 
 
-class RequestContext(TypedDict, total=False):
-    """The mech ``request_context`` shape the trader sends (``Bet.to_request_context``).
-
-    Shared by the replay and tournament builders so the two cannot drift on a
-    key name. ``amm_fee`` is Omen-only and has no benchmark counterpart.
-    """
+class _RequiredContext(TypedDict):
+    """The two request_context keys every builder must set."""
 
     market_id: str
     type: str
+
+
+class RequestContext(_RequiredContext, total=False):
+    """The mech ``request_context`` shape the trader sends (``Bet.to_request_context``).
+
+    Shared by the replay and tournament builders so the two cannot drift on a
+    key name. ``market_id`` and ``type`` are required: a builder that cannot
+    supply both returns None instead. ``amm_fee`` is Omen-only and has no
+    benchmark counterpart.
+    """
+
     description: str
     market_prob: float
     market_close_at: str
@@ -367,10 +374,46 @@ class RequestContext(TypedDict, total=False):
     market_spread: float
 
 
+# Suffix appended to a row's ``mode`` when its request_context carried a
+# market price, so the priced and blind arms never share a scoring bucket.
+MARKET_CONTEXT_SUFFIX = "+market_context"
+
+
+def arm_mode(mode: str, priced: bool) -> str:
+    """Label a row's mode with the market-context arm it belongs to.
+
+    :param mode: the row's base mode (``tournament``, ``cached_replay``, ...).
+    :param priced: whether the row's request_context carried a market price.
+    :return: the mode, suffixed when the row was priced.
+    """
+    return f"{mode}{MARKET_CONTEXT_SUFFIX}" if priced else mode
+
+
+def base_mode(mode: str) -> str:
+    """Strip the market-context arm suffix from a mode label.
+
+    Consumers that test a mode against a literal (``analyze.py``) must compare
+    the base mode, otherwise a priced row matches nothing and drops out of the
+    report.
+
+    :param mode: a mode label, possibly arm-suffixed.
+    :return: the mode without the arm suffix.
+    """
+    return (
+        mode[: -len(MARKET_CONTEXT_SUFFIX)]
+        if mode.endswith(MARKET_CONTEXT_SUFFIX)
+        else mode
+    )
+
+
 def log_market_context_coverage(
     logger: logging.Logger, priced_rows: int, total_rows: int
 ) -> None:
     """Log how many rows actually carried a price when market context was on.
+
+    Warns on no coverage and on partial coverage, because a run that asked for
+    the price and did not get it is a blind run wearing the wrong label; logs
+    at info level only when every row was priced.
 
     :param logger: the calling module's logger.
     :param priced_rows: rows whose request_context carried ``market_prob``.

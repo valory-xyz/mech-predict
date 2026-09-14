@@ -51,6 +51,7 @@ from benchmark.scoring_primitives import (
     log_loss_score,
     sample_edge_sd,
 )
+from benchmark.tools import arm_mode
 from scipy.optimize import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-order
     minimize,
 )
@@ -907,9 +908,9 @@ def score(  # pylint: disable=too-many-statements,too-many-locals
     for row in rows:
         tool = row.get("tool_name") or "unknown"
         version = row.get("tool_version") or row.get("tool_ipfs_hash") or "unknown"
-        mode = row.get("mode") or "production_replay"
-        if row.get("market_context"):
-            mode = f"{mode}+market_context"
+        mode = arm_mode(
+            row.get("mode") or "production_replay", bool(row.get("market_context"))
+        )
         tv_groups[f"{tool} | {version}"].append(row)
         tvm_groups[f"{tool} | {version} | {mode}"].append(row)
     by_tool_version = {k: compute_group_stats(g) for k, g in tv_groups.items()}

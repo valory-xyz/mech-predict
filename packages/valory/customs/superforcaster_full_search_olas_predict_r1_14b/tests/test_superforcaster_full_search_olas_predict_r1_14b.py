@@ -1048,15 +1048,63 @@ class TestOlasPredictWiring:
         # the tail is not JSON-serialisable, so assert on the payload itself
         assert "not supported" in result[0]
 
-    def test_token_budget_matches_the_parent_after_issue_455(self) -> None:
-        """4096, the same as the parent and the rest of the fleet.
+    def test_completion_budget_leaves_room_for_the_prompt(self) -> None:
+        """max_tokens is below the fleet's 4096 because the window is 8k."""
+        # #470 raised the fleet to 4096 so free-text completions are not cut off
+        # before the JSON; the same reasoning applies to a think block. But the
+        # fleet targets GPT-4.1, where the prompt is unconstrained. Here the
+        # prompt and the completion share 8192, and at 4096 the evidence block
+        # alone overruns what is left. Observed completions: 394-523 tokens.
+        max_tokens = module.DEFAULT_MODEL_SETTINGS["max_tokens"]
+        assert max_tokens == 2048
+        assert max_tokens > 523 * 2, "must clear the longest observed completion"
 
-        #470 raised the parent from 500 after free-text completions ran
-        786-1016 tokens and were cut off with no JSON. A reasoning model that
-        emits a think block before the four numeric fields is more exposed to
-        that, not less, so it must not sit below the fleet budget.
-        """
-        assert module.DEFAULT_MODEL_SETTINGS["max_tokens"] == 4096
+    def test_worst_case_request_fits_the_context_window(self) -> None:
+        """Full evidence + peopleAlsoAsk + a capped question must still fit."""
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        organic = [
+            {
+                "title": f"t{i}",
+                "link": f"https://e.com/{i}",
+                "snippet": page,
+                "date": "x",
+            }
+            for i in range(module.MAX_SOURCES)
+        ]
+        misc = [{"question": f"q{i}?", "snippet": page} for i in range(8)]
+        question = module._truncate_to_tokens(
+            " ".join(["word"] * 5000), module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+        )
+        max_tokens = module.DEFAULT_MODEL_SETTINGS["max_tokens"]
+        budget = module._evidence_budget(
+            question, "14/09/2026", "qwen-14b-sft", max_tokens
+        )
+        sources = module._cap_evidence_block(organic, misc, "qwen-14b-sft", budget)
+        prompt = module.PREDICTION_PROMPT.format(
+            question=question, today="14/09/2026", sources=sources
+        )
+        total = module.count_tokens(prompt, "qwen-14b-sft") + max_tokens
+        assert (
+            total <= module.MODEL_CONTEXT_WINDOW
+        ), f"{total} tokens exceeds the {module.MODEL_CONTEXT_WINDOW} window"
+
+    def test_long_free_text_question_is_capped(self) -> None:
+        """Pearl sends the user's message verbatim, and it lands twice."""
+        long_q = " ".join(["word"] * 5000)
+        capped = module._truncate_to_tokens(
+            long_q, module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+        )
+        assert (
+            module.count_tokens(capped, "qwen-14b-sft") <= module._MAX_QUESTION_TOKENS
+        )
+        # a short question is returned untouched
+        short = "Will it rain tomorrow?"
+        assert (
+            module._truncate_to_tokens(
+                short, module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+            )
+            == short
+        )
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_endpoint_comes_from_keychain(self, mock_client_mgr: MagicMock) -> None:

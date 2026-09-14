@@ -229,12 +229,22 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
-# Same budget as the parent (raised to 4096 by issue #455, after free-text
-# completions were truncated before the JSON). A reasoning model needs at least
-# as much room: the <think> block precedes the four numeric fields, so a short
-# budget cuts the completion off before `p_yes` is ever written.
+# The served model's context window (vLLM `--max-model-len`). The tools this
+# package descends from target GPT-4.1, where prompt length is a non-issue; here
+# the prompt AND the completion must fit in 8k together, so the two are budgeted
+# against each other rather than capped independently.
+MODEL_CONTEXT_WINDOW = 8192
+# The chat template wraps the messages in tokens this tokeniser never sees, and
+# the tokeniser is tiktoken rather than Qwen's (measured drift: ~1%).
+CONTEXT_SAFETY_MARGIN = 256
+# 2048, not the fleet's 4096. Issue #455 raised the fleet value so free-text
+# completions are not truncated before the JSON, and the same reasoning applies
+# to a <think> block -- but at 4096 only 4096 remain for the prompt, which the
+# evidence block alone exceeds. Observed completions from this model run
+# 394-523 tokens, so 2048 is roughly 4x the longest seen while leaving 6144 for
+# the prompt.
 DEFAULT_MODEL_SETTINGS = {
-    "max_tokens": 4096,
+    "max_tokens": 2048,
     "temperature": 0,
 }
 # The Olas-Predict served model emits reasoning followed by JSON, often inside
@@ -273,6 +283,11 @@ def resolve_model(tool: str) -> str:
     """
     return MODEL_BY_TOOL[tool]
 
+
+# The question is interpolated TWICE into the prompt, so a long free-text
+# prompt (Pearl sends the user's message verbatim) costs double. Capped so it
+# can never crowd out the evidence entirely.
+_MAX_QUESTION_TOKENS = 1200
 
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
@@ -667,15 +682,62 @@ def _cap_evidence_block(
     if count_tokens(rendered, model) <= max_tokens or not organic_data:
         return rendered
 
+    # peopleAlsoAsk goes first. The parent trimmed only organic items, which is
+    # safe on a 1M-token window but not on 8k: a large peopleAlsoAsk block would
+    # otherwise evict every scraped page -- the better evidence -- and could
+    # still overflow, leaving the request to be rejected outright.
+    misc = list(misc_data)
+    while (
+        misc
+        and count_tokens(format_sources_data(organic_data, misc), model) > max_tokens
+    ):
+        misc.pop()
     trimmed = list(organic_data)
     while (
-        trimmed
-        and count_tokens(format_sources_data(trimmed, misc_data), model) > max_tokens
+        trimmed and count_tokens(format_sources_data(trimmed, misc), model) > max_tokens
     ):
         trimmed.pop()
-    rendered = format_sources_data(trimmed, misc_data)
+    rendered = format_sources_data(trimmed, misc)
     rendered += "\n[… evidence truncated …]\n"
     return rendered
+
+
+def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
+    """Cut `text` down to at most `limit` tokens, on a word boundary.
+
+    :param text: the text to shorten.
+    :param limit: maximum tokens to keep.
+    :param model: model name for tokeniser selection.
+    :return: the text, shortened if it was over the limit.
+    """
+    if count_tokens(text, model) <= limit:
+        return text
+    words = text.split()
+    while words and count_tokens(" ".join(words), model) > limit:
+        words = words[: int(len(words) * 0.9)] or words[:-1]
+    return " ".join(words)
+
+
+def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> int:
+    """Tokens left for the evidence block once everything else is placed.
+
+    Rendering the prompt with empty sources prices the template and both copies
+    of the question in one step, so the budget cannot drift from the template.
+
+    :param question: the question as it will be interpolated.
+    :param today: the date string as it will be interpolated.
+    :param model: model name for tokeniser selection.
+    :param max_tokens: completion budget reserved from the same window.
+    :return: tokens available for evidence; may be zero.
+    """
+    skeleton = PREDICTION_PROMPT.format(question=question, today=today, sources="")
+    return max(
+        0,
+        MODEL_CONTEXT_WINDOW
+        - max_tokens
+        - CONTEXT_SAFETY_MARGIN
+        - count_tokens(skeleton, model),
+    )
 
 
 # Matches from 'question "' to '" and the `yes`' to handle nested quotes.
@@ -1018,6 +1080,21 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 f"derived search query: {search_query!r}"
             )
 
+        # Free-text puts the whole user prompt in the question slot, twice. When
+        # that does not fit, prefer the clause parse_prompt already identified as
+        # the question over a truncation: in free text the question usually comes
+        # last, so cutting the tail is what removes it.
+        if count_tokens(question, model) > _MAX_QUESTION_TOKENS:
+            if tier != "raw":
+                question = search_query
+            question = _truncate_to_tokens(question, _MAX_QUESTION_TOKENS, model)
+            print(
+                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] Question too long for the "
+                f"{MODEL_CONTEXT_WINDOW}-token window; using tier={tier} "
+                f"question: {question[:120]!r}"
+            )
+        evidence_budget = _evidence_budget(question, d, model, max_tokens)
+
         if source_content is not None:
             print("Using provided source content (cached replay)...")
             captured_source_content = source_content
@@ -1043,7 +1120,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            sources = _cap_evidence_block(
+                organic_data, misc_data, model, evidence_budget
+            )
         else:
             if not any(ch.isalnum() for ch in search_query):
                 # Nothing searchable: no alphanumeric character at all (empty,
@@ -1103,7 +1182,9 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "pages": captured_pages,
             }
             print("Formatting sources...")
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            sources = _cap_evidence_block(
+                organic_data, misc_data, model, evidence_budget
+            )
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(

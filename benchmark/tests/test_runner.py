@@ -653,14 +653,37 @@ class TestMarketContextRowIdentity:
         )
 
     def test_output_row_records_mode(self) -> None:
-        """The row says which mode produced it and carries the mode-specific id."""
+        """The row says which arm produced it and carries the arm-specific id."""
         blind = build_output_row(SCORED_ROW, "t", "m", VALID_RESULT)
         priced = build_output_row(
-            SCORED_ROW, "t", "m", VALID_RESULT, with_market_context=True
+            SCORED_ROW,
+            "t",
+            "m",
+            VALID_RESULT,
+            with_market_context=True,
+            request_context={"market_id": "0xabc", "type": "omen", "market_prob": 0.4},
         )
-        assert blind["market_context"] is False
-        assert priced["market_context"] is True
+        assert blind["market_context_arm"] is False
+        assert priced["market_context_arm"] is True
         assert blind["row_id"] != priced["row_id"]
+
+    def test_market_context_records_the_price_not_the_flag(self) -> None:
+        """A priced-arm row whose context carried no price is not priced.
+
+        Scoring, bucketing and tournament dedup all key on this field, so it
+        must say what the tool received rather than what the operator asked
+        for.
+        """
+        row = build_output_row(
+            SCORED_ROW,
+            "t",
+            "m",
+            VALID_RESULT,
+            with_market_context=True,
+            request_context={"market_id": "0xabc", "type": "omen"},
+        )
+        assert row["market_context_arm"] is True
+        assert row["market_context"] is False
 
     def test_second_arm_writes_into_the_same_file(self, tmp_path: Path) -> None:
         """Blind then market-context into one output file yields two rows."""
@@ -692,6 +715,35 @@ class TestMarketContextCoverageLog:
             _replay_one_row(tmp_path, SCORED_ROW, with_market_context=True)
         assert "market context: 1/1 rows carried a usable price" in caplog.text
         assert "effectively blind" not in caplog.text
+
+    def test_resumed_row_makes_no_gamma_fetch(self, tmp_path: Path) -> None:
+        """A row whose every tool is done must not pay for a description fetch."""
+        output = _replay_one_row(tmp_path, SCORED_ROW, with_market_context=True)
+        polymarket_row = {k: v for k, v in SCORED_ROW.items() if k != "description"}
+        dataset = tmp_path / "dataset.jsonl"
+        dataset.write_text(
+            json.dumps(
+                {**polymarket_row, "source_content": {"mode": "cached", "sources": []}}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with (
+            patch(f"{RUNNER}.build_keychain"),
+            patch(f"{RUNNER}.run_single") as mock_run,
+            patch(f"{RUNNER}._fetch_polymarket_description") as mock_gamma,
+        ):
+            mock_run.return_value = dict(VALID_RESULT)
+            replay(
+                dataset_path=dataset,
+                output_path=output,
+                tools=["superforcaster-market-aware"],
+                model="test-model",
+                with_market_context=True,
+            )
+
+        mock_gamma.assert_not_called()
+        mock_run.assert_not_called()
 
     def test_warns_on_partial_coverage(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

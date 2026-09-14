@@ -333,6 +333,7 @@ def build_output_row(
     run_result: dict[str, Any],
     *,
     with_market_context: bool = False,
+    request_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a production_log.jsonl-compatible row from a replay result.
 
@@ -340,15 +341,26 @@ def build_output_row(
     request_context, so the row records exactly what the tool could have
     seen and :mod:`benchmark.scorer` scores edge against it.
 
+    Two separate facts are recorded. ``market_context_arm`` is the run's
+    ``--market-context`` flag and matches the row id. ``market_context`` is
+    what the tool actually received: the flag can be on and the context still
+    carry no price when the dataset row has none, and scoring must not treat
+    such a row as priced.
+
     :param dataset_row: the replayed dataset row.
     :param tool_name: registered tool name.
     :param model: LLM model identifier.
     :param run_result: dict returned by :func:`run_single`.
     :param with_market_context: the arm; part of the row id and recorded as
-        ``market_context``.
+        ``market_context_arm``.
+    :param request_context: the context this row was run with; its
+        ``market_prob`` decides ``market_context``.
     :return: a production_log.jsonl-compatible output row.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    priced = (
+        request_context is not None and request_context.get("market_prob") is not None
+    )
     question_text = dataset_row["question_text"]
     close_at = dataset_row.get("market_close_at")
 
@@ -358,7 +370,8 @@ def build_output_row(
         ),
         "schema_version": "1.0",
         "mode": "cached_replay",
-        "market_context": with_market_context,
+        "market_context": priced,
+        "market_context_arm": with_market_context,
         "market_id": dataset_row.get("market_id"),
         "platform": dataset_row.get("platform", "unknown"),
         "question_text": question_text,
@@ -462,6 +475,21 @@ def replay(
                 else "none"
             )
 
+            # Build the context only when some tool still has to run: it can
+            # issue a Gamma description fetch, and a fully resumed row must
+            # not pay for one, nor count toward market-context coverage.
+            row_ids = {
+                tool_name: _make_row_id(
+                    tool_name, question, model, with_market_context=with_market_context
+                )
+                for tool_name in tools
+            }
+            pending_tools = [t for t in tools if row_ids[t] not in existing_ids]
+            skipped += len(tools) - len(pending_tools)
+            done += len(tools) - len(pending_tools)
+            if not pending_tools:
+                continue
+
             request_context = build_request_context(
                 row, with_market_context=with_market_context
             )
@@ -469,15 +497,7 @@ def replay(
             if request_context is not None and "market_prob" in request_context:
                 priced_rows += 1
 
-            for tool_name in tools:
-                row_id = _make_row_id(
-                    tool_name, question, model, with_market_context=with_market_context
-                )
-                if row_id in existing_ids:
-                    skipped += 1
-                    done += 1
-                    continue
-
+            for tool_name in pending_tools:
                 log.info(
                     "[%d/%d] %s (source:%s) | %s",
                     done + 1,
@@ -503,6 +523,7 @@ def replay(
                     model,
                     result,
                     with_market_context=with_market_context,
+                    request_context=request_context,
                 )
                 out.write(json.dumps(output_row) + "\n")
                 out.flush()

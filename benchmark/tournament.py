@@ -312,8 +312,13 @@ def build_output_row(
     cid: str,
     *,
     with_market_context: bool = False,
+    request_context: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build a tournament prediction row.
+
+    ``market_context_arm`` records the run's ``--market-context`` flag and
+    matches the row id; ``market_context`` records what the tool actually
+    received, which is False when the market carried no usable price.
 
     :param market: market dict (id, platform, question_text, etc.).
     :param tool_name: tournament tool name.
@@ -323,10 +328,15 @@ def build_output_row(
     :param cid: IPFS CID of the tool package that produced ``run_result``;
         recorded as ``tool_ipfs_hash`` for the audit trail.
     :param with_market_context: the arm; part of the row id and recorded as
-        ``market_context``.
+        ``market_context_arm``.
+    :param request_context: the context this row was run with; its
+        ``market_prob`` decides ``market_context``.
     :return: dict ready to serialize as a JSONL row.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    priced = (
+        request_context is not None and request_context.get("market_prob") is not None
+    )
     question_text = market["question_text"]
 
     return {
@@ -339,7 +349,8 @@ def build_output_row(
         ),
         "schema_version": "1.0",
         "mode": "tournament",
-        "market_context": with_market_context,
+        "market_context": priced,
+        "market_context_arm": with_market_context,
         "market_id": market.get("id"),
         "market_address": market.get("market_address"),
         "platform": market.get("platform", "unknown"),
@@ -403,6 +414,7 @@ def _skipped_global_timeout_row(
     cid: str,
     *,
     with_market_context: bool = False,
+    request_context: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build a row recording that we ran out of wall-clock budget."""
     return build_output_row(
@@ -421,7 +433,38 @@ def _skipped_global_timeout_row(
         },
         cid,
         with_market_context=with_market_context,
+        request_context=request_context,
     )
+
+
+def _pending_tools(
+    market: dict[str, Any],
+    tools: list[str],
+    model: str,
+    existing_ids: set[str],
+    with_market_context: bool,
+) -> list[str]:
+    """Return the tools that still have to run for a market on a resumed run.
+
+    :param market: one open-market row.
+    :param tools: every tool in the roster.
+    :param model: LLM model identifier.
+    :param existing_ids: row ids already present in the output file.
+    :param with_market_context: the arm, which is part of the row id.
+    :return: the tools whose row is not written yet, in roster order.
+    """
+    return [
+        tool_name
+        for tool_name in tools
+        if _make_row_id(
+            tool_name,
+            market.get("id", ""),
+            market.get("platform", ""),
+            model,
+            with_market_context=with_market_context,
+        )
+        not in existing_ids
+    ]
 
 
 def _select_markets(
@@ -494,9 +537,9 @@ def run_tournament(
         recorded as ``skipped_global_timeout`` rows.
     :param with_market_context: forward a request_context (market price,
         close time, liquidity) to every tool; see
-        :func:`build_request_context`. Off by default. One output file holds
-        one arm: when both arms exist for a market, ``score_tournament``
-        scores the priced row and drops the blind one.
+        :func:`build_request_context`. Off by default. Both arms append to
+        the SAME output file: the arm is in the row id, and
+        ``score_tournament`` needs to see both to keep one row per market.
     """
     tools = list(tools_to_cid.keys())
     markets = _select_markets(load_markets(markets_path), max_markets)
@@ -533,6 +576,14 @@ def run_tournament(
                 log.warning("Skipping market %s: no question_text", market.get("id"))
                 continue
 
+            pending_tools = _pending_tools(
+                market, tools, model, existing_ids, with_market_context
+            )
+            skipped += len(tools) - len(pending_tools)
+            done += len(tools) - len(pending_tools)
+            if not pending_tools:
+                continue
+
             request_context = (
                 build_request_context(market) if with_market_context else None
             )
@@ -540,20 +591,8 @@ def run_tournament(
             if request_context is not None and "market_prob" in request_context:
                 priced_rows += 1
 
-            for tool_name in tools:
+            for tool_name in pending_tools:
                 cid = tools_to_cid[tool_name]
-                row_id = _make_row_id(
-                    tool_name,
-                    market.get("id", ""),
-                    market.get("platform", ""),
-                    model,
-                    with_market_context=with_market_context,
-                )
-                if row_id in existing_ids:
-                    skipped += 1
-                    done += 1
-                    continue
-
                 if (
                     global_timeout is not None
                     and time.monotonic() - started_at > global_timeout
@@ -570,6 +609,7 @@ def run_tournament(
                         model,
                         cid,
                         with_market_context=with_market_context,
+                        request_context=request_context,
                     )
                     out.write(json.dumps(row, ensure_ascii=False) + "\n")
                     out.flush()
@@ -595,6 +635,7 @@ def run_tournament(
                     result,
                     cid,
                     with_market_context=with_market_context,
+                    request_context=request_context,
                 )
                 out.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 out.flush()
@@ -689,7 +730,8 @@ def main() -> None:
             "Forward a request_context (market price, close time, liquidity) "
             "to every tool, as production does. Off by default; required by "
             "tools that read the price in production "
-            "(superforcaster-market-aware). Use a separate --output per arm."
+            "(superforcaster-market-aware). Keep both arms in the SAME "
+            "--output file so score_tournament can keep one row per market."
         ),
     )
     args = parser.parse_args()

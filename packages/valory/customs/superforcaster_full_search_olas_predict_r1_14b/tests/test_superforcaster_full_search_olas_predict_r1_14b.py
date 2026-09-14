@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 import openai
 import pytest
 import requests
+import yaml
 
 import packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b as module
 from packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b import (
@@ -47,9 +48,7 @@ class TestOpenAIClientManager:
 
     def test_context_manager_returns_client_instance(self) -> None:
         """__enter__ returns a fresh OpenAIClient, __exit__ closes it."""
-        mgr = OpenAIClientManager(
-            api_key="sk-test", base_url="http://vllm:8000/v1", auth_type="Bearer"
-        )
+        mgr = OpenAIClientManager(api_key="sk-test", base_url="http://vllm:8000/v1")
         with patch(
             "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b.OpenAIClient"
         ) as MockClient:
@@ -64,7 +63,6 @@ class TestOpenAIClientManager:
                 MockClient.assert_called_once_with(
                     api_key="sk-test",
                     base_url="http://vllm:8000/v1",
-                    auth_type="Bearer",
                 )
 
             mock_instance.client.close.assert_called_once()
@@ -156,9 +154,9 @@ def _make_mock_api_keys(
         "openai": ["sk-test"],
         "serperapi": ["serper-test"],
         # the forecasting endpoint is authenticated; run() requires the key
-        "vllm_server_api_key": ["r1-14b-test-key"],
+        "finetuned": ["r1-14b-test-key"],
         # the vLLM endpoint URL is passed via the KeyChain
-        "vllm_server_url": ["https://vllm.example/v1"],
+        "finetuned_endpoint": ["https://vllm.example/v1"],
         "return_source_content": [return_source_content],
         "source_content_mode": [source_content_mode],
     }
@@ -435,7 +433,7 @@ class TestEvidenceBlockCap:
             {"title": "T", "link": "http://x", "snippet": "s", "position": 1},
         ]
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
-        assert "[... evidence truncated ...]" not in rendered
+        assert "[… evidence truncated …]" not in rendered
         assert "T" in rendered
 
     def test_oversize_evidence_is_trimmed_with_marker(self) -> None:
@@ -458,7 +456,7 @@ class TestEvidenceBlockCap:
             for i in range(5)
         ]
         rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
-        assert "[... evidence truncated ...]" in rendered
+        assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
         # Trailing items are dropped, leading (most-relevant) kept: a
         # leading-drop mutation would keep T4 and drop T0, failing this.
@@ -476,7 +474,7 @@ class TestEvidenceBlockCap:
         ]
         rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1")
         # organic is empty -- early return, no trailing-drop marker added
-        assert "[... evidence truncated ...]" not in rendered
+        assert "[… evidence truncated …]" not in rendered
         assert "lorem ipsum" in rendered
 
 
@@ -544,11 +542,15 @@ class TestFetchPageContent:
 class TestErrorHandling:
     """with_key_rotation's catch-all returns parseable null-prediction JSON."""
 
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
     @patch(f"{SF_MODULE}.OpenAIClientManager")
-    def test_rate_limit_rotates_olas_predict_key(
-        self, mock_client_mgr: MagicMock
+    def test_rate_limit_is_retried_at_the_completion(
+        self, mock_client_mgr: MagicMock, _mock_sleep: MagicMock
     ) -> None:
-        """A vLLM 429 rotates the actual forecasting-endpoint key."""
+        """A vLLM 429 retries the completion, not the whole pipeline."""
+        # Re-raising to `with_key_rotation` would re-run search and page
+        # scraping for a single-key endpoint that has nothing to rotate to, and
+        # then propagate the 429 anyway. The parent retries the completion.
         mock_client = _stub_openai(mock_client_mgr)
         rate_limit = openai.RateLimitError(
             "429 Too Many Requests",
@@ -560,11 +562,10 @@ class TestErrorHandling:
             OpenAIResponse(content=PREDICTION_JSON, usage=Usage()),
         ]
         keys = _make_mock_api_keys("false")
-        keys.max_retries = lambda: {"vllm_server_api_key": 1}
+        keys.max_retries = lambda: {"finetuned": 1}
 
         result = run(
             tool="superforcaster_full_search_olas_predict_r1_14b_omen",
-            model="qwen-14b-sft",
             prompt=PREDICTION_PROMPT,
             api_keys=keys,
             counter_callback=None,
@@ -572,7 +573,8 @@ class TestErrorHandling:
         )
 
         assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
-        keys.rotate.assert_called_once_with("vllm_server_api_key")
+        assert mock_client.completions.call_count == 2
+        keys.rotate.assert_not_called()
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
@@ -1046,9 +1048,15 @@ class TestOlasPredictWiring:
         # the tail is not JSON-serialisable, so assert on the payload itself
         assert "not supported" in result[0]
 
-    def test_token_budget_leaves_room_for_the_think_block(self) -> None:
-        """The 1024-token budget leaves room for the model's think block."""
-        assert module.DEFAULT_MODEL_SETTINGS["max_tokens"] == 1024
+    def test_token_budget_matches_the_parent_after_issue_455(self) -> None:
+        """4096, the same as the parent and the rest of the fleet.
+
+        #470 raised the parent from 500 after free-text completions ran
+        786-1016 tokens and were cut off with no JSON. A reasoning model that
+        emits a think block before the four numeric fields is more exposed to
+        that, not less, so it must not sit below the fleet budget.
+        """
+        assert module.DEFAULT_MODEL_SETTINGS["max_tokens"] == 4096
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_endpoint_comes_from_keychain(self, mock_client_mgr: MagicMock) -> None:
@@ -1102,7 +1110,7 @@ class TestOlasPredictWiring:
         services = {
             "openai": "sk-test",
             "serperapi": "serper-test",
-            "vllm_server_api_key": "r1-14b-test-key",
+            "finetuned": "r1-14b-test-key",
             # deliberately omit vllm_server_url
             "return_source_content": "false",
             "source_content_mode": "cleaned",
@@ -1117,11 +1125,64 @@ class TestOlasPredictWiring:
             api_keys=keys,
         )
         assert "No endpoint for the forecasting service" in result[0]
-        assert module.DEFAULT_AUTH_TYPE == "Bearer"
 
-    def test_default_model_is_the_released_checkpoint(self) -> None:
-        """component.yaml pins the served model; this constant documents it."""
-        assert module.DEFAULT_MODEL == "qwen-14b-sft"
+    def test_base_url_reaches_the_openai_sdk(self) -> None:
+        """Without base_url the SDK would silently talk to api.openai.com."""
+        with patch(
+            "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b."
+            "superforcaster_full_search_olas_predict_r1_14b.openai.OpenAI"
+        ) as mock_openai:
+            module.OpenAIClient(api_key="sk-test", base_url="http://vllm:8000/v1")
+        mock_openai.assert_called_once_with(
+            api_key="sk-test", base_url="http://vllm:8000/v1"
+        )
+
+    def test_served_model_is_resolved_from_the_tool(self) -> None:
+        """Both wire names resolve to the one checkpoint this endpoint serves."""
+        assert module.resolve_model(module.TOOL_OMEN) == "qwen-14b-sft"
+        assert module.resolve_model(module.TOOL_POLYMARKET) == "qwen-14b-sft"
+        assert set(module.MODEL_BY_TOOL) == set(module.ALLOWED_TOOLS)
+        # component.yaml's default_model must agree: the mech shows it in the
+        # tool metadata, and a drift there misreports what is being served.
+        component = yaml.safe_load(
+            (Path(module.__file__).parent / "component.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert component["params"]["default_model"] == "qwen-14b-sft"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_requester_supplied_model_is_ignored(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The requester-controlled `model` kwarg is not honoured."""
+        # `task_data.get("model", params.default_model)` lets a request
+        # override the component default, and the benchmark tournament passes
+        # its own `--model` default. Either would reach a vLLM that serves one
+        # checkpoint.
+        mock_client = _stub_openai(mock_client_mgr)
+        run(
+            tool=module.TOOL_OMEN,
+            prompt=PREDICTION_PROMPT,
+            model="gpt-4.1-2025-04-14",
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+        assert mock_client.completions.call_args.kwargs["model"] == "qwen-14b-sft"
+
+    def test_model_kwarg_is_not_required(self) -> None:
+        """Pearl and the tournament may omit `model` entirely."""
+        with patch(f"{SF_MODULE}.OpenAIClientManager") as mock_client_mgr:
+            _stub_openai(mock_client_mgr)
+            result = run(
+                tool=module.TOOL_POLYMARKET,
+                prompt=PREDICTION_PROMPT,
+                api_keys=_make_mock_api_keys("false"),
+                counter_callback=None,
+                source_content={"serper_response": FAKE_SERPER_RESPONSE},
+            )
+        assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
 
     def test_reasoning_completion_is_normalized_to_delivery_json(self) -> None:
         """Reasoning prose and fenced JSON do not leak into the delivery."""

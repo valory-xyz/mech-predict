@@ -19,28 +19,14 @@
 """Olas-Predict-R1-14B forecasting tool.
 
 A sibling of `superforcaster_full_search` that keeps its evidence pipeline and
-prompt byte-for-byte and swaps the forecaster for Olas-Predict-R1-14B, a
-fine-tuned DeepSeek-R1-Distill-Qwen-14B served from a self-hosted vLLM
-endpoint (OpenAI-compatible, so the client differs only by `base_url`).
+forecasting prompt and swaps the forecaster for Olas-Predict-R1-14B, a
+fine-tuned DeepSeek-R1-Distill-Qwen-14B served from a self-hosted vLLM endpoint
+(OpenAI-compatible, so the client differs only by `base_url`).
 
-WHY THE PARENT. The out-of-time evaluation scored this model on a vendored,
-byte-identical copy of `superforcaster_full_search`, swapping only the model.
-Forking it therefore ships the configuration that was measured rather than a
-new combination. On that evidence the model is level with GPT-4.1 on Omen and
-ahead of it on Polymarket; on snippet-only evidence it is behind, which is why
-this tool is full-search and has no snippet variant.
-
-WHAT DIFFERS FROM THE PARENT
-  * `base_url` on the OpenAI client, taken from the `endpoint` kwarg that the
-    mech forwards from its deployment config (env vars never reach a component
-    running as bytes published from IPFS).
-  * `max_tokens` 1024, not 500 -- a reasoning model needs room for its
-    <think> block before the four numeric fields, and at 500 the completion is
-    truncated before `p_yes` exists.
-  * `params.default_model` in component.yaml pins the served model; the mech
-    passes it through as the `model` kwarg, so no model branching lives here.
-
-Everything else -- search, page extraction, prompt, parsing -- is the parent's.
+What differs from the parent: the client is pointed at the vLLM endpoint from
+the KeyChain, the served model is fixed per tool name rather than taken from the
+request, and the completion is stripped of the model's `<think>` block before
+the JSON is parsed. Rationale and evaluation results are in the pull request.
 """
 
 import functools
@@ -138,40 +124,28 @@ def with_key_rotation(func: Callable) -> Callable:
     return wrapper
 
 
-# Self-hosted vLLM endpoint (OpenAI-compatible). The endpoint URL and API key
-# are deployment inputs passed via the KeyChain. The KeyChain carries the
-# vLLM server URL, the vLLM server API key, and the non-secret settings the
-# parent already routes through it: return_source_content, source_content_mode.
-#
-# The endpoint is AUTHENTICATED -- it is not an open vLLM. The evaluation
-# supplied the endpoint URL, API key, and authorization type and
-# built the client with an EXPLICIT Authorization header, because the gateway in
-# front of vLLM does not necessarily accept the SDK's own plain `Bearer`. We
-# mirror that here rather than relying on the SDK default.
-VLLM_SERVER_URL = "vllm_server_url"
-VLLM_SERVER_API_KEY = "vllm_server_api_key"
-DEFAULT_AUTH_TYPE = "Bearer"
+# KeyChain services carrying the vLLM endpoint and its key. The KeyChain is the
+# only config channel that reaches a component running as bytes published from
+# IPFS, so the endpoint rides it alongside the key. These are the names
+# `finetuned_prediction` already uses and the benchmark flywheel already exports
+# (VLLM_ENDPOINT / VLLM_API_KEY): one vLLM server holds every qwen checkpoint,
+# so a second pair of names would need new secrets for the same machine.
+VLLM_SERVER_API_KEY = "finetuned"
+VLLM_SERVER_URL = "finetuned_endpoint"
 
 
 class OpenAIClientManager:
     """Client context manager for OpenAI."""
 
-    def __init__(
-        self, api_key: str, base_url: str, auth_type: str = DEFAULT_AUTH_TYPE
-    ):  # noqa: DAR101
-        """Initializes with the vLLM key, base URL and auth scheme"""
+    def __init__(self, api_key: str, base_url: str):  # noqa: DAR101
+        """Initializes with the vLLM key and base URL"""
         self.api_key = api_key
         self.base_url = base_url
-        self.auth_type = auth_type
         self._client: Optional["OpenAIClient"] = None
 
     def __enter__(self) -> "OpenAIClient":
         """Initializes and returns LLM client."""
-        self._client = OpenAIClient(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            auth_type=self.auth_type,
-        )
+        self._client = OpenAIClient(api_key=self.api_key, base_url=self.base_url)
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
@@ -206,21 +180,15 @@ class OpenAIResponse:
 class OpenAIClient:
     """OpenAI Client"""
 
-    def __init__(self, api_key: str, base_url: str, auth_type: str = DEFAULT_AUTH_TYPE):
+    def __init__(self, api_key: str, base_url: str):
         """Initializes a client bound to the authenticated vLLM endpoint.
 
         :param api_key: API key for the vLLM gateway.
         :param base_url: OpenAI-compatible vLLM endpoint URL.
-        :param auth_type: Authorization scheme expected by the gateway.
         """
         self.api_key = api_key
         self.base_url = base_url
-        self.auth_type = auth_type
-        self.client = openai.OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            default_headers={"Authorization": f"{auth_type} {api_key}"},
-        )
+        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def completions(
         self,
@@ -261,27 +229,49 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
-# max_tokens is 1024, not the parent's 500. Olas-Predict-R1-14B is a reasoning
-# model: it emits a <think> block before the four numeric fields, so at 500 the
-# completion is truncated before `p_yes` is ever written and the answer is
-# unusable. 1024 is the budget the out-of-time evaluation used.
+# Same budget as the parent (raised to 4096 by issue #455, after free-text
+# completions were truncated before the JSON). A reasoning model needs at least
+# as much room: the <think> block precedes the four numeric fields, so a short
+# budget cuts the completion off before `p_yes` is ever written.
 DEFAULT_MODEL_SETTINGS = {
-    "max_tokens": 1024,
+    "max_tokens": 4096,
     "temperature": 0,
 }
-# Informational only: the mech resolves the model from `params.default_model`
-# in component.yaml and passes it as the `model` kwarg.
-DEFAULT_MODEL = "qwen-14b-sft"
 # The Olas-Predict served model emits reasoning followed by JSON, often inside
 # a markdown fence. The delivery must contain only the validated JSON object.
-THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
-JSON_RE = re.compile(r"\{[^}]*\}")
+# Reasoning models emit a think block before the answer. Two shapes occur:
+# `<think>...</think>{json}` when the model writes both tags, and a BARE
+# `...</think>{json}` when the chat template already supplied the opener. The
+# bare shape is the common one for DeepSeek-R1 templates, so matching only the
+# paired form leaves the whole reasoning in place -- and the reasoning contains
+# draft probabilities. Everything before the LAST `</think>` is dropped.
+THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
+# Take the LAST balanced object, not the first: any leftover reasoning puts a
+# draft `{"p_yes": ...}` ahead of the real answer.
+JSON_RE = re.compile(r"\{[^{}]*\}")
 # Two wire names, one package: the code is identical for both platforms (the
 # evaluation ran this same pipeline on Omen and Polymarket), and separate names
 # let the two be scored, promoted and served independently.
 TOOL_OMEN = "superforcaster_full_search_olas_predict_r1_14b_omen"
 TOOL_POLYMARKET = "superforcaster_full_search_olas_predict_r1_14b_polymarket"
 ALLOWED_TOOLS = [TOOL_OMEN, TOOL_POLYMARKET]
+
+# vLLM --served-model-name, resolved from the tool rather than the request. The
+# mech's `model` kwarg is requester-controlled (`task_data.get("model",
+# params.default_model)`), and the benchmark tournament passes its own default,
+# so honouring it would send this endpoint a checkpoint it does not serve. The
+# requester picks the tool; the tool picks the model.
+SERVED_MODEL = "qwen-14b-sft"
+MODEL_BY_TOOL = {TOOL_OMEN: SERVED_MODEL, TOOL_POLYMARKET: SERVED_MODEL}
+
+
+def resolve_model(tool: str) -> str:
+    """Return the vLLM served-model name for `tool`.
+
+    :param tool: One of `ALLOWED_TOOLS`.
+    :return: The served-model name to request from the vLLM endpoint.
+    """
+    return MODEL_BY_TOOL[tool]
 
 
 MAX_SOURCES = 5
@@ -309,82 +299,82 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 MAX_EVIDENCE_TOKENS = 4000
 
 
-PREDICTION_PROMPT = (
-    "You are an advanced AI system which has been finetuned to provide calibrated "
-    "probabilistic forecasts under uncertainty, with your performance evaluated "
-    "according to the Brier score. When forecasting, do not treat 0.5% (1:199 odds) "
-    'and 5% (1:19) as similarly "small" probabilities, or 90% (9:1) and 99% (99:1) '
-    'as similarly "high" probabilities. As the odds show, they are markedly '
-    "different, so output your probabilities accordingly.\n\n"
-    "Question:\n{question}\n\n"
-    "Today's date: {today}\n"
-    "Your pretraining knowledge cutoff: October 2023\n\n"
-    "We have retrieved the following information for this question:\n"
-    "<background>{sources}</background>\n\n"
-    "Recall the question you are forecasting:\n{question}\n\n"
-    "Instructions:\n"
-    "1. Compress key factual information from the sources, as well as useful "
-    "background information which may not be in the sources, into a list of core "
-    "factual points to reference. Aim for information which is specific, relevant, "
-    "and covers the core considerations you'll use to make your forecast. For this "
-    "step, do not draw any conclusions about how a fact will influence your answer "
-    "or forecast. Place this section of your response in <facts></facts> tags.\n\n"
-    "2. Provide a few reasons why the answer might be no. Rate the strength of each "
-    "reason on a scale of 1-10. Use <no></no> tags.\n\n"
-    "3. Provide a few reasons why the answer might be yes. Rate the strength of each "
-    "reason on a scale of 1-10. Use <yes></yes> tags.\n\n"
-    "4. Aggregate your considerations. Do not summarize or repeat previous points; "
-    "instead, investigate how the competing factors and mechanisms interact and "
-    "weigh against each other. Factorize your thinking across (exhaustive, mutually "
-    "exclusive) cases if and only if it would be beneficial to your reasoning. We "
-    "have detected that you overestimate world conflict, drama, violence, and crises "
-    "due to news' negativity bias, which doesn't necessarily represent overall "
-    "trends or base rates. Similarly, we also have detected you overestimate "
-    "dramatic, shocking, or emotionally charged news due to news' sensationalism "
-    "bias. Therefore adjust for news' negativity bias and sensationalism bias by "
-    "considering reasons to why your provided sources might be biased or exaggerated. "
-    "Think like a superforecaster. Use <thinking></thinking> tags for this section "
-    "of your response.\n\n"
-    "5. Output an initial probability (prediction) as a single number between 0 and 1 "
-    "given steps 1-4. Use <tentative></tentative> tags.\n\n"
-    "6. Reflect on your answer, performing sanity checks and mentioning any "
-    "additional knowledge or background information which may be relevant. Check for "
-    "over/underconfidence, improper treatment of conjunctive or disjunctive "
-    "conditions (only if applicable), and other forecasting biases when reviewing "
-    "your reasoning. Consider priors/base rates, and the extent to which "
-    "case-specific information justifies the deviation between your tentative "
-    "forecast and the prior. Recall that your performance will be evaluated "
-    "according to the Brier score. Be precise with tail probabilities. Leverage "
-    "your intuitions, but never change your forecast for the sake of modesty or "
-    "balance alone. Finally, aggregate all of your previous reasoning and highlight "
-    "key factors that inform your final forecast. Use <thinking></thinking> tags "
-    "for this portion of your response.\n\n"
-    "7. Output your final prediction (a number between 0 and 1 with an asterisk at "
-    "the beginning and end of the decimal) in <answer></answer> tags.\n\n"
-    "OUTPUT_FORMAT\n"
-    "* Your output response must be only a single JSON object to be parsed by "
-    'Python\'s "json.loads()".\n'
-    '* The JSON must contain four fields: "p_yes", "p_no", "confidence", and '
-    '"info_utility".\n'
-    "* Each item in the JSON must have a value between 0 and 1.\n"
-    '   - "p_yes": Estimated probability that the event in the "Question" '
-    "occurs.\n"
-    '   - "p_no": Estimated probability that the event in the "Question" does '
-    "not occur.\n"
-    '   - "confidence": A value between 0 and 1 indicating the confidence in the '
-    "prediction. 0 indicates lowest confidence value; 1 maximum confidence value.\n"
-    '   - "info_utility": Utility of the information provided in "sources" to '
-    "help you make the prediction. 0 indicates lowest utility; 1 maximum utility.\n"
-    '* The sum of "p_yes" and "p_no" must equal 1.\n'
-    "* Output only the JSON object. Do not include any other contents in your "
-    "response.\n"
-    '* This is incorrect:"```json{{\\n  \\"p_yes\\": 0.2,\\n  \\"p_no\\": 0.8,\\n  '
-    '\\"confidence\\": 0.7,\\n  \\"info_utility\\": 0.5\\n}}```"\n'
-    '* This is incorrect:```json"{{\\n  \\"p_yes\\": 0.2,\\n  \\"p_no\\": 0.8,\\n  '
-    '\\"confidence\\": 0.7,\\n  \\"info_utility\\": 0.5\\n}}"```\n'
-    '* This is correct:"{{\\n  \\"p_yes\\": 0.2,\\n  \\"p_no\\": 0.8,\\n  '
-    '\\"confidence\\": 0.7,\\n  \\"info_utility\\": 0.5\\n}}"\n'
-)
+PREDICTION_PROMPT = """
+You are an advanced AI system which has been finetuned to provide calibrated probabilistic
+forecasts under uncertainty, with your performance evaluated according to the Brier score. When
+forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly “small” probabilities,
+or 90% (9:1) and 99% (99:1) as similarly “high” probabilities. As the odds show, they are
+markedly different, so output your probabilities accordingly.
+
+Question:
+{question}
+
+Today's date: {today}
+Your pretraining knowledge cutoff: October 2023
+
+We have retrieved the following information for this question:
+<background>{sources}</background>
+
+Recall the question you are forecasting:
+{question}
+
+Instructions:
+1. Compress key factual information from the sources, as well as useful background information
+which may not be in the sources, into a list of core factual points to reference. Aim for
+information which is specific, relevant, and covers the core considerations you'll use to make
+your forecast. For this step, do not draw any conclusions about how a fact will influence your
+answer or forecast. Place this section of your response in <facts></facts> tags.
+
+2. Provide a few reasons why the answer might be no. Rate the strength of each reason on a
+scale of 1-10. Use <no></no> tags.
+
+3. Provide a few reasons why the answer might be yes. Rate the strength of each reason on a
+scale of 1-10. Use <yes></yes> tags.
+
+4. Aggregate your considerations. Do not summarize or repeat previous points; instead,
+investigate how the competing factors and mechanisms interact and weigh against each other.
+Factorize your thinking across (exhaustive, mutually exclusive) cases if and only if it would be
+beneficial to your reasoning. We have detected that you overestimate world conflict, drama,
+violence, and crises due to news' negativity bias, which doesn't necessarily represent overall
+trends or base rates. Similarly, we also have detected you overestimate dramatic, shocking,
+or emotionally charged news due to news' sensationalism bias. Therefore adjust for news'
+negativity bias and sensationalism bias by considering reasons to why your provided sources
+might be biased or exaggerated. Think like a superforecaster. Use <thinking></thinking> tags
+for this section of your response.
+
+5. Output an initial probability (prediction) as a single number between 0 and 1 given steps 1-4.
+Use <tentative></tentative> tags.
+
+6. Reflect on your answer, performing sanity checks and mentioning any additional knowledge
+or background information which may be relevant. Check for over/underconfidence, improper
+treatment of conjunctive or disjunctive conditions (only if applicable), and other forecasting
+biases when reviewing your reasoning. Consider priors/base rates, and the extent to which
+case-specific information justifies the deviation between your tentative forecast and the prior.
+Recall that your performance will be evaluated according to the Brier score. Be precise with tail
+probabilities. Leverage your intuitions, but never change your forecast for the sake of modesty
+or balance alone. Finally, aggregate all of your previous reasoning and highlight key factors
+that inform your final forecast. Use <thinking></thinking> tags for this portion of your response.
+
+7. Output your final prediction (a number between 0 and 1 with an asterisk at the beginning and
+end of the decimal) in <answer></answer> tags.
+
+
+OUTPUT_FORMAT
+* Your output response must be only a single JSON object to be parsed by Python's "json.loads()".
+* The JSON must contain four fields: "p_yes", "p_no", "confidence", and "info_utility".
+* Each item in the JSON must have a value between 0 and 1.
+   - "p_yes": Estimated probability that the event in the "Question" occurs.
+   - "p_no": Estimated probability that the event in the "Question" does not occur.
+   - "confidence": A value between 0 and 1 indicating the confidence in the prediction. 0 indicates lowest
+     confidence value; 1 maximum confidence value.
+   - "info_utility": Utility of the information provided in "sources" to help you make the prediction.
+     0 indicates lowest utility; 1 maximum utility.
+* The sum of "p_yes" and "p_no" must equal 1.
+* Output only the JSON object. Do not include any other contents in your response.
+* This is incorrect:"```json{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}```"
+* This is incorrect:```json"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"```
+* This is correct:"{{\n  \"p_yes\": 0.2,\n  \"p_no\": 0.8,\n  \"confidence\": 0.7,\n  \"info_utility\": 0.5\n}}"
+"""
 
 
 def generate_prediction_with_retry(
@@ -429,10 +419,6 @@ def generate_prediction_with_retry(
                 )
 
             return response.content, counter_callback
-        except openai.RateLimitError:
-            # Let with_key_rotation select a new Olas-Predict key and rebuild the
-            # OpenAI-compatible client before retrying.
-            raise
         except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
@@ -462,13 +448,19 @@ def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     """
     if not completion:
         return None
-    match = JSON_RE.search(THINK_BLOCK_RE.sub("", completion))
-    if match is None:
-        return None
-    try:
-        prediction = json.loads(match.group(0))
-        p_yes = float(prediction["p_yes"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+    # Walk the candidates from the END: if any reasoning survives the think
+    # strip it carries draft probabilities, and the real answer is last.
+    candidates = JSON_RE.findall(THINK_BLOCK_RE.sub("", completion))
+    prediction = p_yes = None
+    for blob in reversed(candidates):
+        try:
+            parsed = json.loads(blob)
+            p_yes = float(parsed["p_yes"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        prediction = parsed
+        break
+    if prediction is None or p_yes is None:
         return None
     if not 0.0 <= p_yes <= 1.0:
         return None
@@ -492,7 +484,7 @@ def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
         return None
     words = text.split()
     if len(words) > max_words:
-        text = " ".join(words[:max_words]) + " [...]"
+        text = " ".join(words[:max_words]) + " […]"
     return text.strip()
 
 
@@ -682,7 +674,7 @@ def _cap_evidence_block(
     ):
         trimmed.pop()
     rendered = format_sources_data(trimmed, misc_data)
-    rendered += "\n[... evidence truncated ...]\n"
+    rendered += "\n[… evidence truncated …]\n"
     return rendered
 
 
@@ -888,7 +880,7 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    Unlike _null_prediction_response this is a VALID prediction
+    Unlike the with_key_rotation error null this is a VALID prediction
     (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455). The on-chain JSON carries
     only the four standard fields; the explicit marker for requesters lives in
@@ -922,9 +914,6 @@ def _flagged_null_result(
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        # Off-chain markers distinguishing a flagged null from a genuine
-        # max-uncertainty forecast and recording the derivation tier
-        # (matches superforcaster-polymarket-v4).
         "empty_retrieval": True,
         "null_reason": context,
         "parse_tier": tier,
@@ -955,9 +944,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if tool not in ALLOWED_TOOLS:
         raise ValueError(f"Tool {tool} is not supported.")
 
-    model = kwargs.get("model")
-    if model is None:
-        raise ValueError("Model not supplied.")
+    model = resolve_model(tool)
 
     delivery_rate = int(kwargs.get("delivery_rate", DEFAULT_DELIVERY_RATE))
     counter_callback: Optional[Callable[..., Any]] = kwargs.get(
@@ -976,19 +963,14 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         return max_cost
 
     api_keys = kwargs["api_keys"]
-    # The endpoint is authenticated, so the key is REQUIRED. Failing loudly here
-    # beats sending an unauthenticated request and surfacing a 401 as a generic
-    # tool error.
+    # Key and endpoint are both REQUIRED: a default would hide a misconfigured
+    # deployment behind a 401 or a connection error to the wrong host.
     llm_api_key = _optional_key(api_keys, VLLM_SERVER_API_KEY)
     if not llm_api_key:
         raise ValueError(
             f"No API key for the forecasting endpoint: set "
             f"'{VLLM_SERVER_API_KEY}' in the mech's API_KEYS."
         )
-    # The endpoint is a deployment input passed via the KeyChain under
-    # `vllm_server_url`. It is required: a silent localhost
-    # fallback would hide a misconfigured deployment behind a connection error
-    # to the wrong host.
     endpoint = _optional_key(api_keys, VLLM_SERVER_URL)
     if not endpoint:
         raise ValueError(

@@ -17,11 +17,10 @@
 #
 # ------------------------------------------------------------------------------
 
-"""Superforcaster Full Search tool.
+"""Superforcaster Full Search tool served by Olas-Predict-R1-14B.
 
-A sibling of the original superforcaster that augments evidence by fetching
-the top search-result pages, extracting the main article text via
-readability + markdownify, and feeding the cleaned page body into the
-forecasting prompt alongside the Serper snippet. The prompt and prediction
-architecture are unchanged from superforcaster.
+A sibling of superforcaster_full_search that keeps its full-page search
+evidence pipeline and forecasting prompt and swaps the forecaster for
+Olas-Predict-R1-14B, a fine-tuned DeepSeek-R1-Distill-Qwen-14B served from a
+self-hosted, OpenAI-compatible vLLM endpoint.
 """

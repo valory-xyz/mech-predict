@@ -1009,13 +1009,7 @@ class TestVllmCandidateRegistry:
 
     @pytest.mark.parametrize(
         "tool_name",
-        [
-            "predict-base",
-            "predict-fine-tuned",
-            "predict-fine-tuned-calibrated",
-            "superforcaster_full_search_olas_predict_r1_14b_omen",
-            "superforcaster_full_search_olas_predict_r1_14b_polymarket",
-        ],
+        ["predict-base", "predict-fine-tuned", "predict-fine-tuned-calibrated"],
     )
     def test_finetuned_tools_use_vllm_backend(self, tool_name: str) -> None:
         """All fine-tuned modes are registered against the vLLM backend.

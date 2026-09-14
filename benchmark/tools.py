@@ -99,7 +99,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             ".superforcaster_full_search_olas_predict_r1_14b"
         ),
         family="superforcaster",
-        backend="vllm",
     ),
     "superforcaster_full_search_olas_predict_r1_14b_polymarket": ToolSpec(
         module=(
@@ -107,7 +106,6 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             ".superforcaster_full_search_olas_predict_r1_14b"
         ),
         family="superforcaster",
-        backend="vllm",
     ),
     # valory/superforcaster_calibrated_full_search -- the other shipped
     # superforcaster the benchmark could not reach. Unlike its sibling this one
@@ -294,9 +292,6 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         # / VLLM_ENDPOINT defaults via its `or` guards.
         "finetuned": [os.environ.get("VLLM_API_KEY", "")],
         "finetuned_endpoint": [os.environ.get("VLLM_ENDPOINT", "")],
-        # vLLM-backed Olas-Predict R1 14B tool
-        "vllm_server_api_key": [os.environ.get("OLAS_PREDICT_R1_14B_API_KEY", "")],
-        "vllm_server_url": [os.environ.get("OLAS_PREDICT_R1_14B_ENDPOINT", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
         "return_source_content": ["true" if return_source_content else "false"],
     }

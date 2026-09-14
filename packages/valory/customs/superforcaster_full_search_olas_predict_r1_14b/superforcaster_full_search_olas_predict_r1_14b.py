@@ -255,6 +255,8 @@ DEFAULT_MODEL_SETTINGS = {
 # bare shape is the common one for DeepSeek-R1 templates, so matching only the
 # paired form leaves the whole reasoning in place -- and the reasoning contains
 # draft probabilities. Everything before the LAST `</think>` is dropped.
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
 THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
 # Take the LAST balanced object, not the first: any leftover reasoning puts a
 # draft `{"p_yes": ...}` ahead of the real answer.
@@ -464,6 +466,13 @@ def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     :return: Clean prediction JSON, or None when no valid p_yes exists.
     """
     if not completion:
+        return None
+    # An opener with no closer means the completion was cut off mid-reasoning
+    # (the token budget ran out). Everything present is therefore a DRAFT, and
+    # harvesting one would deliver a working estimate as the final answer --
+    # the same failure the think strip exists to prevent. There is no answer to
+    # recover here, so return None and let the caller surface the error.
+    if THINK_OPEN in completion and THINK_CLOSE not in completion:
         return None
     # Walk the candidates from the END: if any reasoning survives the think
     # strip it carries draft probabilities, and the real answer is last.

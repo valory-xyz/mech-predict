@@ -1253,6 +1253,35 @@ class TestOlasPredictWiring:
             "info_utility": 0.5,
         }
 
+    def test_unterminated_think_block_is_rejected(self) -> None:
+        """An opener with no closer means the completion was cut off."""
+        # Everything present is then a DRAFT written while reasoning. Harvesting
+        # one would deliver a working estimate as the final answer -- the exact
+        # failure the think strip exists to prevent. More likely at max_tokens
+        # 2048 than at the fleet's 4096, so it is a real path, not a curiosity.
+        assert (
+            canonical_prediction(
+                '<think> I estimate {"p_yes": 0.77} tentatively, but need to check'
+            )
+            is None
+        )
+        assert (
+            canonical_prediction(
+                '<think> draft {"p_yes": 0.1} then revise {"p_yes": 0.95} still'
+            )
+            is None
+        )
+
+    def test_bare_closing_think_tag_still_parses(self) -> None:
+        """The guard must not break the shape the endpoint actually emits."""
+        # The chat template supplies the opener, so completions carry only the
+        # closer. Verified against the live endpoint: '<think>' never appears.
+        completion = (
+            'reasoning with a draft {"p_yes": 0.9}\n</think>\n'
+            '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}'
+        )
+        assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.3
+
     def test_unparseable_reasoning_completion_is_rejected(self) -> None:
         """A completion without prediction JSON does not produce a delivery."""
         assert canonical_prediction("Reasoning only.") is None

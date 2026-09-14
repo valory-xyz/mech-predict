@@ -1253,6 +1253,81 @@ class TestOlasPredictWiring:
             "info_utility": 0.5,
         }
 
+    def test_draft_before_think_close_loses_to_the_final_answer(self) -> None:
+        """The exact regression: a draft p_yes inside the reasoning must lose."""
+        # Pre-fix this delivered 0.9 -- the draft written while reasoning --
+        # because the paired-tag strip did not match a BARE closer and the
+        # first-match JSON pick took whatever came earliest.
+        completion = (
+            'Reasoning. A first pass would be {"p_yes": 0.9, "p_no": 0.1} but '
+            "the evidence points lower, so I will revise.\n</think>\n"
+            '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}'
+        )
+        assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.3
+
+    def test_people_also_ask_is_trimmed_before_scraped_pages(self) -> None:
+        """A large peopleAlsoAsk block must not evict the better evidence."""
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        organic = [
+            {
+                "title": f"Page {i}",
+                "link": f"https://e.com/{i}",
+                "snippet": page,
+                "date": "x",
+            }
+            for i in range(module.MAX_SOURCES)
+        ]
+        paa = [{"question": f"q{i}?", "snippet": page} for i in range(30)]
+        # A budget that cannot hold both: the scraped pages must be what survives.
+        rendered = module._cap_evidence_block(organic, paa, "olas-predict-r1-14b", 3000)
+        assert rendered.count("**Title:**") == module.MAX_SOURCES, "pages evicted"
+        assert "**Question:**" not in rendered, "peopleAlsoAsk should go first"
+
+    def test_requester_max_tokens_cannot_starve_the_evidence(self) -> None:
+        """`max_tokens` is requester-controlled, so it is clamped like `model`."""
+        # Unclamped, a value near the window drives the evidence budget to zero
+        # and the tool forecasts on an empty <background> while still returning
+        # a normal-looking four-field answer.
+        assert module.MODEL_CONTEXT_WINDOW - module.MIN_PROMPT_BUDGET < 8192
+        clamped = min(8192, module.MODEL_CONTEXT_WINDOW - module.MIN_PROMPT_BUDGET)
+        budget = module._evidence_budget(
+            "Will it rain?", "14/09/2026", "olas-predict-r1-14b", clamped
+        )
+        assert budget > 0, "clamp must leave room for evidence"
+
+    def test_exhausted_evidence_budget_is_flagged_not_forecast(self) -> None:
+        """Trimming everything away must surface, not look like a forecast."""
+        had = True
+        assert module._evidence_is_exhausted(
+            "\n[\u2026 evidence truncated \u2026]\n", had
+        )
+        assert not module._evidence_is_exhausted("1. **Title:** kept", had)
+        assert not module._evidence_is_exhausted("1. **Question:** kept", had)
+        # nothing retrieved is the OTHER guard's job, not this one
+        assert not module._evidence_is_exhausted("", False)
+
+    def test_rate_limit_exhaustion_preserves_the_type_for_rotation(self) -> None:
+        """429 exhaustion must re-raise RateLimitError, not RuntimeError."""
+        # with_key_rotation dispatches on the exact type, so wrapping it in a
+        # RuntimeError silently disables key rotation for the one case it exists
+        # to handle.
+        rate_limit = openai.RateLimitError(
+            "429", response=MagicMock(status_code=429, headers={}), body={}
+        )
+        client = MagicMock()
+        client.completions.side_effect = rate_limit
+        with patch(f"{SF_MODULE}.time.sleep", return_value=None):
+            with pytest.raises(openai.RateLimitError):
+                generate_prediction_with_retry(
+                    client=client,
+                    model="olas-predict-r1-14b",
+                    messages=[],
+                    temperature=0,
+                    max_tokens=2048,
+                    retries=2,
+                    delay=0,
+                )
+
     def test_prompt_matches_the_parent_byte_for_byte(self) -> None:
         """The lineage claim depends on this staying true, so pin it."""
         # tool_lineage.json calls this a byte-identical copy of the parent's

@@ -255,6 +255,12 @@ CONTEXT_SAFETY_MARGIN = 256
 # and the request is rejected with a 400. Scale the estimate instead of
 # trusting it; 1.25 leaves headroom above the worst shape measured.
 TOKENIZER_SAFETY_FACTOR = 1.25
+# The requester supplies `max_tokens` (the mech forwards task_data), so it is
+# untrusted in the same way `model` is. Left unclamped, a value near the window
+# drives the evidence budget to zero and the tool forecasts on no evidence at
+# all while still returning a normal-looking answer. The prompt keeps this
+# floor; a request asking for more completion than that is capped.
+MIN_PROMPT_BUDGET = 3000
 # 2048, not the fleet's 4096. Issue #455 raised the fleet value so free-text
 # completions are not truncated before the JSON, and the same reasoning applies
 # to a <think> block -- but at 4096 only 4096 remain for the prompt, which the
@@ -294,7 +300,9 @@ ALLOWED_TOOLS = [TOOL_OMEN, TOOL_POLYMARKET]
 # so honouring it would send this endpoint a checkpoint it does not serve. The
 # requester picks the tool; the tool picks the model.
 SERVED_MODEL = "olas-predict-r1-14b"
-MODEL_BY_TOOL = {TOOL_OMEN: SERVED_MODEL, TOOL_POLYMARKET: SERVED_MODEL}
+# Derived, not hand-listed: a third wire name added to ALLOWED_TOOLS without a
+# matching entry would otherwise KeyError at delivery time rather than here.
+MODEL_BY_TOOL = {tool: SERVED_MODEL for tool in ALLOWED_TOOLS}
 
 
 def resolve_model(tool: str) -> str:
@@ -456,11 +464,24 @@ def generate_prediction_with_retry(
                 )
 
             return response.content, counter_callback
+        except openai.RateLimitError as e:
+            # Retry HERE first -- re-raising immediately would send every 429 to
+            # with_key_rotation, which re-runs all of run() including the Serper
+            # search and the page scrapes. But on exhaustion re-raise the
+            # ORIGINAL RateLimitError rather than wrapping it: with_key_rotation
+            # dispatches on that exact type, so a RuntimeError would silently
+            # disable key rotation for the one case it exists to handle.
+            print(f"Attempt {attempt + 1} rate-limited: {e}")
+            time.sleep(delay)
+            attempt += 1
+            last_error = e
         except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
             last_error = e
+    if isinstance(last_error, openai.RateLimitError):
+        raise last_error
     raise RuntimeError(
         f"Failed to generate prediction after retries: {last_error}"
     ) from last_error
@@ -695,9 +716,13 @@ def _cap_evidence_block(
 ) -> str:
     """Render the evidence block, dropping trailing organic items until it fits.
 
-    Same trailing-drop pattern as factual_research: Serper orders organic
-    results by relevance so trailing drops are cheapest. The effective ceiling
-    is min(MAX_EVIDENCE_TOKENS, the window budget the caller passes). If the block still exceeds the budget once all
+    peopleAlsoAsk is dropped FIRST, then trailing organic items: Serper orders
+    organic by relevance, and a scraped page is better evidence than a PAA
+    snippet, so the cheaper material goes first. (The parent trims only organic
+    and leaves peopleAlsoAsk alone -- safe on a 1M-token window, not on 8k.)
+    The effective ceiling is min(MAX_EVIDENCE_TOKENS, the caller's window
+    budget). If even an empty block overflows, the caller detects it via
+    _evidence_is_exhausted rather than sending a doomed prompt. If the block still exceeds the budget once all
     organic items are gone, the result is returned as-is (peopleAlsoAsk is
     small and not separately trimmed).
 
@@ -751,6 +776,18 @@ def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
     while words and budget_tokens(" ".join(words), model) > limit:
         words = words[: int(len(words) * 0.9)] or words[:-1]
     return " ".join(words)
+
+
+def _evidence_is_exhausted(rendered: str, had_evidence: bool) -> bool:
+    """True when evidence existed but the window budget trimmed all of it away.
+
+    :param rendered: the capped evidence block.
+    :param had_evidence: whether any organic or peopleAlsoAsk item was retrieved.
+    :return: True when the model would be asked to forecast on nothing.
+    """
+    if not had_evidence:
+        return False
+    return "**Title:**" not in rendered and "**Question:**" not in rendered
 
 
 def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> int:
@@ -1084,7 +1121,11 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
     with OpenAIClientManager(llm_api_key, endpoint) as llm_client:
-        max_tokens = kwargs.get("max_tokens", DEFAULT_MODEL_SETTINGS["max_tokens"])
+        # Clamped, not trusted -- see MIN_PROMPT_BUDGET.
+        max_tokens = min(
+            int(kwargs.get("max_tokens", DEFAULT_MODEL_SETTINGS["max_tokens"])),
+            MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET,
+        )
         temperature = kwargs.get("temperature", DEFAULT_MODEL_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
@@ -1219,6 +1260,25 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             print("Formatting sources...")
             sources = _cap_evidence_block(
                 organic_data, misc_data, model, evidence_budget
+            )
+
+        # The budget can trim every item away -- a requester-supplied
+        # `max_tokens`, or a question long enough to crowd out the block. The
+        # empty-retrieval guard above cannot see this: it runs BEFORE trimming.
+        # Without this the tool forecasts on nothing and returns a
+        # normal-looking answer, which is the exact gap _flagged_null_result
+        # exists to close.
+        if _evidence_is_exhausted(sources, bool(organic_data or misc_data)):
+            return _flagged_null_result(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                captured_source_content=captured_source_content,
+                return_source_content=return_source_content,
+                counter_callback=counter_callback,
+                context="evidence budget exhausted",
+                tier=tier,
+                scan_truncated=scan_truncated,
             )
 
         print("Updating prompt...")

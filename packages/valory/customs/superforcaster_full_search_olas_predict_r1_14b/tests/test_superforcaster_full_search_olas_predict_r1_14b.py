@@ -1337,7 +1337,13 @@ class TestOlasPredictWiring:
                 source_content={"serper_response": FAKE_SERPER_RESPONSE},
             )
             assert "error_type" not in result[0], f"max_tokens={bad!r} errored"
-            assert mock_client.completions.call_args.kwargs["max_tokens"] >= 1
+            # All three fall back to the DEFAULT, not to 1: a 1-token budget is
+            # a request that cannot produce a parseable answer, so clamping a
+            # negative upward to 1 would trade a loud failure for a silent one.
+            assert (
+                mock_client.completions.call_args.kwargs["max_tokens"]
+                == module.DEFAULT_MODEL_SETTINGS["max_tokens"]
+            ), f"max_tokens={bad!r} did not fall back to the default"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_run_flags_a_budget_starved_prompt_without_calling_the_model(

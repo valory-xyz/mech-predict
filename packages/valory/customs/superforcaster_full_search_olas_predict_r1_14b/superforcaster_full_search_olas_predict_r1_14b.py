@@ -345,8 +345,9 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 # long body. Trailing organic items are dropped (Serper orders by relevance)
 # until the rendered block fits. Same trailing-drop pattern as
 # factual_research (which caps at 3000); budget set to 4000 here to fit
-# observed evidence sizes with headroom. Binding at 8k alongside the
-# 1M context but bounds cost and guards against outlier pages.
+# observed evidence sizes with headroom. On this model's 8k window it is the
+# tighter of two ceilings -- the other being what the window physically allows
+# -- so unlike the parent it binds in practice, not just in theory.
 MAX_EVIDENCE_TOKENS = 4000
 
 
@@ -749,10 +750,8 @@ def _cap_evidence_block(
     snippet, so the cheaper material goes first. (The parent trims only organic
     and leaves peopleAlsoAsk alone -- safe on a 1M-token window, not on 8k.)
     The effective ceiling is min(MAX_EVIDENCE_TOKENS, the caller's window
-    budget). If even an empty block overflows, the caller detects it via
-    _evidence_is_exhausted rather than sending a doomed prompt. If the block still exceeds the budget once all
-    organic items are gone, the result is returned as-is (peopleAlsoAsk is
-    small and not separately trimmed).
+    budget). If even an empty block overflows, the caller sees it via
+    _CappedEvidence.is_empty rather than sending a doomed prompt.
 
     :param organic_data: Serper organic results (already capped to MAX_SOURCES).
     :param misc_data: Serper peopleAlsoAsk items.
@@ -1164,10 +1163,15 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # back too instead of raising TypeError; max(1, ...) so 0 or a negative
         # is corrected here rather than burning three retries on a 400.
         _ceiling = MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET
+        # `or` catches None and 0 (both falsy); a NEGATIVE is truthy, so it
+        # would otherwise clamp to 1 -- a request that cannot produce a
+        # parseable answer. Treat every non-positive value the same way.
         _requested = int(
             kwargs.get("max_tokens") or DEFAULT_MODEL_SETTINGS["max_tokens"]
         )
-        max_tokens = max(1, min(_requested, _ceiling))
+        if _requested <= 0:
+            _requested = int(DEFAULT_MODEL_SETTINGS["max_tokens"])
+        max_tokens = min(_requested, _ceiling)
         if _requested != max_tokens:
             print(
                 f"[{TOOL_OMEN.rsplit('_', 1)[0]}] max_tokens {_requested} "

@@ -126,12 +126,14 @@ def with_key_rotation(func: Callable) -> Callable:
 
 # KeyChain services carrying the vLLM endpoint and its key. The KeyChain is the
 # only config channel that reaches a component running as bytes published from
-# IPFS, so the endpoint rides it alongside the key. These are the names
-# `finetuned_prediction` already uses and the benchmark flywheel already exports
-# (VLLM_ENDPOINT / VLLM_API_KEY): one vLLM server holds every qwen checkpoint,
-# so a second pair of names would need new secrets for the same machine.
-VLLM_SERVER_API_KEY = "finetuned"
-VLLM_SERVER_URL = "finetuned_endpoint"
+# IPFS, so the endpoint rides it alongside the key.
+#
+# Named for what they ARE -- a vLLM server URL and its key -- not for the
+# prototype tool that happens to share the machine today. These names are the
+# deployment contract: they must match the entries in each mech's 1Password
+# `api-keys` item exactly, and a rename after deployment fails every delivery.
+VLLM_SERVER_API_KEY = "vllm_server_api_key"
+VLLM_SERVER_URL = "vllm_server_url"
 
 
 class OpenAIClientManager:

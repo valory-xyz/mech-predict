@@ -154,9 +154,9 @@ def _make_mock_api_keys(
         "openai": ["sk-test"],
         "serperapi": ["serper-test"],
         # the forecasting endpoint is authenticated; run() requires the key
-        "finetuned": ["r1-14b-test-key"],
+        "vllm_server_api_key": ["r1-14b-test-key"],
         # the vLLM endpoint URL is passed via the KeyChain
-        "finetuned_endpoint": ["https://vllm.example/v1"],
+        "vllm_server_url": ["https://vllm.example/v1"],
         "return_source_content": [return_source_content],
         "source_content_mode": [source_content_mode],
     }
@@ -562,7 +562,7 @@ class TestErrorHandling:
             OpenAIResponse(content=PREDICTION_JSON, usage=Usage()),
         ]
         keys = _make_mock_api_keys("false")
-        keys.max_retries = lambda: {"finetuned": 1}
+        keys.max_retries = lambda: {"vllm_server_api_key": 1}
 
         result = run(
             tool="superforcaster_full_search_olas_predict_r1_14b_omen",
@@ -1163,7 +1163,7 @@ class TestOlasPredictWiring:
         services = {
             "openai": "sk-test",
             "serperapi": "serper-test",
-            "finetuned": "r1-14b-test-key",
+            "vllm_server_api_key": "r1-14b-test-key",
             # deliberately omit vllm_server_url
             "return_source_content": "false",
             "source_content_mode": "cleaned",

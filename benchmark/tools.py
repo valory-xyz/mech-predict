@@ -292,6 +292,11 @@ def build_keychain(*, return_source_content: bool = False) -> "KeyChain":
         # / VLLM_ENDPOINT defaults via its `or` guards.
         "finetuned": [os.environ.get("VLLM_API_KEY", "")],
         "finetuned_endpoint": [os.environ.get("VLLM_ENDPOINT", "")],
+        # superforcaster_full_search_olas_predict_r1_14b reads its own names:
+        # the endpoint is a deployment input named for what it is, not for the
+        # prototype tool that shares the machine. Same server, same secrets.
+        "vllm_server_api_key": [os.environ.get("VLLM_API_KEY", "")],
+        "vllm_server_url": [os.environ.get("VLLM_ENDPOINT", "")],
         "search_provider": [os.environ.get("SEARCH_PROVIDER", "google")],
         "return_source_content": ["true" if return_source_content else "false"],
     }

@@ -281,12 +281,16 @@ DEFAULT_MODEL_SETTINGS = {
 # bare shape is the common one for DeepSeek-R1 templates, so matching only the
 # paired form leaves the whole reasoning in place -- and the reasoning contains
 # draft probabilities. Everything before the LAST `</think>` is dropped.
-THINK_OPEN = "<think>"
-THINK_CLOSE = "</think>"
-THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
-# Take the LAST balanced object, not the first: any leftover reasoning puts a
-# draft `{"p_yes": ...}` ahead of the real answer.
-JSON_RE = re.compile(r"\{[^{}]*\}")
+# Case-insensitive throughout: the tags come from the chat template, which is a
+# deployment artifact we do not control. A template emitting <THINK> would make
+# a case-sensitive guard silently no-op and put draft probabilities back in play.
+THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
+# NB no regex: a character class cannot match a nested object, so
+# `{"p_yes": 0.8, ..., "meta": {"a": 1}}` -- a perfectly good forecast with one
+# extra key -- would be skipped and the whole delivery lost to a null.
+# raw_decode handles nesting and gives the object's true extent.
 # Two wire names, one package: the code is identical for both platforms (the
 # evaluation ran this same pipeline on Omen and Polymarket), and separate names
 # let the two be scored, promoted and served independently.
@@ -500,6 +504,29 @@ def _coerce_unit_interval(value: Any, default: float = 0.5) -> float:
     return coerced
 
 
+def _json_objects(text: str) -> List[Dict[str, Any]]:
+    """Every top-level JSON object in `text`, in order of appearance.
+
+    :param text: text that may contain JSON objects among prose.
+    :return: the decoded objects, nested values included.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = end
+
+
 def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     """Build the delivery JSON from an Olas-Predict reasoning completion.
 
@@ -513,17 +540,16 @@ def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     # harvesting one would deliver a working estimate as the final answer --
     # the same failure the think strip exists to prevent. There is no answer to
     # recover here, so return None and let the caller surface the error.
-    if THINK_OPEN in completion and THINK_CLOSE not in completion:
+    if THINK_OPEN_RE.search(completion) and not THINK_CLOSE_RE.search(completion):
         return None
     # Walk the candidates from the END: if any reasoning survives the think
     # strip it carries draft probabilities, and the real answer is last.
-    candidates = JSON_RE.findall(THINK_BLOCK_RE.sub("", completion))
+    candidates = _json_objects(THINK_BLOCK_RE.sub("", completion))
     prediction = p_yes = None
-    for blob in reversed(candidates):
+    for parsed in reversed(candidates):
         try:
-            parsed = json.loads(blob)
             p_yes = float(parsed["p_yes"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError):
             continue
         prediction = parsed
         break
@@ -715,7 +741,7 @@ def _cap_evidence_block(
     misc_data: List[Dict[str, Any]],
     model: str,
     max_tokens: int = MAX_EVIDENCE_TOKENS,
-) -> str:
+) -> "_CappedEvidence":
     """Render the evidence block, dropping trailing organic items until it fits.
 
     peopleAlsoAsk is dropped FIRST, then trailing organic items: Serper orders
@@ -732,7 +758,7 @@ def _cap_evidence_block(
     :param misc_data: Serper peopleAlsoAsk items.
     :param model: model name for tokeniser selection.
     :param max_tokens: target ceiling on the rendered block.
-    :return: rendered evidence string, with a truncation marker if items were dropped.
+    :return: the rendered block plus how many organic / peopleAlsoAsk items survived.
     """
     # MAX_EVIDENCE_TOKENS still binds: the lost-in-the-middle rationale is about
     # how much evidence the model reads well, independent of how much the window
@@ -741,7 +767,7 @@ def _cap_evidence_block(
     max_tokens = min(max_tokens, MAX_EVIDENCE_TOKENS)
     rendered = format_sources_data(organic_data, misc_data)
     if budget_tokens(rendered, model) <= max_tokens or not organic_data:
-        return rendered
+        return _CappedEvidence(rendered, len(organic_data), len(misc_data))
 
     # peopleAlsoAsk goes first. The parent trimmed only organic items, which is
     # safe on a 1M-token window but not on 8k: a large peopleAlsoAsk block would
@@ -761,7 +787,7 @@ def _cap_evidence_block(
         trimmed.pop()
     rendered = format_sources_data(trimmed, misc)
     rendered += "\n[… evidence truncated …]\n"
-    return rendered
+    return _CappedEvidence(rendered, len(trimmed), len(misc))
 
 
 def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
@@ -780,16 +806,26 @@ def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
     return " ".join(words)
 
 
-def _evidence_is_exhausted(rendered: str, had_evidence: bool) -> bool:
-    """True when evidence existed but the window budget trimmed all of it away.
+class _CappedEvidence(NamedTuple):
+    """The capped evidence block plus what survived the cap.
 
-    :param rendered: the capped evidence block.
-    :param had_evidence: whether any organic or peopleAlsoAsk item was retrieved.
-    :return: True when the model would be asked to forecast on nothing.
+    Counting here rather than string-matching the render: the markers are
+    `format_sources_data`'s template, so a reword would silently flip an
+    exhaustion check either way -- always-null or never-null, with no test
+    coupling the two.
     """
-    if not had_evidence:
-        return False
-    return "**Title:**" not in rendered and "**Question:**" not in rendered
+
+    rendered: str
+    organic_kept: int
+    misc_kept: int
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the cap left no evidence at all.
+
+        :return: True when neither an organic nor a peopleAlsoAsk item survived.
+        """
+        return self.organic_kept == 0 and self.misc_kept == 0
 
 
 def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> int:
@@ -1123,11 +1159,21 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
     with OpenAIClientManager(llm_api_key, endpoint) as llm_client:
-        # Clamped, not trusted -- see MIN_PROMPT_BUDGET.
-        max_tokens = min(
-            int(kwargs.get("max_tokens", DEFAULT_MODEL_SETTINGS["max_tokens"])),
-            MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET,
+        # Clamped, not trusted -- see MIN_PROMPT_BUDGET. `or` rather than a
+        # get() default so an explicit null (the key present, value None) falls
+        # back too instead of raising TypeError; max(1, ...) so 0 or a negative
+        # is corrected here rather than burning three retries on a 400.
+        _ceiling = MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET
+        _requested = int(
+            kwargs.get("max_tokens") or DEFAULT_MODEL_SETTINGS["max_tokens"]
         )
+        max_tokens = max(1, min(_requested, _ceiling))
+        if _requested != max_tokens:
+            print(
+                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] max_tokens {_requested} "
+                f"clamped to {max_tokens} (window {MODEL_CONTEXT_WINDOW}, "
+                f"prompt floor {MIN_PROMPT_BUDGET})"
+            )
         temperature = kwargs.get("temperature", DEFAULT_MODEL_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
@@ -1162,7 +1208,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # that does not fit, prefer the clause parse_prompt already identified as
         # the question over a truncation: in free text the question usually comes
         # last, so cutting the tail is what removes it.
-        if count_tokens(question, model) > _MAX_QUESTION_TOKENS:
+        if budget_tokens(question, model) > _MAX_QUESTION_TOKENS:
             if tier != "raw":
                 question = search_query
             question = _truncate_to_tokens(question, _MAX_QUESTION_TOKENS, model)
@@ -1198,9 +1244,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
-            sources = _cap_evidence_block(
+            capped = _cap_evidence_block(
                 organic_data, misc_data, model, evidence_budget
             )
+            sources = capped.rendered
         else:
             if not any(ch.isalnum() for ch in search_query):
                 # Nothing searchable: no alphanumeric character at all (empty,
@@ -1260,9 +1307,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "pages": captured_pages,
             }
             print("Formatting sources...")
-            sources = _cap_evidence_block(
+            capped = _cap_evidence_block(
                 organic_data, misc_data, model, evidence_budget
             )
+            sources = capped.rendered
 
         # The budget can trim every item away -- a requester-supplied
         # `max_tokens`, or a question long enough to crowd out the block. The
@@ -1270,7 +1318,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # Without this the tool forecasts on nothing and returns a
         # normal-looking answer, which is the exact gap _flagged_null_result
         # exists to close.
-        if _evidence_is_exhausted(sources, bool(organic_data or misc_data)):
+        if (organic_data or misc_data) and capped.is_empty:
             return _flagged_null_result(
                 model=model,
                 temperature=temperature,
@@ -1307,7 +1355,17 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         if extracted_block is None:
             raise ValueError("Model output did not contain a parseable p_yes.")
 
+        # How much evidence the model actually saw. At a 1M window trimming was
+        # rare and the parent could omit this; at 8k under a 4000-token ceiling
+        # it is routine, and a one-source forecast is a different thing from a
+        # five-source one. The only other trace is the truncation marker inside
+        # the prompt, which never reaches the delivery.
         used_params = {
+            "sources_used": capped.organic_kept + capped.misc_kept,
+            "sources_dropped": (
+                (len(organic_data) + len(misc_data))
+                - (capped.organic_kept + capped.misc_kept)
+            ),
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,

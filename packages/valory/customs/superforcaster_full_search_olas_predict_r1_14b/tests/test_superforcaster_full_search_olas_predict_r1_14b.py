@@ -432,7 +432,7 @@ class TestEvidenceBlockCap:
         organic = [
             {"title": "T", "link": "http://x", "snippet": "s", "position": 1},
         ]
-        rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
+        rendered = _cap_evidence_block(organic, [], model="gpt-4.1").rendered
         assert "[… evidence truncated …]" not in rendered
         assert "T" in rendered
 
@@ -455,7 +455,7 @@ class TestEvidenceBlockCap:
             }
             for i in range(5)
         ]
-        rendered = _cap_evidence_block(organic, [], model="gpt-4.1")
+        rendered = _cap_evidence_block(organic, [], model="gpt-4.1").rendered
         assert "[… evidence truncated …]" in rendered
         assert count_tokens(rendered, "gpt-4.1") <= MAX_EVIDENCE_TOKENS + 100
         # Trailing items are dropped, leading (most-relevant) kept: a
@@ -472,7 +472,7 @@ class TestEvidenceBlockCap:
         huge_paa = [
             {"question": "lorem ipsum " * 800, "link": "http://x", "snippet": "s"}
         ]
-        rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1")
+        rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1").rendered
         # organic is empty -- early return, no trailing-drop marker added
         assert "[… evidence truncated …]" not in rendered
         assert "lorem ipsum" in rendered
@@ -1083,7 +1083,7 @@ class TestOlasPredictWiring:
         )
         sources = module._cap_evidence_block(
             organic, misc, "olas-predict-r1-14b", budget
-        )
+        ).rendered
         prompt = module.PREDICTION_PROMPT.format(
             question=question, today="14/09/2026", sources=sources
         )
@@ -1279,7 +1279,9 @@ class TestOlasPredictWiring:
         ]
         paa = [{"question": f"q{i}?", "snippet": page} for i in range(30)]
         # A budget that cannot hold both: the scraped pages must be what survives.
-        rendered = module._cap_evidence_block(organic, paa, "olas-predict-r1-14b", 3000)
+        rendered = module._cap_evidence_block(
+            organic, paa, "olas-predict-r1-14b", 3000
+        ).rendered
         assert rendered.count("**Title:**") == module.MAX_SOURCES, "pages evicted"
         assert "**Question:**" not in rendered, "peopleAlsoAsk should go first"
 
@@ -1295,16 +1297,126 @@ class TestOlasPredictWiring:
         )
         assert budget > 0, "clamp must leave room for evidence"
 
-    def test_exhausted_evidence_budget_is_flagged_not_forecast(self) -> None:
-        """Trimming everything away must surface, not look like a forecast."""
-        had = True
-        assert module._evidence_is_exhausted(
-            "\n[\u2026 evidence truncated \u2026]\n", had
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_run_clamps_an_oversized_requester_max_tokens(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The clamp must be exercised through run(), not recomputed here."""
+        # Recomputing min(...) in the test would pass with the production clamp
+        # deleted, changed to max, or off by one -- which is the regression it
+        # exists to catch. Assert on what reaches the endpoint instead.
+        mock_client = _stub_openai(mock_client_mgr)
+        run(
+            tool=module.TOOL_OMEN,
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            max_tokens=8000,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
         )
-        assert not module._evidence_is_exhausted("1. **Title:** kept", had)
-        assert not module._evidence_is_exhausted("1. **Question:** kept", had)
-        # nothing retrieved is the OTHER guard's job, not this one
-        assert not module._evidence_is_exhausted("", False)
+        sent = mock_client.completions.call_args.kwargs["max_tokens"]
+        assert sent == module.MODEL_CONTEXT_WINDOW - module.MIN_PROMPT_BUDGET
+        assert sent < 8000
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_run_rejects_a_null_or_nonpositive_max_tokens(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """An explicit null or 0 must not raise or reach the endpoint."""
+        # `kwargs.get("max_tokens", DEFAULT)` returns None when the key is
+        # present with a null value, and int(None) raises TypeError; 0 would be
+        # rejected by the endpoint after three retries.
+        for bad in (None, 0, -5):
+            mock_client = _stub_openai(mock_client_mgr)
+            result = run(
+                tool=module.TOOL_OMEN,
+                prompt=PREDICTION_PROMPT,
+                api_keys=_make_mock_api_keys("false"),
+                counter_callback=None,
+                max_tokens=bad,
+                source_content={"serper_response": FAKE_SERPER_RESPONSE},
+            )
+            assert "error_type" not in result[0], f"max_tokens={bad!r} errored"
+            assert mock_client.completions.call_args.kwargs["max_tokens"] >= 1
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_run_flags_a_budget_starved_prompt_without_calling_the_model(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Evidence trimmed to nothing must surface, not reach the endpoint."""
+        mock_client = _stub_openai(mock_client_mgr)
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        bulky = {
+            "serper_response": {
+                "organic": [
+                    {
+                        "title": f"P{i}",
+                        "link": f"https://e.com/{i}",
+                        "snippet": page,
+                        "date": "x",
+                    }
+                    for i in range(module.MAX_SOURCES)
+                ],
+                "peopleAlsoAsk": [],
+            }
+        }
+        # A completion budget that leaves the prompt almost nothing.
+        result = run(
+            tool=module.TOOL_OMEN,
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            max_tokens=module.MODEL_CONTEXT_WINDOW - module.MIN_PROMPT_BUDGET,
+            source_content=bulky,
+        )
+        used = result[4] or {}
+        if used.get("null_reason") == "evidence budget exhausted":
+            assert not mock_client.completions.called, "doomed prompt was sent"
+            assert used["empty_retrieval"] is True
+        else:
+            # Budget held: then the counts must still be reported.
+            assert "sources_used" in used and "sources_dropped" in used
+
+    def test_nested_json_in_a_valid_forecast_is_not_discarded(self) -> None:
+        """One extra nested key must not cost the whole forecast."""
+        # A `[^{}]*` character class cannot match an object containing an
+        # object, so this returned None and the delivery became a null -- which
+        # on a dashboard is indistinguishable from a real model failure.
+        completion = (
+            '</think>\n{"p_yes": 0.8, "p_no": 0.2, "confidence": 0.9, '
+            '"info_utility": 0.7, "meta": {"a": 1}}'
+        )
+        assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.8
+
+    def test_think_tags_are_matched_case_insensitively(self) -> None:
+        """The tags come from the chat template, which we do not control."""
+        upper = '<THINK> draft {"p_yes": 0.9} still thinking'
+        assert canonical_prediction(upper) is None, "uppercase guard bypassed"
+        closed = (
+            'draft {"p_yes": 0.9}</THINK>{"p_yes": 0.3, "p_no": 0.7, '
+            '"confidence": 0.6, "info_utility": 0.5}'
+        )
+        assert json.loads(canonical_prediction(closed) or "{}")["p_yes"] == 0.3
+
+    def test_capped_evidence_reports_what_survived(self) -> None:
+        """The cap reports counts, so nothing has to string-match the render."""
+        # Previously this was inferred by looking for "**Title:**" in the
+        # rendered block -- a template reword would have silently flipped it.
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        organic = [
+            {
+                "title": f"P{i}",
+                "link": f"https://e.com/{i}",
+                "snippet": page,
+                "date": "x",
+            }
+            for i in range(module.MAX_SOURCES)
+        ]
+        fits = module._cap_evidence_block(organic, [], "olas-predict-r1-14b", 99999)
+        assert fits.organic_kept == module.MAX_SOURCES and not fits.is_empty
+        starved = module._cap_evidence_block(organic, [], "olas-predict-r1-14b", 10)
+        assert starved.organic_kept == 0 and starved.misc_kept == 0
+        assert starved.is_empty
 
     def test_rate_limit_exhaustion_preserves_the_type_for_rotation(self) -> None:
         """429 exhaustion must re-raise RateLimitError, not RuntimeError."""

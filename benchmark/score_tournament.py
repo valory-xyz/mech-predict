@@ -384,31 +384,67 @@ def _apply_resolution(
     return scored_row
 
 
-def drop_superseded_blind_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop blind rows that a market-context row supersedes.
+def _arm_key(row: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    """Identity of the prediction a row represents, independent of its arm.
+
+    ``model`` is part of it because ``tournament._make_row_id`` counts it as
+    row identity: two models predicting one market are two experiments, and
+    neither supersedes the other.
+
+    :param row: a tournament row.
+    :return: the (tool, cid, market, model) key.
+    """
+    return (
+        row.get("tool_name"),
+        row.get("tool_ipfs_hash"),
+        row.get("market_address"),
+        row.get("model"),
+    )
+
+
+def _arm_rank(row: dict[str, Any]) -> tuple[int, int]:
+    """Rank a row against its siblings: scoreable first, then priced.
+
+    An unscoreable row (timeout, tool error, unfetchable CID) must never
+    supersede a usable prediction just because it ran in the priced arm.
+
+    :param row: a tournament row.
+    :return: a sort key, higher is better.
+    """
+    scoreable = (
+        row.get("prediction_parse_status") == "valid" and row.get("p_yes") is not None
+    )
+    return (int(scoreable), int(bool(row.get("market_context"))))
+
+
+def dedupe_arm_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one row per prediction when both market-context arms ran it.
 
     Switching the tournament to ``--market-context`` re-predicts every open
-    market once with the price. Scoring both rows would count the market
-    twice for the same tool and CID and mix the arms, so the priced row wins.
+    market once more, so the same tool, CID, market and model can hold a
+    blind row and a priced row. Scoring both would count the market twice and
+    mix the arms. The best row wins per :func:`_arm_rank`; ties keep the row
+    that appeared first, so the outcome does not depend on file order beyond
+    that.
 
-    :param rows: pending tournament rows.
-    :return: the rows minus blind ones that have a priced sibling.
+    :param rows: tournament rows.
+    :return: one row per prediction, in the input order.
     """
-    priced = {
-        (r.get("tool_name"), r.get("tool_ipfs_hash"), r.get("market_address"))
-        for r in rows
-        if r.get("market_context")
-    }
-    kept = [
-        r
-        for r in rows
-        if r.get("market_context")
-        or (r.get("tool_name"), r.get("tool_ipfs_hash"), r.get("market_address"))
-        not in priced
-    ]
-    dropped = len(rows) - len(kept)
+    best: dict[tuple[Any, Any, Any, Any], dict[str, Any]] = {}
+    for row in rows:
+        key = _arm_key(row)
+        incumbent = best.get(key)
+        if incumbent is None or _arm_rank(row) > _arm_rank(incumbent):
+            best[key] = row
+    kept_ids = {id(r) for r in best.values()}
+    kept = [r for r in rows if id(r) in kept_ids]
+    dropped = [r for r in rows if id(r) not in kept_ids]
     if dropped:
-        log.info("  %d blind rows superseded by market-context rows", dropped)
+        log.info(
+            "  %d duplicate arm rows dropped: %s",
+            len(dropped),
+            ", ".join(sorted(str(r.get("row_id")) for r in dropped)),
+        )
     return kept
 
 
@@ -420,7 +456,7 @@ def score_tournament(
     predictions = load_predictions(predictions_path)
     log.info("Loaded %d tournament predictions", len(predictions))
 
-    pending = drop_superseded_blind_rows(
+    pending = dedupe_arm_rows(
         [r for r in predictions if r.get("final_outcome") is None]
     )
     log.info("  %d pending (no final_outcome)", len(pending))
@@ -463,7 +499,33 @@ def score_tournament(
     )
 
     if scored_count > 0:
+        _reconcile_scored_arms(output_path)
         _update_predictions_file(predictions_path, resolution_map)
+
+
+def _reconcile_scored_arms(output_path: Path) -> None:
+    """Drop a scored row that a later arm's row supersedes.
+
+    :func:`dedupe_arm_rows` only sees rows that are still pending. When a
+    market resolved and scored in one cron cycle and the other arm's
+    prediction for it lands later, the stale scored row is already on disk,
+    so the same guarantee is re-applied to the scored file: one row per
+    tool, CID, market and model.
+
+    :param output_path: the scored-rows JSONL.
+    """
+    if not output_path.exists():
+        return
+    rows = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    kept = dedupe_arm_rows(rows)
+    if len(kept) == len(rows):
+        return
+    _atomic_write_rows(output_path, kept)
+    log.info("Reconciled %s: %d -> %d scored rows", output_path, len(rows), len(kept))
 
 
 def _update_predictions_file(
@@ -488,17 +550,26 @@ def _update_predictions_file(
                 updates += 1
             updated_lines.append(json.dumps(row, ensure_ascii=False))
 
-    # Atomic write: temp file + os.replace to avoid corruption on crash
+    _atomic_write_rows(path, [json.loads(line) for line in updated_lines])
+    log.info("Updated %d rows in %s", updates, path)
+
+
+def _atomic_write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Rewrite a JSONL file via a temp file and os.replace.
+
+    :param path: the file to replace.
+    :param rows: the rows to write.
+    """
     tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp:
-            tmp.write("\n".join(updated_lines) + "\n")
+            for row in rows:
+                tmp.write(json.dumps(row, ensure_ascii=False) + "\n")
         os.replace(tmp_path, str(path))
     except BaseException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
-    log.info("Updated %d rows in %s", updates, path)
 
 
 # ---------------------------------------------------------------------------

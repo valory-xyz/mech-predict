@@ -1041,7 +1041,7 @@ class TestOlasPredictWiring:
         result = module.run(
             tool="superforcaster_full_search",
             prompt=PREDICTION_PROMPT,
-            model="qwen-14b-sft",
+            model="olas-predict-r1-14b",
             api_keys=_make_mock_api_keys(),
         )
         # result is (error_json, prompt, ..., api_keys); the KeyChain mock at
@@ -1073,17 +1073,21 @@ class TestOlasPredictWiring:
         ]
         misc = [{"question": f"q{i}?", "snippet": page} for i in range(8)]
         question = module._truncate_to_tokens(
-            " ".join(["word"] * 5000), module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+            " ".join(["word"] * 5000),
+            module._MAX_QUESTION_TOKENS,
+            "olas-predict-r1-14b",
         )
         max_tokens = module.DEFAULT_MODEL_SETTINGS["max_tokens"]
         budget = module._evidence_budget(
-            question, "14/09/2026", "qwen-14b-sft", max_tokens
+            question, "14/09/2026", "olas-predict-r1-14b", max_tokens
         )
-        sources = module._cap_evidence_block(organic, misc, "qwen-14b-sft", budget)
+        sources = module._cap_evidence_block(
+            organic, misc, "olas-predict-r1-14b", budget
+        )
         prompt = module.PREDICTION_PROMPT.format(
             question=question, today="14/09/2026", sources=sources
         )
-        total = module.count_tokens(prompt, "qwen-14b-sft") + max_tokens
+        total = module.count_tokens(prompt, "olas-predict-r1-14b") + max_tokens
         assert (
             total <= module.MODEL_CONTEXT_WINDOW
         ), f"{total} tokens exceeds the {module.MODEL_CONTEXT_WINDOW} window"
@@ -1092,16 +1096,17 @@ class TestOlasPredictWiring:
         """Pearl sends the user's message verbatim, and it lands twice."""
         long_q = " ".join(["word"] * 5000)
         capped = module._truncate_to_tokens(
-            long_q, module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+            long_q, module._MAX_QUESTION_TOKENS, "olas-predict-r1-14b"
         )
         assert (
-            module.count_tokens(capped, "qwen-14b-sft") <= module._MAX_QUESTION_TOKENS
+            module.count_tokens(capped, "olas-predict-r1-14b")
+            <= module._MAX_QUESTION_TOKENS
         )
         # a short question is returned untouched
         short = "Will it rain tomorrow?"
         assert (
             module._truncate_to_tokens(
-                short, module._MAX_QUESTION_TOKENS, "qwen-14b-sft"
+                short, module._MAX_QUESTION_TOKENS, "olas-predict-r1-14b"
             )
             == short
         )
@@ -1121,7 +1126,7 @@ class TestOlasPredictWiring:
         result = run(
             tool=module.TOOL_OMEN,
             prompt=PREDICTION_PROMPT,
-            model="qwen-14b-sft",
+            model="olas-predict-r1-14b",
             api_keys=_make_mock_api_keys(),
             source_content={"serper_response": FAKE_SERPER_RESPONSE},
         )
@@ -1143,7 +1148,7 @@ class TestOlasPredictWiring:
         result = module.run(
             tool=module.TOOL_OMEN,
             prompt=PREDICTION_PROMPT,
-            model="qwen-14b-sft",
+            model="olas-predict-r1-14b",
             api_keys=keys,
         )
         assert "No API key for the forecasting endpoint" in result[0]
@@ -1169,7 +1174,7 @@ class TestOlasPredictWiring:
         result = module.run(
             tool=module.TOOL_OMEN,
             prompt=PREDICTION_PROMPT,
-            model="qwen-14b-sft",
+            model="olas-predict-r1-14b",
             api_keys=keys,
         )
         assert "No endpoint for the forecasting service" in result[0]
@@ -1187,8 +1192,8 @@ class TestOlasPredictWiring:
 
     def test_served_model_is_resolved_from_the_tool(self) -> None:
         """Both wire names resolve to the one checkpoint this endpoint serves."""
-        assert module.resolve_model(module.TOOL_OMEN) == "qwen-14b-sft"
-        assert module.resolve_model(module.TOOL_POLYMARKET) == "qwen-14b-sft"
+        assert module.resolve_model(module.TOOL_OMEN) == "olas-predict-r1-14b"
+        assert module.resolve_model(module.TOOL_POLYMARKET) == "olas-predict-r1-14b"
         assert set(module.MODEL_BY_TOOL) == set(module.ALLOWED_TOOLS)
         # component.yaml's default_model must agree: the mech shows it in the
         # tool metadata, and a drift there misreports what is being served.
@@ -1197,7 +1202,7 @@ class TestOlasPredictWiring:
                 encoding="utf-8"
             )
         )
-        assert component["params"]["default_model"] == "qwen-14b-sft"
+        assert component["params"]["default_model"] == "olas-predict-r1-14b"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     def test_requester_supplied_model_is_ignored(
@@ -1217,7 +1222,9 @@ class TestOlasPredictWiring:
             counter_callback=None,
             source_content={"serper_response": FAKE_SERPER_RESPONSE},
         )
-        assert mock_client.completions.call_args.kwargs["model"] == "qwen-14b-sft"
+        assert (
+            mock_client.completions.call_args.kwargs["model"] == "olas-predict-r1-14b"
+        )
 
     def test_model_kwarg_is_not_required(self) -> None:
         """Pearl and the tournament may omit `model` entirely."""

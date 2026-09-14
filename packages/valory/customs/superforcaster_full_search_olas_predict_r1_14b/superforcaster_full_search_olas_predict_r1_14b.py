@@ -266,12 +266,14 @@ TOOL_OMEN = "superforcaster_full_search_olas_predict_r1_14b_omen"
 TOOL_POLYMARKET = "superforcaster_full_search_olas_predict_r1_14b_polymarket"
 ALLOWED_TOOLS = [TOOL_OMEN, TOOL_POLYMARKET]
 
-# vLLM --served-model-name, resolved from the tool rather than the request. The
+# vLLM --served-model-name (the SFT warm-start checkpoint; the server renamed it
+# from `qwen-14b-sft` on 2026-09-14 and the old name now 404s), resolved from the
+# tool rather than the request. The
 # mech's `model` kwarg is requester-controlled (`task_data.get("model",
 # params.default_model)`), and the benchmark tournament passes its own default,
 # so honouring it would send this endpoint a checkpoint it does not serve. The
 # requester picks the tool; the tool picks the model.
-SERVED_MODEL = "qwen-14b-sft"
+SERVED_MODEL = "olas-predict-r1-14b"
 MODEL_BY_TOOL = {TOOL_OMEN: SERVED_MODEL, TOOL_POLYMARKET: SERVED_MODEL}
 
 

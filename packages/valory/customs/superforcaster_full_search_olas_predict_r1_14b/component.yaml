@@ -11,14 +11,14 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeigxggofb36cqcpj7527qbstqnxti2lfnocgkqpehmsd3fgu4tgvkq
-  superforcaster_full_search_olas_predict_r1_14b.py: bafybeifxdxtwsloqqppx2geuut54l7c4ehv6dsqkeahxtejsqgoey4x6ky
+  superforcaster_full_search_olas_predict_r1_14b.py: bafybeiggimc4msrjvbkg6xvwe5lghiwert7pylbqyhwdgbh2c6iohhpnda
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_full_search_olas_predict_r1_14b.py: bafybeigiobewcro5aacpyyqdqvdz6dcdkt55i3nyzhkwz36sx4zein6vdi
+  tests/test_superforcaster_full_search_olas_predict_r1_14b.py: bafybeiaskv6fqvc6emat3pj5b64h74syfxys7vrmldqqefvj3ls7pgfc44
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_full_search_olas_predict_r1_14b.py
 callable: run
 params:
-  default_model: qwen-14b-sft
+  default_model: olas-predict-r1-14b
 dependencies:
   openai:
     version: ==1.93.0

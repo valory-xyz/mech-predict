@@ -294,6 +294,7 @@ def step_replay(
     tools: list[str],
     model: str,
     timeout: int,
+    *,
     with_market_context: bool = False,
 ) -> Path:
     """Run the replay runner.
@@ -304,7 +305,9 @@ def step_replay(
     :param model: LLM model identifier.
     :param timeout: per-tool timeout in seconds.
     :param with_market_context: forward market odds on the request_context; see
-        :func:`benchmark.runner.build_request_context`.
+        :func:`benchmark.runner.build_request_context`. Each arm gets its own
+        candidate file (:func:`main`), because a sweep scores the whole file
+        and has no per-row dedup step to separate the arms afterwards.
     :return: the output path.
     """
     log.info("=== REPLAY: %s on %d tools ===", model, len(tools))

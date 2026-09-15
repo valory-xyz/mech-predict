@@ -96,6 +96,32 @@ def get_model_encoding(model: str) -> Encoding:
     return encoding_for_model(model)
 
 
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable null-prediction tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than a raw exception string. ``error_type``
+    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
+    hitting every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -118,17 +144,27 @@ def with_key_rotation(func: Callable) -> Callable:
                 result: MechResponse = func(*args, **kwargs)
                 return result + (api_keys,)
             except anthropic.RateLimitError as e:
-                # try with a new key again
+                # Rotate keys on a rate-limit hit. Once the pool is exhausted,
+                # honor the null-prediction contract instead of re-raising: an
+                # exception raised here escapes wrapper() entirely (a sibling
+                # except clause cannot catch it), so the branch below that
+                # builds the typed error JSON never runs.
                 service = "anthropic"
                 if retries_left[service] <= 0:
-                    raise e
+                    print(
+                        f"[prediction-request-reasoning-v1] rate-limit exhausted: {e}"
+                    )
+                    return _null_prediction_response(e, api_keys)
                 retries_left[service] -= 1
                 api_keys.rotate(service)
                 return execute()
             except openai.RateLimitError as e:
                 # try with a new key again
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
+                    print(
+                        f"[prediction-request-reasoning-v1] rate-limit exhausted: {e}"
+                    )
+                    return _null_prediction_response(e, api_keys)
                 retries_left["openai"] -= 1
                 retries_left["openrouter"] -= 1
                 api_keys.rotate("openai")
@@ -137,10 +173,14 @@ def with_key_rotation(func: Callable) -> Callable:
             except googleapiclient.errors.HttpError as e:
                 # try with a new key again
                 if e.status_code != GOOGLE_RATE_LIMIT_EXCEEDED_CODE:
-                    raise e
+                    print(f"[prediction-request-reasoning-v1] google api failure: {e}")
+                    return _null_prediction_response(e, api_keys)
                 service = "google_api_key"
                 if retries_left[service] <= 0:
-                    raise e
+                    print(
+                        f"[prediction-request-reasoning-v1] rate-limit exhausted: {e}"
+                    )
+                    return _null_prediction_response(e, api_keys)
                 retries_left[service] -= 1
                 api_keys.rotate(service)
                 return execute()
@@ -148,17 +188,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 print(f"Unexpected error: {type(e).__name__}: {e}")
                 # Parseable typed error null (matches market_aware /
                 # factual_research) instead of a raw exception string.
-                error_json = json.dumps(
-                    {
-                        "p_yes": None,
-                        "p_no": None,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                    }
-                )
-                return error_json, "", None, None, None, api_keys
+                return _null_prediction_response(e, api_keys)
 
         mech_response = execute()
         return mech_response
@@ -535,20 +565,147 @@ def parser_reasoning_response(response: str) -> str:
     return reasoning.strip()
 
 
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
+
+    :param text: text that may carry JSON objects among prose.
+    :return: the decoded objects, and True if the text ends mid-object.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if tail.startswith('"'):
+                return found, True
+            idx = start + 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = max(end, start + 1)
+
+
+def extract_prediction(content: Optional[str]) -> Optional[str]:
+    """Return the forecast object from a completion, as a JSON string."""
+    if not content:
+        return content
+    candidates, cut_mid_object = _json_objects(content)
+    if cut_mid_object:
+        return None
+    for parsed in reversed(candidates):
+        try:
+            p_yes = float(parsed["p_yes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0.0 <= p_yes <= 1.0:
+            continue
+        return json.dumps(parsed)
+    return content
+
+
+def _is_forecast_object(extracted: str) -> bool:
+    """Whether `extracted` is a JSON object carrying a usable `p_yes`.
+
+    extract_prediction returns the completion unchanged when no candidate
+    qualifies, so the caller has to tell a selected forecast from a passthrough
+    before delivering it to a consumer that flat-``json.loads`` the result.
+
+    :param extracted: the extractor's return value.
+    :return: True when it parses as an object with an in-range `p_yes`.
+    """
+    try:
+        parsed = json.loads(extracted)
+        p_yes = float(parsed["p_yes"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return False
+    return 0.0 <= p_yes <= 1.0
+
+
 def parser_prediction_response(response: str) -> str:
     """Parse the response from the prediction model."""
     tags = ["p_yes", "p_no", "info_utility", "confidence"]
     results = {}
 
+    if f"<{tags[0]}>" not in response:
+        # The prompt asks for the tag form, but a free-text (Pearl-shaped)
+        # prompt reliably elicits a JSON object instead -- splitting on a tag
+        # that is not there raised IndexError, and the old handler masked it.
+        # Hand those completions to the shared extractor so the delivery is the
+        # forecast object rather than the whole reasoning block.
+        extracted = extract_prediction(response)
+        if extracted is not None and _is_forecast_object(extracted):
+            return extracted
+        print("Not a valid answer from the model")
+        print(f"response = {response}")
+        raise ValueError("No forecast object found in the model response")
+
     for key in tags:
         try:
             value_str = response.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
-            value = float(value_str)
-            results[key] = value
+            results[key] = float(value_str)
         except Exception as e:
+            # Report the failure itself: the value never got assigned on this
+            # path, so naming it here raised UnboundLocalError and hid the
+            # real error.
             print("Not a valid answer from the model")
             print(f"response = {response}")
-            raise ValueError(f"Error for {key}: {value}") from e
+            raise ValueError(f"Error for {key}: {type(e).__name__}: {e}") from e
 
     return json.dumps(results)
 

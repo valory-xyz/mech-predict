@@ -20,15 +20,18 @@
 """Unit tests for superforcaster-polymarket-v3's free-text-input contract (issue #455)."""
 
 import json
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymarket_v3 import (
+    DEFAULT_ANTHROPIC_MODEL,
     DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_SETTINGS,
     _MAX_SCAN_CHARS,
     _MAX_SEARCH_QUERY_LEN,
+    extract_prediction,
     parse_prompt,
     run,
 )
@@ -477,3 +480,195 @@ class TestMaxTokensWiring:
         assert create_kwargs["max_tokens"] == DEFAULT_OPENAI_SETTINGS["max_tokens"]
         # and the same value is what the delivery reports as used
         assert result[4]["max_tokens"] == DEFAULT_OPENAI_SETTINGS["max_tokens"]
+
+
+FORECAST = {"p_yes": 0.62, "p_no": 0.38, "confidence": 0.8, "info_utility": 0.6}
+FORECAST_JSON = json.dumps(FORECAST)
+
+# What the model actually returns on a free-text prompt: the seven-step
+# scaffold the prompt asks for, a lower draft written mid-reasoning, and the
+# real forecast last. Delivered verbatim it is not parseable JSON.
+SCAFFOLD_COMPLETION = (
+    "<facts>\n"
+    "* No transfer has been announced as of today.\n"
+    "</facts>\n"
+    "<thinking>\n"
+    'An early read put it lower: {"p_yes": 0.30, "p_no": 0.70, '
+    '"confidence": 0.4, "info_utility": 0.3}\n'
+    "Later reporting firmed the story up, so revise upward.\n"
+    "</thinking>\n"
+    "<answer>\n" + FORECAST_JSON + "\n"
+    "</answer>\n"
+)
+
+# A max_tokens cut that lands while the answer object is being written.
+CUT_COMPLETION = '<answer>\n{"p_yes": 0.62, "p_no"'
+
+
+def _openai_sdk_response(content: str) -> MagicMock:
+    """Build a mock ``chat.completions.create`` response carrying *content*.
+
+    :param content: the text the SDK reports as the message content.
+    :return: a MagicMock shaped like an openai ChatCompletion.
+    """
+    resp = MagicMock()
+    resp.choices = [MagicMock(message=MagicMock(content=content))]
+    resp.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+    return resp
+
+
+def _anthropic_sdk_response(text: str) -> MagicMock:
+    """Build a mock ``messages.create`` response carrying *text*.
+
+    :param text: the text the single TextBlock returns.
+    :return: a MagicMock shaped like an anthropic Message.
+    """
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = text
+    resp = MagicMock()
+    resp.content = [text_block]
+    resp.stop_reason = "end_turn"
+    resp.usage = MagicMock(input_tokens=10, output_tokens=5)
+    return resp
+
+
+class TestExtractPrediction:
+    """Shape-by-shape coverage of the forecast extractor."""
+
+    def test_bare_json_passes_through(self) -> None:
+        """A completion that is already the forecast object survives unchanged."""
+        assert json.loads(extract_prediction(FORECAST_JSON) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_the_answer_object(self) -> None:
+        """The forecast is sliced out of the facts/thinking/answer block."""
+        assert json.loads(extract_prediction(SCAFFOLD_COMPLETION) or "") == FORECAST
+
+    def test_draft_before_the_answer_does_not_shadow_it(self) -> None:
+        """A tentative object written mid-reasoning loses to the final one."""
+        content = '{"p_yes": 0.30}\nrevised after new reporting\n' + FORECAST_JSON
+        assert json.loads(extract_prediction(content) or "") == FORECAST
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object with no p_yes after the forecast is not mistaken for it."""
+        content = FORECAST_JSON + '\nSources used: {"organic": 3, "misc": 1}'
+        assert json.loads(extract_prediction(content) or "") == FORECAST
+
+    def test_cut_mid_object_returns_none(self) -> None:
+        """A completion cut while the answer was being written yields None."""
+        assert extract_prediction(CUT_COMPLETION) is None
+
+    def test_cut_whose_inner_object_closes_returns_none(self) -> None:
+        """A nested object closing inside the cut does not fake a complete answer."""
+        content = '{"p_yes": 0.30}\n{"meta": {"sources": 3}, "p_yes": 0.6'
+        assert extract_prediction(content) is None
+
+    def test_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace in prose must not suppress a delivered forecast."""
+        content = "See {source for details\n" + FORECAST_JSON
+        assert json.loads(extract_prediction(content) or "") == FORECAST
+
+    def test_braces_and_escaped_quotes_inside_string_values(self) -> None:
+        """A brace or an escaped quote inside a value does not end the object."""
+        forecast: Dict[str, Any] = dict(FORECAST)
+        forecast["rationale"] = 'resolves if } appears and "confirmed" is said'
+        content = "<answer>\n" + json.dumps(forecast) + "\n</answer>"
+        assert json.loads(extract_prediction(content) or "") == forecast
+
+    def test_out_of_range_p_yes_is_skipped(self) -> None:
+        """A p_yes outside [0, 1] is not a forecast; the valid earlier one wins."""
+        content = FORECAST_JSON + '\ncorrection: {"p_yes": 1.4, "p_no": -0.4}'
+        assert json.loads(extract_prediction(content) or "") == FORECAST
+
+    def test_null_p_yes_is_skipped(self) -> None:
+        """A null p_yes is not coercible, so the valid earlier object wins."""
+        content = FORECAST_JSON + '\n{"p_yes": null, "p_no": null}'
+        assert json.loads(extract_prediction(content) or "") == FORECAST
+
+    def test_no_candidate_returns_content_unchanged(self) -> None:
+        """With no forecast object at all the raw completion is left as-is."""
+        content = "I cannot answer this question."
+        assert extract_prediction(content) == content
+
+    def test_empty_content_passes_through(self) -> None:
+        """Empty and None completions are returned as-is, not crashed on."""
+        assert extract_prediction(None) is None
+        assert extract_prediction("") == ""
+
+
+class TestDeliveredPredictionIsParseable:
+    """run() must deliver the forecast object on BOTH provider branches.
+
+    These patch the provider SDK constructor only, so the real
+    LLMClientManager / LLMClient / completions() path runs end to end.
+    A helper-level test alone would stay green if the extractor were
+    unwired from the return paths, which is the failure these pin.
+    """
+
+    @patch(f"{V3_MODULE}.openai.OpenAI")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_openai_branch_delivers_the_forecast_object(
+        self, mock_fetch: MagicMock, mock_openai: MagicMock
+    ) -> None:
+        """run() on the OpenAI model delivers parseable JSON, not the scaffold."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _openai_sdk_response(SCAFFOLD_COMPLETION)
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_OPENAI_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        assert json.loads(result[0]) == FORECAST
+        assert "<thinking>" not in result[0]
+
+    @patch(f"{V3_MODULE}.Anthropic")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_anthropic_branch_delivers_the_forecast_object(
+        self, mock_fetch: MagicMock, mock_anthropic: MagicMock
+    ) -> None:
+        """run() on the claude model delivers parseable JSON, not the scaffold."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_anthropic.return_value.messages.create
+        create.return_value = _anthropic_sdk_response(SCAFFOLD_COMPLETION)
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_ANTHROPIC_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        assert json.loads(result[0]) == FORECAST
+        assert "<thinking>" not in result[0]
+
+    @patch(f"{V3_MODULE}.time.sleep")
+    @patch(f"{V3_MODULE}.openai.OpenAI")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_cut_completion_is_not_delivered(
+        self, mock_fetch: MagicMock, mock_openai: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """A cut answer reaches the retry loop instead of being delivered partial."""
+        # The OpenAI branch has no stop_reason guard, so the extractor's None
+        # is the only thing between a truncated object and the caller.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _openai_sdk_response(CUT_COMPLETION)
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_OPENAI_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        delivered = json.loads(result[0])
+        assert delivered["p_yes"] is None
+        assert "<answer>" not in result[0]
+        assert create.call_count == 3

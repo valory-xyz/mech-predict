@@ -208,6 +208,100 @@ def _provider_for(model: str) -> str:
     return "anthropic" if "claude" in model else "openai"
 
 
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
+
+    :param text: text that may carry JSON objects among prose.
+    :return: the decoded objects, and True if the text ends mid-object.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if tail.startswith('"'):
+                return found, True
+            idx = start + 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = max(end, start + 1)
+
+
+def extract_prediction(content: Optional[str]) -> Optional[str]:
+    """Return the forecast object from a completion, as a JSON string."""
+    if not content:
+        return content
+    candidates, cut_mid_object = _json_objects(content)
+    if cut_mid_object:
+        return None
+    for parsed in reversed(candidates):
+        try:
+            p_yes = float(parsed["p_yes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0.0 <= p_yes <= 1.0:
+            continue
+        return json.dumps(parsed)
+    return content
+
+
 class LLMClientManager:
     """Context manager that picks the SDK by model name.
 
@@ -379,7 +473,13 @@ class LLMClient:
                     f"{resp.stop_reason!r}, content_types="
                     f"{[getattr(b, 'type', None) for b in resp.content]!r}"
                 )
-            response.content = text_block.text
+            # Anthropic return path: deliver the forecast object, not the
+            # reasoning scaffold the prompt also asks for. Slicing here --
+            # rather than in a helper the caller may or may not use -- is
+            # what makes the DELIVERY parseable. A cut mid-object yields
+            # None, which the caller's empty-content guard turns into a
+            # retry instead of an unparseable on-chain result.
+            response.content = extract_prediction(text_block.text)
             response.usage.prompt_tokens = resp.usage.input_tokens
             response.usage.completion_tokens = resp.usage.output_tokens
             return response
@@ -393,7 +493,11 @@ class LLMClient:
             timeout=150,
             stop=None,
         )
-        response.content = response_provider.choices[0].message.content
+        # OpenAI return path: same extraction as the Anthropic branch above,
+        # so both providers deliver the forecast object rather than prose.
+        response.content = extract_prediction(
+            response_provider.choices[0].message.content
+        )
         response.usage.prompt_tokens = response_provider.usage.prompt_tokens
         response.usage.completion_tokens = response_provider.usage.completion_tokens
         return response

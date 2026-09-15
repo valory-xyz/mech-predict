@@ -36,12 +36,14 @@ from packages.napthaai.customs.prediction_request_reasoning_v1.prediction_reques
     LLMClientManager,
     count_tokens,
     do_reasoning_with_retry,
+    extract_prediction,
     extract_texts,
     fetch_additional_information,
     get_urls_from_queries_serper,
     multi_queries,
     multi_questions_response,
     parse_prompt,
+    parser_prediction_response,
     run,
 )
 
@@ -487,6 +489,14 @@ def _make_anthropic_error(cls: type, message: str = "simulated") -> Exception:
     return err
 
 
+def _make_http_error(status_code: int, message: str) -> Exception:
+    """Build a googleapiclient HttpError carrying the given status code."""
+    resp = SimpleNamespace(status=status_code, reason=message)
+    return module.googleapiclient.errors.HttpError(
+        resp=resp, content=message.encode("utf-8")
+    )
+
+
 def _anthropic_client(resp: MagicMock) -> Any:
     """Construct an ``LLMClient`` on the anthropic branch with a mocked backing client."""
     with patch("anthropic.Anthropic") as MockAnthropic:
@@ -607,16 +617,66 @@ class TestWithKeyRotationAnthropic:
         assert [c.args[0] for c in keys.rotate.call_args_list] == ["anthropic"]
         assert result[-1] is keys
 
-    def test_anthropic_pool_exhausted_reraises(self) -> None:
-        """When the anthropic pool is exhausted, the error re-raises so the task fails."""
+    def test_anthropic_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted anthropic pool delivers the typed null, it does not raise."""
         keys = self._keys(anthropic_budget=0)
 
         @module.with_key_rotation
         def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
             raise _make_anthropic_error(module.anthropic.RateLimitError, "burned")
 
-        with pytest.raises(module.anthropic.RateLimitError, match="burned"):
-            fake(api_keys=keys)
+        result = fake(api_keys=keys)
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None and parsed["p_no"] is None
+        assert parsed["error_type"] == "RateLimitError"
+        assert parsed["error"] == "burned"
+        assert result[-1] is keys
+
+    def test_openai_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted openai/openrouter pool delivers the typed null too."""
+        keys = self._keys(anthropic_budget=5)
+        keys.max_retries = lambda: {"openai": 0, "openrouter": 0, "anthropic": 5}
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(module.openai.RateLimitError, "openai burned")
+
+        result = fake(api_keys=keys)
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "RateLimitError"
+        assert keys.rotate.call_count == 0
+
+    def test_google_rate_limit_exhausted_returns_typed_null(self) -> None:
+        """An exhausted google pool delivers the typed null instead of raising."""
+        keys = self._keys(anthropic_budget=5)
+        keys.max_retries = lambda: {
+            "openai": 5,
+            "openrouter": 5,
+            "anthropic": 5,
+            "google_api_key": 0,
+        }
+        err = _make_http_error(module.GOOGLE_RATE_LIMIT_EXCEEDED_CODE, "quota")
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise err
+
+        result = fake(api_keys=keys)
+        assert json.loads(result[0])["p_yes"] is None
+
+    def test_non_rate_limit_google_error_returns_typed_null(self) -> None:
+        """A non-429 google error is a permanent failure, delivered as the typed null."""
+        keys = self._keys(anthropic_budget=5)
+        err = _make_http_error(403, "forbidden")
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise err
+
+        result = fake(api_keys=keys)
+        assert json.loads(result[0])["p_yes"] is None
+        assert keys.rotate.call_count == 0
 
 
 class TestCountTokensAnthropic:
@@ -1225,3 +1285,191 @@ class TestScanTruncationObservable:
         result = self._run_free_text(prompt)
         assert result[4]["parse_tier"] == "clause"
         assert result[4]["scan_truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Free-text answer extraction: the model replies in JSON, not the tag form.
+# ---------------------------------------------------------------------------
+
+FORECAST_JSON = '{"p_yes": 0.83, "p_no": 0.17, "confidence": 0.8, "info_utility": 0.7}'
+TAG_RESPONSE = (
+    "<p_yes>0.6</p_yes><p_no>0.4</p_no>"
+    "<info_utility>0.5</info_utility><confidence>0.7</confidence>"
+)
+
+
+class TestExtractPrediction:
+    """extract_prediction(): the completion shapes a free-text prompt produces."""
+
+    def test_bare_json_object_passes_through(self) -> None:
+        """A completion that is only the forecast object comes back as that object."""
+        assert json.loads(extract_prediction(FORECAST_JSON) or "") == json.loads(
+            FORECAST_JSON
+        )
+
+    def test_reasoning_scaffold_yields_only_the_object(self) -> None:
+        """Prose around the answer is dropped, leaving the forecast object."""
+        completion = (
+            "Step 1: the transfer was confirmed by the club.\n"
+            "Step 2: no competing reports.\n"
+            f"Final answer:\n{FORECAST_JSON}\n"
+        )
+        extracted = extract_prediction(completion)
+        assert json.loads(extracted or "")["p_yes"] == 0.83
+        assert "Step 1" not in (extracted or "")
+
+    def test_draft_before_the_answer_loses_to_the_final_one(self) -> None:
+        """When two forecasts appear, the last one is delivered."""
+        completion = (
+            'Draft: {"p_yes": 0.2, "p_no": 0.8}\n'
+            f"On reflection, the final answer is {FORECAST_JSON}"
+        )
+        assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.83
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object without p_yes after the answer does not displace the forecast."""
+        completion = f'{FORECAST_JSON}\nSources: {{"urls": ["http://x.com"]}}'
+        assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.83
+
+    def test_cut_mid_object_returns_none(self) -> None:
+        """A max_tokens cut while the answer is being written yields no forecast."""
+        completion = 'Reasoning done.\n{"p_yes": 0.83, "p_no": 0.1'
+        assert extract_prediction(completion) is None
+
+    def test_cut_whose_inner_object_closed_returns_none(self) -> None:
+        """A nested object closing inside the cut answer does not close the answer."""
+        completion = '{"meta": {"model": "gpt"}, "p_yes": 0.83, "p_no"'
+        assert extract_prediction(completion) is None
+
+    def test_earlier_forecast_before_a_cut_is_not_delivered(self) -> None:
+        """A complete forecast followed by a cut object is a draft, so None."""
+        completion = f'{FORECAST_JSON}\nRevised: {{"p_yes": 0.5'
+        assert extract_prediction(completion) is None
+
+    def test_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace that never began an object leaves the forecast delivered."""
+        completion = f"{FORECAST_JSON}\nSee {{source for details"
+        assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.83
+
+    def test_brace_inside_a_string_value_does_not_close_the_object(self) -> None:
+        """A brace inside a value is part of the string, not the object terminator."""
+        completion = '{"p_yes": 0.3, "p_no": 0.7, "reason": "resolves if } appears"}'
+        parsed = json.loads(extract_prediction(completion) or "")
+        assert parsed["p_yes"] == 0.3 and parsed["reason"] == "resolves if } appears"
+
+    def test_escaped_quote_inside_a_string_value_is_handled(self) -> None:
+        """An escaped quote does not end the string, so the object still parses."""
+        completion = (
+            '{"p_yes": 0.3, "p_no": 0.7, '
+            '"reason": "the \\"final\\" report shows } by June"}'
+        )
+        assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.3
+
+    def test_out_of_range_p_yes_is_skipped_for_the_valid_one(self) -> None:
+        """A p_yes above 1 is not a probability, so an earlier valid forecast wins."""
+        completion = f'{FORECAST_JSON}\nScaled: {{"p_yes": 83, "p_no": 17}}'
+        assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.83
+
+    def test_lone_out_of_range_p_yes_passes_the_content_through(self) -> None:
+        """With no usable candidate the completion is returned unchanged."""
+        completion = '{"p_yes": 83, "p_no": 17}'
+        assert extract_prediction(completion) == completion
+
+    def test_null_p_yes_is_not_a_forecast(self) -> None:
+        """A null p_yes is skipped, so the completion passes through unchanged."""
+        completion = '{"p_yes": null, "p_no": null}'
+        assert extract_prediction(completion) == completion
+
+    def test_prose_without_json_passes_through(self) -> None:
+        """A completion with no object at all is returned unchanged."""
+        completion = "I cannot estimate this probability."
+        assert extract_prediction(completion) == completion
+
+    @pytest.mark.parametrize("content", [None, ""])
+    def test_empty_content_is_returned_unchanged(self, content: Any) -> None:
+        """Empty or missing content is handed back as-is."""
+        assert extract_prediction(content) == content
+
+
+class TestParserPredictionResponse:
+    """parser_prediction_response(): tag parity, JSON fallback, honest errors."""
+
+    def test_tag_form_still_parses_to_the_four_floats(self) -> None:
+        """The advertised tag form is unaffected by the fallback."""
+        parsed = json.loads(parser_prediction_response(TAG_RESPONSE))
+        assert parsed == {
+            "p_yes": 0.6,
+            "p_no": 0.4,
+            "info_utility": 0.5,
+            "confidence": 0.7,
+        }
+
+    def test_json_answer_is_delivered_as_the_forecast_object(self) -> None:
+        """A tagless JSON answer is extracted instead of crashing."""
+        completion = f"Reasoning about the market.\n{FORECAST_JSON}"
+        parsed = json.loads(parser_prediction_response(completion))
+        assert parsed["p_yes"] == 0.83 and parsed["confidence"] == 0.8
+
+    def test_tagless_prose_raises_value_error(self) -> None:
+        """A tagless answer with no forecast object is a ValueError, not an IndexError."""
+        with pytest.raises(ValueError, match="No forecast object"):
+            parser_prediction_response("I cannot estimate this probability.")
+
+    def test_cut_json_answer_raises_value_error(self) -> None:
+        """A cut-off JSON answer is rejected rather than delivered as a draft."""
+        with pytest.raises(ValueError, match="No forecast object"):
+            parser_prediction_response('{"p_yes": 0.83, "p_no"')
+
+    def test_missing_later_tag_reports_the_real_cause(self) -> None:
+        """A response missing a later tag names the cause instead of an unbound value."""
+        with pytest.raises(ValueError, match="Error for p_no: IndexError"):
+            parser_prediction_response("<p_yes>0.6</p_yes>")
+
+    def test_unparseable_tag_value_reports_the_real_cause(self) -> None:
+        """A non-numeric tag value names the float failure, not an unbound value."""
+        with pytest.raises(ValueError, match="Error for p_yes: ValueError"):
+            parser_prediction_response("<p_yes>maybe</p_yes>")
+
+
+class TestFreeTextAnswerDelivery:
+    """run(): the extractor sits on the path that returns the completion."""
+
+    @staticmethod
+    def _run_with_completion(content: str) -> tuple:
+        """Run the tool end to end with the prediction model returning `content`."""
+        with (
+            patch(f"{REASONING_MODULE}.LLMClientManager") as mock_mgr,
+            patch(f"{REASONING_MODULE}.fetch_additional_information") as mock_fetch,
+            patch(f"{REASONING_MODULE}.do_reasoning_with_retry") as mock_reasoning,
+        ):
+            mock_llm = _mock_client_manager(mock_mgr)
+            mock_fetch.return_value = ("additional info", {"pages": {}}, ["q1"], None)
+            mock_reasoning.return_value = ("reasoning result", None)
+            mock_llm.completions.return_value = MagicMock(
+                content=content,
+                usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+            )
+            return run(
+                tool="prediction-request-reasoning-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(),
+            )
+
+    def test_run_delivers_the_extracted_forecast_object(self) -> None:
+        """The delivery is the forecast object, not the whole reasoning block."""
+        completion = (
+            "Step 1: the club confirmed the transfer.\n"
+            f"Final answer:\n{FORECAST_JSON}"
+        )
+        result = self._run_with_completion(completion)
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.83 and parsed["p_no"] == 0.17
+        assert "Step 1" not in result[0]
+
+    def test_run_delivers_a_parseable_null_when_the_answer_was_cut(self) -> None:
+        """A cut answer is delivered as the typed null, never as truncated text."""
+        result = self._run_with_completion('Reasoning done.\n{"p_yes": 0.83, "p_no"')
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"

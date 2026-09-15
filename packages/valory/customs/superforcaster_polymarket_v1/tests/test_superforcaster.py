@@ -113,7 +113,9 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
     return mock
 
 
-def _install_mock_client(mock_client_mgr: MagicMock) -> MagicMock:
+def _install_mock_client(
+    mock_client_mgr: MagicMock, content: str = PREDICTION_JSON
+) -> MagicMock:
     """Wire OpenAIClientManager to return a client whose completions() yields PREDICTION_JSON.
 
     The wrapper's call path is `OpenAIClient.completions(...)`, so the response
@@ -122,11 +124,12 @@ def _install_mock_client(mock_client_mgr: MagicMock) -> MagicMock:
     wrapper hides).
 
     :param mock_client_mgr: the patched OpenAIClientManager mock.
+    :param content: the raw completion the mocked model returns.
     :return: the inner mock_client wired into the manager's __enter__.
     """
     mock_client = MagicMock()
     mock_response = MagicMock()
-    mock_response.content = PREDICTION_JSON
+    mock_response.content = content
     mock_response.usage.prompt_tokens = 10
     mock_response.usage.completion_tokens = 5
     mock_client.completions.return_value = mock_response
@@ -470,3 +473,168 @@ class TestIssue455RunWiring:
         )
         assert result[4]["parse_tier"] == "template"
         assert result[4]["scan_truncated"] is False
+
+
+FORECAST = {"p_yes": 0.19, "p_no": 0.81, "confidence": 0.7, "info_utility": 0.6}
+
+SCAFFOLD_COMPLETION = (
+    "<facts>\n- Isak handed in a transfer request on 2025-08-01.\n</facts>\n"
+    "<no>\n- Newcastle publicly refused the bid (8/10).\n</no>\n"
+    "<yes>\n- The player is pushing for the move (6/10).\n</yes>\n"
+    "<thinking>\nThe deadline leaves little room for a new bid.\n</thinking>\n"
+    "<tentative>\n0.22\n</tentative>\n"
+    "<thinking>\nThe criterion needs a permanent transfer, not a loan.\n</thinking>\n"
+    "<answer>\n*0.19*\n</answer>\n" + json.dumps(FORECAST)
+)
+
+
+class TestExtractPrediction:
+    """extract_prediction() slices the forecast out of a scaffolded completion."""
+
+    def test_bare_json_is_returned_unchanged(self) -> None:
+        """A trader-template completion is already JSON and survives intact."""
+        bare = json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(bare) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """The seven-step block is dropped; only the JSON object is delivered."""
+        out = module.extract_prediction(SCAFFOLD_COMPLETION) or ""
+        assert json.loads(out) == FORECAST
+        assert "<facts>" not in out
+        assert "<answer>" not in out
+
+    def test_a_draft_before_the_answer_does_not_shadow_it(self) -> None:
+        """A drafted object earlier in the text loses to the final one."""
+        completion = "Draft: " + json.dumps(
+            {"p_yes": 0.8, "p_no": 0.2}
+        ) + "\n" "On reflection that is too high.\n" + json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object after the forecast with no p_yes is passed over."""
+        completion = json.dumps(FORECAST) + '\nSources used: {"count": 3}'
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_a_cut_mid_object_returns_none(self) -> None:
+        """A max_tokens cut while the answer is being written yields None."""
+        completion = SCAFFOLD_COMPLETION[: -len(json.dumps(FORECAST))] + (
+            '{"p_yes": 0.19, "p_no": 0.8'
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_whose_nested_object_closes_still_returns_none(self) -> None:
+        """A closing brace belonging to a nested object is not the answer's."""
+        completion = 'Answer:\n{"meta": {"model": "gpt-4o"}, "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_draft_before_a_cut_is_not_delivered(self) -> None:
+        """A tentative object written before a cut is a draft, not a forecast."""
+        completion = json.dumps({"p_yes": 0.8, "p_no": 0.2}) + '\n{"p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace that does not open an object leaves the forecast."""
+        completion = (
+            "See the {source for details on the resolution criterion.\n"
+            + json.dumps(FORECAST)
+        )
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_balanced_non_json_braces_are_stepped_over(self) -> None:
+        """Balanced braces that are not valid JSON do not stop the scan."""
+        completion = "Use {curly braces} sparingly.\n" + json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_a_brace_inside_a_string_value_does_not_close_the_object(self) -> None:
+        """A } inside a string value is skipped while scanning for the close."""
+        payload = dict(FORECAST, note="resolves if } appears in the filing")
+        completion = "<answer>\n*0.19*\n</answer>\n" + json.dumps(payload)
+        assert json.loads(module.extract_prediction(completion) or "") == payload
+
+    def test_escaped_quotes_inside_a_string_value_survive(self) -> None:
+        """An escaped quote does not end the string the scanner is inside."""
+        payload = dict(FORECAST, note='the club said "maybe" about the } bid')
+        completion = "<thinking>\nWeighing the quote.\n</thinking>\n" + json.dumps(
+            payload
+        )
+        assert json.loads(module.extract_prediction(completion) or "") == payload
+
+    def test_out_of_range_p_yes_is_skipped(self) -> None:
+        """A p_yes outside 0..1 is not a probability and loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": 1.4})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_null_p_yes_is_skipped(self) -> None:
+        """A null p_yes carries no forecast and loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": None})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_non_numeric_p_yes_is_skipped(self) -> None:
+        """A p_yes that will not coerce to a float loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": "high"})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_numeric_string_p_yes_is_accepted(self) -> None:
+        """A p_yes quoted as a numeric string still counts as a forecast."""
+        payload = dict(FORECAST, p_yes="0.19")
+        out = module.extract_prediction(json.dumps(payload)) or ""
+        assert float(json.loads(out)["p_yes"]) == 0.19
+
+    def test_a_completion_with_no_forecast_is_left_untouched(self) -> None:
+        """With no usable object the raw text is returned for the error path."""
+        assert module.extract_prediction("no json at all") == "no json at all"
+
+    def test_empty_and_missing_content_pass_through(self) -> None:
+        """Falsy completions are returned as they arrived."""
+        assert module.extract_prediction(None) is None
+        assert module.extract_prediction("") == ""
+
+    def test_a_cut_after_a_brace_in_a_string_value_returns_none(self) -> None:
+        """A } inside a string must not make a truncated object look complete."""
+        completion = '{"note": "resolves if } appears", "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_after_an_escaped_quote_returns_none(self) -> None:
+        """An escaped quote must not end the string and expose a later }."""
+        completion = '{"note": "he said \\"maybe}\\" indeed", "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+
+class TestExtractPredictionRunWiring:
+    """The extractor sits on run()'s delivery path, not only in a helper."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_delivers_parseable_json_for_a_scaffolded_completion(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Unwiring the extractor makes run() deliver the scaffold verbatim."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr, content=SCAFFOLD_COMPLETION)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert json.loads(result[0]) == FORECAST
+        assert "<facts>" not in result[0]
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_from_a_cut_completion(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A completion cut mid-answer is delivered as None, not as a draft."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        cut = json.dumps({"p_yes": 0.8, "p_no": 0.2}) + '\n{"p_yes": 0.19'
+        _install_mock_client(mock_client_mgr, content=cut)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[0] is None

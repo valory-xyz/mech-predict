@@ -24,7 +24,7 @@ import json
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -640,16 +640,20 @@ class TestWithKeyRotationAnthropic:
         assert [c.args[0] for c in keys.rotate.call_args_list] == ["anthropic"]
         assert result[-1] is keys
 
-    def test_anthropic_pool_exhausted_reraises(self) -> None:
-        """When the anthropic pool is exhausted, the error re-raises so the task fails."""
+    def test_anthropic_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted anthropic pool delivers the typed null, not a raised error."""
         keys = self._keys(anthropic_budget=0)
 
         @module.with_key_rotation
         def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
             raise _make_anthropic_error(module.anthropic.RateLimitError, "burned")
 
-        with pytest.raises(module.anthropic.RateLimitError, match="burned"):
-            fake(api_keys=keys)
+        result = fake(api_keys=keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "RateLimitError"
+        assert payload["error"] == "burned"
+        assert result[-1] is keys
 
 
 class TestCountTokensAnthropic:
@@ -1145,3 +1149,264 @@ class TestSearchQueryPlumbing:
             )
         mock_serper.assert_called_once()
         assert mock_serper.call_args.kwargs["queries"] == ["short q"]
+
+
+def _make_bare_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an SDK error instance without a live transport response."""
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    return err
+
+
+def _make_google_http_error(status: int, message: str = "simulated") -> Exception:
+    """Build a googleapiclient HttpError carrying the given status code."""
+    err = _make_bare_error(module.googleapiclient.errors.HttpError, message)
+    err.resp = SimpleNamespace(  # type: ignore[attr-defined]
+        status=status, reason=message
+    )
+    err.content = message.encode()  # type: ignore[attr-defined]
+    err.uri = None  # type: ignore[attr-defined]
+    err.error_details = ""  # type: ignore[attr-defined]
+    err.reason = message  # type: ignore[attr-defined]
+    return err
+
+
+class TestWithKeyRotationNullContract:
+    """No failure branch of with_key_rotation may let an exception escape."""
+
+    @staticmethod
+    def _keys() -> MagicMock:
+        """Build an api_keys mock with every retry budget exhausted."""
+        keys = MagicMock()
+        keys.max_retries = lambda: {
+            "openai": 0,
+            "openrouter": 0,
+            "anthropic": 0,
+            "google_api_key": 0,
+        }
+        keys.rotate = MagicMock()
+        return keys
+
+    @staticmethod
+    def _deliver(exc: Exception, keys: MagicMock) -> tuple:
+        """Wrap a function that always raises exc and call it."""
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise exc
+
+        return fake(api_keys=keys)
+
+    def test_openai_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted openai/openrouter pool delivers the typed null."""
+        keys = self._keys()
+        result = self._deliver(
+            _make_bare_error(module.openai.RateLimitError, "burned"), keys
+        )
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["p_no"] is None
+        assert payload["error_type"] == "RateLimitError"
+        assert result[-1] is keys
+
+    def test_google_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted google key pool on a 429 delivers the typed null."""
+        keys = self._keys()
+        result = self._deliver(_make_google_http_error(429, "quota"), keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "HttpError"
+        assert result[-1] is keys
+
+    def test_google_non_rate_limit_error_returns_typed_null(self) -> None:
+        """A non-429 google failure delivers the typed null instead of escaping."""
+        keys = self._keys()
+        result = self._deliver(_make_google_http_error(403, "forbidden"), keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "HttpError"
+        assert result[-1] is keys
+
+
+# Completion shapes the extractor has to survive. The forecast object is the
+# one with an in-range p_yes; everything else in the string is noise.
+FORECAST = {"p_yes": 0.62, "p_no": 0.38, "confidence": 0.7, "info_utility": 0.6}
+FORECAST_JSON = json.dumps(FORECAST)
+SCAFFOLD_COMPLETION = (
+    "<facts>Isak has not been transferred.</facts>\n"
+    "<thinking>Base rate for a deadline-day move is low.</thinking>\n"
+    "<answer>\n" + FORECAST_JSON + "\n</answer>"
+)
+
+
+class TestExtractPrediction:
+    """The shared extractor: which object of a completion is the forecast."""
+
+    def test_bare_json_passes_through(self) -> None:
+        """A completion that is only the forecast object round-trips."""
+        assert json.loads(module.extract_prediction(FORECAST_JSON) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """The scaffold's prose is dropped and the answer object kept."""
+        extracted = module.extract_prediction(SCAFFOLD_COMPLETION)
+        assert json.loads(extracted or "") == FORECAST
+        assert "<thinking>" not in (extracted or "")
+
+    def test_draft_before_the_answer_loses_to_the_final_object(self) -> None:
+        """A mid-reasoning draft cannot shadow the final forecast."""
+        content = (
+            'Draft: {"p_yes": 0.2, "p_no": 0.8} -- revising upward.\n' + FORECAST_JSON
+        )
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object after the forecast with no p_yes is not delivered."""
+        content = FORECAST_JSON + '\n{"sources": ["bbc.co.uk"]}'
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_cut_mid_object_returns_none(self) -> None:
+        """A max_tokens cut while writing the answer yields no forecast."""
+        content = 'Reasoning done.\n{"p_yes": 0.62, "p_no": 0.3'
+        assert module.extract_prediction(content) is None
+
+    def test_cut_after_an_inner_object_closed_returns_none(self) -> None:
+        """A cut whose nested object closed is still a cut, not a forecast."""
+        content = '{"p_yes": 0.62, "meta": {"model": "x"}, "p_no": 0.3'
+        assert module.extract_prediction(content) is None
+
+    def test_draft_before_a_cut_is_not_delivered(self) -> None:
+        """A complete draft followed by a cut answer is not the forecast."""
+        content = '{"p_yes": 0.2, "p_no": 0.8}\nFinal answer:\n{"p_yes": 0.6'
+        assert module.extract_prediction(content) is None
+
+    def test_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace in prose must not suppress the forecast."""
+        content = FORECAST_JSON + "\nSee {source for details"
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_braces_and_escaped_quotes_inside_values_survive(self) -> None:
+        """Braces and escaped quotes inside a string value do not break the scan."""
+        payload: Dict[str, Any] = dict(FORECAST)
+        payload["info"] = 'resolves if } appears in the "final" text'
+        content = "Answer:\n" + json.dumps(payload)
+        assert json.loads(module.extract_prediction(content) or "") == payload
+
+    def test_out_of_range_p_yes_is_not_a_forecast(self) -> None:
+        """An out-of-range p_yes is skipped, not delivered as a forecast."""
+        # The earlier fixture was byte-identical to json.dumps of its own
+        # parse, so passthrough and extraction were indistinguishable and the
+        # mutant survived. Pair it with a valid object so the two differ.
+        # The out-of-range object must be LAST: the walk runs in reverse, so
+        # a valid object after it would be found first and the skip would
+        # never be exercised.
+        completion = (
+            '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.3
+
+    def test_null_p_yes_is_not_a_forecast(self) -> None:
+        """A null p_yes is skipped, so the content comes back unchanged."""
+        content = '{"p_yes": null, "p_no": null}'
+        assert module.extract_prediction(content) == content
+
+    def test_empty_content_is_returned_unchanged(self) -> None:
+        """Empty or missing content is passed straight back."""
+        assert module.extract_prediction("") == ""
+        assert module.extract_prediction(None) is None
+
+
+class TestParserPredictionResponse:
+    """parser_prediction_response: tag form, JSON fallback, and error surfacing."""
+
+    def test_tag_form_still_parsed(self) -> None:
+        """The documented tag form keeps producing the four-field JSON."""
+        parsed = json.loads(module.parser_prediction_response(VALID_TAGGED_COMPLETION))
+        assert parsed == {
+            "p_yes": 0.5,
+            "p_no": 0.5,
+            "info_utility": 0.5,
+            "confidence": 0.5,
+        }
+
+    def test_json_answer_falls_back_to_the_extractor(self) -> None:
+        """A JSON answer with no tags is parsed by the extractor, not rejected."""
+        parsed = json.loads(module.parser_prediction_response(SCAFFOLD_COMPLETION))
+        assert parsed == FORECAST
+
+    def test_missing_tag_raises_value_error_naming_the_tag(self) -> None:
+        """A half-written tag block raises ValueError carrying the real error."""
+        broken = "<p_yes>0.5</p_yes><p_no>0.5</p_no>"
+        with pytest.raises(ValueError) as excinfo:
+            module.parser_prediction_response(broken)
+        assert "info_utility" in str(excinfo.value)
+        assert "IndexError" in str(excinfo.value)
+        assert not isinstance(excinfo.value, UnboundLocalError)
+
+    def test_non_numeric_tag_value_raises_value_error(self) -> None:
+        """A non-numeric tag value reports the float failure, not an unbound name."""
+        broken = (
+            "<p_yes>very likely</p_yes><p_no>0.5</p_no>"
+            "<confidence>0.5</confidence><info_utility>0.5</info_utility>"
+        )
+        with pytest.raises(ValueError) as excinfo:
+            module.parser_prediction_response(broken)
+        assert "p_yes" in str(excinfo.value)
+        assert "UnboundLocalError" not in str(excinfo.value)
+
+    def test_prose_without_a_forecast_raises_value_error(self) -> None:
+        """A completion with neither tags nor a forecast object is an error."""
+        with pytest.raises(ValueError, match="No forecast object"):
+            module.parser_prediction_response("I cannot answer that question.")
+
+
+def _run_with_completion(content: str, prompt: str = "Will X happen?") -> tuple:
+    """Run the tool end to end with fetch + the LLM mocked to deliver content."""
+    with (
+        patch(f"{RAG_MODULE}.LLMClientManager") as mock_mgr,
+        patch(f"{RAG_MODULE}.fetch_additional_information") as mock_fetch,
+    ):
+        mock_llm, _ = _mock_client_manager(mock_mgr)
+        mock_fetch.return_value = ("additional info", {"pages": {}}, None)
+        mock_llm.completions.return_value = MagicMock(
+            content=content,
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        return run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+        )
+
+
+class TestRunDeliversTheForecastObject:
+    """run() wiring: the extractor must sit on the delivery path, not beside it."""
+
+    def test_free_text_json_completion_is_delivered_as_the_forecast(self) -> None:
+        """A JSON answer to a free-text prompt is delivered as the forecast object."""
+        result = _run_with_completion(SCAFFOLD_COMPLETION, LONG_FREE_TEXT_PROMPT)
+        assert json.loads(result[0]) == FORECAST
+        assert "<thinking>" not in result[0]
+
+    def test_bare_json_completion_is_delivered_unwrapped(self) -> None:
+        """A bare JSON completion reaches the caller as a parseable forecast."""
+        result = _run_with_completion(FORECAST_JSON)
+        assert json.loads(result[0])["p_yes"] == 0.62
+
+    def test_tagged_completion_delivery_is_unchanged(self) -> None:
+        """The tag-form path still delivers the four-field JSON."""
+        result = _run_with_completion(VALID_TAGGED_COMPLETION)
+        assert json.loads(result[0]) == {
+            "p_yes": 0.5,
+            "p_no": 0.5,
+            "info_utility": 0.5,
+            "confidence": 0.5,
+        }
+
+    def test_truncated_completion_delivers_the_typed_error_null(self) -> None:
+        """A cut-off answer becomes the typed null, never an escaping exception."""
+        result = _run_with_completion('Reasoning.\n{"p_yes": 0.62, "p_no": 0.3')
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "ValueError"

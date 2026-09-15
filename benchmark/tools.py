@@ -93,14 +93,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     # search sibling of superforcaster_full_search, with Olas-Predict-R1-14B
     # served through the self-hosted OpenAI-compatible vLLM endpoint. The two
     # names share one package but are evaluated independently by platform.
-    "superforcaster_full_search_olas_predict_r1_14b_omen": ToolSpec(
-        module=(
-            "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b"
-            ".superforcaster_full_search_olas_predict_r1_14b"
-        ),
-        family="superforcaster",
-    ),
-    "superforcaster_full_search_olas_predict_r1_14b_polymarket": ToolSpec(
+    "superforcaster_full_search_olas_predict_r1_14b": ToolSpec(
         module=(
             "packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b"
             ".superforcaster_full_search_olas_predict_r1_14b"

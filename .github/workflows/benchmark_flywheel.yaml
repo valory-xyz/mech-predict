@@ -509,9 +509,9 @@ jobs:
         if: always() && !cancelled()
         run: python -m benchmark.analyze --platform polymarket --include-tournament
 
-      # Stale ROI outputs are restored from artifact and would be uploaded
-      # again as if live — delete on flag-on so the detailed report artifacts
-      # degrade to "no ROI" instead of preserving a frozen snapshot.
+      # Stale ROI outputs are restored from artifact and re-rendered
+      # by notify_slack as if live — delete on flag-on so the section
+      # degrades to "no ROI" instead of a frozen snapshot.
       - name: Clear stale ROI outputs (flag on)
         if: always() && !cancelled() && env.USE_MECH_ANALYTICS_ROWS == 'true'
         run: |
@@ -521,9 +521,9 @@ jobs:
 
       # Companion ROI simulation over the same data the benchmark job just
       # fetched/scored. continue-on-error: the companion must not fail the
-      # flywheel -- when it breaks, the daily decision summaries still go out
-      # and only the detailed ROI artifacts are absent. Under
-      # USE_MECH_ANALYTICS_ROWS=true
+      # flywheel -- when it breaks, the daily Slack posts simply go out
+      # without the ROI section (notify_slack degrades gracefully when
+      # roi_results.json is missing). Under USE_MECH_ANALYTICS_ROWS=true
       # the roi_sim CLI fetches production rows from mech-analytics;
       # --logs-dir is ignored on that path so we omit it. --tournament-input
       # stays because tournament_scored.jsonl is still produced by the

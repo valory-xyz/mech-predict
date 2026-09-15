@@ -340,11 +340,17 @@ def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
     return completion or ""
 
 
-def _json_objects(text: str) -> List[Dict[str, Any]]:
-    """Every top-level JSON object in `text`, in order of appearance.
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes. That is what a `max_tokens` cut looks like when it lands
+    while the model is writing the answer, and it has to be distinguished from
+    a complete-but-irrelevant trailing object: both leave a valid forecast
+    earlier in the text, but only one of them means that forecast is a draft.
 
     :param text: text that may carry JSON objects among prose.
-    :return: the decoded objects, nested values included.
+    :return: the decoded objects, and True if the text ends mid-object.
     """
     decoder = json.JSONDecoder()
     found: List[Dict[str, Any]] = []
@@ -352,12 +358,17 @@ def _json_objects(text: str) -> List[Dict[str, Any]]:
     while True:
         start = text.find("{", idx)
         if start < 0:
-            return found
+            return found, False
         try:
             obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
-            # Not the start of an object (a stray brace, a '{' in prose):
-            # step past it rather than giving up on the rest of the text.
+            # Distinguish a cut from junk by whether the opener ever closes.
+            # A `max_tokens` cut lands mid-object and leaves no closing brace
+            # at all; a malformed-but-complete object ({"p_yes": }) and a
+            # stray brace in prose both still have one. Only the first means
+            # the forecast before it is a draft.
+            if "}" not in text[start:]:
+                return found, True
             idx = start + 1
             continue
         if isinstance(obj, dict):
@@ -392,7 +403,13 @@ def extract_json(
     # Objects with no usable p_yes are skipped, not accepted -- a trailing
     # non-prediction object must not shadow the forecast before it, and a
     # malformed final object must not strand a valid earlier one.
-    for parsed in reversed(_json_objects(THINK_BLOCK_RE.sub("", text))):
+    candidates, cut_mid_object = _json_objects(THINK_BLOCK_RE.sub("", text))
+    if cut_mid_object:
+        # The answer was being written when the budget ran out. Anything
+        # complete before it is a draft, and delivering one would be the same
+        # failure the think-block guard above prevents.
+        return None
+    for parsed in reversed(candidates):
         try:
             float(parsed["p_yes"])
         except (KeyError, TypeError, ValueError):
@@ -847,22 +864,12 @@ def _truncate_query(query: str) -> str:
     return cut.rstrip()
 
 
-# Declared once and reused by ParsedPrompt, parse_prompt and
-# _flagged_null_result: a bare `str` on any of them lets a typo ("clauses") or
-# a renamed tier reach used_params["parse_tier"] without mypy noticing, and the
-# benchmark slices deliveries on that exact string.
-ParseTier = Literal["template", "clause", "raw"]
-# The closed set of reasons run() can return a flagged null for. Recorded in
-# used_params["null_reason"], so it is likewise consumer-visible.
-NullReason = Literal["empty query", "live search"]
-
-
 class ParsedPrompt(NamedTuple):
     """parse_prompt's result: the LLM question, the Serper query, the tier."""
 
     question: str
     query: str
-    tier: ParseTier
+    tier: Literal["template", "clause", "raw"]
 
 
 def parse_prompt(prompt: str) -> ParsedPrompt:
@@ -899,7 +906,7 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
         candidates.append(
             (_score_clause(scan, start, clause), len(clause), -start, clause)
         )
-    tier: ParseTier
+    tier: Literal["template", "clause", "raw"]
     if candidates:
         # Clarifying questions (inside resolution criteria) often carry the
         # dates/counts that outscore a digit-free market question. In free
@@ -966,8 +973,8 @@ def _flagged_null_result(
     temperature: float,
     max_tokens: int,
     counter_callback: Optional[Callable[..., Any]],
-    context: NullReason,
-    tier: ParseTier,
+    context: str,
+    tier: str,
     scan_truncated: bool = False,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.

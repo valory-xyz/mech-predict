@@ -1,8 +1,8 @@
 {
   "factual_research-v2": "bafybeidgo3jesmvuwa64ooij7mywk7hf7ls5len2sf7cbcjwt3t6r5u6qm",
-  "predict-base": "bafybeig2un6s7vpicbpherx3skzsjtqq2cx3zyljzobgk53yy7cakkg3ce",
-  "predict-fine-tuned": "bafybeig2un6s7vpicbpherx3skzsjtqq2cx3zyljzobgk53yy7cakkg3ce",
-  "predict-fine-tuned-calibrated": "bafybeig2un6s7vpicbpherx3skzsjtqq2cx3zyljzobgk53yy7cakkg3ce",
+  "predict-base": "bafybeib2u62qqo4bk5y4p5fuoeeupwrjdnbcemzmlp4i3jsf35stx5azgy",
+  "predict-fine-tuned": "bafybeib2u62qqo4bk5y4p5fuoeeupwrjdnbcemzmlp4i3jsf35stx5azgy",
+  "predict-fine-tuned-calibrated": "bafybeib2u62qqo4bk5y4p5fuoeeupwrjdnbcemzmlp4i3jsf35stx5azgy",
   "superforcaster-polymarket-v4": "bafybeiefu5cetnebkr2yza6yn6la2ldkwvn2pjlgcmew2e6fblnyjh5roq",
   "superforcaster-market-aware": "bafybeiecvkdx2zjezc5aslnpg4nbw25rsbrc7xtpywbkjv3d47tdvskhgq"
 }

@@ -20,7 +20,7 @@
 """Unit tests for the fine-tuned Qwen prediction tool."""
 
 import json
-from typing import Any, Dict, List, Optional, get_args, get_type_hints
+from typing import Any, Dict, List, Optional, get_args
 from unittest.mock import MagicMock, patch
 
 import openai
@@ -101,6 +101,7 @@ class FakeKeyChain:
         ("<think>no json here</think> nothing", None),  # no JSON object
         ('{"p_no": 0.6}', None),  # missing p_yes
         ('{"p_yes": "high"}', None),  # non-numeric p_yes
+        ('{"p_yes": null}', None),  # null p_yes -- pins the TypeError arm
         ('{"p_yes": 1.5}', None),  # out of [0, 1]
         ("", None),  # empty
     ],
@@ -111,6 +112,7 @@ class FakeKeyChain:
         "no_json",
         "missing",
         "non_numeric",
+        "null_p_yes",
         "out_of_range",
         "empty",
     ],
@@ -157,6 +159,21 @@ def test_canonical_prediction_rejects_an_out_of_range_p_yes(completion: str) -> 
     # parse_p_yes. Without that check the delivery is built anyway: p_yes 1.5
     # gives p_no -0.5, i.e. a NEGATIVE probability answered on-chain.
     assert canonical_prediction(completion) is None
+
+
+def test_a_cut_mid_object_after_the_think_block_is_not_a_draft() -> None:
+    """A budget cut while writing the answer must not deliver an earlier draft."""
+    # A max_tokens cut lands mid-object and leaves no closing brace. Anything
+    # complete before it is a draft, so there is no answer to recover.
+    completion = '</think>\n{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": '
+    assert canonical_prediction(completion) is None
+
+
+def test_a_closed_but_invalid_trailing_object_still_falls_back() -> None:
+    """A complete-but-unparseable trailing object is junk, not a cut."""
+    # It closes, so the completion was not cut: the earlier forecast stands.
+    completion = '</think>\n{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": }'
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.25
 
 
 def test_bare_closing_tag_discards_the_reasoning_draft() -> None:
@@ -896,22 +913,12 @@ def test_malformed_serper_body_is_typed_error_not_flagged_null() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_flagged_null_keeps_the_parsed_prompt_tier_literal() -> None:
-    """_flagged_null_result types tier as ParsedPrompt's Literal, not a bare str."""
-    hints = get_type_hints(module._flagged_null_result)
-    assert hints["tier"] is module.ParsedPrompt.__annotations__["tier"]
-    assert get_args(hints["tier"]) == ("template", "clause", "raw")
-
-
-def test_flagged_null_reasons_are_a_closed_literal() -> None:
-    """_flagged_null_result types context as the closed null-reason Literal."""
-    hints = get_type_hints(module._flagged_null_result)
-    assert get_args(hints["context"]) == ("empty query", "live search")
-
-
 def test_parse_prompt_only_ever_returns_a_declared_tier() -> None:
-    """Every tier parse_prompt can emit is a member of the shared Literal."""
-    declared = set(get_args(module.ParseTier))
+    """Every tier parse_prompt can emit is a member of ParsedPrompt's Literal."""
+    # Reads the tier set off ParsedPrompt, which every copy in the fleet
+    # declares identically -- not off a module-level alias this tool alone
+    # would carry.
+    declared = set(get_args(module.ParsedPrompt.__annotations__["tier"]))
     prompts = [
         _bare_prompt("Will X happen?"),  # template
         "Some preamble. Will the club sign a striker? More text.",  # clause

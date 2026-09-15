@@ -29,11 +29,11 @@ from unittest.mock import MagicMock
 import pytest
 from benchmark import notify_slack, roi_slack
 from benchmark.roi_slack import (
-    _FLAGS_CAP,
-    _HEADERS,
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
     STALE_AFTER_DAYS,
+    _FLAGS_CAP,
+    _HEADERS,
     _load_results,
     _render_table,
     build_roi_message,

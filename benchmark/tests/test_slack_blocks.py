@@ -25,10 +25,10 @@ and so an unattended run fails here rather than on an opaque HTTP 400.
 
 import pytest
 from benchmark.slack_blocks import (
+    Col,
     EMPTY_CELL,
     MAX_COLUMNS,
     MAX_TABLE_CHARS,
-    Col,
     cell,
     message,
     section,

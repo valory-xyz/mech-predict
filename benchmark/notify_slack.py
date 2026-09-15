@@ -34,8 +34,8 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
-from benchmark.digest_tables import build_concise_digest_message
-from benchmark.roi_slack import build_roi_section
+from benchmark.digest_tables import build_concise_digest_message, build_digest_messages
+from benchmark.roi_slack import build_roi_message, build_roi_section
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
 
@@ -428,15 +428,15 @@ def _summary_only(llm_digest: str) -> str:
     short narrative interpretation of the platform Brier trend.
 
     :param llm_digest: complete legacy V1 digest.
-    :return: Summary section, or the original text when no section is found.
+    :return: bounded Summary section, or a notice when it cannot be extracted.
     """
     match = re.search(
         r"(?ms)^\*Summary:\*\s*(.*?)(?=^\*[^*\n]+:\*|\Z)",
         llm_digest.strip(),
     )
-    if match is None:
-        return llm_digest.strip()
-    return f"*Summary:* {match.group(1).strip()}"
+    if match is None or not match.group(1).strip():
+        return "*Summary:* Unavailable; consult the full report for platform trends."
+    return f"*Summary:* {match.group(1).strip()}"[:3000]
 
 
 def _deployed_tools_for(platform_key: str, override: str | None) -> list[str] | None:
@@ -503,6 +503,37 @@ def _infer_platform_label(report_path: Path) -> str | None:
     return _PLATFORM_LABEL_BY_STEM.get(report_path.stem)
 
 
+def _detailed_digest_messages(
+    results_dir: Path,
+    platform: str,
+    deployed_tools: list[str] | None,
+    roi_results: Path,
+) -> list[dict[str, Any]]:
+    """Build the detailed opt-out, keeping ROI failures independent.
+
+    :param results_dir: directory containing scorer artifacts.
+    :param platform: platform key.
+    :param deployed_tools: live roster, or None when lookup failed.
+    :param roi_results: path to the optional ROI artifact.
+    :return: detailed table messages and an optional ROI companion.
+    """
+    payloads = build_digest_messages(
+        results_dir,
+        platform,
+        allowed_tools=TOOL_REGISTRY,
+        deployed_tools=deployed_tools,
+    )
+    if os.environ.get("ROI_SECTION", "on").strip().lower() == "off":
+        return payloads
+    try:
+        roi = build_roi_message(roi_results, platform)
+        if roi is not None:
+            payloads.append(roi)
+    except Exception:  # pylint: disable=broad-except
+        log.warning("ROI table build failed; posting digest without it.", exc_info=True)
+    return payloads
+
+
 def main() -> None:
     """Read report, summarize, post. Skip gracefully if keys missing."""
     parser = argparse.ArgumentParser(description="Post benchmark summary to Slack")
@@ -534,6 +565,11 @@ def main() -> None:
             "Path to roi_results.json (from benchmark.roi_sim) for the ROI "
             "companion message posted after the digest."
         ),
+    )
+    parser.add_argument(
+        "--detailed-tables",
+        action="store_true",
+        help="Post the detailed computed tables and optional ROI companion.",
     )
     args = parser.parse_args()
 
@@ -571,38 +607,41 @@ def main() -> None:
 
     report_url = _build_report_url()
 
-    # Production mode: one concise, computed decision message.  The stored
-    # Markdown report is unchanged and remains the detailed audit trail.
-    # Full V2 tables and the ROI companion stay available to builders/tests but
-    # are deliberately absent from Slack: neither is needed to make today's
-    # promotion/demotion decision.
-    concise_mode = _computed_tables_enabled()
-    if concise_mode:
-        concise = None
+    # Computed mode defaults to the concise decision view. The explicit
+    # detailed opt-out keeps the original tables available to operators.
+    computed_mode = _computed_tables_enabled() or args.detailed_tables
+    if computed_mode:
+        payloads = []
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
-                concise = build_concise_digest_message(
-                    args.report.parent,
-                    platform_key,
-                    _summary_only(llm_digest),
-                    allowed_tools=TOOL_REGISTRY,
-                    deployed_tools=_deployed_tools_for(
-                        platform_key, args.deployed_tools
-                    ),
-                    report_url=report_url,
-                )
+                deployed = _deployed_tools_for(platform_key, args.deployed_tools)
+                if args.detailed_tables:
+                    payloads = _detailed_digest_messages(
+                        args.report.parent, platform_key, deployed, args.roi_results
+                    )
+                else:
+                    concise = build_concise_digest_message(
+                        args.report.parent,
+                        platform_key,
+                        _summary_only(llm_digest),
+                        allowed_tools=TOOL_REGISTRY,
+                        deployed_tools=deployed,
+                        report_url=report_url,
+                    )
+                    if concise is not None:
+                        payloads.append(concise)
         except Exception:  # pylint: disable=broad-except
             log.warning(
-                "Concise decision summary build failed; using the V1 digest.",
+                "Computed decision summary build failed; using the V1 digest.",
                 exc_info=True,
             )
-        if concise is not None:
-            if args.dry_run:
-                print(json.dumps(concise, ensure_ascii=False, indent=2))
-                return
-            log.info("Posting concise decision summary to Slack...")
-            post_to_slack(webhook_url, concise)
+        if payloads:
+            for payload in payloads:
+                if args.dry_run:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    post_to_slack(webhook_url, payload)
             log.info("Done.")
             return
 
@@ -620,7 +659,7 @@ def main() -> None:
     # it entirely.
     roi_section = None
     if (
-        not concise_mode
+        not computed_mode
         and os.environ.get("ROI_SECTION", "on").strip().lower() != "off"
     ):
         try:

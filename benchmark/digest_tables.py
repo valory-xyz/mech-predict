@@ -953,7 +953,7 @@ def _category_signal_rows(
         parts = key.split(" | ", 1)
         if len(parts) != 2 or parts[0] not in permitted:
             continue
-        n = _num(stats.get("n"))
+        n = _num(stats.get("valid_n"))
         brier = _num(stats.get("brier"))
         accuracy = _num(stats.get("directional_accuracy"))
         yes_rate = _num(stats.get("outcome_yes_rate"))
@@ -984,15 +984,18 @@ def _category_signal_rows(
         row = max(
             negative,
             key=lambda item: (
-                int(item[2]["n"]) * abs(item[3]),
-                int(item[2]["n"]),
+                int(item[2]["valid_n"]) * abs(item[3]),
+                int(item[2]["valid_n"]),
                 item[0],
                 item[1],
             ),
         )
         selected.append((*row, "Main risk"))
     else:
-        row = min(candidates, key=lambda item: (item[3], -int(item[2]["n"])))
+        row = min(
+            candidates,
+            key=lambda item: (item[3], -int(item[2]["valid_n"]), item[0], item[1]),
+        )
         selected.append((*row, "Weakest segment"))
 
     used = {(selected[0][0], selected[0][1])}
@@ -1003,8 +1006,8 @@ def _category_signal_rows(
         row = max(
             pool,
             key=lambda item: (
-                item[3] * math.sqrt(int(item[2]["n"])),
-                int(item[2]["n"]),
+                item[3] * math.sqrt(int(item[2]["valid_n"])),
+                int(item[2]["valid_n"]),
                 item[0],
                 item[1],
             ),
@@ -1017,7 +1020,7 @@ def _category_signal_rows(
     if remaining:
         row = max(
             preferred(remaining),
-            key=lambda item: (int(item[2]["n"]), abs(item[3]), item[0], item[1]),
+            key=lambda item: (int(item[2]["valid_n"]), abs(item[3]), item[0], item[1]),
         )
         label = "Additional risk" if row[3] < 0 else "Largest remaining slice"
         selected.append((*row, label))
@@ -1037,7 +1040,7 @@ def _category_signal_text(
 
     bullets = ["*Tool × Category signals:*"]
     for tool, category, stats, lift, label in rows:
-        n = int(stats["n"])
+        n = int(stats["valid_n"])
         limited = " — limited sample" if n < 100 else ""
         accuracy = float(stats["directional_accuracy"])
         yes_rate = float(stats["outcome_yes_rate"])
@@ -1108,7 +1111,10 @@ def _decision_text(
 
     for tool in promote:
         stats = windows["tournament"].get(tool) or {}
-        n = int(_num(stats.get("edge_n")) or _num(stats.get("valid_n")) or 0)
+        count = _num(stats.get("edge_n"))
+        if count is None:
+            count = _num(stats.get("valid_n"))
+        n = int(count or 0)
         lines.append(
             f"• `{tool}`\n"
             f"  Promotion gate passed: floor `{_floor(stats)}`; "
@@ -1185,6 +1191,11 @@ def _decision_warnings(
         )
 
     for tool, verdict in prod.items():
+        if verdict == "no data" or verdict.startswith("n="):
+            warnings.append(
+                f":warning: `{tool}` has insufficient data to judge ({verdict}). "
+                "Investigate prediction failures and unresolved markets before acting."
+            )
         stats = windows["w1"].get(tool) or {}
         valid_n = _num(stats.get("valid_n"))
         edge_n = _num(stats.get("edge_n"))
@@ -1268,6 +1279,8 @@ def build_concise_digest_message(
         permitted = set(allowed_tools)
         prod_tools &= permitted
         tourn_tools &= permitted
+        prod_tools |= _ran_but_unscored(windows["at"], permitted)
+        prod_tools |= _ran_but_unscored(windows["w1"], permitted)
     if deployed_tools is not None:
         live = {normalize_tool_name(tool) for tool in deployed_tools}
         prod_tools = {tool for tool in prod_tools if normalize_tool_name(tool) in live}

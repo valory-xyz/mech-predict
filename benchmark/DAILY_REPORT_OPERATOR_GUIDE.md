@@ -22,13 +22,14 @@ Slack is the action inbox. Each platform posts one concise message:
 
 | Block | Contains | You look at it when |
 |---|---|---|
-| **Decision** | 🟢 `PROMOTE n` · 🟠 `DEMOTE n` · 🔴 `NO ACTION` · ⚪ `NO CHANGE`, affected tools, decisive evidence, and the next human step | always |
+| **Decision** | 🟢 `PROMOTE n` / `PROMOTE n FIRST` · 🟠 `PROMOTE n · DEMOTE m` / `DEMOTE n` · 🔴 `NO ACTION` · ⚪ `NO CHANGE`, affected tools, decisive evidence, and the next human step | always |
 | **Summary** | Current 7d platform Brier and its movement vs the main and previous windows | for platform health |
 | **Tool × Category signals** | at most three current-window rows: main risk, strongest positive (or best available), and largest remaining slice | to see whether the result is concentrated or broad |
 | **Warnings** | only caveats that qualify the decision or make the 7d trend provisional | before acting |
 | **Full report** | link to the unchanged Markdown artifact | when you need every table, legend, candidate, or audit detail |
 
-Category rows require n ≥ 30. Rows with 30–99 samples are labelled
+Category rows require at least 30 scored predictions (`valid_n`); all sample
+counts and selection weights use this scored pool. Rows with 30–99 samples are labelled
 `limited sample`. Selection is deterministic: negative impact is
 `n × abs(DA lift)`,
 positive strength is `DA lift × sqrt(n)`, the third row is the largest-volume
@@ -36,11 +37,19 @@ remaining slice, and rows for actioned tools are preferred. If one row satisfies
 multiple roles it appears once; Slack shows fewer than three rather than padding
 with noise.
 
-The full production, tournament, alert, and simulated-ROI tables remain in the
-Markdown artifact. ROI is context only and never a promotion/demotion input, so
-it is not posted as a Slack companion message.
+The Markdown artifact retains its detailed production, tournament, and
+simulated-ROI analysis. ROI is context only and never a promotion/demotion input,
+so the concise view omits its Slack companion. The detailed Slack mode also
+retains the original alert table.
 
-🔴 `NO ACTION` = every deployed tool fails but demoting all would empty the platform → escalate, never act tool-by-tool.
+🔴 `NO ACTION` = no deployed tool clears the gate and no candidate qualifies → escalate, never act tool-by-tool.
+`PROMOTE n FIRST` means a qualified replacement must be deployed before reviewing
+any demotion. A combined `PROMOTE n · DEMOTE m` lists both proposed actions.
+
+For the detailed Slack table sequence and ROI companion, run the notifier with
+`--detailed-tables` (`ROI_SECTION=off` omits ROI). `BENCHMARK_COMPUTED_TABLES=true`
+selects the concise computed view by default; unset it for the legacy V1 narrative.
+The Markdown report is generated independently and remains unchanged.
 
 A failed or cancelled job posts a separate message, `benchmark-flywheel did not complete`, naming the broken jobs with a link to the run. Treat anything else posted that morning as partial - open the run before acting.
 

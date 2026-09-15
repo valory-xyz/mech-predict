@@ -600,9 +600,29 @@ class TestSummaryOnly:
             "Performance declined slightly."
         )
 
-    def test_unstructured_fallback_is_preserved(self) -> None:
-        """Unexpected model output remains visible rather than disappearing."""
-        assert _summary_only("plain summary") == "plain summary"
+    @pytest.mark.parametrize(
+        "digest",
+        [
+            "",
+            "   ",
+            "*Summary:*",
+            "**Summary:** trend\n\n*Recommended actions:* DEMOTE all",
+        ],
+    )
+    def test_malformed_summary_cannot_leak_actions(self, digest: str) -> None:
+        """Missing or malformed summaries yield a nonempty neutral placeholder."""
+        summary = _summary_only(digest)
+        assert "Unavailable" in summary
+        assert "DEMOTE" not in summary
+
+    def test_long_summary_fits_slack(self) -> None:
+        """Even a recognized summary cannot overflow one Slack section."""
+        summary = _summary_only("*Summary:* " + "trend " * 1000)
+        assert len(summary) == 3000
+
+    def test_unstructured_fallback_is_safe(self) -> None:
+        """Unexpected model output cannot inject uncomputed decisions."""
+        assert "Unavailable" in _summary_only("plain summary")
 
 
 class TestDeployedToolsForTriState:

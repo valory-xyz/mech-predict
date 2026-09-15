@@ -29,11 +29,11 @@ from unittest.mock import MagicMock
 import pytest
 from benchmark import notify_slack, roi_slack
 from benchmark.roi_slack import (
+    _FLAGS_CAP,
+    _HEADERS,
     MAX_LINE_WIDTH,
     MAX_TABLE_ROWS,
     STALE_AFTER_DAYS,
-    _FLAGS_CAP,
-    _HEADERS,
     _load_results,
     _render_table,
     build_roi_message,
@@ -1000,6 +1000,37 @@ class TestNotifySlackHook:
         monkeypatch.setattr(notify_slack, "build_roi_section", _must_not_run)
         posted = self._run_main(monkeypatch, tmp_path)
         assert posted == [payload]
+
+    @pytest.mark.parametrize("roi_env", [None, "off"])
+    def test_detailed_opt_out_posts_tables(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, roi_env: str | None
+    ) -> None:
+        """The detailed opt-out reaches both builders and honors ROI_SECTION."""
+        tables = [{"text": "table", "blocks": []}]
+        roi = {"text": "roi", "blocks": []}
+        monkeypatch.setattr(notify_slack, "_deployed_tools_for", lambda *a: ["live"])
+        monkeypatch.setattr(
+            notify_slack, "build_digest_messages", lambda *a, **k: list(tables)
+        )
+        monkeypatch.setattr(notify_slack, "build_roi_message", lambda *a: roi)
+        posted = self._run_main(monkeypatch, tmp_path, ["--detailed-tables"], roi_env)
+        assert posted == tables + ([] if roi_env == "off" else [roi])
+
+    def test_detailed_roi_failure_preserves_tables(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A broken optional ROI artifact cannot suppress the table digest."""
+        tables = [{"text": "table", "blocks": []}]
+        monkeypatch.setattr(notify_slack, "_deployed_tools_for", lambda *a: ["live"])
+        monkeypatch.setattr(
+            notify_slack, "build_digest_messages", lambda *a, **k: tables
+        )
+
+        def broken_roi(*args: Any) -> None:
+            raise ValueError("broken ROI")
+
+        monkeypatch.setattr(notify_slack, "build_roi_message", broken_roi)
+        assert self._run_main(monkeypatch, tmp_path, ["--detailed-tables"]) == tables
 
     def test_section_posted_as_separate_message(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

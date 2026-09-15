@@ -34,7 +34,9 @@ from benchmark.digest_tables import (
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _category_signal_rows,
+    _category_signal_text,
     _decision_state,
+    _decision_text,
     _edge_lower_bound,
     _headline,
     _no_replacement_note,
@@ -188,6 +190,7 @@ class TestConciseDecisionSummary:
         majority = max(yes_rate, 1.0 - yes_rate)
         return {
             "n": n,
+            "valid_n": n,
             "brier": brier,
             "directional_accuracy": majority + lift,
             "outcome_yes_rate": yes_rate,
@@ -208,6 +211,65 @@ class TestConciseDecisionSummary:
             ("factual_research", "business", "Strongest segment"),
             ("factual_research", "other", "Largest remaining slice"),
         ]
+
+    def test_category_counts_use_scored_evidence(self) -> None:
+        """Failed and unresolved rows cannot inflate rank, labels, or eligibility."""
+        cells = {
+            "live | failures": dict(self._category(1000, -0.2), valid_n=35),
+            "live | evidence": self._category(100, -0.1),
+            "live | thin": dict(self._category(1000, -0.5), valid_n=29),
+            "live | empty": dict(self._category(1000, -0.5), valid_n=0),
+        }
+        rows = _category_signal_rows(cells, {"live"}, set())
+        assert [row[1] for row in rows] == ["evidence", "failures"]
+        text = _category_signal_text(cells, {"live"}, set())
+        assert "limited sample" in text and "n=35" in text
+        assert "n=1,000" not in text
+
+    def test_tied_categories_ignore_input_order(self) -> None:
+        """Equal weakest segments retain a stable lexical tiebreaker."""
+        cells = {f"live | {name}": self._category(100, 0.1) for name in ("b", "a")}
+        forward = _category_signal_rows(cells, {"live"}, set())
+        reverse = _category_signal_rows(
+            dict(reversed(list(cells.items()))), {"live"}, set()
+        )
+        assert forward == reverse
+
+    def test_unscored_deployed_tool_warns(self, tmp_path: Path) -> None:
+        """A prediction tool that ran without scoring stays in the live roster."""
+        unscored = _stats(brier=None, valid_n=0, edge_n=0)
+        results = _results_dir(
+            tmp_path,
+            at={"live": unscored, "retired": unscored},
+            w1={"live": unscored, "retired": unscored},
+        )
+        payload = build_concise_digest_message(
+            results,
+            "polymarket",
+            "summary",
+            allowed_tools={"live", "retired"},
+            deployed_tools={"live"},
+        )
+        assert payload is not None
+        text = _flatten(payload)
+        assert "`live` has insufficient data to judge (no data)" in text
+        assert "retired" not in text
+
+    def test_thin_deployed_tool_warns(self, tmp_path: Path) -> None:
+        """A numeric score below the decision floor is not a clean bill of health."""
+        results = _results_dir(tmp_path, at={"live": _stats(edge_n=12)})
+        payload = build_concise_digest_message(results, "polymarket", "summary")
+        assert payload is not None
+        assert "insufficient data to judge (n=12 < 30)" in _flatten(payload)
+
+    def test_promotion_evidence_preserves_zero_edge_count(self) -> None:
+        """The formatter does not replace an explicit zero with another pool."""
+        text, _ = _decision_text(
+            {},
+            {"candidate": "PROMOTE"},
+            {"tournament": {"candidate": _stats(edge_n=0, valid_n=100)}},
+        )
+        assert "n=0." in text
 
     def test_replacement_is_promoted_before_every_tool_demotes(self) -> None:
         """A replacement must land before an all-demote roster can be actioned."""

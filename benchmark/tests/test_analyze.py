@@ -1596,6 +1596,22 @@ class TestScopeTournamentToActive:
             "tool-a | cid-prod | production_replay",
         }
 
+    def test_market_context_arm_is_still_scoped(self) -> None:
+        """A priced tournament bucket is scoped like any other tournament row.
+
+        The arm suffix must not let a dropped CID's rows accumulate forever.
+        """
+        tvm_scores = {
+            "by_tool_version_mode": {
+                "tool-a | cid-active | tournament+market_context": {"n": 10},
+                "tool-a | cid-dropped | tournament+market_context": {"n": 5},
+            },
+        }
+        scoped = _scope_tournament_to_active(tvm_scores, {"cid-active"})
+        assert set(scoped["by_tool_version_mode"]) == {
+            "tool-a | cid-active | tournament+market_context"
+        }
+
     def test_none_active_cids_returns_input_unchanged(self) -> None:
         """active_cids=None disables scoping; input is returned as-is."""
         tvm_scores = {
@@ -1622,6 +1638,22 @@ class TestTournamentCallouts:
         result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
         assert "## Tournament Callouts" in result
         assert "| Tool | Version | n | Brier | BSS vs mkt | vs Production |" in result
+        assert "tool-a" in result
+        assert "v2" in result
+
+    def test_market_context_candidate_is_surfaced(self) -> None:
+        """The market-aware rows this PR exists to measure reach the digest.
+
+        Their bucket carries the arm suffix, so an exact ``== "tournament"``
+        test would drop every one of them silently.
+        """
+        prod = _scores_with_tool("tool-a", 0.20, 1000)
+        tourn = _tournament_scores_with_version("tool-a", "v2", 0.10, 50)
+        cell = tourn["by_tool_version_mode"].pop("tool-a | v2 | tournament")
+        tourn["by_tool_version_mode"]["tool-a | v2 | tournament+market_context"] = cell
+
+        result = section_tournament_callouts(prod, tourn, active_cids={"v2"})
+
         assert "tool-a" in result
         assert "v2" in result
 

@@ -28,7 +28,6 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
-
 from benchmark import tool_usage
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (

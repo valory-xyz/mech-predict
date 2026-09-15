@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from benchmark.digest_tables import (
     RELIABILITY_GATE,
     TITLE_RULE_CHAR,

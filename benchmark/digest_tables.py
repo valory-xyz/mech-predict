@@ -940,6 +940,11 @@ def _category_signal_rows(
     Order: highest-impact negative DA lift, strongest sample-adjusted
     positive signal (or best available), then the largest remaining slice.
     Actioned tools are preferred when a suitable row exists.
+
+    :param by_tool_category: current-window stats keyed by ``tool | category``.
+    :param tools: production tools eligible to appear in the summary.
+    :param priority_tools: tools involved in today's deployment decision.
+    :return: selected rows with computed lift and display role, at most three.
     """
     permitted = set(tools)
     priority = set(priority_tools)
@@ -1238,6 +1243,14 @@ def build_concise_digest_message(
     Full tables, legends, ROI, and unchanged rows remain in the Markdown
     artifact. Slack carries only the decision, platform trend summary, three
     deterministic category signals, relevant warnings, and the artifact link.
+
+    :param results_dir: directory containing the scorer output files.
+    :param platform: platform key, such as ``omen`` or ``polymarket``.
+    :param summary: short platform-level Brier trend in Slack mrkdwn.
+    :param allowed_tools: optional prediction-tool allowlist.
+    :param deployed_tools: optional live production roster.
+    :param report_url: optional link to the unchanged Markdown artifact.
+    :return: one Slack webhook payload, or None when there are no scored tools.
     """
     windows = {
         key: _load_by_tool(results_dir / name.format(platform=platform))

@@ -553,6 +553,17 @@ def parser_prediction_response(response: str) -> str:
     return json.dumps(results)
 
 
+def _dedup_queries(queries: List[str]) -> List[str]:
+    """Drop duplicate search queries, keeping the first occurrence of each."""
+    # Keyed on the normalized form so trivial spacing or casing differences do
+    # not sneak a second identical search call through; the value keeps the
+    # original text, and dict insertion order keeps the sequence stable.
+    unique: Dict[str, str] = {}
+    for query in queries:
+        unique.setdefault(query.strip().casefold(), query)
+    return list(unique.values())
+
+
 def multi_queries(
     client: "LLMClient",
     prompt: str,
@@ -598,6 +609,9 @@ def multi_queries(
     # straight to the search engine, which degrades sharply on prompt-shaped
     # queries (issue #455).
     queries.append(search_query)
+    # A brainstormed query can coincide with the compact one; without this the
+    # duplicate would cost a second identical search call.
+    queries = _dedup_queries(queries)
 
     return queries, counter_callback
 
@@ -663,6 +677,11 @@ def get_urls_from_queries_serper(
             data = response.json()
             organic, _ = _shape_serper_sources(data, "live search")
             urls.extend(item["link"] for item in organic[:num])
+        except ValueError:
+            # A missing/malformed organic key is a broken or reshaped
+            # integration (a quota-error body hits every query alike), not a
+            # zero-hit -- surface it as an error null instead of swallowing.
+            raise
         except Exception as e:
             print(f"Error fetching URLs for query '{query}': {e}")
     return list(set(urls))

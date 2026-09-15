@@ -45,6 +45,7 @@ from packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_
 # clean and the suppression cannot drift under formatter line-wrapping.
 _QUERY_CAP = module._MAX_SEARCH_QUERY_LEN  # pylint: disable=protected-access
 _SCAN_CAP = module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+_SHAPE_SERPER = module._shape_serper_sources  # pylint: disable=protected-access
 
 
 class TestLLMClientManager:
@@ -110,6 +111,23 @@ class TestFunctionsAcceptClient:
         """fetch_additional_information requires client as first param."""
         params = list(inspect.signature(fetch_additional_information).parameters)
         assert params[0] == "client"
+
+    def test_multi_queries_search_query_is_required(self) -> None:
+        """multi_queries takes search_query as a required param right after prompt."""
+        params = inspect.signature(multi_queries).parameters
+        assert list(params)[:3] == ["client", "prompt", "search_query"]
+        assert params["search_query"].default is inspect.Parameter.empty
+
+    def test_fetch_additional_information_search_query_is_required(self) -> None:
+        """fetch_additional_information takes search_query as a required param."""
+        params = inspect.signature(fetch_additional_information).parameters
+        assert list(params)[:4] == [
+            "client",
+            "client_embedding",
+            "prompt",
+            "search_query",
+        ]
+        assert params["search_query"].default is inspect.Parameter.empty
 
 
 RAG_MODULE = (
@@ -266,6 +284,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -307,6 +326,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -352,6 +372,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -373,6 +394,7 @@ class TestFetchReplayPath:
                 client=MagicMock(),
                 client_embedding=MagicMock(),
                 prompt="test",
+                search_query="test",
                 model="gpt-4.1-2025-04-14",
                 google_api_key=None,
                 google_engine_id=None,
@@ -676,6 +698,20 @@ LONG_FREE_TEXT_PROMPT = (
 )
 
 
+# A real Serper peopleAlsoAsk entry carries a link, not just question/snippet.
+# The link is what makes the "misc is not a retrieval source" assertions
+# discriminating: a harvester that reached into misc would return this URL,
+# so a fixture without it cannot tell the two behaviours apart.
+PAA_WITH_LINK = [
+    {
+        "question": "Q?",
+        "snippet": "A.",
+        "title": "PAA answer",
+        "link": "http://paa.example.com/answer",
+    },
+]
+
+
 def _mock_client_manager(mock_mgr: MagicMock) -> tuple:
     """Configure a mocked LLMClientManager and return its (llm, embed) pair."""
     mock_llm = MagicMock()
@@ -747,6 +783,56 @@ class TestDegenerateShortCircuit:
         assert result[4]["null_reason"] == "empty query"
         assert result[4]["scan_truncated"] is False
 
+    @patch(f"{RAG_MODULE}.get_urls_from_queries_serper")
+    @patch(f"{RAG_MODULE}.get_urls_from_queries")
+    @patch(f"{RAG_MODULE}.find_similar_chunks")
+    @patch(f"{RAG_MODULE}.get_embeddings")
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_replay_with_degenerate_query_uses_the_cached_capture(
+        self,
+        mock_mgr: MagicMock,
+        mock_queries: MagicMock,
+        mock_embeddings: MagicMock,
+        mock_similar: MagicMock,
+        mock_google: MagicMock,
+        mock_serper: MagicMock,
+    ) -> None:
+        """A replay carries its own documents, so the short-circuit must not fire."""
+        # The derived query is never used on the replay path: gating the
+        # short-circuit on source_content is what keeps a captured-document
+        # replay from being answered with the "empty query" null.
+        mock_llm, _ = _mock_client_manager(mock_mgr)
+        cached_doc = ExtendedDocument(
+            text="cached evidence here", url="http://cached.example.com"
+        )
+        mock_embeddings.return_value = [cached_doc]
+        mock_similar.return_value = [cached_doc]
+        mock_llm.completions.return_value = MagicMock(
+            content=VALID_TAGGED_COMPLETION,
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        source_content = {
+            "mode": "cleaned",
+            "pages": {"http://cached.example.com": "cached evidence here"},
+            "pdfs": {},
+        }
+
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt="???",
+            api_keys=_make_mock_api_keys("true"),
+            source_content=source_content,
+        )
+
+        mock_google.assert_not_called()
+        mock_serper.assert_not_called()
+        assert "empty_retrieval" not in result[4]
+        assert result[4]["source_content"] is source_content
+        assert "cached evidence here" in result[1]
+        assert json.loads(result[0])["p_yes"] == 0.5
+
 
 class TestEmptyRetrievalFlaggedNull:
     """Empty retrieval converges on the flagged null, not an error string."""
@@ -810,6 +896,122 @@ class TestEmptyRetrievalFlaggedNull:
         with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
             assert not module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
 
+    def test_misc_only_body_is_well_formed_but_yields_no_urls(self) -> None:
+        """Organic empty with peopleAlsoAsk populated: no raise, and no URL."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        # The PAA entry carries a link: if misc were ever harvested, that link
+        # would come back here and this assertion would fail.
+        serper_resp.json.return_value = {
+            "organic": [],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            assert not module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+
+    def test_misc_links_are_not_harvested_alongside_organic(self) -> None:
+        """With both present, only the organic link becomes a source URL."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {
+            "organic": [{"title": "T", "link": "http://organic.example.com/a"}],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            urls = module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+        assert urls == ["http://organic.example.com/a"]
+
+    def test_shaper_returns_misc_that_the_harvester_drops(self) -> None:
+        """The shaper hands misc back; dropping it is the call site's choice."""
+        body = {
+            "organic": [{"title": "T", "link": "http://organic.example.com/a"}],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        organic, misc = _SHAPE_SERPER(body, "live search")
+        assert organic == body["organic"]
+        assert misc == PAA_WITH_LINK
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_misc_only_body_converges_on_the_flagged_null(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """This tool retrieves from organic links only, so PAA alone is a zero-hit."""
+        _mock_client_manager(mock_mgr)
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {
+            "organic": [],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        empty_capture = {"mode": "cleaned", "pages": {}, "pdfs": {}}
+        with (
+            patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp),
+            patch(
+                f"{RAG_MODULE}.extract_texts", return_value=([], empty_capture)
+            ) as mock_extract,
+        ):
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=LONG_FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(
+                    search_provider="serper", serperapi="serper-test"
+                ),
+            )
+        # Stubbing the fetcher keeps this offline AND discriminating: harvesting
+        # the linked PAA entry would hand extract_texts a URL to retrieve from.
+        assert mock_extract.call_args.kwargs["urls"] == []
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "live search"
+
+
+class TestRunTypedErrorNull:
+    """A non-EmptyRetrieval failure reaches the requester as a parseable null."""
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_malformed_serper_body_is_a_typed_error_null(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """A reshaped Serper body lands as error_type='ValueError', not a raw string."""
+        _mock_client_manager(mock_mgr)
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {"organic": None, "peopleAlsoAsk": []}
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=LONG_FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(
+                    search_provider="serper", serperapi="serper-test"
+                ),
+            )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_invalid_source_content_mode_is_a_typed_error_null(
+        self, mock_mgr: MagicMock
+    ) -> None:
+        """An unsupported source_content_mode uses the same typed-null shape."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(source_content_mode="bogus"),
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
 
 class TestRunParityAndParseMetadata:
     """run() wiring: LLM-input parity on the template path + parse metadata."""
@@ -851,6 +1053,24 @@ class TestRunParityAndParseMetadata:
         assert result[4]["parse_tier"] == "template"
         assert result[4]["scan_truncated"] is False
 
+    def test_raw_tier_past_window_is_marked_truncated(self) -> None:
+        """Question-free prompt past the window: raw tier AND truncated."""
+        prompt = "no question words at all here. " * (_SCAN_CAP // 10)
+        assert len(prompt) > _SCAN_CAP
+        result, _ = self._run_with_fetch_mock(prompt)
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
+
+    def test_clause_tier_past_window_is_marked_truncated(self) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
+            _SCAN_CAP // 3
+        )
+        assert len(prompt) > _SCAN_CAP
+        result, _ = self._run_with_fetch_mock(prompt)
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
     def test_free_text_llm_receives_full_prompt_and_short_query(self) -> None:
         """Free text: the LLM sees the whole prompt; search gets the clause."""
         result, fetch_kwargs = self._run_with_fetch_mock(LONG_FREE_TEXT_PROMPT)
@@ -872,27 +1092,38 @@ class TestSearchQueryPlumbing:
         queries, _ = multi_queries(
             client=client,
             prompt="LONG PROMPT",
+            search_query="short q",
             model="gpt-4.1-2025-04-14",
             num_queries=2,
-            search_query="short q",
         )
         assert queries[-1] == "short q"
         assert "LONG PROMPT" not in queries
+        # The other half of the split: the brainstorming LLM still sees the
+        # whole prompt, and never the compressed query.
+        user_messages = [
+            message["content"]
+            for message in client.completions.call_args.kwargs["messages"]
+            if message["role"] == "user"
+        ]
+        assert len(user_messages) == 1
+        assert "LONG PROMPT" in user_messages[0]
+        assert "short q" not in user_messages[0]
 
-    def test_multi_queries_defaults_to_prompt_without_search_query(self) -> None:
-        """Without a search_query, the old append-the-prompt behavior holds."""
+    def test_multi_queries_dedups_repeated_search_query(self) -> None:
+        """A brainstormed query equal to search_query is not searched twice."""
         client = MagicMock()
         client.completions.return_value = MagicMock(
-            content="<queries>\nquery one\nquery two\n</queries>",
+            content="<queries>\nshort q\nquery two\n</queries>",
             usage=MagicMock(prompt_tokens=1, completion_tokens=1),
         )
         queries, _ = multi_queries(
             client=client,
             prompt="LONG PROMPT",
+            search_query="short q",
             model="gpt-4.1-2025-04-14",
             num_queries=2,
         )
-        assert queries[-1] == "LONG PROMPT"
+        assert queries == ["short q", "query two"]
 
     @patch(f"{RAG_MODULE}.get_urls_from_queries_serper", return_value=[])
     @patch(f"{RAG_MODULE}.multi_queries", side_effect=RuntimeError("boom"))
@@ -905,12 +1136,12 @@ class TestSearchQueryPlumbing:
                 client=MagicMock(),
                 client_embedding=MagicMock(),
                 prompt=LONG_FREE_TEXT_PROMPT,
+                search_query="short q",
                 model="gpt-4.1-2025-04-14",
                 google_api_key=None,
                 google_engine_id=None,
                 serper_api_key="k",
                 search_provider="serper",
-                search_query="short q",
             )
         mock_serper.assert_called_once()
         assert mock_serper.call_args.kwargs["queries"] == ["short q"]

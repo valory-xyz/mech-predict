@@ -606,6 +606,28 @@ class TestV3WithKeyRotationAnthropic:
         assert "anthropic-burned" in result[0]
         assert result[1:] == ("", None, None, None, keys)
 
+    def test_openai_pool_exhausted_returns_error_tuple(self) -> None:
+        """When the openai/openrouter pools are exhausted, the error is wrapped."""
+        # Mirror of the anthropic case above. Without it, replacing the
+        # exhaustion branch's wrapped return with a bare ``raise e`` leaves the
+        # whole suite green -- the OpenAI-side pools are never driven to zero.
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 0,
+            "openrouter": 0,
+            "anthropic": 5,
+        }
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                v3_module.openai.RateLimitError, "openai-burned"
+            )
+
+        result = fake(api_keys=keys)
+        assert "openai-burned" in result[0]
+        assert result[1:] == ("", None, None, None, keys)
+
     def test_missing_anthropic_in_retries_left_does_not_crash_rotation(self) -> None:
         """Older ``max_retries()`` without ``anthropic`` doesn't crash the rotation lookup.
 

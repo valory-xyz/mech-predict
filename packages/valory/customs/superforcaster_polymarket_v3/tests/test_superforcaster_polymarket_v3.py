@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymarket_v3 import (
+    DEFAULT_OPENAI_MODEL,
     DEFAULT_OPENAI_SETTINGS,
     _MAX_SCAN_CHARS,
     _MAX_SEARCH_QUERY_LEN,
@@ -244,6 +245,35 @@ class TestEmptyRetrievalGuard:
 
     @patch(f"{V3_MODULE}.LLMClientManager")
     @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_degenerate_query_with_cached_content_still_predicts(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A degenerate query must not veto a non-empty cached replay."""
+        # The empty-query gate exists to skip a doomed Serper call, so it
+        # belongs on the live-search branch ONLY. Hoisted above the cached
+        # branch it would flag a null here even though the sources needed to
+        # answer are already in hand and no network call is at stake.
+        mock_client = _install_mock_client(mock_client_mgr)
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model="claude-fable-5",
+            prompt="???",
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+            source_content={
+                "mode": "cleaned",
+                "serper_response": FAKE_SERPER_RESPONSE,
+            },
+        )
+        mock_fetch.assert_not_called()
+        mock_client.completions.assert_called_once()
+        assert json.loads(result[0])["p_yes"] == 0.6
+        assert "empty_retrieval" not in result[4]
+        assert "null_reason" not in result[4]
+        assert result[4]["parse_tier"] == "raw"
+
+    @patch(f"{V3_MODULE}.LLMClientManager")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
     def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
@@ -256,9 +286,14 @@ class TestEmptyRetrievalGuard:
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
-        # v3's decorator wraps unexpected exceptions as a stringified error
-        # tuple; the shape ValueError must be visible there, not a 0.5 null.
-        assert "organic" in result[0]
+        # the shape ValueError must surface as the TYPED error null: asserting
+        # only on the message would also pass for a bare stringified return.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
         assert result[4] is None
 
     @patch(f"{V3_MODULE}.LLMClientManager")
@@ -363,6 +398,32 @@ class TestRunWiring:
 
     @patch(f"{V3_MODULE}.LLMClientManager")
     @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_truncation_with_in_window_clause_is_marked(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr)
+        # the chosen clause is in-window, but the real market question sits
+        # past it -- the flag must be set on the clause tier, not only on raw
+        prompt = (
+            "Can I clarify the resolution source by 2025? "
+            + "filler " * (_MAX_SCAN_CHARS // 6)
+            + "Will the ECB cut rates at the next meeting?"
+        )
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model="claude-fable-5",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
+    @patch(f"{V3_MODULE}.LLMClientManager")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
     def test_scan_truncation_is_observable(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
@@ -380,3 +441,39 @@ class TestRunWiring:
         )
         assert result[4]["parse_tier"] == "raw"
         assert result[4]["scan_truncated"] is True
+
+
+class TestMaxTokensWiring:
+    """The default max_tokens must reach the provider SDK, not just exist."""
+
+    @patch(f"{V3_MODULE}.openai.OpenAI")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_default_max_tokens_reaches_the_openai_sdk_call(
+        self, mock_fetch: MagicMock, mock_openai: MagicMock
+    ) -> None:
+        """run() forwards the default cap all the way into chat.completions.create."""
+        # The constant assertion in TestParsePrompt pins the VALUE; this pins
+        # its PATH. Only the real LLMClientManager / LLMClient are exercised
+        # here (the openai SDK constructor is the single patch point), so a
+        # regression that drops `max_tokens=` anywhere between run() and the
+        # SDK call fails this test while the constant stays at 4096.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        sdk_response = MagicMock()
+        sdk_response.choices = [MagicMock(message=MagicMock(content=PREDICTION_JSON))]
+        sdk_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = sdk_response
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_OPENAI_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        assert json.loads(result[0])["p_yes"] == 0.6
+        create_kwargs = create.call_args.kwargs
+        assert create_kwargs["max_tokens"] == DEFAULT_OPENAI_SETTINGS["max_tokens"]
+        # and the same value is what the delivery reports as used
+        assert result[4]["max_tokens"] == DEFAULT_OPENAI_SETTINGS["max_tokens"]

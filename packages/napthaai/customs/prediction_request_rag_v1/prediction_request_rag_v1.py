@@ -514,18 +514,16 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
 def multi_queries(
     client: "LLMClient",
     prompt: str,
+    search_query: str,
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
     temperature: float = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
     max_tokens: int = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
-    search_query: Optional[str] = None,
 ) -> Tuple[List[str], Optional[Callable]]:
     """Generate multiple queries for fetching information from the web."""
     if not client:
         raise RuntimeError("Client not initialized")
-    if search_query is None:
-        search_query = prompt
 
     url_query_prompt = URL_QUERY_PROMPT.format(
         USER_PROMPT=prompt, NUM_QUERIES=num_queries
@@ -560,6 +558,10 @@ def multi_queries(
     # search query, not the raw prompt: a prompt-shaped query degrades Serper
     # sharply, in the worst case to zero organic results (issue #455).
     queries.append(search_query)
+    # Drop repeats while keeping the original order: the brainstormer can hand
+    # back a string identical to the compressed search query, and every repeat
+    # buys the same search results a second time.
+    queries = list(dict.fromkeys(queries))
 
     return queries, counter_callback
 
@@ -897,6 +899,7 @@ def fetch_additional_information(  # pylint: disable=too-many-statements,too-man
     client: "LLMClient",
     client_embedding: Optional["LLMClient"],
     prompt: str,
+    search_query: str,
     model: str,
     google_api_key: Optional[str],
     google_engine_id: Optional[str],
@@ -909,23 +912,19 @@ def fetch_additional_information(  # pylint: disable=too-many-statements,too-man
     num_queries: int = DEFAULT_NUM_QUERIES,
     temperature: float = LLM_SETTINGS["claude-sonnet-4-6"]["temperature"],
     max_tokens: int = LLM_SETTINGS["claude-sonnet-4-6"]["default_max_tokens"],
-    search_query: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Optional[Callable[..., None]]]:
     """Fetch additional information to help answer the user prompt."""
     # generate multiple queries for fetching information from the web
-    if search_query is None:
-        search_query = prompt
-
     try:
         queries, counter_callback = multi_queries(
             client=client,
             prompt=prompt,
+            search_query=search_query,
             model=model,
             num_queries=num_queries,
             counter_callback=counter_callback,
             temperature=temperature,
             max_tokens=max_tokens,
-            search_query=search_query,
         )
         print(f"Queries: {queries}")
     except Exception as e:
@@ -1382,11 +1381,14 @@ def run(  # pylint: disable=too-many-locals
             raise ValueError(
                 f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
             )
-        if not any(ch.isalnum() for ch in search_query):
+        if kwargs.get("source_content", None) is None and not any(
+            ch.isalnum() for ch in search_query
+        ):
             # Nothing searchable: no alphanumeric character at all (empty,
             # whitespace, quotes, or bare punctuation) -- skip the wasted
             # query-brainstorm and search calls and return the flagged null
-            # directly.
+            # directly. A replay call carries its own captured documents, so
+            # the query is never used and the capture must not be discarded.
             return _flagged_null_result(
                 model=model,
                 temperature=temperature,

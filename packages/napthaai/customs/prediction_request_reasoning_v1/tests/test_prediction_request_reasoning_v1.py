@@ -759,6 +759,81 @@ class TestDegenerateShortCircuit:
         assert used_params["scan_truncated"] is False
 
 
+class TestDegenerateQueryWithCachedContent:
+    """A degenerate query must NOT skip a supplied cached capture."""
+
+    @patch(
+        f"{REASONING_MODULE}.parser_prediction_response",
+        return_value='{"p_yes": 0.7, "p_no": 0.3}',
+    )
+    @patch(f"{REASONING_MODULE}.do_reasoning_with_retry")
+    @patch(f"{REASONING_MODULE}.fetch_additional_information")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries_serper")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_degenerate_query_with_cached_pages_still_predicts(
+        self,
+        mock_mgr: MagicMock,
+        mock_serper: MagicMock,
+        mock_google: MagicMock,
+        mock_fetch: MagicMock,
+        mock_reasoning: MagicMock,
+        mock_parser: MagicMock,
+    ) -> None:
+        """Non-empty cached pages outrank the empty-query short circuit."""
+        mock_llm = _mock_client_manager(mock_mgr)
+        cached = {"pages": {"http://u.example": "cached text"}, "pdfs": {}}
+        mock_fetch.return_value = ("cached text", cached, ["q"], None)
+        mock_reasoning.return_value = ("reasoning result", None)
+        mock_llm.completions.return_value = MagicMock(
+            content="<p_yes>0.7</p_yes>",
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt="???",
+            api_keys=_make_mock_api_keys(),
+            source_content=cached,
+        )
+
+        # The cached capture must actually be consumed, and no live search
+        # may fire to replace it.
+        mock_fetch.assert_called_once()
+        assert mock_fetch.call_args.kwargs["source_content"] == cached
+        mock_serper.assert_not_called()
+        mock_google.assert_not_called()
+        used_params = result[4]
+        assert "empty_retrieval" not in used_params
+        assert "null_reason" not in used_params
+        assert json.loads(result[0])["p_yes"] == 0.7
+
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries")
+    @patch(f"{REASONING_MODULE}.get_urls_from_queries_serper")
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    def test_degenerate_query_with_empty_cache_reports_cached_replay(
+        self,
+        mock_mgr: MagicMock,
+        mock_serper: MagicMock,
+        mock_google: MagicMock,
+    ) -> None:
+        """A degenerate query over an empty capture is a cached replay, not an empty query."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt="???",
+            api_keys=_make_mock_api_keys(),
+            source_content={"pages": {}, "pdfs": {}},
+        )
+        mock_serper.assert_not_called()
+        mock_google.assert_not_called()
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["null_reason"] == "cached replay"
+
+
 class TestEmptyRetrievalFlaggedNull:
     """Empty retrieval yields a parseable flagged null, not an error string."""
 
@@ -823,6 +898,64 @@ class TestQueryLeakFix:
         assert LONG_FREE_TEXT_PROMPT not in queries
         sent = client.completions.call_args.kwargs["messages"][1]["content"]
         assert LONG_FREE_TEXT_PROMPT in sent
+
+    def test_multi_queries_dedups_the_appended_search_query(self) -> None:
+        """A brainstormed query equal to search_query is not searched twice."""
+        search_query = "Will Isak transfer to Liverpool?"
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content=f"<queries>alpha\n{search_query}</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query=search_query,
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["alpha", search_query]
+
+    def test_multi_queries_dedup_ignores_case(self) -> None:
+        """Dedup compares case-insensitively, so a recased duplicate is dropped."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>  Will Isak Transfer?  \nalpha</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query="will isak transfer?",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["Will Isak Transfer?", "alpha"]
+
+    def test_multi_queries_keeps_distinct_queries_in_order(self) -> None:
+        """Dedup leaves an all-distinct query list untouched."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>alpha\nbeta</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query="gamma",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["alpha", "beta", "gamma"]
+
+    @pytest.mark.parametrize(
+        "func", [multi_queries, fetch_additional_information], ids=["multi", "fetch"]
+    )
+    def test_search_query_is_a_required_parameter(self, func: Any) -> None:
+        """search_query carries no default, so a caller cannot silently omit it."""
+        param = inspect.signature(func).parameters["search_query"]
+        assert param.default is inspect.Parameter.empty
+        assert param.annotation is str
 
     @patch(
         f"{REASONING_MODULE}.parser_prediction_response", return_value='{"p_yes": 0.5}'
@@ -932,13 +1065,49 @@ class TestSerperShapeGuard:
     """Serper bodies are validated with the typed shape helper."""
 
     @patch(f"{REASONING_MODULE}.requests.request")
-    def test_malformed_serper_body_is_skipped_not_crashed(
+    def test_malformed_serper_body_raises_typed_error(
         self, mock_request: MagicMock
     ) -> None:
-        """A 200 body without the organic key is skipped for that query."""
+        """A missing/malformed organic key raises instead of being swallowed."""
         mock_request.return_value = MagicMock(
             status_code=200, json=lambda: {"message": "quota exceeded"}
         )
+        with pytest.raises(ValueError, match="organic"):
+            get_urls_from_queries_serper(["q1"], api_key="k", num=3)
+
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_malformed_people_also_ask_raises_typed_error(
+        self, mock_request: MagicMock
+    ) -> None:
+        """The second shape check fires too: a non-list peopleAlsoAsk raises."""
+        mock_request.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"organic": [{"link": "https://a.test"}], "peopleAlsoAsk": {}},
+        )
+        with pytest.raises(ValueError, match="peopleAlsoAsk"):
+            get_urls_from_queries_serper(["q1"], api_key="k", num=3)
+
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_empty_organic_with_people_also_ask_yields_no_urls(
+        self, mock_request: MagicMock
+    ) -> None:
+        """Boundary: PAA-only is a well-formed zero-hit, not a shape error."""
+        mock_request.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "organic": [],
+                "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
+            },
+        )
+        urls = get_urls_from_queries_serper(["q1"], api_key="k", num=3)
+        assert urls == []  # pylint: disable=use-implicit-booleaness-not-comparison
+
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_transport_failure_is_still_swallowed_per_query(
+        self, mock_request: MagicMock
+    ) -> None:
+        """The carve-out is shape-only: a per-query transport error still skips."""
+        mock_request.side_effect = requests.RequestException("connection reset")
         urls = get_urls_from_queries_serper(["q1"], api_key="k", num=3)
         assert urls == []  # pylint: disable=use-implicit-booleaness-not-comparison
 
@@ -955,3 +1124,104 @@ class TestSerperShapeGuard:
         )
         urls = get_urls_from_queries_serper(["q1"], api_key="k", num=3)
         assert urls == ["https://example.test"]
+
+
+class TestSerperShapeErrorDelivery:
+    """A broken Serper integration is delivered as the TYPED error null."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"message": "quota exceeded"},
+            {"organic": None, "peopleAlsoAsk": []},
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"link": "https://a.test"}], "peopleAlsoAsk": "nope"},
+        ],
+    )
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_broken_serper_body_delivers_error_null_not_flagged_null(
+        self, mock_request: MagicMock, mock_mgr: MagicMock, body: dict
+    ) -> None:
+        """Reshaped bodies deliver p_yes None + error_type, not the 0.5 null."""
+        _mock_client_manager(mock_mgr)
+        mock_request.return_value = MagicMock(status_code=200, json=lambda: body)
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_serper_api_keys(),
+        )
+        parsed = json.loads(result[0])
+        # error null, NOT the 0.5 flagged null a genuine zero-hit delivers
+        assert parsed["p_yes"] is None and parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        assert parsed["error"] and parsed["error_type"] == "ValueError"
+
+    @patch(f"{REASONING_MODULE}.LLMClientManager")
+    @patch(f"{REASONING_MODULE}.requests.request")
+    def test_genuine_zero_hit_stays_the_flagged_null(
+        self, mock_request: MagicMock, mock_mgr: MagicMock
+    ) -> None:
+        """Control: a well-formed zero-hit keeps the 0.5 flagged-null delivery."""
+        _mock_client_manager(mock_mgr)
+        mock_request.return_value = MagicMock(
+            status_code=200, json=lambda: {"organic": [], "peopleAlsoAsk": []}
+        )
+        result = run(
+            tool="prediction-request-reasoning-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_serper_api_keys(),
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+        assert "error_type" not in parsed
+        assert result[4]["null_reason"] == "live search"
+
+
+class TestScanTruncationObservable:
+    """A scan window that did not cover the prompt is marked, not silent."""
+
+    @staticmethod
+    def _run_free_text(prompt: str) -> tuple:
+        """Run the tool on a free-text prompt with fetch + LLM mocked."""
+        with (
+            patch(f"{REASONING_MODULE}.LLMClientManager") as mock_mgr,
+            patch(f"{REASONING_MODULE}.fetch_additional_information") as mock_fetch,
+            patch(f"{REASONING_MODULE}.do_reasoning_with_retry") as mock_reasoning,
+            patch(
+                f"{REASONING_MODULE}.parser_prediction_response",
+                return_value='{"p_yes": 0.5}',
+            ),
+        ):
+            mock_llm = _mock_client_manager(mock_mgr)
+            mock_fetch.return_value = ("additional info", {"pages": {}}, ["q"], None)
+            mock_reasoning.return_value = ("reasoning result", None)
+            mock_llm.completions.return_value = MagicMock(
+                content="<p_yes>0.5</p_yes>",
+                usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+            )
+            return run(
+                tool="prediction-request-reasoning-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=prompt,
+                api_keys=_make_mock_api_keys(),
+            )
+
+    def test_raw_tier_past_window_is_marked_truncated(self) -> None:
+        """No clause inside the window: raw tier AND scan_truncated True."""
+        prompt = "word " * (_SCAN_CAP // 4) + "Will it happen by 2027?"
+        assert len(prompt) > _SCAN_CAP
+        result = self._run_free_text(prompt)
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
+
+    def test_clause_tier_past_window_is_marked_truncated(self) -> None:
+        """A clause inside the window still flags what sat past it."""
+        prompt = FREE_TEXT_PROMPT + " filler" * (_SCAN_CAP // 3)
+        assert len(prompt) > _SCAN_CAP
+        result = self._run_free_text(prompt)
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True

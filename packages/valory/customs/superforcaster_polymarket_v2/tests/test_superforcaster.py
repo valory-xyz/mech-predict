@@ -665,6 +665,124 @@ class TestExtractPrediction:
         assert "<facts>" not in result[0]
 
 
+class TestExtractPredictionCutAndRange:
+    """A max_tokens cut must not deliver a draft, and p_yes must be in range."""
+
+    def test_a_cut_mid_object_delivers_nothing(self) -> None:
+        """The reviewer counterexample: a cut after a draft must not deliver it."""
+        completion = '{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": '
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_whose_nested_object_closes_is_still_a_cut(self) -> None:
+        """An inner object closing must not be read as the outer one closing."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"p_yes": 0.31, "meta": {"src": "a"}, "p_no": '
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_a_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace that never began an object must not block delivery."""
+        completion = (
+            "See {source for details on the resolution criteria.\n"
+            '{"p_yes": 0.42, "p_no": 0.58, "confidence": 0.7, "info_utility": 0.6}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.42
+
+    def test_braces_and_escaped_quotes_inside_strings_are_ignored(self) -> None:
+        """A brace or escaped quote inside a value must not end the object."""
+        completion = (
+            '{"p_yes": 0.42, "p_no": 0.58, '
+            '"note": "resolves if } appears in the \\"title\\""}'
+        )
+        parsed = json.loads(module.extract_prediction(completion) or "")
+        assert parsed["p_yes"] == 0.42
+        assert parsed["note"] == 'resolves if } appears in the "title"'
+
+    def test_a_brace_inside_a_pending_string_does_not_hide_a_cut(self) -> None:
+        """A cut object whose pending string holds a brace is still a cut."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"p_yes": 0.31, "note": "resolves if } appears'
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_an_escaped_quote_does_not_hide_a_cut(self) -> None:
+        """An escaped quote must not be read as the end of a string value."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"note": "he wrote \\"} done\\" here", "p_yes": '
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_an_out_of_range_p_yes_is_not_delivered(self) -> None:
+        """p_yes outside [0, 1] is not a probability and must be skipped."""
+        completion = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    def test_a_sole_out_of_range_object_leaves_the_error_path_the_content(self) -> None:
+        """With only an out-of-range object there is no forecast to deliver."""
+        completion = '{"p_yes": 1.7, "p_no": -0.7}'
+        assert module.extract_prediction(completion) == completion
+
+    def test_a_null_p_yes_is_skipped(self) -> None:
+        """A JSON null p_yes must not be coerced into a forecast."""
+        completion = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": null, "p_no": null}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_when_the_completion_is_cut(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() delivers nothing when max_tokens cut the answer mid-object."""
+        # Pins the WIRING on the delivery path: unwired this returns the raw
+        # completion, and with the pre-cut-detection extractor it returns the
+        # 0.25 draft as if it were the forecast.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": '
+        )
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[0] is None
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_an_out_of_range_forecast(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() skips a trailing out-of-range object and delivers the forecast."""
+        # Pins the WIRING too: unwired this returns both objects as raw text,
+        # which the requester's json.loads rejects.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert json.loads(result[0])["p_yes"] == 0.06
+
+
 class TestRateLimitExhaustionNull:
     """with_key_rotation must not let a rate-limit exhaustion escape as an exception."""
 

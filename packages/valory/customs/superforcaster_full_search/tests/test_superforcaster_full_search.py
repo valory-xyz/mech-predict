@@ -33,6 +33,7 @@ from packages.valory.customs.superforcaster_full_search.superforcaster_full_sear
     OpenAIClientManager,
     OpenAIResponse,
     Usage,
+    extract_prediction,
     fetch_additional_sources,
     generate_prediction_with_retry,
     parse_prompt,
@@ -1046,3 +1047,156 @@ class TestIssue455RunWiring:
         )
         assert result[4]["parse_tier"] == "template"
         assert result[4]["scan_truncated"] is False
+
+
+# The forecast the extractor must deliver out of every scaffolded shape.
+FORECAST = {"p_yes": 0.35, "p_no": 0.65, "confidence": 0.7, "info_utility": 0.6}
+FORECAST_JSON = json.dumps(FORECAST)
+
+# The long free-text shape: the model answers with the seven-step reasoning
+# scaffold and puts the JSON at the END. Delivering this block verbatim is the
+# defect the extractor fixes.
+SCAFFOLD_COMPLETION = (
+    "<facts>\nThe Federal Reserve met on Wednesday.\n</facts>\n"
+    "<thinking>\nBase rate is low; recent reporting does not move it much.\n"
+    "</thinking>\n"
+    "<answer>\n" + FORECAST_JSON + "\n</answer>"
+)
+
+
+class TestExtractPrediction:
+    """The canonical extractor slices the forecast out of every shape."""
+
+    def test_bare_json_passes_through(self) -> None:
+        """A bare JSON completion is returned as the same object."""
+        assert json.loads(extract_prediction(FORECAST_JSON) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """The <facts>/<thinking>/<answer> block is reduced to the JSON."""
+        assert extract_prediction(SCAFFOLD_COMPLETION) == FORECAST_JSON
+
+    def test_draft_before_the_answer_loses_to_the_final_object(self) -> None:
+        """A tentative forecast written mid-reasoning does not shadow the last."""
+        draft = json.dumps({"p_yes": 0.9, "p_no": 0.1})
+        content = f"First pass: {draft}\nAfter review: {FORECAST_JSON}"
+        assert extract_prediction(content) == FORECAST_JSON
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object after the forecast with no p_yes is ignored."""
+        trailer = json.dumps({"note": "sources listed above"})
+        assert extract_prediction(f"{FORECAST_JSON}\n{trailer}") == FORECAST_JSON
+
+    def test_cut_mid_object_returns_none(self) -> None:
+        """A completion cut while writing the answer delivers nothing."""
+        assert extract_prediction('{"p_yes": 0.4, "p_no": 0.6, "confi') is None
+
+    def test_cut_mid_object_with_a_closed_inner_object_returns_none(self) -> None:
+        """A nested object closing inside the cut does not fake a complete answer."""
+        cut = '{"meta": {"model": "gpt-4o"}, "p_yes": 0.4, "p_no": '
+        assert extract_prediction(cut) is None
+
+    def test_draft_then_cut_delivers_nothing(self) -> None:
+        """A complete draft before a cut answer is still only a draft."""
+        draft = json.dumps({"p_yes": 0.2, "p_no": 0.8})
+        content = "Draft: " + draft + '\nFinal: {"p_yes": 0.3'
+        assert extract_prediction(content) is None
+
+    def test_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace in prose must not suppress a delivered forecast."""
+        content = (
+            "The market resolves if {no official statement is published.\n"
+            + FORECAST_JSON
+        )
+        assert extract_prediction(content) == FORECAST_JSON
+
+    def test_trailing_stray_brace_is_not_a_cut(self) -> None:
+        """A prose brace AFTER the forecast leaves the forecast delivered."""
+        content = FORECAST_JSON + "\nSee {appendix for the source list"
+        assert extract_prediction(content) == FORECAST_JSON
+
+    def test_brace_inside_a_string_value_does_not_close_the_object(self) -> None:
+        """A '}' inside a string value is not read as the object's close."""
+        obj = dict(FORECAST, note="resolves if } is printed")
+        assert json.loads(extract_prediction(json.dumps(obj)) or "") == obj
+
+    def test_escaped_quotes_inside_a_string_value_survive(self) -> None:
+        """Escaped quotes in a value do not break the string scan."""
+        obj = dict(FORECAST, note='he said "yes" and then {')
+        assert json.loads(extract_prediction(json.dumps(obj)) or "") == obj
+
+    def test_out_of_range_p_yes_is_skipped(self) -> None:
+        """A p_yes outside [0, 1] is not a forecast; the valid one wins."""
+        bogus = json.dumps({"p_yes": 1.4, "p_no": -0.4})
+        assert extract_prediction(f"{FORECAST_JSON}\n{bogus}") == FORECAST_JSON
+
+    def test_null_p_yes_is_skipped(self) -> None:
+        """A null p_yes is not coercible; the valid forecast wins."""
+        bogus = json.dumps({"p_yes": None, "p_no": None})
+        assert extract_prediction(f"{FORECAST_JSON}\n{bogus}") == FORECAST_JSON
+
+    def test_string_p_yes_is_coerced(self) -> None:
+        """A quoted numeric p_yes still parses as a forecast."""
+        obj = {"p_yes": "0.35", "p_no": "0.65"}
+        assert json.loads(extract_prediction(json.dumps(obj)) or "") == obj
+
+    def test_no_candidate_returns_the_content_unchanged(self) -> None:
+        """With no usable object the raw completion is handed on untouched."""
+        content = "I cannot answer this question."
+        assert extract_prediction(content) == content
+
+    def test_empty_content_passes_through(self) -> None:
+        """None and empty string are returned as they came in."""
+        assert extract_prediction(None) is None
+        assert extract_prediction("") == ""
+
+
+class TestExtractionIsWiredIntoDelivery:
+    """The extractor sits on run()'s delivery path, not only in a helper."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_run_delivers_the_forecast_not_the_scaffold(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() returns the JSON forecast sliced out of the reasoning block."""
+        mock_client = _stub_openai(mock_client_mgr)
+        mock_client.completions.return_value = OpenAIResponse(
+            content=SCAFFOLD_COMPLETION,
+            usage=Usage(prompt_tokens=10, completion_tokens=5),
+        )
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        assert result[0] == FORECAST_JSON
+        assert "<answer>" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_run_turns_a_cut_completion_into_error_json(
+        self, mock_client_mgr: MagicMock, _mock_sleep: MagicMock
+    ) -> None:
+        """A completion cut mid-forecast is delivered as error JSON, not as text."""
+        mock_client = _stub_openai(mock_client_mgr)
+        mock_client.completions.return_value = OpenAIResponse(
+            content='<answer>\n{"p_yes": 0.4, "p_no": 0.6, "confi',
+            usage=Usage(prompt_tokens=10, completion_tokens=5),
+        )
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert "truncated" in payload["error"]

@@ -64,6 +64,29 @@ BARE_CLOSE = (
 # a deployment artifact this tool does not control, so a template emitting
 # <THINK> must not silently turn the think guards into no-ops.
 BARE_CLOSE_UPPER = BARE_CLOSE.replace("</think>", "</THINK>")
+# A budget cut that lands while the answer is being written, where the object
+# under construction has already opened AND closed a nested one. The brace that
+# closes the nested object is the only "}" after the opener, so asking whether
+# ANY closing brace follows reads the cut as complete and delivers the earlier
+# draft. Reviewer-reproduced.
+CUT_AFTER_NESTED_CLOSE = (
+    "</think>\n" '{"p_yes": 0.25, "p_no": 0.75}\n' '{"p_yes": 0.4, "meta": {"a": 1}'
+)
+# The mirror image: a complete answer followed by an unclosed brace in PROSE.
+# It never closes, but it never began an object either, so reading it as a cut
+# turns a delivered forecast into a typed error. Reviewer-reproduced.
+STRAY_BRACE_AFTER_ANSWER = (
+    "</think>\n" '{"p_yes": 0.3, "p_no": 0.7}\n' "Note: see {source for details"
+)
+# Two closing tags: a draft sits between them and the object after the last one
+# is unparseable. Stripping only to the FIRST tag leaves the draft in the
+# candidate pool and delivers 0.82 as the answer.
+TWO_CLOSING_TAGS = (
+    "</think>\n"
+    'still weighing {"p_yes": 0.82, "p_no": 0.18}\n'
+    "</think>\n"
+    '{"p_yes": }'
+)
 
 
 class FakeKeyChain:
@@ -159,6 +182,17 @@ def test_canonical_prediction_rejects_an_out_of_range_p_yes(completion: str) -> 
     # parse_p_yes. Without that check the delivery is built anyway: p_yes 1.5
     # gives p_no -0.5, i.e. a NEGATIVE probability answered on-chain.
     assert canonical_prediction(completion) is None
+
+
+def test_a_revised_forecast_wins_over_the_earlier_one() -> None:
+    """With two usable objects after the strip, the LAST is the answer."""
+    # A model that revises its estimate emits both. Walking forward would
+    # deliver the superseded one.
+    completion = (
+        '</think>\n{"p_yes": 0.25, "p_no": 0.75}\n'
+        'On reflection:\n{"p_yes": 0.9, "p_no": 0.1}'
+    )
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.9
 
 
 def test_a_cut_mid_object_after_the_think_block_is_not_a_draft() -> None:
@@ -280,6 +314,29 @@ def test_a_brace_inside_a_string_value_does_not_cut_the_answer_short() -> None:
     parsed = json.loads(canonical_prediction(completion) or "{}")
     assert parsed["p_yes"] == 0.61
     assert parsed["info_utility"] == 0.8
+
+
+def test_a_cut_whose_nested_object_closes_is_still_a_cut() -> None:
+    """A cut mid-object counts even when a nested object inside it closed."""
+    # The nested "}" is the only closing brace after the opener. Asking whether
+    # ANY "}" follows therefore reads this cut as a complete object and
+    # delivers the 0.25 written one object earlier -- a draft.
+    assert canonical_prediction(CUT_AFTER_NESTED_CLOSE) is None
+
+
+def test_a_stray_brace_in_prose_after_the_answer_is_not_a_cut() -> None:
+    """An unclosed brace that never began an object must not void the answer."""
+    # "{source" is prose, not a truncated object: a JSON object opens with a
+    # quoted key. Calling it a cut turns a delivered forecast into an error.
+    parsed = json.loads(canonical_prediction(STRAY_BRACE_AFTER_ANSWER) or "{}")
+    assert parsed["p_yes"] == 0.3
+
+
+def test_the_reasoning_strip_runs_to_the_last_closing_tag() -> None:
+    """Two closing tags: everything before the LAST one is reasoning."""
+    # Stripping only to the first tag leaves the mid-reasoning 0.82 as a
+    # candidate, and the unparseable final object hands the delivery to it.
+    assert canonical_prediction(TWO_CLOSING_TAGS) is None
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +668,57 @@ def test_run_delivers_the_error_not_a_negative_probability() -> None:
     parsed = json.loads(out[0])
     assert parsed["p_yes"] is None
     assert parsed["p_no"] is None
+    assert parsed["error_type"] == "ValueError"
+    assert "parseable p_yes" in parsed["error"]
+
+
+def test_run_delivers_the_extracted_object_not_the_raw_completion() -> None:
+    """run() delivers the extracted forecast, not the completion around it."""
+    # Wiring check: the completion is not valid JSON on its own (it carries the
+    # closing tag and trailing prose), so an unwired delivery fails json.loads.
+    # The fixture also pins the fix -- the trailing "{source" is prose, and the
+    # old cut heuristic turned this delivery into an error result.
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (STRAY_BRACE_AFTER_ANSWER, None)
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    result, completion = out[0], out[1]
+    assert completion == STRAY_BRACE_AFTER_ANSWER
+    assert result != completion
+    assert json.loads(result) == {
+        "p_yes": 0.3,
+        "p_no": 0.7,
+        "confidence": 0.5,
+        "info_utility": 0.5,
+    }
+
+
+def test_run_delivers_the_error_when_the_answer_was_cut_off() -> None:
+    """A completion cut mid-answer is delivered as the typed error null."""
+    # The draft written one object earlier must never reach the requester as
+    # the final answer.
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (CUT_AFTER_NESTED_CLOSE, None)
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    parsed = json.loads(out[0])
+    assert parsed["p_yes"] is None
     assert parsed["error_type"] == "ValueError"
     assert "parseable p_yes" in parsed["error"]
 

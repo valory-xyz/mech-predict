@@ -24,7 +24,18 @@ import json
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    List,
+    Literal,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import anthropic
 import faiss
@@ -67,6 +78,35 @@ USER_AGENT_HEADER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 GOOGLE_RATE_LIMIT_EXCEEDED_CODE = 429
 DEFAULT_DELIVERY_RATE = 100
+# Serper degrades sharply on prompt-shaped queries (instruction boilerplate,
+# JSON-format text), in the worst case to zero organic results (issue #455).
+_MAX_SEARCH_QUERY_LEN = 150
+
+
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable null-prediction tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than a raw exception string. ``error_type``
+    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
+    hitting every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -91,17 +131,23 @@ def with_key_rotation(func: Callable) -> Callable:
                 result: MechResponse = func(*args, **kwargs)
                 return result + (api_keys,)
             except anthropic.RateLimitError as e:
-                # try with a new key again
+                # Rotate keys on a rate-limit hit. Once the pool is exhausted,
+                # honor the null-prediction contract instead of re-raising: an
+                # exception raised here escapes wrapper() entirely (a sibling
+                # except clause cannot catch it), so the branch below that
+                # builds the typed error JSON never runs.
                 service = "anthropic"
                 if retries_left[service] <= 0:
-                    raise e
+                    print(f"[prediction-request-rag-v1] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 retries_left[service] -= 1
                 api_keys.rotate(service)
                 return execute()
             except openai.RateLimitError as e:
                 # try with a new key again
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
+                    print(f"[prediction-request-rag-v1] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 retries_left["openai"] -= 1
                 retries_left["openrouter"] -= 1
                 api_keys.rotate("openai")
@@ -110,16 +156,20 @@ def with_key_rotation(func: Callable) -> Callable:
             except googleapiclient.errors.HttpError as e:
                 # try with a new key again
                 if e.status_code != GOOGLE_RATE_LIMIT_EXCEEDED_CODE:
-                    raise e
+                    print(f"[prediction-request-rag-v1] google api failure: {e}")
+                    return _null_prediction_response(e, api_keys)
                 service = "google_api_key"
                 if retries_left[service] <= 0:
-                    raise e
+                    print(f"[prediction-request-rag-v1] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 retries_left[service] -= 1
                 api_keys.rotate(service)
                 return execute()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 print(f"Unexpected error: {type(e).__name__}: {e}")
-                return str(e), "", None, None, None, api_keys
+                # Parseable typed error null (matches market_aware /
+                # factual_research) instead of a raw exception string.
+                return _null_prediction_response(e, api_keys)
 
         mech_response = execute()
         return mech_response
@@ -306,6 +356,8 @@ ALLOWED_MODELS = list(LLM_SETTINGS.keys())
 DEFAULT_NUM_URLS = 3
 DEFAULT_NUM_QUERIES = 2
 NUM_URLS_PER_QUERY = 5
+# Per-query cap on Serper organic results (see _shape_serper_sources).
+MAX_SOURCES = 5
 SPLITTER_CHUNK_SIZE = 1800
 SPLITTER_OVERLAP = 50
 EMBEDDING_MODEL = "text-embedding-3-large"
@@ -392,6 +444,15 @@ After you have written all {NUM_QUERIES} search queries, please submit your fina
 SYSTEM_PROMPT = """You are a world class algorithm for generating structured output from a given input."""
 
 
+class EmptyRetrievalError(ValueError):
+    """Raised when retrieval yields no usable documents (issue #455).
+
+    Distinct from the typed shape errors raised by _shape_serper_sources: a
+    genuine zero-hit converges on the flagged null in run(), while a broken
+    or reshaped integration surfaces as an error null with error_type.
+    """
+
+
 class ExtendedDocument(BaseModel):
     """Document model"""
 
@@ -474,9 +535,21 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
     return len(enc.encode(text))
 
 
+def _dedup_queries(queries: List[str]) -> List[str]:
+    """Drop duplicate search queries, keeping the first occurrence of each."""
+    # Keyed on the normalized form so trivial spacing or casing differences do
+    # not sneak a second identical search call through; the value keeps the
+    # original text, and dict insertion order keeps the sequence stable.
+    unique: Dict[str, str] = {}
+    for query in queries:
+        unique.setdefault(query.strip().casefold(), query)
+    return list(unique.values())
+
+
 def multi_queries(
     client: "LLMClient",
     prompt: str,
+    search_query: str,
     model: str,
     num_queries: int,
     counter_callback: Optional[Callable] = None,
@@ -516,7 +589,14 @@ def multi_queries(
     queries = [query for query in queries if query.strip() != ""]
     if len(queries) > DEFAULT_NUM_QUERIES:
         queries = queries[:DEFAULT_NUM_QUERIES]
-    queries.append(prompt)
+    # The direct query sent alongside the brainstormed ones is the compressed
+    # search query, not the raw prompt: a prompt-shaped query degrades Serper
+    # sharply, in the worst case to zero organic results (issue #455).
+    queries.append(search_query)
+    # Drop repeats while keeping the original order: the brainstormer can hand
+    # back a string identical to the compressed search query, and every repeat
+    # buys the same search results a second time.
+    queries = _dedup_queries(queries)
 
     return queries, counter_callback
 
@@ -604,8 +684,13 @@ def get_urls_from_queries_serper(
             )
             response.raise_for_status()
             data = response.json()
-            organic = data.get("organic", [])
+            organic, _ = _shape_serper_sources(data, "live search")
             urls.extend(item["link"] for item in organic[:num])
+        except ValueError:
+            # A missing/malformed organic key is a broken or reshaped
+            # integration (a quota-error body hits every query alike), not a
+            # zero-hit -- surface it as an error null instead of swallowing.
+            raise
         except Exception as e:
             print(f"Error fetching URLs for query '{query}': {e}")
     return list(set(urls))
@@ -845,10 +930,11 @@ def recursive_character_text_splitter(
     return [text[i : i + max_tokens] for i in range(0, len(text), max_tokens - overlap)]
 
 
-def fetch_additional_information(  # pylint: disable=too-many-statements
+def fetch_additional_information(  # pylint: disable=too-many-statements,too-many-locals
     client: "LLMClient",
     client_embedding: Optional["LLMClient"],
     prompt: str,
+    search_query: str,
     model: str,
     google_api_key: Optional[str],
     google_engine_id: Optional[str],
@@ -864,11 +950,11 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
 ) -> Tuple[str, Dict[str, Any], Optional[Callable[..., None]]]:
     """Fetch additional information to help answer the user prompt."""
     # generate multiple queries for fetching information from the web
-
     try:
         queries, counter_callback = multi_queries(
             client=client,
             prompt=prompt,
+            search_query=search_query,
             model=model,
             num_queries=num_queries,
             counter_callback=counter_callback,
@@ -878,7 +964,7 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
         print(f"Queries: {queries}")
     except Exception as e:
         print(f"Error generating queries: {e}")
-        queries = [prompt]
+        queries = [search_query]
 
     # get the top URLs for the queries
     if source_content is None:
@@ -952,7 +1038,10 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
     print(f"Split Docs: {len(split_docs)}")
 
     if len(split_docs) == 0:
-        raise ValueError("No valid documents found from the provided URLs")
+        # Retrieval came back empty (zero organic hits, or every page failed
+        # to fetch/extract). run() converges this on the flagged null rather
+        # than an opaque error string (issue #455).
+        raise EmptyRetrievalError("No valid documents found from the provided URLs")
 
     if len(split_docs) > MAX_NR_DOCS:
         # truncate the split_docs to the first MAX_NR_DOCS documents
@@ -981,17 +1070,362 @@ def fetch_additional_information(  # pylint: disable=too-many-statements
     return additional_information, raw_source_content, counter_callback
 
 
-def extract_question(prompt: str) -> str:
-    """Uses regexp to extract question from the prompt"""
-    # Match from 'question "' to '" and the `yes`' to handle nested quotes
-    pattern = r'question\s+"(.+?)"\s+and\s+the\s+`yes`'
-    try:
-        question = re.findall(pattern, prompt, re.DOTALL)[0]
-    except Exception as e:
-        print(f"Error extracting question: {e}")
-        question = prompt
+# Matches from 'question "' to '" and the `yes`' to handle nested quotes.
+_TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.DOTALL)
+# Question-clause candidates: every question-word occurrence starts one, running
+# to the FIRST '?' after it (via str.find; tolerates embedded dots --
+# abbreviations, decimals, market ids -- which sentence-boundary splitting
+# would cut on).
+# Candidates may overlap; a feature score selects the market question among
+# them (see _score_clause).
+_QUESTION_WORD_RE = re.compile(
+    r"(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
+    r"|how|whether)\b",
+    re.IGNORECASE,
+)
+# Meta/instruction stems: a question addressed at the RESPONDER ("Can you
+# estimate...", "What is your probability...") or prompt scaffolding ("What
+# follows is..."), never the market question itself. Second-person only:
+# first-person clauses ("Will we...", "Do I...") occur in real market wording.
+_META_STEM_RE = re.compile(
+    r"^(?:(?:can|could|would|will|do|does|did|is|are)\s+(?:you|your)\b"
+    r"|what\s+(?:is|are)\s+(?:your|the\s+(?:respective\s+)?probabilit)"
+    r"|what\s+follows\b)",
+    re.IGNORECASE,
+)
+# Deliberately case-sensitive (unlike the IGNORECASE _QUESTION_WORD_RE): a
+# capitalized market verb marks a sentence-initial market question, and adding
+# IGNORECASE here would double-count lowercase occurrences via the +1 bonus.
+_MARKET_VERB_RE = re.compile(
+    r"^(?:Will|Is|Are|Was|Were|Does|Do|Did|Which|Who|When|Whether)\b"
+)
+# Chars that may directly precede a sentence-initial question word: whitespace,
+# sentence punctuation, ASCII quotes/paren, and typographic quotes.
+_CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
+# Candidate scanning is bounded to the prompt head: every question-word
+# occurrence starts a candidate and each candidate scans forward for '?', so
+# an unbounded scan is quadratic. Measured cost is small at the mech's cap
+# (~6.6ms unbounded at 100KB, the MAX_PROMPT_BYTES limit in the mech repo's
+# valory/task_execution skill) but grows ~4x per 2x and benchmark/direct
+# calls are not capped at all (multi-MB prompts reach seconds) -- the window
+# is defence-in-depth for those paths. Market questions sit in the prompt
+# head in practice (the longest observed production prompt is under 1KB), so
+# a 10KB window loses nothing on real traffic.
+_MAX_SCAN_CHARS = 10_000
+# Near-best window for the last-market-verb tiebreaker. Equals the largest
+# single-feature weight (the digit bonus in _score_clause) so a market clause
+# can never be pushed out of contention by one feature alone.
+_NEAR_BEST_WINDOW = 3
 
-    return question
+
+def _score_clause(prompt: str, start: int, clause: str) -> int:
+    """Score a question-clause candidate; the market question should win.
+
+    Features: digits (market questions carry deadlines/quantities; instruction
+    and clarifying questions rarely do), a market-shaped opening verb, a
+    sentence-initial capitalized start, a penalty for responder-addressed /
+    scaffolding stems, and a penalty for sweeping across a sentence boundary.
+
+    :param prompt: the full prompt (for boundary context).
+    :param start: the clause's start offset in the prompt.
+    :param clause: the candidate clause text.
+    :return: the feature score (higher = more market-question-shaped).
+    """
+    score = 0
+    if any(ch.isdigit() for ch in clause):
+        score += 3
+    if _MARKET_VERB_RE.match(clause):
+        score += 1
+    if clause[0].isupper() and (start == 0 or prompt[start - 1] in _CLAUSE_BOUNDARY):
+        score += 2
+    if _META_STEM_RE.match(clause):
+        score -= 3
+    if ". " in clause:
+        score -= 1
+    return score
+
+
+def _shape_serper_sources(
+    raw: Dict[str, Any], context: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Validate a serper_response body and slice it into (organic, misc).
+
+    A body without the organic key is a broken or reshaped integration (a
+    quota-error body, a renamed key, a corrupted cache entry), not a genuine
+    zero-hit -- raise so it surfaces as an error null with error_type instead
+    of collapsing into the flagged null.
+
+    :param raw: the serper_response dict (live or cached).
+    :param context: short label for the error message (live vs cached replay).
+    :return: the (organic, peopleAlsoAsk) lists, organic capped at MAX_SOURCES.
+    """
+    if not isinstance(raw.get("organic"), list):
+        raise ValueError(
+            f"{context}: Serper response missing or malformed 'organic' key; "
+            f"got keys: {sorted(raw)[:8]}"
+        )
+    misc = raw.get("peopleAlsoAsk", [])
+    if not isinstance(misc, list):
+        raise ValueError(
+            f"{context}: Serper response has a malformed 'peopleAlsoAsk' key; "
+            f"got {type(misc).__name__}"
+        )
+    return raw["organic"][:MAX_SOURCES], misc
+
+
+def _truncate_query(query: str) -> str:
+    """Cap the query at _MAX_SEARCH_QUERY_LEN, cutting on a word boundary.
+
+    :param query: the derived search query.
+    :return: the query, truncated without a dangling partial word.
+    """
+    if len(query) <= _MAX_SEARCH_QUERY_LEN:
+        return query
+    cut = query[:_MAX_SEARCH_QUERY_LEN]
+    if not query[_MAX_SEARCH_QUERY_LEN].isspace() and not cut.endswith(" "):
+        cut = cut.rsplit(None, 1)[0] if " " in cut else cut
+    return cut.rstrip()
+
+
+class ParsedPrompt(NamedTuple):
+    """parse_prompt's result: the LLM question, the Serper query, the tier."""
+
+    question: str
+    query: str
+    tier: Literal["template", "clause", "raw"]
+
+
+def parse_prompt(prompt: str) -> ParsedPrompt:
+    """Split a request prompt into the LLM question and the Serper search query.
+
+    Trader-template prompts carry the bare market question between known
+    delimiters: it serves as both values, keeping that path byte-identical to
+    previous releases. Any other prompt is free text under the advertised
+    input contract (issue #455): the LLM receives the WHOLE prompt (resolution
+    criteria, source, and deadline stay in context) while the search query is
+    the best-scoring question clause (see _score_clause), with double quotes
+    dropped (Serper treats quoted spans as exact-match terms) and the length
+    capped on a word boundary.
+
+    :param prompt: the raw prompt passed to run().
+    :return: a ParsedPrompt -- tier is 'template' (trader regex matched),
+        'clause' (a scored question clause), or 'raw' (no clause found;
+        capped prompt head).
+    """
+    match = _TRADER_TEMPLATE_RE.findall(prompt)
+    if match:
+        question = match[0]
+        return ParsedPrompt(question, question, "template")
+    scan = prompt[:_MAX_SCAN_CHARS]
+    candidates = []
+    for word in _QUESTION_WORD_RE.finditer(scan):
+        start = word.start()
+        if start > 0 and scan[start - 1].isalnum():
+            continue
+        end = scan.find("?", start)
+        if end == -1:
+            continue
+        clause = scan[start : end + 1]
+        candidates.append(
+            (_score_clause(scan, start, clause), len(clause), -start, clause)
+        )
+    tier: Literal["template", "clause", "raw"]
+    if candidates:
+        # Clarifying questions (inside resolution criteria) often carry the
+        # dates/counts that outscore a digit-free market question. In free
+        # text the market question is reliably the LAST market-verb-shaped
+        # question -- clarifiers and instructions precede it -- so among
+        # candidates near the best score, prefer the last market-verb one.
+        best_score = max(candidates)[0]
+        market_shaped = [
+            c
+            for c in candidates
+            if c[0] >= best_score - _NEAR_BEST_WINDOW
+            and _MARKET_VERB_RE.match(c[3])
+            and not _META_STEM_RE.match(c[3])
+        ]
+        chosen = (
+            min(market_shaped, key=lambda c: c[2]) if market_shaped else max(candidates)
+        )
+        query, tier = chosen[3], "clause"
+    else:
+        query, tier = scan, "raw"
+    query = _truncate_query(query.replace('"', "").strip())
+    if not query:
+        # Degenerate prompts (only quotes/whitespace) must not strip down to
+        # an empty Serper query -- fall back to the unstripped prompt head.
+        query = _truncate_query(prompt.strip())
+    return ParsedPrompt(prompt, query, tier)
+
+
+def _flagged_null_result(
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    captured_source_content: Optional[Dict[str, Any]],
+    return_source_content: bool,
+    counter_callback: Optional[Callable[..., Any]],
+    context: str,
+    tier: str,
+    scan_truncated: bool = False,
+) -> MechResponse:
+    """Build the flagged null prediction returned on empty retrieval.
+
+    Unlike the with_key_rotation error null this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
+    trader consumer still parses it (issue #455). The on-chain JSON carries
+    only the four standard fields; the explicit marker for requesters lives in
+    used_params["empty_retrieval"] (off-chain metadata.params).
+
+    :param model: the model name recorded in used_params.
+    :param temperature: the temperature recorded in used_params.
+    :param max_tokens: the max_tokens recorded in used_params.
+    :param captured_source_content: the (empty) retrieval capture.
+    :param return_source_content: whether to attach the capture to used_params.
+    :param counter_callback: the cost callback, threaded back unchanged.
+    :param context: why the null was produced; recorded unconditionally in
+        used_params["null_reason"] so a skipped search ("empty query") stays
+        distinguishable from a genuine zero-hit ("live search").
+    :param tier: the parse_prompt tier that produced the search query.
+    :param scan_truncated: whether the scan window did not cover the whole
+        prompt (any non-template tier; a template match returns before the
+        window can matter).
+    :return: the flagged-null MechResponse tuple.
+    """
+    print(
+        f"[prediction-request-rag-v1] {context}: empty retrieval"
+        " -- returning null prediction"
+    )
+    null_result = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    used_params: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "empty_retrieval": True,
+        "null_reason": context,
+        "parse_tier": tier,
+        "scan_truncated": scan_truncated,
+    }
+    if return_source_content:
+        used_params["source_content"] = captured_source_content
+    return null_result, "", None, counter_callback, used_params
+
+
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
+
+    :param text: text that may carry JSON objects among prose.
+    :return: the decoded objects, and True if the text ends mid-object.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if tail.startswith('"'):
+                return found, True
+            idx = start + 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = max(end, start + 1)
+
+
+def extract_prediction(content: Optional[str]) -> Optional[str]:
+    """Return the forecast object from a completion, as a JSON string."""
+    if not content:
+        return content
+    candidates, cut_mid_object = _json_objects(content)
+    if cut_mid_object:
+        return None
+    for parsed in reversed(candidates):
+        try:
+            p_yes = float(parsed["p_yes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0.0 <= p_yes <= 1.0:
+            continue
+        return json.dumps(parsed)
+    return content
+
+
+def _is_forecast_object(extracted: str) -> bool:
+    """Whether `extracted` is a JSON object carrying a usable `p_yes`.
+
+    extract_prediction returns the completion unchanged when no candidate
+    qualifies, so the caller has to tell a selected forecast from a passthrough
+    before delivering it to a consumer that flat-``json.loads`` the result.
+
+    :param extracted: the extractor's return value.
+    :return: True when it parses as an object with an in-range `p_yes`.
+    """
+    try:
+        parsed = json.loads(extracted)
+        p_yes = float(parsed["p_yes"])
+    except (KeyError, TypeError, ValueError):
+        # json.JSONDecodeError is a ValueError, so a non-JSON passthrough and a
+        # forecast-less object both land here.
+        return False
+    return 0.0 <= p_yes <= 1.0
 
 
 def parser_prediction_response(response: str) -> str:
@@ -999,21 +1433,36 @@ def parser_prediction_response(response: str) -> str:
     tags = ["p_yes", "p_no", "info_utility", "confidence"]
     results = {}
 
+    if f"<{tags[0]}>" not in response:
+        # The prompt asks for the tag form, but a free-text (Pearl-shaped)
+        # prompt reliably elicits a JSON object instead -- splitting on a tag
+        # that is not there raised IndexError, and the old handler masked it.
+        # Hand those completions to the shared extractor so the delivery is the
+        # forecast object rather than the whole reasoning block.
+        extracted = extract_prediction(response)
+        if extracted is not None and _is_forecast_object(extracted):
+            return extracted
+        print("Not a valid answer from the model")
+        print(f"response = {response}")
+        raise ValueError("No forecast object found in the model response")
+
     for key in tags:
         try:
             value_str = response.split(f"<{key}>")[1].split(f"</{key}>")[0].strip()
-            value = float(value_str)
-            results[key] = value
+            results[key] = float(value_str)
         except Exception as e:
+            # Report the failure itself: the value never got assigned on this
+            # path, so naming it here raised UnboundLocalError and hid the
+            # real error.
             print("Not a valid answer from the model")
             print(f"response = {response}")
-            raise ValueError(f"Error for {key}: {value}") from e
+            raise ValueError(f"Error for {key}: {type(e).__name__}: {e}") from e
 
     return json.dumps(results)
 
 
 @with_key_rotation
-def run(
+def run(  # pylint: disable=too-many-locals
     **kwargs: Any,
 ) -> Union[float, MechResponse]:
     """Run the task"""
@@ -1045,7 +1494,30 @@ def run(
         llm_client,
         embedding_client,
     ):
-        prompt = extract_question(kwargs["prompt"])
+        prompt = kwargs["prompt"]
+        question, search_query, tier = parse_prompt(prompt)
+        # The scan window not covering the whole prompt is observable on its
+        # own: even a clause-tier pick may have missed the real question
+        # sitting past the window (not only the raw-tier no-clause case).
+        # A template match is exempt: it returns the exact question before
+        # the window plays any role, so nothing can have been missed.
+        scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
+        if scan_truncated:
+            print(
+                f"[prediction-request-rag-v1] Scan window exhausted: "
+                f"prompt is {len(prompt)} chars, scanned the first "
+                f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
+            )
+        elif tier == "raw":
+            print(
+                "[prediction-request-rag-v1] No question clause found; "
+                f"using capped prompt head as the search query: {search_query!r}"
+            )
+        elif tier == "clause":
+            print(
+                f"[prediction-request-rag-v1] Free-text prompt (tier={tier}); "
+                f"derived search query: {search_query!r}"
+            )
         max_tokens = kwargs.get("max_tokens", LLM_SETTINGS[model]["default_max_tokens"])
         temperature = kwargs.get("temperature", LLM_SETTINGS[model]["temperature"])
         num_urls = kwargs.get("num_urls", DEFAULT_NUM_URLS)
@@ -1073,30 +1545,71 @@ def run(
             raise ValueError(
                 f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
             )
-        additional_information, source_content, counter_callback = (
-            fetch_additional_information(
-                client=llm_client,
-                client_embedding=embedding_client,
-                prompt=prompt,
+        if kwargs.get("source_content", None) is None and not any(
+            ch.isalnum() for ch in search_query
+        ):
+            # Nothing searchable: no alphanumeric character at all (empty,
+            # whitespace, quotes, or bare punctuation) -- skip the wasted
+            # query-brainstorm and search calls and return the flagged null
+            # directly. A replay call carries its own captured documents, so
+            # the query is never used and the capture must not be discarded.
+            return _flagged_null_result(
                 model=model,
-                google_api_key=google_api_key,
-                google_engine_id=google_engine_id,
-                serper_api_key=serper_api_key,
-                search_provider=search_provider,
-                counter_callback=counter_callback,
-                source_content=kwargs.get("source_content", None),
-                source_content_mode=source_content_mode,
-                num_urls=num_urls,
-                num_queries=num_queries,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                captured_source_content=None,
+                return_source_content=return_source_content,
+                counter_callback=counter_callback,
+                context="empty query",
+                tier=tier,
+                scan_truncated=scan_truncated,
             )
-        )
+        cached_source_content = kwargs.get("source_content", None)
+        try:
+            additional_information, source_content, counter_callback = (
+                fetch_additional_information(
+                    client=llm_client,
+                    client_embedding=embedding_client,
+                    prompt=question,
+                    model=model,
+                    google_api_key=google_api_key,
+                    google_engine_id=google_engine_id,
+                    serper_api_key=serper_api_key,
+                    search_provider=search_provider,
+                    counter_callback=counter_callback,
+                    source_content=cached_source_content,
+                    source_content_mode=source_content_mode,
+                    num_urls=num_urls,
+                    num_queries=num_queries,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    search_query=search_query,
+                )
+            )
+        except EmptyRetrievalError:
+            # Retrieval came back empty (zero hits live, or an empty cached
+            # capture on replay) -- return the flagged null instead of an
+            # opaque error string (issue #455).
+            return _flagged_null_result(
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                captured_source_content=cached_source_content,
+                return_source_content=return_source_content,
+                counter_callback=counter_callback,
+                context=(
+                    "cached replay"
+                    if cached_source_content is not None
+                    else "live search"
+                ),
+                tier=tier,
+                scan_truncated=scan_truncated,
+            )
 
         # Generate the prediction prompt
         prediction_prompt = PREDICTION_PROMPT.format(
             ADDITIONAL_INFORMATION=additional_information,
-            USER_PROMPT=prompt,
+            USER_PROMPT=question,
         )
 
         # Generate the prediction
@@ -1117,6 +1630,8 @@ def run(
             "max_tokens": max_tokens,
             "num_urls": num_urls,
             "num_queries": num_queries,
+            "parse_tier": tier,
+            "scan_truncated": scan_truncated,
         }
         if return_source_content:
             used_params["source_content"] = source_content

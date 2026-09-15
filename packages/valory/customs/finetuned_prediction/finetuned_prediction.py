@@ -340,14 +340,48 @@ def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
     return completion or ""
 
 
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
 def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
     """Every top-level JSON object in `text`, plus whether the tail is cut off.
 
     The second value is True when an object opens after the last complete one
-    and never closes. That is what a `max_tokens` cut looks like when it lands
-    while the model is writing the answer, and it has to be distinguished from
-    a complete-but-irrelevant trailing object: both leave a valid forecast
-    earlier in the text, but only one of them means that forecast is a draft.
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
 
     :param text: text that may carry JSON objects among prose.
     :return: the decoded objects, and True if the text ends mid-object.
@@ -359,21 +393,27 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
         start = text.find("{", idx)
         if start < 0:
             return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if tail.startswith('"'):
+                return found, True
+            idx = start + 1
+            continue
         try:
             obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
-            # Distinguish a cut from junk by whether the opener ever closes.
-            # A `max_tokens` cut lands mid-object and leaves no closing brace
-            # at all; a malformed-but-complete object ({"p_yes": }) and a
-            # stray brace in prose both still have one. Only the first means
-            # the forecast before it is a draft.
-            if "}" not in text[start:]:
-                return found, True
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
             idx = start + 1
             continue
         if isinstance(obj, dict):
             found.append(obj)
-        idx = end
+        idx = max(end, start + 1)
 
 
 def extract_json(

@@ -324,11 +324,51 @@ OUTPUT_FORMAT
 """
 
 
-def _json_objects(text: str) -> List[Dict[str, Any]]:
-    """Every top-level JSON object in `text`, in order of appearance.
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
 
     :param text: text that may carry JSON objects among prose.
-    :return: the decoded objects, nested values included.
+    :return: the decoded objects, and True if the text ends mid-object.
     """
     decoder = json.JSONDecoder()
     found: List[Dict[str, Any]] = []
@@ -336,12 +376,23 @@ def _json_objects(text: str) -> List[Dict[str, Any]]:
     while True:
         start = text.find("{", idx)
         if start < 0:
-            return found
+            return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if tail.startswith('"'):
+                return found, True
+            idx = start + 1
+            continue
         try:
             obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
-            # Not the start of an object (a stray brace, a '{' in prose):
-            # step past it rather than giving up on the rest of the text.
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
             idx = start + 1
             continue
         if isinstance(obj, dict):
@@ -350,29 +401,18 @@ def _json_objects(text: str) -> List[Dict[str, Any]]:
 
 
 def extract_prediction(content: Optional[str]) -> Optional[str]:
-    """Return the forecast object from a completion, as a JSON string.
-
-    The prompt asks for a seven-step reasoning scaffold AND for JSON only.
-    The model resolves that by prompt length: a short trader-template question
-    yields bare JSON, a long free-text one yields the full
-    `<facts>/<thinking>/<answer>` block with the forecast at the END. Delivering
-    the block verbatim breaks the documented output contract (tool_schemas.yaml
-    describes `result` as JSON), so slice the forecast out.
-
-    Walks candidates from the end and skips objects with no coercible `p_yes`,
-    so a tentative value written mid-reasoning cannot shadow the final answer.
-    Returns the content unchanged when no candidate qualifies, leaving the
-    existing error path to surface it.
-
-    :param content: the raw model completion.
-    :return: the forecast object as JSON, or `content` when none is found.
-    """
+    """Return the forecast object from a completion, as a JSON string."""
     if not content:
         return content
-    for parsed in reversed(_json_objects(content)):
+    candidates, cut_mid_object = _json_objects(content)
+    if cut_mid_object:
+        return None
+    for parsed in reversed(candidates):
         try:
-            float(parsed["p_yes"])
+            p_yes = float(parsed["p_yes"])
         except (KeyError, TypeError, ValueError):
+            continue
+        if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
     return content

@@ -586,6 +586,85 @@ def _make_throttled_api_keys(openai_retries: int, openrouter_retries: int) -> Ma
     return mock
 
 
+class TestExtractPrediction:
+    """The delivery must be the forecast object, never the reasoning block."""
+
+    def test_bare_json_is_returned_unchanged(self) -> None:
+        """The trader-template shape already emits JSON and must not change."""
+        bare = '{"p_yes": 0.19, "p_no": 0.81, "confidence": 0.8, "info_utility": 0.7}'
+        assert json.loads(module.extract_prediction(bare) or "")["p_yes"] == 0.19
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """A free-text completion delivers the trailing object, not the block."""
+        # The shape a free-text prompt actually produces: the prompt asks for
+        # the seven-step scaffold AND for JSON only, and the model does both.
+        completion = (
+            "<facts>\n- BTC must print at or above 150000.\n</facts>\n"
+            "<no>\n1. Requires an unprecedented rally. (Strength: 8)\n</no>\n"
+            "<thinking>\nWeighing base rates against the sources.\n</thinking>\n"
+            "<tentative>\n0.08\n</tentative>\n"
+            "<answer>\n*0.06*\n</answer>\n"
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}'
+        )
+        out = module.extract_prediction(completion) or ""
+        parsed = json.loads(out)
+        assert parsed == {
+            "p_yes": 0.06,
+            "p_no": 0.94,
+            "confidence": 0.7,
+            "info_utility": 0.6,
+        }
+        assert "<facts>" not in out
+
+    def test_a_tentative_value_does_not_shadow_the_answer(self) -> None:
+        """An earlier object in the reasoning must not win over the final one."""
+        completion = (
+            'Draft so far: {"p_yes": 0.9, "p_no": 0.1} but revising down.\n'
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object with no usable p_yes must not shadow the forecast."""
+        completion = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"note": "sources retrieved"}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    def test_a_completion_with_no_forecast_is_left_untouched(self) -> None:
+        """With nothing to extract the caller's error path must still see it."""
+        assert module.extract_prediction("no json at all") == "no json at all"
+        assert module.extract_prediction(None) is None
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_delivers_parseable_json_for_a_reasoning_completion(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() delivers the forecast object, not the raw reasoning block."""
+        # Pins the WIRING, not just the helper: without extract_prediction on
+        # the completion path this delivers the whole scaffold and the
+        # requester's json.loads raises.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = (
+            "<facts>\n- BTC must print at or above 150000.\n</facts>\n"
+            "<thinking>\nWeighing base rates.\n</thinking>\n"
+            "<answer>\n*0.06*\n</answer>\n"
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}'
+        )
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert json.loads(result[0])["p_yes"] == 0.06
+        assert "<facts>" not in result[0]
+
+
 class TestRateLimitExhaustionNull:
     """with_key_rotation must not let a rate-limit exhaustion escape as an exception."""
 

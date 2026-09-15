@@ -1172,6 +1172,20 @@ class TestSerperShapeGuard:
         assert urls == []  # pylint: disable=use-implicit-booleaness-not-comparison
 
     @patch(f"{REASONING_MODULE}.requests.request")
+    def test_a_systemic_http_status_is_not_swallowed(
+        self, mock_request: MagicMock
+    ) -> None:
+        """A 401/403/429 fails every query alike, so it must surface."""
+        # HTTPError subclasses RequestException: without a dedicated arm it
+        # lands in the transport bucket, urls ends empty and the delivery is a
+        # flagged null indistinguishable on-chain from a genuine zero-hit.
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("401 Unauthorized")
+        mock_request.return_value = resp
+        with pytest.raises(requests.HTTPError):
+            get_urls_from_queries_serper(["q1", "q2"], "key", num=3)
+
+    @patch(f"{REASONING_MODULE}.requests.request")
     def test_valid_serper_body_yields_links(self, mock_request: MagicMock) -> None:
         """A well-formed organic list still yields its links."""
         mock_request.return_value = MagicMock(

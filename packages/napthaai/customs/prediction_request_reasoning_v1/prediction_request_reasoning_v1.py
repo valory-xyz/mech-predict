@@ -839,7 +839,18 @@ def get_urls_from_queries_serper(
             # integration (a quota-error body hits every query alike), not a
             # zero-hit -- surface it as an error null instead of swallowing.
             raise
-        except Exception as e:
+        except requests.HTTPError:
+            # An auth or quota status (401/403/429) is systemic: every query in
+            # the loop fails it identically, so swallowing leaves urls empty and
+            # the tool delivers a flagged null that is indistinguishable on-chain
+            # from a genuine zero-hit. HTTPError subclasses RequestException, so
+            # this arm must precede the transport arm below to be reachable.
+            raise
+        except requests.RequestException as e:
+            # A genuine per-query transport blip (connection reset, read
+            # timeout): the other queries can still succeed, so skip this one.
+            print(f"Transport error fetching URLs for query '{query}': {e}")
+        except Exception as e:  # noqa: BLE001
             print(f"Error fetching URLs for query '{query}': {e}")
     return list(set(urls))
 

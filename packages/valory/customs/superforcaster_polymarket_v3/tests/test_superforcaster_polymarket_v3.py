@@ -164,7 +164,10 @@ class TestParsePrompt:
         # Free-text prompts elicit the evidence block before the verdict.
         # Observed production completions ran to 1016 tokens, where a 500
         # cap truncated before any JSON was emitted at all.
-        assert DEFAULT_OPENAI_SETTINGS["max_tokens"] >= 2048
+        # Pins the VALUE, not a floor: a wiring test alone leaves anything in
+        # [2048, 4095] invisible to CI. The Anthropic branch is already pinned
+        # exactly, so this brings the OpenAI branch in line.
+        assert DEFAULT_OPENAI_SETTINGS["max_tokens"] == 4096
 
 
 class TestEmptyRetrievalGuard:

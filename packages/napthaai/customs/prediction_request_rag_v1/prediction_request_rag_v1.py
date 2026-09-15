@@ -535,6 +535,17 @@ def count_tokens(text: str, model: str, client: Optional["LLMClient"] = None) ->
     return len(enc.encode(text))
 
 
+def _dedup_queries(queries: List[str]) -> List[str]:
+    """Drop duplicate search queries, keeping the first occurrence of each."""
+    # Keyed on the normalized form so trivial spacing or casing differences do
+    # not sneak a second identical search call through; the value keeps the
+    # original text, and dict insertion order keeps the sequence stable.
+    unique: Dict[str, str] = {}
+    for query in queries:
+        unique.setdefault(query.strip().casefold(), query)
+    return list(unique.values())
+
+
 def multi_queries(
     client: "LLMClient",
     prompt: str,
@@ -585,7 +596,7 @@ def multi_queries(
     # Drop repeats while keeping the original order: the brainstormer can hand
     # back a string identical to the compressed search query, and every repeat
     # buys the same search results a second time.
-    queries = list(dict.fromkeys(queries))
+    queries = _dedup_queries(queries)
 
     return queries, counter_callback
 

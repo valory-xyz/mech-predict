@@ -2,8 +2,8 @@
     "dev": {
         "custom/dvilela/corcel_request/0.1.0": "bafybeic74xc32orfiffumv3cxe7o4vktzobk6gszjecuhto4or7k5ppi5y",
         "custom/dvilela/gemini_prediction/0.1.0": "bafybeifpoil2wjh6hr7sqoomlilhsyt3ktpy6tjzmisrlopxcjbkr3hhfq",
-        "custom/napthaai/prediction_request_rag_v1/0.1.0": "bafybeibherxo6bj5syxafloxoteqedwyab5depsere7xwu4taoq5z5uxzm",
-        "custom/napthaai/prediction_request_reasoning_v1/0.1.0": "bafybeidobn4v3caw6s6gynkahoq2vffq5dbn34fomu7mfs6grntl6tn5z4",
+        "custom/napthaai/prediction_request_rag_v1/0.1.0": "bafybeigza7i345uzn4veynhz4ryd7dperswbuovb4og6qdiqbif44ony2y",
+        "custom/napthaai/prediction_request_reasoning_v1/0.1.0": "bafybeig4cnxw6yu6axvgn7z6yelioeabxong7mkar2dmmq5qrvjw63jgse",
         "custom/napthaai/prediction_url_cot_v1/0.1.0": "bafybeife4x6syyji4jtfbg2jmxec7b2bv3z6d4lkvj6a7da5nhelrunyja",
         "custom/napthaai/resolve_market_reasoning/0.1.0": "bafybeidji6or6kpmawho64tc7qetinykhrklvv2gmnqfcd6ejmg43j3i7q",
         "custom/nickcom007/prediction_request_sme/0.1.0": "bafybeifsk4og24t22agcrj7mm6fz3wxwfbdg554yjhc6odpxal5ofg22ti",
@@ -18,18 +18,19 @@
         "custom/valory/propose_question/0.1.0": "bafybeif2dmjftef7pnixwnutn42tdaxbbr77anl5ixsv6kwsxnk7sm6fni",
         "custom/valory/resolve_market/0.1.0": "bafybeiaozazbggoglwrnfyn5v2qebyn4y4jpaxxbdodi3bd5eyieo4a55i",
         "custom/valory/resolve_market_jury/0.1.0": "bafybeigdv6zbbuf2flnti7hfwbotagnqz43g76v2jfhcuk4ancucxmg5gi",
-        "custom/valory/superforcaster/0.1.0": "bafybeidkraklf5c6rkv6g7y7lqj2woy4j5u5dmupjez6mtjhdek3lzbmki",
-        "custom/valory/superforcaster_calibrated_full_search/0.1.0": "bafybeialuhbtfumvlbdtzimfn7wdacqwccn2ny5cbhi4tkri6iih6pfgxe",
-        "custom/valory/superforcaster_full_search/0.1.0": "bafybeihba6ch6g7gndfwv75dtpfrpnvg4dw6wq6lxexch5h3n3vjafuxsm",
+        "custom/valory/superforcaster/0.1.0": "bafybeiejfgdbtlm6y5ak224nmjx3xnqieerz5oavuhthm3klqx7ge7fs6a",
+        "custom/valory/superforcaster_calibrated_full_search/0.1.0": "bafybeicjycpoey5vpdtxrvhku7azmcszdv43usldn7egogwmjfin6qyuli",
+        "custom/valory/superforcaster_full_search/0.1.0": "bafybeiggj6zjgp6yw7xw7csubnhgsrolsjzclo5fxhgnennbc7wgw74opm",
         "custom/valory/superforcaster_market_aware/0.1.0": "bafybeiecvkdx2zjezc5aslnpg4nbw25rsbrc7xtpywbkjv3d47tdvskhgq",
-        "custom/valory/superforcaster_polymarket_v1/0.1.0": "bafybeiawfhy3w5aclmxm5zxebwd5l7paseqlgmihwbqfyhcdpn2kccgtrq",
+        "custom/valory/superforcaster_polymarket_v1/0.1.0": "bafybeiea65byyzqoylhspa6qjzfcb3kia2fh2fokbrm6eh7bbxlh3fxr5y",
         "custom/valory/superforcaster_polymarket_v2/0.1.0": "bafybeigopot226az3ida2rwlamlr2isi4i2m3nk36dtzug3w3jvnk673uy",
-        "custom/valory/superforcaster_polymarket_v3/0.1.0": "bafybeiemkdmmfl4eewu26hu6xxr2ratnhyerfizya4bsq5bi2acjqt3bqu",
+        "custom/valory/superforcaster_polymarket_v3/0.1.0": "bafybeifpp73ncgdfcjrxkhfspm6avzt25xvnrws5eppgo4svfv5bj3uw7a",
         "custom/valory/superforcaster_polymarket_v4/0.1.0": "bafybeiefu5cetnebkr2yza6yn6la2ldkwvn2pjlgcmew2e6fblnyjh5roq",
         "custom/victorpolisetty/dalle_request/0.1.0": "bafybeiadatvfc6opcsmhpxxzmsqpwgbckblciqypx2iwe5uwove6nmki3e",
         "custom/victorpolisetty/gemini_request/0.1.0": "bafybeiamjk5mfycjqkstkzymggako2jt7yjros2zx4l54zyuei2xkj4gqu",
-        "agent/valory/mech_predict/0.1.0": "bafybeiaodrc3pxz4mwa7hcvv2fxm6zxgyzpnl5ph5tj5jyemua66zwzb34",
-        "service/valory/mech_predict/0.1.0": "bafybeiep53r4ox2dualtofxg77tzmbg54ufkqvy3dbp6nhl4vg2rotlg74"
+        "custom/valory/superforcaster_full_search_olas_predict_r1_14b/0.1.0": "bafybeidvg6kgq7fgmfgp4fqe7aaqsukjko3ctv6oo5xme73i7jo2f56qae",
+        "agent/valory/mech_predict/0.1.0": "bafybeieuxkjhnfersx5i6pl73jkrs4wwvnarl2fydhz66g4uzkqrtgvwmi",
+        "service/valory/mech_predict/0.1.0": "bafybeib42c2o4kutuagz3lt5u6y4lngcmtwoxkyu2r7witylye4mbkaogi"
     },
     "third_party": {
         "protocol/open_aea/signing/1.0.0": "bafybeifsjmldwyki3beqyvdt5lzenrg6wyrqaar5plc5rpnvtc4zlentye",
@@ -70,8 +71,8 @@
         "skill/valory/reset_pause_abci/0.1.0": "bafybeifrnmlscfiki7wojs6zasppefupd2wkjyq6orhdllfppjud7isrxi",
         "skill/valory/termination_abci/0.1.0": "bafybeih6sa2ttcvvjk7rcfn7ure2ws23kcfufssb4qmluzcfvednkfpvoi",
         "skill/valory/delivery_rate_abci/0.1.0": "bafybeifjiazvf3qhr2264i55u4tlvmyf6ztgak2ndqolujt4kw6jiy7l3m",
-        "skill/valory/mech_abci/0.1.0": "bafybeib6fe2v3mvcey454zgu4exkuci2or2c374cyxvesbki546ejfjpri",
-        "skill/valory/task_execution/0.1.0": "bafybeicrkwz2m2qnwngxiues2rywm3twcj67cq4pyhfrgzp5dxiwbzuntm",
-        "skill/valory/task_submission_abci/0.1.0": "bafybeid3rhrgxtiqfhsh4dip53q6u6ct7vfg3vhgs53vb4vhk7qkhxqaiq"
+        "skill/valory/mech_abci/0.1.0": "bafybeigazj3f7byohtdxcah34znlfis7o4xrizfxqapvbgrhxmysyx22pa",
+        "skill/valory/task_execution/0.1.0": "bafybeifplbillwkoiq4g6ofo6xsrlbafvmtepdq6evszaymfwgb3xshafy",
+        "skill/valory/task_submission_abci/0.1.0": "bafybeiaeaojq66oo2jxlawc6b3i4wdcalbaddnwpmnucm2ilogna2wzqwi"
     }
 }

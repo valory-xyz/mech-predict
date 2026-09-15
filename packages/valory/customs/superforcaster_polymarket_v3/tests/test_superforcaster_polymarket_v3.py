@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymarket_v3 import (
+    DEFAULT_OPENAI_SETTINGS,
     _MAX_SCAN_CHARS,
     _MAX_SEARCH_QUERY_LEN,
     parse_prompt,
@@ -153,6 +154,13 @@ class TestParsePrompt:
         question, _, tier = parse_prompt(prompt)
         assert tier == "raw"
         assert question == prompt
+
+    def test_default_max_tokens_admits_a_full_free_text_completion(self) -> None:
+        """The default cap clears an observed free-text completion."""
+        # Free-text prompts elicit the evidence block before the verdict.
+        # Observed production completions ran to 1016 tokens, where a 500
+        # cap truncated before any JSON was emitted at all.
+        assert DEFAULT_OPENAI_SETTINGS["max_tokens"] >= 2048
 
 
 class TestEmptyRetrievalGuard:

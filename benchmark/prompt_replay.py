@@ -2124,6 +2124,22 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
     # self-hosted vLLM, and parse their own output — so they skip the family
     # template-pull / hosted-API key selection / structured-output path below.
     is_vllm_candidate = TOOL_REGISTRY[candidate_tool_name].backend == VLLM_BACKEND
+    # A candidate that defines `resolve_model` pins its own served checkpoint on
+    # a self-hosted endpoint. Routed down the hosted branch it would silently be
+    # replayed against `--model` (default gpt-4.1) using this tool's prompt, and
+    # the report would carry the tool's name over another model's numbers -- a
+    # wrong answer where the registry mismatch used to raise. Refuse instead.
+    if not is_vllm_candidate and hasattr(candidate_module, "resolve_model"):
+        raise ValueError(
+            f"Candidate '{candidate_tool_name}' resolves its own served model "
+            f"(it defines resolve_model), so it runs on a self-hosted endpoint, "
+            f"but its TOOL_REGISTRY entry has backend="
+            f"'{TOOL_REGISTRY[candidate_tool_name].backend}'. Replaying it on "
+            f"the hosted path would measure that backend's model and report it "
+            f"under this tool's name. Register it with backend='"
+            f"{VLLM_BACKEND}' (and provide the vLLM candidate interface), or "
+            f"do not replay it."
+        )
     # The vLLM path renders a superforcaster-shaped <background> forecaster prompt
     # from the baseline's extracted question + sources, so it only makes sense
     # against a superforcaster-family baseline. Other families extract those

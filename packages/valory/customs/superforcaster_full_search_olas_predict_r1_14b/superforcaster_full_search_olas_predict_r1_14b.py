@@ -16,7 +16,18 @@
 #   limitations under the License.
 #
 # ------------------------------------------------------------------------------
-"""Contains the job definitions"""
+"""Olas-Predict-R1-14B forecasting tool.
+
+A sibling of `superforcaster_full_search` that keeps its evidence pipeline and
+forecasting prompt and swaps the forecaster for Olas-Predict-R1-14B, a
+fine-tuned DeepSeek-R1-Distill-Qwen-14B served from a self-hosted vLLM endpoint
+(OpenAI-compatible, so the client differs only by `base_url`).
+
+What differs from the parent: the client is pointed at the vLLM endpoint from
+the KeyChain, the served model is fixed per tool name rather than taken from the
+request, and the completion is stripped of the model's `<think>` block before
+the JSON is parsed. Rationale and evaluation results are in the pull request.
+"""
 
 import functools
 import json
@@ -86,12 +97,10 @@ def with_key_rotation(func: Callable) -> Callable:
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 # try with a new key again
-                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                if retries_left[VLLM_SERVER_API_KEY] <= 0:
                     raise e
-                retries_left["openai"] -= 1
-                retries_left["openrouter"] -= 1
-                api_keys.rotate("openai")
-                api_keys.rotate("openrouter")
+                retries_left[VLLM_SERVER_API_KEY] -= 1
+                api_keys.rotate(VLLM_SERVER_API_KEY)
                 return execute()
             except Exception as e:  # noqa: BLE001
                 # Return a parseable null-prediction JSON (matches
@@ -115,17 +124,30 @@ def with_key_rotation(func: Callable) -> Callable:
     return wrapper
 
 
+# KeyChain services carrying the vLLM endpoint and its key. The KeyChain is the
+# only config channel that reaches a component running as bytes published from
+# IPFS, so the endpoint rides it alongside the key.
+#
+# Named for what they ARE -- a vLLM server URL and its key -- not for the
+# prototype tool that happens to share the machine today. These names are the
+# deployment contract: they must match the entries in each mech's 1Password
+# `api-keys` item exactly, and a rename after deployment fails every delivery.
+VLLM_SERVER_API_KEY = "vllm_server_api_key"
+VLLM_SERVER_URL = "vllm_server_url"
+
+
 class OpenAIClientManager:
     """Client context manager for OpenAI."""
 
-    def __init__(self, api_key: str):
-        """Initializes with API keys"""
+    def __init__(self, api_key: str, base_url: str):  # noqa: DAR101
+        """Initializes with the vLLM key and base URL"""
         self.api_key = api_key
+        self.base_url = base_url
         self._client: Optional["OpenAIClient"] = None
 
     def __enter__(self) -> "OpenAIClient":
         """Initializes and returns LLM client."""
-        self._client = OpenAIClient(api_key=self.api_key)
+        self._client = OpenAIClient(api_key=self.api_key, base_url=self.base_url)
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
@@ -160,10 +182,15 @@ class OpenAIResponse:
 class OpenAIClient:
     """OpenAI Client"""
 
-    def __init__(self, api_key: str):
-        """Initializes with API keys and client."""
+    def __init__(self, api_key: str, base_url: str):
+        """Initializes a client bound to the authenticated vLLM endpoint.
+
+        :param api_key: API key for the vLLM gateway.
+        :param base_url: OpenAI-compatible vLLM endpoint URL.
+        """
         self.api_key = api_key
-        self.client = openai.OpenAI(api_key=self.api_key)
+        self.base_url = base_url
+        self.client = openai.OpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def completions(
         self,
@@ -193,6 +220,16 @@ class OpenAIClient:
         return response
 
 
+def budget_tokens(text: str, model: str) -> int:
+    """Token count for window budgeting, scaled for the tokeniser mismatch.
+
+    :param text: the text to size.
+    :param model: model name for tokeniser selection.
+    :return: a deliberately conservative token count.
+    """
+    return int(count_tokens(text, model) * TOKENIZER_SAFETY_FACTOR) + 1
+
+
 def count_tokens(text: str, model: str) -> int:
     """Count the number of tokens in a text."""
     try:
@@ -204,17 +241,89 @@ def count_tokens(text: str, model: str) -> int:
     return len(enc.encode(text))
 
 
-# max_tokens matches the rest of the superforcaster fleet. At 500 a free-text
-# prompt truncates mid-reasoning and the delivery carries no parseable JSON at
-# all: the model emits its evidence block before the verdict, and observed
-# free-text completions run 786-1016 tokens. It is a ceiling, not a spend --
-# trader-template requests still complete in well under 100 tokens.
-DEFAULT_OPENAI_SETTINGS = {
-    "max_tokens": 4096,
+# The served model's context window (vLLM `--max-model-len`). The tools this
+# package descends from target GPT-4.1, where prompt length is a non-issue; here
+# the prompt AND the completion must fit in 8k together, so the two are budgeted
+# against each other rather than capped independently.
+MODEL_CONTEXT_WINDOW = 8192
+# The chat template wraps the messages in tokens this tokeniser never sees.
+CONTEXT_SAFETY_MARGIN = 256
+# `count_tokens` uses tiktoken, which has no Qwen encoding and falls back to
+# o200k_base -- so every budget here is an ESTIMATE in the wrong tokeniser.
+# Measured against the endpoint's reported prompt_tokens on four prompt shapes:
+#   english news 1.058 | unicode es+jp 1.078 | bare template 1.033
+#   numeric/URL-heavy 1.158   <- market evidence is full of prices, dates, URLs
+# At 1.158 a full prompt under-counts by ~740 tokens, far past the 256 margin,
+# and the request is rejected with a 400. Scale the estimate instead of
+# trusting it; 1.25 leaves headroom above the worst shape measured.
+TOKENIZER_SAFETY_FACTOR = 1.25
+# The requester supplies `max_tokens` (the mech forwards task_data), so it is
+# untrusted in the same way `model` is. Left unclamped, a value near the window
+# drives the evidence budget to zero and the tool forecasts on no evidence at
+# all while still returning a normal-looking answer. The prompt keeps this
+# floor; a request asking for more completion than that is capped.
+MIN_PROMPT_BUDGET = 3000
+# 2048, not the fleet's 4096. Issue #455 raised the fleet value so free-text
+# completions are not truncated before the JSON, and the same reasoning applies
+# to a <think> block -- but at 4096 only 4096 remain for the prompt, which the
+# evidence block alone exceeds. Observed completions from this model run
+# 394-523 tokens, so 2048 is roughly 4x the longest seen while leaving 6144 for
+# the prompt.
+DEFAULT_MODEL_SETTINGS = {
+    "max_tokens": 2048,
     "temperature": 0,
 }
-DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
-ALLOWED_TOOLS = ["superforcaster_full_search"]
+# The Olas-Predict served model emits reasoning followed by JSON, often inside
+# a markdown fence. The delivery must contain only the validated JSON object.
+# Reasoning models emit a think block before the answer. Two shapes occur:
+# `<think>...</think>{json}` when the model writes both tags, and a BARE
+# `...</think>{json}` when the chat template already supplied the opener. The
+# bare shape is the common one for DeepSeek-R1 templates, so matching only the
+# paired form leaves the whole reasoning in place -- and the reasoning contains
+# draft probabilities. Everything before the LAST `</think>` is dropped.
+# Case-insensitive throughout: the tags come from the chat template, which is a
+# deployment artifact we do not control. A template emitting <THINK> would make
+# a case-sensitive guard silently no-op and put draft probabilities back in play.
+THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
+# NB no regex: a character class cannot match a nested object, so
+# `{"p_yes": 0.8, ..., "meta": {"a": 1}}` -- a perfectly good forecast with one
+# extra key -- would be skipped and the whole delivery lost to a null.
+# raw_decode handles nesting and gives the object's true extent.
+# One wire name. The two platform-suffixed names this replaces resolved to the
+# same package, the same served model, and identical code -- nothing branched on
+# which was called. Platform selection happens in the deployment env, not here.
+TOOL_NAME = "superforcaster_full_search_olas_predict_r1_14b"
+ALLOWED_TOOLS = [TOOL_NAME]
+
+# vLLM --served-model-name (the SFT warm-start checkpoint; the server renamed it
+# from `qwen-14b-sft` on 2026-09-14 and the old name now 404s), resolved from the
+# tool rather than the request. The
+# mech's `model` kwarg is requester-controlled (`task_data.get("model",
+# params.default_model)`), and the benchmark tournament passes its own default,
+# so honouring it would send this endpoint a checkpoint it does not serve. The
+# requester picks the tool; the tool picks the model.
+SERVED_MODEL = "olas-predict-r1-14b"
+# Derived, not hand-listed: a third wire name added to ALLOWED_TOOLS without a
+# matching entry would otherwise KeyError at delivery time rather than here.
+MODEL_BY_TOOL = {tool: SERVED_MODEL for tool in ALLOWED_TOOLS}
+
+
+def resolve_model(tool: str) -> str:
+    """Return the vLLM served-model name for `tool`.
+
+    :param tool: One of `ALLOWED_TOOLS`.
+    :return: The served-model name to request from the vLLM endpoint.
+    """
+    return MODEL_BY_TOOL[tool]
+
+
+# The question is interpolated TWICE into the prompt, so a long free-text
+# prompt (Pearl sends the user's message verbatim) costs double. Capped so it
+# can never crowd out the evidence entirely.
+_MAX_QUESTION_TOKENS = 1200
+
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
@@ -232,11 +341,12 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 
 # Cap on the rendered <background> evidence block to bound prompt size and
 # avoid lost-in-the-middle degradation when an outlier page returns a very
-# long body. Trailing organic items are dropped (Serper orders by relevance)
-# until the rendered block fits. Same trailing-drop pattern as
-# factual_research (which caps at 3000); budget set to 4000 here to fit
-# observed evidence sizes with headroom. Not load-bearing for gpt-4.1's
-# 1M context but bounds cost and guards against outlier pages.
+# long body. peopleAlsoAsk is dropped first, then trailing organic items
+# (Serper orders organic by relevance), until the rendered block fits --
+# see _cap_evidence_block. Budget set to 4000, against factual_research's 3000, to fit
+# observed evidence sizes with headroom. On this model's 8k window it is the
+# tighter of two ceilings -- the other being what the window physically allows
+# -- so unlike the parent it binds in practice, not just in theory.
 MAX_EVIDENCE_TOKENS = 4000
 
 
@@ -360,14 +470,101 @@ def generate_prediction_with_retry(
                 )
 
             return response.content, counter_callback
+        except openai.RateLimitError as e:
+            # Retry HERE first -- re-raising immediately would send every 429 to
+            # with_key_rotation, which re-runs all of run() including the Serper
+            # search and the page scrapes. But on exhaustion re-raise the
+            # ORIGINAL RateLimitError rather than wrapping it: with_key_rotation
+            # dispatches on that exact type, so a RuntimeError would silently
+            # disable key rotation for the one case it exists to handle.
+            print(f"Attempt {attempt + 1} rate-limited: {e}")
+            time.sleep(delay)
+            attempt += 1
+            last_error = e
         except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
             last_error = e
+    if isinstance(last_error, openai.RateLimitError):
+        raise last_error
     raise RuntimeError(
         f"Failed to generate prediction after retries: {last_error}"
     ) from last_error
+
+
+def _coerce_unit_interval(value: Any, default: float = 0.5) -> float:
+    """Coerce a value to a float in [0, 1], falling back to `default`."""
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not 0.0 <= coerced <= 1.0:
+        return default
+    return coerced
+
+
+def _json_objects(text: str) -> List[Dict[str, Any]]:
+    """Every top-level JSON object in `text`, in order of appearance.
+
+    :param text: text that may contain JSON objects among prose.
+    :return: the decoded objects, nested values included.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = end
+
+
+def canonical_prediction(completion: Optional[str]) -> Optional[str]:
+    """Build the delivery JSON from an Olas-Predict reasoning completion.
+
+    :param completion: Raw completion from the Olas-Predict endpoint.
+    :return: Clean prediction JSON, or None when no valid p_yes exists.
+    """
+    if not completion:
+        return None
+    # An opener with no closer means the completion was cut off mid-reasoning
+    # (the token budget ran out). Everything present is therefore a DRAFT, and
+    # harvesting one would deliver a working estimate as the final answer --
+    # the same failure the think strip exists to prevent. There is no answer to
+    # recover here, so return None and let the caller surface the error.
+    if THINK_OPEN_RE.search(completion) and not THINK_CLOSE_RE.search(completion):
+        return None
+    # Walk the candidates from the END: if any reasoning survives the think
+    # strip it carries draft probabilities, and the real answer is last.
+    candidates = _json_objects(THINK_BLOCK_RE.sub("", completion))
+    prediction = p_yes = None
+    for parsed in reversed(candidates):
+        try:
+            p_yes = float(parsed["p_yes"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        prediction = parsed
+        break
+    if prediction is None or p_yes is None:
+        return None
+    if not 0.0 <= p_yes <= 1.0:
+        return None
+    return json.dumps(
+        {
+            "p_yes": p_yes,
+            "p_no": round(1.0 - p_yes, 6),
+            "confidence": _coerce_unit_interval(prediction.get("confidence")),
+            "info_utility": _coerce_unit_interval(prediction.get("info_utility")),
+        }
+    )
 
 
 def _clean_html(html: str, max_words: int = _MAX_PAGE_WORDS) -> Optional[str]:
@@ -394,7 +591,7 @@ def _fetch_page_content(
 
     `capture_payload` is the raw HTML when mode=="raw" (for full-fidelity
     replay) and the cleaned text otherwise. Returns (None, None) on any
-    fetch / parse failure — the caller falls back to the Serper snippet.
+    fetch / parse failure -- the caller falls back to the Serper snippet.
 
     :param url: The URL to fetch.
     :param mode: ``"cleaned"`` stores extracted text; ``"raw"`` stores HTML.
@@ -419,7 +616,9 @@ def _fetch_page_content(
         capture = resp.text if mode == "raw" else text
         return text, capture
     except Exception as e:  # noqa: BLE001 -- best-effort scrape, never raise
-        print(f"[superforcaster_full_search] Failed to fetch {url}: {e}")
+        print(
+            f"[superforcaster_full_search_olas_predict_r1_14b] Failed to fetch {url}: {e}"
+        )
         return None, None
 
 
@@ -458,7 +657,7 @@ def _scrape_pages(
                 text, capture = fut.result()
             except Exception as e:  # noqa: BLE001
                 print(
-                    f"[superforcaster_full_search] Scrape error for {item['link']}: {e}"
+                    f"[superforcaster_full_search_olas_predict_r1_14b] Scrape error for {item['link']}: {e}"
                 )
                 continue
             if text:
@@ -497,7 +696,7 @@ def fetch_additional_sources(question: str, serper_api_key: str) -> requests.Res
         "Content-Type": "application/json",
     }
     # timeout matches the fleet's other Serper callers (factual_research,
-    # prediction_request, …); without it a hung connection blocks the run.
+    # prediction_request, ...); without it a hung connection blocks the run.
     return requests.request("POST", url, headers=headers, data=payload, timeout=30)
 
 
@@ -542,34 +741,140 @@ def _cap_evidence_block(
     misc_data: List[Dict[str, Any]],
     model: str,
     max_tokens: int = MAX_EVIDENCE_TOKENS,
-) -> str:
+) -> "_CappedEvidence":
     """Render the evidence block, dropping trailing organic items until it fits.
 
-    Same trailing-drop pattern as factual_research (which caps at 3000;
-    4000 here): Serper orders organic results by relevance so trailing
-    drops are cheapest. If the block still exceeds the budget once all
-    organic items are gone, the result is returned as-is (peopleAlsoAsk is
-    small and not separately trimmed).
+    peopleAlsoAsk is dropped FIRST, then trailing organic items: Serper orders
+    organic by relevance, and a scraped page is better evidence than a PAA
+    snippet, so the cheaper material goes first. (The parent trims only organic
+    and leaves peopleAlsoAsk alone -- safe on a 1M-token window, not on 8k.)
+    The effective ceiling is min(MAX_EVIDENCE_TOKENS, the caller's window
+    budget). If even an empty block overflows, the caller sees it via
+    _CappedEvidence.is_empty rather than sending a doomed prompt.
 
     :param organic_data: Serper organic results (already capped to MAX_SOURCES).
     :param misc_data: Serper peopleAlsoAsk items.
     :param model: model name for tokeniser selection.
     :param max_tokens: target ceiling on the rendered block.
-    :return: rendered evidence string, with a truncation marker if items were dropped.
+    :return: the rendered block plus how many organic / peopleAlsoAsk items survived.
     """
+    # MAX_EVIDENCE_TOKENS still binds: the lost-in-the-middle rationale is about
+    # how much evidence the model reads well, independent of how much the window
+    # physically allows. The window budget is the other ceiling, whichever is
+    # tighter.
+    max_tokens = min(max_tokens, MAX_EVIDENCE_TOKENS)
     rendered = format_sources_data(organic_data, misc_data)
-    if count_tokens(rendered, model) <= max_tokens or not organic_data:
-        return rendered
+    # NB no `or not organic_data` short-circuit. The parent had one because it
+    # never trimmed peopleAlsoAsk, so with no organic items there was nothing it
+    # could drop. This file trims peopleAlsoAsk FIRST, so that clause became a
+    # hole: a PAA-only oversized response skipped BOTH loops and shipped an
+    # untrimmed block past the 8k window (measured: 21304 tokens against a 3000
+    # budget). Both loops handle an empty list -- `while trimmed and ...`
+    # short-circuits immediately.
+    if budget_tokens(rendered, model) <= max_tokens:
+        return _CappedEvidence(rendered, len(organic_data), len(misc_data))
 
+    # peopleAlsoAsk goes first. The parent trimmed only organic items, which is
+    # safe on a 1M-token window but not on 8k: a large peopleAlsoAsk block would
+    # otherwise evict every scraped page -- the better evidence -- and could
+    # still overflow, leaving the request to be rejected outright.
+    misc = list(misc_data)
+    while (
+        misc
+        and budget_tokens(format_sources_data(organic_data, misc), model) > max_tokens
+    ):
+        misc.pop()
     trimmed = list(organic_data)
     while (
         trimmed
-        and count_tokens(format_sources_data(trimmed, misc_data), model) > max_tokens
+        and budget_tokens(format_sources_data(trimmed, misc), model) > max_tokens
     ):
         trimmed.pop()
-    rendered = format_sources_data(trimmed, misc_data)
+    rendered = format_sources_data(trimmed, misc)
     rendered += "\n[… evidence truncated …]\n"
-    return rendered
+    return _CappedEvidence(rendered, len(trimmed), len(misc))
+
+
+def _truncate_to_tokens(text: str, limit: int, model: str) -> str:
+    """Cut `text` down to at most `limit` tokens, on a word boundary.
+
+    :param text: the text to shorten.
+    :param limit: maximum tokens to keep.
+    :param model: model name for tokeniser selection.
+    :return: the text, shortened if it was over the limit.
+    """
+    if budget_tokens(text, model) <= limit:
+        return text
+    words = text.split()
+    while words and budget_tokens(" ".join(words), model) > limit:
+        words = words[: int(len(words) * 0.9)] or words[:-1]
+    return " ".join(words)
+
+
+class _CappedEvidence(NamedTuple):
+    """The capped evidence block plus what survived the cap.
+
+    Counting here rather than string-matching the render: the markers are
+    `format_sources_data`'s template, so a reword would silently flip an
+    exhaustion check either way -- always-null or never-null, with no test
+    coupling the two.
+    """
+
+    rendered: str
+    organic_kept: int
+    misc_kept: int
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the cap left no evidence at all.
+
+        :return: True when neither an organic nor a peopleAlsoAsk item survived.
+        """
+        return self.organic_kept == 0 and self.misc_kept == 0
+
+
+def _clamp_max_tokens(raw: Any, ceiling: int) -> int:
+    """Coerce a requester-supplied completion budget into a usable one.
+
+    Extracted so every rejection path is testable on its own. `bool` is checked
+    before `int` because `isinstance(True, int)` is True and `int(True)` is 1 --
+    a one-token budget that cannot produce a parseable answer.
+
+    :param raw: the requester's `max_tokens`, of any type.
+    :param ceiling: the largest completion budget the window can afford.
+    :return: a positive budget no larger than `ceiling`.
+    """
+    default = int(DEFAULT_MODEL_SETTINGS["max_tokens"])
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return min(default, ceiling)
+    # int() AFTER the positivity check, not before: a small positive float such
+    # as 3e-9 passes `> 0` and then truncates to a zero budget.
+    requested = int(raw)
+    if requested <= 0:
+        return min(default, ceiling)
+    return min(requested, ceiling)
+
+
+def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> int:
+    """Tokens left for the evidence block once everything else is placed.
+
+    Rendering the prompt with empty sources prices the template and both copies
+    of the question in one step, so the budget cannot drift from the template.
+
+    :param question: the question as it will be interpolated.
+    :param today: the date string as it will be interpolated.
+    :param model: model name for tokeniser selection.
+    :param max_tokens: completion budget reserved from the same window.
+    :return: tokens available for evidence; may be zero.
+    """
+    skeleton = PREDICTION_PROMPT.format(question=question, today=today, sources="")
+    return max(
+        0,
+        MODEL_CONTEXT_WINDOW
+        - max_tokens
+        - CONTEXT_SAFETY_MARGIN
+        - budget_tokens(skeleton, model),
+    )
 
 
 # Matches from 'question "' to '" and the `yes`' to handle nested quotes.
@@ -771,6 +1076,8 @@ def _flagged_null_result(
     context: str,
     tier: str,
     scan_truncated: bool = False,
+    sources_used: int = 0,
+    sources_dropped: int = 0,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -795,10 +1102,12 @@ def _flagged_null_result(
     :param scan_truncated: whether the scan window did not cover the whole
         prompt (any non-template tier; a template match returns before the
         window can matter).
+    :param sources_used: evidence items that reached the model (0 on every null).
+    :param sources_dropped: evidence items retrieved but not sent.
     :return: the flagged-null MechResponse tuple.
     """
     print(
-        f"[superforcaster_full_search] {context}: empty retrieval"
+        f"[superforcaster_full_search_olas_predict_r1_14b] {context}: empty retrieval"
         " -- returning null prediction"
     )
     null_result = json.dumps(
@@ -812,10 +1121,29 @@ def _flagged_null_result(
         "null_reason": context,
         "parse_tier": tier,
         "scan_truncated": scan_truncated,
+        # Same keys as the healthy path. Emitting them only on success meant a
+        # consumer indexing used_params["sources_used"] hit a KeyError on
+        # exactly the deliveries it most needed to distinguish -- "no sources
+        # ever" from "sources trimmed to zero".
+        "sources_used": sources_used,
+        "sources_dropped": sources_dropped,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
     return null_result, "", None, counter_callback, used_params
+
+
+def _optional_key(api_keys: Any, service: str) -> Optional[str]:
+    """Return the key for `service`, or None if the KeyChain lacks it.
+
+    :param api_keys: KeyChain-like mapping of service names to values.
+    :param service: Service name to retrieve.
+    :return: The configured value, or None when absent.
+    """
+    try:
+        return api_keys[service]
+    except Exception:  # noqa: BLE001 - KeyChain raises various types when absent
+        return None
 
 
 @with_key_rotation
@@ -825,9 +1153,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if tool not in ALLOWED_TOOLS:
         raise ValueError(f"Tool {tool} is not supported.")
 
-    model = kwargs.get("model")
-    if model is None:
-        raise ValueError("Model not supplied.")
+    model = resolve_model(tool)
 
     delivery_rate = int(kwargs.get("delivery_rate", DEFAULT_DELIVERY_RATE))
     counter_callback: Optional[Callable[..., Any]] = kwargs.get(
@@ -845,7 +1171,21 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         return max_cost
 
-    openai_api_key = kwargs["api_keys"]["openai"]
+    api_keys = kwargs["api_keys"]
+    # Key and endpoint are both REQUIRED: a default would hide a misconfigured
+    # deployment behind a 401 or a connection error to the wrong host.
+    llm_api_key = _optional_key(api_keys, VLLM_SERVER_API_KEY)
+    if not llm_api_key:
+        raise ValueError(
+            f"No API key for the forecasting endpoint: set "
+            f"'{VLLM_SERVER_API_KEY}' in the mech's API_KEYS."
+        )
+    endpoint = _optional_key(api_keys, VLLM_SERVER_URL)
+    if not endpoint:
+        raise ValueError(
+            "No endpoint for the forecasting service: set "
+            f"'{VLLM_SERVER_URL}' in the mech's API_KEYS."
+        )
     source_content = kwargs.get("source_content", None)
     return_source_content = (
         kwargs["api_keys"].get("return_source_content", "false") == "true"
@@ -855,9 +1195,25 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         raise ValueError(
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
-    with OpenAIClientManager(openai_api_key) as llm_client:
-        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
-        temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
+    with OpenAIClientManager(llm_api_key, endpoint) as llm_client:
+        # Clamped, not trusted -- see MIN_PROMPT_BUDGET. `or` rather than a
+        # get() default so an explicit null (the key present, value None) falls
+        # back too instead of raising TypeError.
+        _ceiling = MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET
+        _raw_max_tokens = kwargs.get("max_tokens")
+        max_tokens = _clamp_max_tokens(_raw_max_tokens, _ceiling)
+        # Compare against the RAW value, not a pre-corrected one: rewriting
+        # `_requested` to the default first meant the pathological inputs this
+        # guard exists for (None / 0 / negative) never logged, because by the
+        # time of the comparison they already equalled the result.
+        if _raw_max_tokens is not None and _raw_max_tokens != max_tokens:
+            print(
+                f"[{TOOL_NAME}] max_tokens "
+                f"{_raw_max_tokens!r} corrected to {max_tokens} "
+                f"(window {MODEL_CONTEXT_WINDOW}, prompt floor "
+                f"{MIN_PROMPT_BUDGET})"
+            )
+        temperature = kwargs.get("temperature", DEFAULT_MODEL_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
         today = date.today()
@@ -872,20 +1228,35 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
         if scan_truncated:
             print(
-                f"[superforcaster_full_search] Scan window exhausted: "
+                f"[superforcaster_full_search_olas_predict_r1_14b] Scan window exhausted: "
                 f"prompt is {len(prompt)} chars, scanned the first "
                 f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
             )
         elif tier == "raw":
             print(
-                "[superforcaster_full_search] No question clause found; "
+                "[superforcaster_full_search_olas_predict_r1_14b] No question clause found; "
                 f"using capped prompt head as the search query: {search_query!r}"
             )
         elif tier == "clause":
             print(
-                f"[superforcaster_full_search] Free-text prompt (tier={tier}); "
+                f"[superforcaster_full_search_olas_predict_r1_14b] Free-text prompt (tier={tier}); "
                 f"derived search query: {search_query!r}"
             )
+
+        # Free-text puts the whole user prompt in the question slot, twice. When
+        # that does not fit, prefer the clause parse_prompt already identified as
+        # the question over a truncation: in free text the question usually comes
+        # last, so cutting the tail is what removes it.
+        if budget_tokens(question, model) > _MAX_QUESTION_TOKENS:
+            if tier != "raw":
+                question = search_query
+            question = _truncate_to_tokens(question, _MAX_QUESTION_TOKENS, model)
+            print(
+                f"[{TOOL_NAME}] Question too long for the "
+                f"{MODEL_CONTEXT_WINDOW}-token window; using tier={tier} "
+                f"question: {question[:120]!r}"
+            )
+        evidence_budget = _evidence_budget(question, d, model, max_tokens)
 
         if source_content is not None:
             print("Using provided source content (cached replay)...")
@@ -912,7 +1283,10 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             cached_pages = source_content.get("pages", {})
             cached_mode = source_content.get("mode", source_content_mode)
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            capped = _cap_evidence_block(
+                organic_data, misc_data, model, evidence_budget
+            )
+            sources = capped.rendered
         else:
             if not any(ch.isalnum() for ch in search_query):
                 # Nothing searchable: no alphanumeric character at all (empty,
@@ -972,7 +1346,30 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "pages": captured_pages,
             }
             print("Formatting sources...")
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            capped = _cap_evidence_block(
+                organic_data, misc_data, model, evidence_budget
+            )
+            sources = capped.rendered
+
+        # The budget can trim every item away -- a requester-supplied
+        # `max_tokens`, or a question long enough to crowd out the block. The
+        # empty-retrieval guard above cannot see this: it runs BEFORE trimming.
+        # Without this the tool forecasts on nothing and returns a
+        # normal-looking answer, which is the exact gap _flagged_null_result
+        # exists to close.
+        if (organic_data or misc_data) and capped.is_empty:
+            return _flagged_null_result(
+                sources_dropped=len(organic_data) + len(misc_data),
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                captured_source_content=captured_source_content,
+                return_source_content=return_source_content,
+                counter_callback=counter_callback,
+                context="evidence budget exhausted",
+                tier=tier,
+                scan_truncated=scan_truncated,
+            )
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(
@@ -984,7 +1381,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             {"role": "user", "content": prediction_prompt},
         ]
         print("Getting prompt response...")
-        extracted_block, counter_callback = generate_prediction_with_retry(
+        completion, counter_callback = generate_prediction_with_retry(
             client=llm_client,
             model=model,
             messages=messages,
@@ -994,8 +1391,21 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             delay=COMPLETION_DELAY,
             counter_callback=counter_callback,
         )
+        extracted_block = canonical_prediction(completion)
+        if extracted_block is None:
+            raise ValueError("Model output did not contain a parseable p_yes.")
 
+        # How much evidence the model actually saw. At a 1M window trimming was
+        # rare and the parent could omit this; at 8k under a 4000-token ceiling
+        # it is routine, and a one-source forecast is a different thing from a
+        # five-source one. The only other trace is the truncation marker inside
+        # the prompt, which never reaches the delivery.
         used_params = {
+            "sources_used": capped.organic_kept + capped.misc_kept,
+            "sources_dropped": (
+                (len(organic_data) + len(misc_data))
+                - (capped.organic_kept + capped.misc_kept)
+            ),
             "model": model,
             "temperature": temperature,
             "max_tokens": max_tokens,

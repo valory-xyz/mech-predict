@@ -1448,8 +1448,8 @@ def _flagged_null_result(
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
-    A VALID prediction (p_yes = p_no = 0.5) with zero confidence and
-    info_utility, so a requester can detect and discount it while the strict
+    Unlike the with_key_rotation error null this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
     trader consumer still parses it (issue #455).
 
     :param model: the model name recorded in used_params.

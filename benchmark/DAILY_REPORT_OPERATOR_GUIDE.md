@@ -16,16 +16,29 @@ flowchart LR
     you -->|"most days"| nothing["nothing"]
 ```
 
-## 2. The report, message by message
+## 2. The Slack decision summary
 
-| Message | Contains | You look at it when |
+Slack is the action inbox. Each platform posts one concise message:
+
+| Block | Contains | You look at it when |
 |---|---|---|
-| **Title** | the verdict: 🟢 `PROMOTE n` · 🟠 `DEMOTE n` · 🔴 `NO ACTION` · ⚪ `NO CHANGE` | always — often the only thing you need |
-| 1a. Production W-2 vs W-1 | week-over-week movement | a delta surprised you |
-| 1b. Production 90D vs W-1 | the decision table: `floor`, `condAcc`, `rec` | title said act, or you want the evidence |
-| 2. Tournament | candidates, same columns | title said PROMOTE |
-| 3. Alerts | reasons to distrust today's numbers | **before acting on anything** |
-| 4. Simulated trader ROI | context only — never a decision input | curiosity |
+| **Decision** | 🟢 `PROMOTE n` · 🟠 `DEMOTE n` · 🔴 `NO ACTION` · ⚪ `NO CHANGE`, affected tools, decisive evidence, and the next human step | always |
+| **Summary** | Current 7d platform Brier and its movement vs the main and previous windows | for platform health |
+| **Tool × Category signals** | at most three current-window rows: main risk, strongest positive (or best available), and largest remaining slice | to see whether the result is concentrated or broad |
+| **Warnings** | only caveats that qualify the decision or make the 7d trend provisional | before acting |
+| **Full report** | link to the unchanged Markdown artifact | when you need every table, legend, candidate, or audit detail |
+
+Category rows require n ≥ 30. Rows with 30–99 samples are labelled
+`limited sample`. Selection is deterministic: negative impact is
+`n × abs(DA lift)`,
+positive strength is `DA lift × sqrt(n)`, the third row is the largest-volume
+remaining slice, and rows for actioned tools are preferred. If one row satisfies
+multiple roles it appears once; Slack shows fewer than three rather than padding
+with noise.
+
+The full production, tournament, alert, and simulated-ROI tables remain in the
+Markdown artifact. ROI is context only and never a promotion/demotion input, so
+it is not posted as a Slack companion message.
 
 🔴 `NO ACTION` = every deployed tool fails but demoting all would empty the platform → escalate, never act tool-by-tool.
 

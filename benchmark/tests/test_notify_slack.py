@@ -28,6 +28,7 @@ from urllib.error import HTTPError
 from urllib.request import Request
 
 import pytest
+
 from benchmark import tool_usage
 from benchmark.analyze import PLATFORM_LABELS, ROLLING_WINDOW_DAYS
 from benchmark.notify_slack import (
@@ -40,6 +41,7 @@ from benchmark.notify_slack import (
     _deployed_tools_for,
     _infer_platform_label,
     _main_window_label,
+    _summary_only,
     _v1_heading,
     post_to_slack,
 )
@@ -579,6 +581,29 @@ class TestV1Heading:
         """No date in the heading -> badge without a stamp, never a crash."""
         heading = _v1_heading("Polystrat", "no heading here")
         assert "*POLYSTRAT  \u00b7  REPORT V1*" in heading
+
+
+class TestSummaryOnly:
+    """The concise path keeps only the LLM's platform-trend paragraph."""
+
+    def test_extracts_summary_before_other_sections(self) -> None:
+        """Tool rankings and generated actions do not leak into concise Slack."""
+        digest = (
+            "*Summary:* Current 7d Brier is `0.2039`.\n"
+            "Performance declined slightly.\n\n"
+            "*Tool performance:*\n"
+            "• `alpha` — details\n\n"
+            "*Recommended actions:*\n"
+            "• investigate"
+        )
+        assert _summary_only(digest) == (
+            "*Summary:* Current 7d Brier is `0.2039`.\n"
+            "Performance declined slightly."
+        )
+
+    def test_unstructured_fallback_is_preserved(self) -> None:
+        """Unexpected model output remains visible rather than disappearing."""
+        assert _summary_only("plain summary") == "plain summary"
 
 
 class TestDeployedToolsForTriState:

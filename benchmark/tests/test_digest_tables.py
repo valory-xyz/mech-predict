@@ -29,15 +29,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from benchmark.digest_tables import (
     RELIABILITY_GATE,
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
+    _category_signal_rows,
+    _decision_state,
     _edge_lower_bound,
     _headline,
     _no_replacement_note,
     _survivors,
     _verdict,
+    build_concise_digest_message,
     build_digest_messages,
 )
 
@@ -172,6 +176,122 @@ def _flatten(payload: dict[str, Any]) -> str:
         elif block["type"] == "context":
             lines.extend(e["text"] for e in block["elements"])
     return "\n".join(lines)
+
+
+class TestConciseDecisionSummary:
+    """The production Slack view contains decisions, not full report tables."""
+
+    @staticmethod
+    def _category(
+        n: int, lift: float, *, brier: float = 0.2, yes_rate: float = 0.4
+    ) -> dict[str, Any]:
+        """Build one category cell with an exact DA lift."""
+        majority = max(yes_rate, 1.0 - yes_rate)
+        return {
+            "n": n,
+            "brier": brier,
+            "directional_accuracy": majority + lift,
+            "outcome_yes_rate": yes_rate,
+        }
+
+    def test_category_selection_is_risk_strength_then_volume(self) -> None:
+        """Selection reproduces the agreed human-diagnostic ordering."""
+        cells = {
+            "factual_research | other": self._category(390, 0.1261),
+            "factual_research | business": self._category(272, 0.1905),
+            "factual_research | weather": self._category(214, -0.1545),
+            # Raw lift is worse, but its sample-adjusted impact is smaller.
+            "factual_research | tiny": self._category(30, -0.20),
+        }
+        rows = _category_signal_rows(cells, {"factual_research"}, set())
+        assert [(tool, category, label) for tool, category, _, _, label in rows] == [
+            ("factual_research", "weather", "Main risk"),
+            ("factual_research", "business", "Strongest segment"),
+            ("factual_research", "other", "Largest remaining slice"),
+        ]
+
+    def test_replacement_is_promoted_before_every_tool_demotes(self) -> None:
+        """A replacement must land before an all-demote roster can be actioned."""
+        state, token, promote, demote = _decision_state(
+            {"live": "demote: no-skill"}, {"candidate": "PROMOTE"}
+        )
+        assert state == "promote"
+        assert token == "PROMOTE 1 FIRST"
+        assert promote == ["candidate"]
+        assert demote == []
+
+    def test_message_has_one_decision_view_and_no_tables(self, tmp_path: Path) -> None:
+        """The concise message keeps summary/category context and drops tables/ROI."""
+        results = tmp_path / "results"
+        results.mkdir()
+        bad_at = _stats(
+            edge=-0.12,
+            edge_sd=0.05,
+            conditional_accuracy_rate=0.55,
+            brier=0.31,
+            baseline_brier=0.24,
+        )
+        bad_w1 = _stats(
+            edge=-0.19,
+            edge_sd=0.05,
+            conditional_accuracy_rate=0.55,
+            brier=0.34,
+            baseline_brier=0.24,
+        )
+        good = _stats(
+            edge=0.02,
+            edge_sd=0.05,
+            conditional_accuracy_rate=0.60,
+            brier=0.20,
+            baseline_brier=0.24,
+        )
+        (results / "trailing_scores_polymarket.json").write_text(
+            json.dumps(
+                {
+                    "window_end": "2026-09-15T00:00:00Z",
+                    "by_tool": {"bad": bad_at, "good": good},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (results / "rolling_scores_polymarket.json").write_text(
+            json.dumps(
+                {
+                    "by_tool": {"bad": bad_w1, "good": good},
+                    "by_tool_category": {
+                        "bad | politics": self._category(299, -0.1783),
+                        "bad | weather": self._category(71, 0.0286),
+                        "good | other": self._category(120, 0.10),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        _write(
+            results,
+            "prev_rolling_scores_polymarket.json",
+            {"bad": bad_w1, "good": good},
+        )
+        _write(results, "scores_tournament_polymarket.json", {})
+
+        payload = build_concise_digest_message(
+            results,
+            "polymarket",
+            "*Summary:* Current 7d Brier regressed.",
+            allowed_tools={"bad", "good"},
+            report_url="https://example.test/report",
+        )
+        assert payload is not None
+        assert not any(block["type"] == "table" for block in payload["blocks"])
+        body = _flatten(payload)
+        assert "*Decision: DEMOTE 1*" in body
+        assert "Sustained no-skill" in body
+        assert "*Summary:* Current 7d Brier regressed." in body
+        assert "*Tool × Category signals:*" in body
+        assert "Main risk" in body
+        assert "Full Polystrat report" in body
+        assert "Legend" not in body
+        assert "ROI" not in body
 
 
 def _cells(body: str, tool: str, after: str = "") -> list[str]:

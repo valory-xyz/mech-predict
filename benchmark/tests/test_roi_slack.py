@@ -938,8 +938,8 @@ class TestNotifySlackHook:
         tmp_path: Path,
         extra_argv: list[str] | None = None,
         roi_env: str | None = None,
-        post_stub: Optional[Callable[[str, str], None]] = None,
-    ) -> list[str]:
+        post_stub: Optional[Callable[[str, Any], None]] = None,
+    ) -> list[Any]:
         """Drive notify_slack.main with network + LLM stubbed; return posts.
 
         :param monkeypatch: pytest monkeypatch fixture.
@@ -967,9 +967,9 @@ class TestNotifySlackHook:
             monkeypatch.setenv("ROI_SECTION", roi_env)
         monkeypatch.setenv("OPENAI_API_KEY", "test-key")
         monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.test/T000")
-        posted: list[str] = []
+        posted: list[Any] = []
 
-        def _record(url: str, text: str) -> None:
+        def _record(url: str, text: Any) -> None:
             """Record every posted text, then delegate to ``post_stub`` if given."""
             posted.append(text)
             if post_stub is not None:
@@ -983,6 +983,23 @@ class TestNotifySlackHook:
         monkeypatch.setattr(sys, "argv", argv)
         notify_slack.main()
         return posted
+
+    def test_computed_mode_posts_only_the_concise_decision(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Production mode suppresses the legacy digest, full tables, and ROI."""
+        payload = {"text": "concise", "blocks": []}
+        monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", "true")
+        monkeypatch.setattr(
+            notify_slack, "build_concise_digest_message", lambda *a, **k: payload
+        )
+
+        def _must_not_run(*args: Any, **kwargs: Any) -> None:
+            raise AssertionError("ROI builder must not run in concise mode")
+
+        monkeypatch.setattr(notify_slack, "build_roi_section", _must_not_run)
+        posted = self._run_main(monkeypatch, tmp_path)
+        assert posted == [payload]
 
     def test_section_posted_as_separate_message(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

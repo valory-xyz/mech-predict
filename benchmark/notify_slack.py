@@ -1,9 +1,10 @@
 """
-Post an AI-summarized benchmark report to Slack for one platform deployment.
+Post a concise benchmark decision summary for one platform deployment.
 
-Reads a per-platform markdown report (``report_<platform>.md``), sends it
-to OpenAI for a concise Slack-formatted summary scoped to the named
-deployment, and posts the result via an incoming webhook.
+Reads a per-platform Markdown report, asks OpenAI only for its short platform
+trend interpretation, and combines that with scorer-derived decisions,
+category signals, and warnings. The production path posts one Slack message;
+the complete Markdown artifact remains unchanged as the audit trail.
 
 Usage:
     python -m benchmark.notify_slack --report benchmark/results/report_omen.md --platform-label Omenstrat
@@ -33,7 +34,7 @@ from benchmark.analyze import (
     ROLLING_WINDOW_DAYS,
     VERSION_DELTA_LOW_SAMPLE_STRICT,
 )
-from benchmark.digest_tables import build_digest_messages
+from benchmark.digest_tables import build_concise_digest_message, build_digest_messages
 from benchmark.roi_slack import build_roi_message, build_roi_section
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE, use_mech_analytics_rows
 from benchmark.tools import TOOL_REGISTRY
@@ -419,6 +420,25 @@ def _v1_heading(platform_label: str, report_text: str) -> str:
     return f"{rule}\n*{line}*\n{rule}"
 
 
+def _summary_only(llm_digest: str) -> str:
+    """Keep only the platform-level Summary section from the LLM digest.
+
+    Tool/category selection and every deployment decision are computed from
+    scorer artifacts elsewhere.  The LLM remains responsible only for the
+    short narrative interpretation of the platform Brier trend.
+
+    :param llm_digest: complete legacy V1 digest.
+    :return: bounded Summary section, or a notice when it cannot be extracted.
+    """
+    match = re.search(
+        r"(?ms)^\*Summary:\*\s*(.*?)(?=^\*[^*\n]+:\*|\Z)",
+        llm_digest.strip(),
+    )
+    if match is None or not match.group(1).strip():
+        return "*Summary:* Unavailable; consult the full report for platform trends."
+    return f"*Summary:* {match.group(1).strip()}"[:3000]
+
+
 def _deployed_tools_for(platform_key: str, override: str | None) -> list[str] | None:
     """Tools live on this platform's mechs, from the on-chain manifests.
 
@@ -483,6 +503,37 @@ def _infer_platform_label(report_path: Path) -> str | None:
     return _PLATFORM_LABEL_BY_STEM.get(report_path.stem)
 
 
+def _detailed_digest_messages(
+    results_dir: Path,
+    platform: str,
+    deployed_tools: list[str] | None,
+    roi_results: Path,
+) -> list[dict[str, Any]]:
+    """Build the detailed opt-out, keeping ROI failures independent.
+
+    :param results_dir: directory containing scorer artifacts.
+    :param platform: platform key.
+    :param deployed_tools: live roster, or None when lookup failed.
+    :param roi_results: path to the optional ROI artifact.
+    :return: detailed table messages and an optional ROI companion.
+    """
+    payloads = build_digest_messages(
+        results_dir,
+        platform,
+        allowed_tools=TOOL_REGISTRY,
+        deployed_tools=deployed_tools,
+    )
+    if os.environ.get("ROI_SECTION", "on").strip().lower() == "off":
+        return payloads
+    try:
+        roi = build_roi_message(roi_results, platform)
+        if roi is not None:
+            payloads.append(roi)
+    except Exception:  # pylint: disable=broad-except
+        log.warning("ROI table build failed; posting digest without it.", exc_info=True)
+    return payloads
+
+
 def main() -> None:
     """Read report, summarize, post. Skip gracefully if keys missing."""
     parser = argparse.ArgumentParser(description="Post benchmark summary to Slack")
@@ -515,6 +566,11 @@ def main() -> None:
             "companion message posted after the digest."
         ),
     )
+    parser.add_argument(
+        "--detailed-tables",
+        action="store_true",
+        help="Post the detailed computed tables and optional ROI companion.",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -546,13 +602,51 @@ def main() -> None:
         )
         sys.exit(1)
 
-    heading = _v1_heading(platform_label, report_text)
-
     log.info("Summarizing %s report with %s...", platform_label, MODEL)
-    summary = f"{heading}\n\n{summarize_report(report_text, api_key, platform_label)}"
+    llm_digest = summarize_report(report_text, api_key, platform_label)
 
-    # Append link to full report if running in GitHub Actions
     report_url = _build_report_url()
+
+    # Computed mode defaults to the concise decision view. The explicit
+    # detailed opt-out keeps the original tables available to operators.
+    computed_mode = _computed_tables_enabled() or args.detailed_tables
+    if computed_mode:
+        payloads = []
+        try:
+            platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
+            if platform_key is not None:
+                deployed = _deployed_tools_for(platform_key, args.deployed_tools)
+                if args.detailed_tables:
+                    payloads = _detailed_digest_messages(
+                        args.report.parent, platform_key, deployed, args.roi_results
+                    )
+                else:
+                    concise = build_concise_digest_message(
+                        args.report.parent,
+                        platform_key,
+                        _summary_only(llm_digest),
+                        allowed_tools=TOOL_REGISTRY,
+                        deployed_tools=deployed,
+                        report_url=report_url,
+                    )
+                    if concise is not None:
+                        payloads.append(concise)
+        except Exception:  # pylint: disable=broad-except
+            log.warning(
+                "Computed decision summary build failed; using the V1 digest.",
+                exc_info=True,
+            )
+        if payloads:
+            for payload in payloads:
+                if args.dry_run:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    post_to_slack(webhook_url, payload)
+            log.info("Done.")
+            return
+
+    heading = _v1_heading(platform_label, report_text)
+    summary = f"{heading}\n\n{llm_digest}"
     if report_url:
         summary += f"\n<{report_url}|Full report>"
 
@@ -564,60 +658,28 @@ def main() -> None:
     # posting it, must NEVER break the daily digest. ROI_SECTION=off disables
     # it entirely.
     roi_section = None
-    if os.environ.get("ROI_SECTION", "on").strip().lower() != "off":
+    if (
+        not computed_mode
+        and os.environ.get("ROI_SECTION", "on").strip().lower() != "off"
+    ):
         try:
             platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
             if platform_key is not None:
-                # Tables on: render the ROI companion as a native table too.
-                roi_section = (
-                    build_roi_message(args.roi_results, platform_key)
-                    if _computed_tables_enabled()
-                    else build_roi_section(args.roi_results, platform_key)
-                )
+                roi_section = build_roi_section(args.roi_results, platform_key)
         except Exception:  # pylint: disable=broad-except
             log.warning(
                 "ROI section build failed; posting digest without it.",
                 exc_info=True,
             )
 
-    # Computed tables: cells read straight from scorer artifacts. One message
-    # per table (same split rationale as above); opt-in via BENCHMARK_COMPUTED_TABLES.
-    table_messages: list[dict[str, Any]] = []
-    if _computed_tables_enabled():
-        try:
-            platform_key = _PLATFORM_KEY_BY_LABEL.get(platform_label)
-            if platform_key is not None:
-                table_messages = build_digest_messages(
-                    args.report.parent,
-                    platform_key,
-                    # Registry = allowlist; third-party tools are never ranked.
-                    allowed_tools=TOOL_REGISTRY,
-                    # 1a/1b list only what the mechs serve right now.
-                    deployed_tools=_deployed_tools_for(
-                        platform_key, args.deployed_tools
-                    ),
-                )
-        except Exception:  # pylint: disable=broad-except
-            log.warning(
-                "Computed tables build failed; posting digest without them.",
-                exc_info=True,
-            )
-
     if args.dry_run:
         print(summary)
-        for message in table_messages:
-            print(f"\n\n{message}")
         if roi_section:
             print(f"\n\n{roi_section}")
         return
 
     log.info("Posting to Slack...")
     post_to_slack(webhook_url, summary)
-    for message in table_messages:
-        try:
-            post_to_slack(webhook_url, message)
-        except Exception:  # pylint: disable=broad-except
-            log.warning("Posting a computed table failed; continuing.", exc_info=True)
     if roi_section:
         try:
             post_to_slack(webhook_url, roi_section)

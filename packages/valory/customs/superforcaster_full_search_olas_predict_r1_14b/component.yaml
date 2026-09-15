@@ -1,0 +1,36 @@
+name: superforcaster_full_search_olas_predict_r1_14b
+author: valory
+version: 0.1.0
+type: custom
+description: Prediction market forecasting tool. A sibling of superforcaster_full_search
+  that keeps its full-page search evidence pipeline and forecasting prompt unchanged
+  and swaps the forecaster for Olas-Predict-R1-14B, a fine-tuned DeepSeek-R1-Distill-Qwen-14B
+  served from a self-hosted vLLM endpoint. Returns p_yes, p_no, confidence and info_utility
+  for a binary prediction market question.
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeigxggofb36cqcpj7527qbstqnxti2lfnocgkqpehmsd3fgu4tgvkq
+  superforcaster_full_search_olas_predict_r1_14b.py: bafybeic67ubd2dl3dpbuwre4okg7fkx5daizxfa773drpaodmbokx42noe
+  tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
+  tests/test_superforcaster_full_search_olas_predict_r1_14b.py: bafybeiabdahchiqasfiamzmsp5vacx7is7jeklgyjxupb4e3grfg5tadxq
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_full_search_olas_predict_r1_14b.py
+callable: run
+params:
+  default_model: olas-predict-r1-14b
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  requests:
+    version: ==2.32.5
+  readability-lxml:
+    version: ==0.8.1
+  lxml_html_clean:
+    version: ==0.4.4
+  markdownify:
+    version: ==1.2.2

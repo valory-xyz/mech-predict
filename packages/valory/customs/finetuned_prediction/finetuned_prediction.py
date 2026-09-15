@@ -54,16 +54,17 @@ output (`<think>…</think>` then a flat JSON object). build_messages mirrors th
 framing exactly; the constant-system-message "mech-parity" shape was a
 benchmark-only artifact and is intentionally NOT used here.
 
-Parsing parity
---------------
-`extract_json` / `parse_p_yes` are vendored from
-`fine_tuning/src/fine_tuning/training/reward.py` (the single source of truth
-there). They MUST stay behaviourally equivalent — same regexes and parsing
-logic — so the reward used to train the model and the parser used to score its
-deliveries agree; otherwise production parsing silently diverges from the
-benchmark. (Only cosmetics differ here: type-hint syntax and docstrings.) If the
-upstream parser changes, mirror the change here. See the pinned commit on the
-parsing block below.
+Parsing
+-------
+`extract_json` / `parse_p_yes` began as a verbatim port of
+`fine_tuning/src/fine_tuning/training/reward.py` and are NO LONGER behaviourally
+identical to it. That reward scores training rollouts, which are complete and
+carry a single flat object; served deliveries are not, and its `{[^{}]*}` regex
+drops some of them. The candidates here come from `json.JSONDecoder().raw_decode`
+instead, with two extra rules. The three resulting behaviour differences -- and
+why none of them can fire on a training rollout, so the reward and this parser
+still agree on what they both see -- are listed above the parsing block below,
+which also pins the upstream commit to re-sync against.
 """
 
 import functools
@@ -285,23 +286,49 @@ OUTPUT_FORMAT
 
 
 # ---------------------------------------------------------------------------
-# Output parsing — vendored from fine_tuning reward.py (keep in sync)
+# Output parsing -- derived from fine_tuning reward.py (keep in sync)
 # ---------------------------------------------------------------------------
-# Vendored from valory-xyz/fine-tuning @ 5551073
-# (src/fine_tuning/training/reward.py). Re-sync on every upstream parser change
-# so production parsing cannot drift from the training-time reward. Behaviourally
-# identical to that source; only the type-hint syntax and docstrings differ (the
-# regexes and parsing logic are the same).
+# Derived from valory-xyz/fine-tuning @ 5551073
+# (src/fine_tuning/training/reward.py). Re-sync on every upstream parser change,
+# so that what production parses stays anchored to the training-time reward.
+#
+# NOT behaviourally identical to that source. Upstream matches the answer with a
+# flat `{[^{}]*}` regex over the post-think text and takes the last object that
+# parses; here the candidates come from json.JSONDecoder().raw_decode and two
+# further rules apply, so three behaviours differ:
+#
+#   1. Nested objects, and a '}' inside a string value, parse. The character
+#      class stops at the FIRST '}', so upstream loses a good forecast that
+#      carries one extra nested key -- or a resolution-source string containing
+#      a brace -- to a null delivery.
+#   2. A candidate with no usable p_yes is SKIPPED rather than accepted as the
+#      answer. A trailing non-prediction object after the forecast (observed on
+#      this tool) otherwise shadows the forecast sitting one object earlier.
+#   3. A <think> opener with no closer yields None. That is the truncated
+#      completion (the token budget ran out mid-reasoning): upstream's strip is
+#      a no-op there, so the regex harvests a DRAFT probability out of the
+#      reasoning and delivers it as the final answer.
+#
+# None of the three can fire on what the reward actually scores -- a training
+# rollout is complete (so rule 3 has no truncated input), single-object (rule 2)
+# and flat (rule 1) -- so on every completion the reward sees, both parsers still
+# return the same p_yes. Where they differ, upstream is losing or mis-reading a
+# delivery the mech has to answer. Rules 1-3 are ports of the parser in
+# superforcaster_full_search_olas_predict_r1_14b, which the fleet already runs
+# against this same served-model family.
 
-# Strip the <think>...</think> block (non-greedy, multiline).
-# The served checkpoints emit a BARE closing tag: the chat template supplies
-# the opening <think>, so it never appears in the completion. A paired-tag
-# pattern therefore strips nothing. Match greedily to the LAST closing tag
-# so everything before the final answer is discarded; a completion with no
-# closing tag is left untouched.
-THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL)
-# Match a flat JSON object: from the first '{' to the first '}'.
-JSON_RE = re.compile(r"\{[^{}]*\}")
+# A <think> opener with no closer is a truncated completion, not an answer.
+# Case-insensitive throughout: the tags come from the chat template, which is a
+# deployment artifact this tool does not control, and a template emitting
+# <THINK> would make a case-sensitive guard silently no-op.
+THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+# Strip the reasoning block. The served checkpoints emit a BARE closing tag: the
+# chat template supplies the opening <think>, so it never appears in the
+# completion and a paired-tag pattern would strip nothing. Match greedily to the
+# LAST closing tag so everything before the final answer is discarded; a
+# completion with no closing tag is left untouched.
+THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
 
 
 def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
@@ -313,52 +340,82 @@ def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
     return completion or ""
 
 
+def _json_objects(text: str) -> List[Dict[str, Any]]:
+    """Every top-level JSON object in `text`, in order of appearance.
+
+    :param text: text that may carry JSON objects among prose.
+    :return: the decoded objects, nested values included.
+    """
+    decoder = json.JSONDecoder()
+    found: List[Dict[str, Any]] = []
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            return found
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            # Not the start of an object (a stray brace, a '{' in prose):
+            # step past it rather than giving up on the rest of the text.
+            idx = start + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+        idx = end
+
+
 def extract_json(
     completion: Union[str, List[Dict[str, str]]],
 ) -> Optional[Dict[str, Any]]:
-    """Strip the <think> block and parse the remaining flat JSON object.
+    """Strip the <think> block and return the answer object.
 
-    Returns None if the response has no parseable JSON object.
+    Returns None if the completion was truncated mid-reasoning, or if no
+    candidate object carries a coercible `p_yes`. The range check on that
+    `p_yes` belongs to the callers.
 
     :param completion: the model output (string or chat-message list).
-    :return: the parsed JSON object, or None if not parseable.
+    :return: the answer object, or None when there is none.
     """
     text = _to_text(completion)
     if not text:
         return None
-    stripped = THINK_BLOCK_RE.sub("", text).strip()
+    # An opener with no closer means the completion was cut off mid-reasoning
+    # (the token budget ran out). Everything present is therefore a DRAFT, and
+    # harvesting one would deliver a working estimate as the final answer --
+    # the same failure the think strip exists to prevent. There is no answer to
+    # recover here, so return None and let the caller surface the error.
+    if THINK_OPEN_RE.search(text) and not THINK_CLOSE_RE.search(text):
+        return None
     # Walk candidates from the END: the answer is the last object emitted, and
     # a first-match pick returns a draft probability written mid-reasoning.
-    # Walking in reverse rather than taking [-1] outright keeps a valid earlier
-    # object when the final one is malformed.
-    for blob in reversed(JSON_RE.findall(stripped)):
+    # Objects with no usable p_yes are skipped, not accepted -- a trailing
+    # non-prediction object must not shadow the forecast before it, and a
+    # malformed final object must not strand a valid earlier one.
+    for parsed in reversed(_json_objects(THINK_BLOCK_RE.sub("", text))):
         try:
-            parsed = json.loads(blob)
-        except json.JSONDecodeError:
+            float(parsed["p_yes"])
+        except (KeyError, TypeError, ValueError):
             continue
-        if isinstance(parsed, dict):
-            return parsed
+        return parsed
     return None
 
 
 def parse_p_yes(completion: Union[str, List[Dict[str, str]]]) -> Optional[float]:
     """Extract `p_yes` from a model response. Returns None if invalid.
 
-    Invalid if: no parseable JSON object, no `p_yes` key, or `p_yes` is not a
-    float in [0, 1].
+    Invalid if: no answer object (see extract_json), or `p_yes` is not a float
+    in [0, 1]. An out-of-range value is rejected outright rather than falling
+    back to an earlier candidate -- a model that answered 1.5 has not answered.
 
     :param completion: the model output (string or chat-message list).
     :return: the parsed p_yes in [0, 1], or None if invalid.
     """
     obj = extract_json(completion)
-    if not isinstance(obj, dict):
+    if obj is None:
         return None
-    if "p_yes" not in obj:
-        return None
-    try:
-        p_yes = float(obj["p_yes"])
-    except (TypeError, ValueError):
-        return None
+    # extract_json only returns an object whose p_yes coerces to float.
+    p_yes = float(obj["p_yes"])
     if not 0.0 <= p_yes <= 1.0:
         return None
     return p_yes
@@ -371,17 +428,23 @@ def canonical_prediction(completion: Optional[str]) -> Optional[str]:
     object (no reasoning block) carrying at least `p_yes`/`p_no`. We re-derive a
     normalised object from the parsed completion so `p_no` is always present and
     consistent with `p_yes`, defaulting confidence/info_utility when the model
-    omitted them. Returns None when `p_yes` could not be parsed.
+    omitted them. Returns None when there is no answer object to deliver: an
+    unparseable or out-of-range `p_yes`, or a completion truncated
+    mid-reasoning (see extract_json).
 
     :param completion: the raw model completion (or None).
     :return: the canonical delivery JSON string, or None if p_yes is unparseable.
     """
     if completion is None:
         return None
-    p_yes = parse_p_yes(completion)
-    if p_yes is None:
+    obj = extract_json(completion)
+    if obj is None:
         return None
-    obj = extract_json(completion) or {}
+    # Range-checked here rather than via parse_p_yes so the delivered
+    # confidence / info_utility come from the SAME object as the p_yes.
+    p_yes = float(obj["p_yes"])
+    if not 0.0 <= p_yes <= 1.0:
+        return None
     result = {
         "p_yes": p_yes,
         "p_no": round(1.0 - p_yes, 6),
@@ -405,6 +468,32 @@ def _coerce_unit_interval(value: Any, default: float = 0.5) -> float:
 # ---------------------------------------------------------------------------
 # API key rotation (framework contract: return value must end with api_keys)
 # ---------------------------------------------------------------------------
+
+
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable typed-error null tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than a raw exception string. ``error_type``
+    lets an operator tell a systemic misconfiguration (a revoked key hitting
+    every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
 
 
 def with_key_rotation(func: Callable) -> Callable:
@@ -436,8 +525,16 @@ def with_key_rotation(func: Callable) -> Callable:
                     return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
+                # Rotate keys on a rate-limit hit. Once every configured
+                # service is exhausted, honor the null-prediction contract
+                # instead of re-raising: Python does not cascade sibling
+                # except clauses, so a raise here escapes wrapper() past the
+                # `except Exception` branch below and breaks the exact
+                # contract on the path -- fleet-wide throttling -- most likely
+                # to hit many requests at once.
                 if all(remaining <= 0 for remaining in retries_left.values()):
-                    raise e
+                    print(f"[finetuned-prediction] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 for service, remaining in retries_left.items():
                     if remaining > 0:
                         retries_left[service] -= 1
@@ -448,17 +545,8 @@ def with_key_rotation(func: Callable) -> Callable:
                 # (matches superforcaster_market_aware / factual_research) so
                 # a caller or the tournament scorer sees an explicit, typed
                 # error rather than a raw exception string.
-                error_json = json.dumps(
-                    {
-                        "p_yes": None,
-                        "p_no": None,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                    }
-                )
-                return error_json, "", None, None, None, api_keys
+                print(f"[finetuned-prediction] permanent failure: {e}")
+                return _null_prediction_response(e, api_keys)
 
         return execute()
 
@@ -759,12 +847,22 @@ def _truncate_query(query: str) -> str:
     return cut.rstrip()
 
 
+# Declared once and reused by ParsedPrompt, parse_prompt and
+# _flagged_null_result: a bare `str` on any of them lets a typo ("clauses") or
+# a renamed tier reach used_params["parse_tier"] without mypy noticing, and the
+# benchmark slices deliveries on that exact string.
+ParseTier = Literal["template", "clause", "raw"]
+# The closed set of reasons run() can return a flagged null for. Recorded in
+# used_params["null_reason"], so it is likewise consumer-visible.
+NullReason = Literal["empty query", "live search"]
+
+
 class ParsedPrompt(NamedTuple):
     """parse_prompt's result: the LLM question, the Serper query, the tier."""
 
     question: str
     query: str
-    tier: Literal["template", "clause", "raw"]
+    tier: ParseTier
 
 
 def parse_prompt(prompt: str) -> ParsedPrompt:
@@ -801,7 +899,7 @@ def parse_prompt(prompt: str) -> ParsedPrompt:
         candidates.append(
             (_score_clause(scan, start, clause), len(clause), -start, clause)
         )
-    tier: Literal["template", "clause", "raw"]
+    tier: ParseTier
     if candidates:
         # Clarifying questions (inside resolution criteria) often carry the
         # dates/counts that outscore a digit-free market question. In free
@@ -834,8 +932,8 @@ def gather_sources(question: str, serper_api_key: str) -> Optional[str]:
     """Run the search query through Serper and format the top results.
 
     Fails (raises, so with_key_rotation returns the error for the mech to
-    handle) on a Serper request error or a malformed response body (the typed
-    ValueError from _shape_serper_sources). A genuine zero-hit (organic AND
+    handle) on a Serper transport error, a non-2xx status, or a malformed
+    response body (the typed ValueError from _shape_serper_sources). A genuine zero-hit (organic AND
     peopleAlsoAsk both empty) returns None instead so run() can deliver the
     flagged null prediction (issue #455): the model was trained only on
     research-backed prompts, so an empty `<background>` block is
@@ -848,6 +946,9 @@ def gather_sources(question: str, serper_api_key: str) -> Optional[str]:
     """
     try:
         response = fetch_additional_sources(question, serper_api_key)
+        # Surface HTTP errors with a real status code instead of crashing
+        # .json() on a non-JSON 4xx/5xx body (matches the fleet pattern).
+        response.raise_for_status()
         data = response.json()
     except Exception as exc:  # noqa: BLE001 — surface as an explanatory failure
         raise RuntimeError(f"Web search (Serper) request failed: {exc}") from exc
@@ -865,8 +966,8 @@ def _flagged_null_result(
     temperature: float,
     max_tokens: int,
     counter_callback: Optional[Callable[..., Any]],
-    context: str,
-    tier: str,
+    context: NullReason,
+    tier: ParseTier,
     scan_truncated: bool = False,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.

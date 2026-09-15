@@ -20,10 +20,12 @@
 """Unit tests for the fine-tuned Qwen prediction tool."""
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, get_args, get_type_hints
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
+import requests
 
 import packages.valory.customs.finetuned_prediction.finetuned_prediction as module
 from packages.valory.customs.finetuned_prediction.finetuned_prediction import (
@@ -58,6 +60,10 @@ BARE_CLOSE = (
     "</think>\n"
     '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}'
 )
+# Same completion with an UPPERCASE tag. The tags come from the chat template,
+# a deployment artifact this tool does not control, so a template emitting
+# <THINK> must not silently turn the think guards into no-ops.
+BARE_CLOSE_UPPER = BARE_CLOSE.replace("</think>", "</THINK>")
 
 
 class FakeKeyChain:
@@ -137,11 +143,45 @@ def test_canonical_prediction_derives_p_no_and_defaults() -> None:
 def test_canonical_prediction_returns_none_on_malformed() -> None:
     """Unparseable or missing completions yield None."""
     assert canonical_prediction("<think>oops</think> not json") is None
+    assert canonical_prediction(None) is None
+
+
+@pytest.mark.parametrize(
+    "completion",
+    ['{"p_yes": 1.5}', '{"p_yes": -0.2}', '</think>\n{"p_yes": 1.5, "p_no": -0.5}'],
+    ids=["above_one", "below_zero", "after_think_block"],
+)
+def test_canonical_prediction_rejects_an_out_of_range_p_yes(completion: str) -> None:
+    """An out-of-range p_yes yields None, never a derived p_no outside [0, 1]."""
+    # canonical_prediction range-checks its own object rather than deferring to
+    # parse_p_yes. Without that check the delivery is built anyway: p_yes 1.5
+    # gives p_no -0.5, i.e. a NEGATIVE probability answered on-chain.
+    assert canonical_prediction(completion) is None
 
 
 def test_bare_closing_tag_discards_the_reasoning_draft() -> None:
     """A draft written before a bare </think> must not win over the answer."""
     assert json.loads(canonical_prediction(BARE_CLOSE) or "{}")["p_yes"] == 0.3
+
+
+def test_an_uppercase_bare_closing_tag_discards_the_reasoning_draft() -> None:
+    """An uppercase </THINK> must strip the reasoning just like the lower one."""
+    assert json.loads(canonical_prediction(BARE_CLOSE_UPPER) or "{}")["p_yes"] == 0.3
+    # The draft parses and the post-tag answer does not: only a case-insensitive
+    # strip keeps the draft out of the candidate pool.
+    draft_only = 'Draft: {"p_yes": 0.9, "p_no": 0.1}\n</THINK>\n{"p_yes": }'
+    assert canonical_prediction(draft_only) is None
+
+
+def test_an_uppercase_closing_tag_still_ends_the_reasoning_block() -> None:
+    """A lowercase opener closed by </THINK> is complete, not truncated."""
+    # THINK_CLOSE_RE decides truncation. Case-sensitive, it misses </THINK> and
+    # discards a COMPLETE completion as if the token budget had run out.
+    completion = (
+        '<think>draft {"p_yes": 0.9, "p_no": 0.1}</THINK>\n'
+        '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}'
+    )
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.3
 
 
 def test_a_reasoning_draft_is_never_delivered_as_the_answer() -> None:
@@ -172,7 +212,57 @@ def test_completion_without_any_closing_tag_is_left_intact() -> None:
     """No closing tag must not cause the whole completion to be stripped."""
     parsed = json.loads(canonical_prediction('{"p_yes": 0.42, "p_no": 0.58}') or "{}")
     assert parsed["p_yes"] == 0.42
-    assert canonical_prediction(None) is None
+
+
+def test_a_trailing_non_prediction_object_does_not_shadow_the_answer() -> None:
+    """An object with no p_yes after the answer is skipped, not taken as it."""
+    completion = (
+        "</think>\n"
+        '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}\n'
+        '{"ok": true}'
+    )
+    assert json.loads(canonical_prediction(completion) or "{}")["p_yes"] == 0.3
+
+
+def test_a_truncated_think_block_never_delivers_a_draft() -> None:
+    """An opener with no closer is a cut-off completion, not an answer."""
+    # Real on the truncated path (max_tokens exhausted mid-reasoning): every
+    # probability present is a working estimate, so there is nothing to deliver.
+    completion = '<think>maybe {"p_yes": 0.9, "p_no": 0.1} still thinking'
+    assert canonical_prediction(completion) is None
+    assert parse_p_yes(completion) is None
+
+
+def test_an_uppercase_truncated_think_block_never_delivers_a_draft() -> None:
+    """An uppercase <THINK> opener with no closer is truncated all the same."""
+    # THINK_OPEN_RE decides truncation. Case-sensitive, it misses <THINK> and
+    # the draft probability is harvested and delivered as the final answer.
+    completion = '<THINK>maybe {"p_yes": 0.9, "p_no": 0.1} still thinking'
+    assert canonical_prediction(completion) is None
+    assert parse_p_yes(completion) is None
+
+
+def test_a_nested_object_in_the_answer_still_parses() -> None:
+    """An answer carrying a nested object must not be lost to a null delivery."""
+    completion = (
+        "</think>\n"
+        '{"p_yes": 0.44, "p_no": 0.56, "meta": {"draft": 0.9}, "confidence": 0.7}'
+    )
+    parsed = json.loads(canonical_prediction(completion) or "{}")
+    assert parsed["p_yes"] == 0.44
+    assert parsed["confidence"] == 0.7
+
+
+def test_a_brace_inside_a_string_value_does_not_cut_the_answer_short() -> None:
+    """A '}' inside a string value must not truncate the answer object."""
+    completion = (
+        "</think>\n"
+        '{"p_yes": 0.61, "p_no": 0.39, "note": "resolves if } appears", '
+        '"info_utility": 0.8}'
+    )
+    parsed = json.loads(canonical_prediction(completion) or "{}")
+    assert parsed["p_yes"] == 0.61
+    assert parsed["info_utility"] == 0.8
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +322,60 @@ def test_key_rotation_converts_exception_to_error_tuple() -> None:
     assert parsed["info_utility"] == 0.0
     assert parsed["error"] == "boom"
     assert parsed["error_type"] == "RuntimeError"
+
+
+def _rate_limit_error(message: str) -> openai.RateLimitError:
+    """Build an openai.RateLimitError without touching the network."""
+    return openai.RateLimitError(
+        message, response=MagicMock(status_code=429, headers={}), body={}
+    )
+
+
+def test_rate_limit_rotates_every_configured_service_then_retries() -> None:
+    """A 429 with retries left rotates every service and runs the tool again."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    attempts = 0
+
+    @with_key_rotation
+    def tool(**kwargs: Any) -> tuple[str, str, None, None, dict[str, str]]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise _rate_limit_error("429 Too Many Requests")
+        return "result", "prompt", None, None, {"k": "v"}
+
+    out = tool(api_keys=keychain)
+    assert attempts == 2
+    assert out == ("result", "prompt", None, None, {"k": "v"}, keychain)
+    assert sorted(keychain.rotated) == ["finetuned", "serperapi"]
+
+
+def test_rate_limit_exhaustion_returns_the_typed_error_null() -> None:
+    """Exhausted keys deliver the typed error null, not an escaping exception."""
+    # Python does not cascade sibling `except` clauses, so a `raise` from the
+    # RateLimitError branch would bypass the `except Exception` branch that
+    # builds the null and reach the mech as a raw exception.
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    attempts = 0
+
+    @with_key_rotation
+    def tool(**kwargs: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise _rate_limit_error("429 Too Many Requests")
+
+    out = tool(api_keys=keychain)
+    # Every configured service was rotated once before the keys ran out.
+    assert attempts == 2
+    assert sorted(keychain.rotated) == ["finetuned", "serperapi"]
+    assert out[1:] == ("", None, None, None, keychain)
+    parsed = json.loads(out[0])
+    assert parsed["p_yes"] is None
+    assert parsed["p_no"] is None
+    assert parsed["confidence"] == 0.0
+    assert parsed["info_utility"] == 0.0
+    assert parsed["error_type"] == "RateLimitError"
+    assert "429" in parsed["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +576,28 @@ def test_run_raises_on_unparseable_completion() -> None:
     assert "parseable p_yes" in out[0]
 
 
+def test_run_delivers_the_error_not_a_negative_probability() -> None:
+    """An out-of-range p_yes is delivered as the error, not as p_no < 0."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = ('</think>\n{"p_yes": 1.5, "p_no": -0.5}', None)
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    # with_key_rotation converts the ValueError into a typed error null.
+    parsed = json.loads(out[0])
+    assert parsed["p_yes"] is None
+    assert parsed["p_no"] is None
+    assert parsed["error_type"] == "ValueError"
+    assert "parseable p_yes" in parsed["error"]
+
+
 def test_run_delivery_rate_zero_returns_max_cost() -> None:
     """A zero delivery rate returns the counter callback's max cost."""
     counter = MagicMock(return_value=1.23)
@@ -484,6 +650,20 @@ def test_gather_sources_raises_on_serper_request_failure() -> None:
         f"{MODULE_PATH}.fetch_additional_sources", side_effect=Exception("down")
     ):
         with pytest.raises(RuntimeError, match="request failed"):
+            gather_sources("Will X happen?", "serp-key")
+
+
+def test_gather_sources_surfaces_a_non_2xx_status_instead_of_a_json_crash() -> None:
+    """A 4xx/5xx Serper body raises with its status, never reaching .json()."""
+    resp = MagicMock()
+    resp.raise_for_status.side_effect = requests.HTTPError(
+        "403 Client Error: Forbidden for url: https://google.serper.dev/search"
+    )
+    # A credit/auth error body is HTML, so .json() would raise an opaque
+    # JSONDecodeError that hides the status the operator needs.
+    resp.json.side_effect = AssertionError("json() called on an error body")
+    with patch(f"{MODULE_PATH}.fetch_additional_sources", return_value=resp):
+        with pytest.raises(RuntimeError, match="403 Client Error"):
             gather_sources("Will X happen?", "serp-key")
 
 
@@ -577,6 +757,32 @@ def test_both_empty_retrieval_returns_flagged_null_live_search() -> None:
     assert used_params["parse_tier"] == "template"
 
 
+def test_organic_empty_but_people_also_ask_present_still_calls_the_llm() -> None:
+    """The guard needs BOTH lists empty; peopleAlsoAsk alone keeps the LLM path."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    payload = {"organic": [], "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}]}
+    with (
+        patch(
+            f"{MODULE_PATH}.fetch_additional_sources",
+            return_value=_serper_response(payload),
+        ),
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        out = run(
+            tool=TOOL_BASE,
+            prompt=_bare_prompt("Will X happen?"),
+            api_keys=keychain,
+        )
+    gen.assert_called_once()
+    result, _, _, _, used_params, _ = out
+    assert json.loads(result)["p_yes"] == 0.73
+    assert "empty_retrieval" not in used_params
+    # The peopleAlsoAsk block is the evidence the forecaster actually receives.
+    assert "People Also Ask" in gen.call_args.kwargs["messages"][0]["content"]
+
+
 def test_template_past_scan_window_not_marked_truncated() -> None:
     """A trader-template prompt longer than the window is NOT scan_truncated."""
     keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
@@ -593,6 +799,42 @@ def test_template_past_scan_window_not_marked_truncated() -> None:
     used_params = out[4]
     assert used_params["parse_tier"] == "template"
     assert used_params["scan_truncated"] is False
+
+
+def test_raw_tier_past_scan_window_is_marked_truncated() -> None:
+    """A question-free prompt past the window is raw tier AND scan_truncated."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    prompt = "no question words at all here. " * (module._MAX_SCAN_CHARS // 10)
+    assert len(prompt) > module._MAX_SCAN_CHARS
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        out = run(tool=TOOL_BASE, prompt=prompt, api_keys=keychain)
+    used_params = out[4]
+    assert used_params["parse_tier"] == "raw"
+    assert used_params["scan_truncated"] is True
+
+
+def test_clause_tier_past_scan_window_is_marked_truncated() -> None:
+    """A clause-tier pick on a longer-than-window prompt is still marked."""
+    keychain = FakeKeyChain({"finetuned": "EMPTY", "serperapi": "serp-key"})
+    prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
+        module._MAX_SCAN_CHARS // 3
+    )
+    assert len(prompt) > module._MAX_SCAN_CHARS
+    with (
+        patch(f"{MODULE_PATH}.generate_prediction_with_retry") as gen,
+        patch(f"{MODULE_PATH}.VLLMClientManager"),
+        patch(f"{MODULE_PATH}.gather_sources", return_value="SRC"),
+    ):
+        gen.return_value = (WELL_FORMED, None)
+        out = run(tool=TOOL_BASE, prompt=prompt, api_keys=keychain)
+    used_params = out[4]
+    assert used_params["parse_tier"] == "clause"
+    assert used_params["scan_truncated"] is True
 
 
 def test_free_text_search_uses_derived_query_not_full_prompt() -> None:
@@ -647,3 +889,33 @@ def test_malformed_serper_body_is_typed_error_not_flagged_null() -> None:
     assert parsed["confidence"] == 0.0
     assert parsed["info_utility"] == 0.0
     assert parsed["error_type"] == "ValueError"
+
+
+# ---------------------------------------------------------------------------
+# Shared annotations -- the tier/reason strings reach used_params verbatim
+# ---------------------------------------------------------------------------
+
+
+def test_flagged_null_keeps_the_parsed_prompt_tier_literal() -> None:
+    """_flagged_null_result types tier as ParsedPrompt's Literal, not a bare str."""
+    hints = get_type_hints(module._flagged_null_result)
+    assert hints["tier"] is module.ParsedPrompt.__annotations__["tier"]
+    assert get_args(hints["tier"]) == ("template", "clause", "raw")
+
+
+def test_flagged_null_reasons_are_a_closed_literal() -> None:
+    """_flagged_null_result types context as the closed null-reason Literal."""
+    hints = get_type_hints(module._flagged_null_result)
+    assert get_args(hints["context"]) == ("empty query", "live search")
+
+
+def test_parse_prompt_only_ever_returns_a_declared_tier() -> None:
+    """Every tier parse_prompt can emit is a member of the shared Literal."""
+    declared = set(get_args(module.ParseTier))
+    prompts = [
+        _bare_prompt("Will X happen?"),  # template
+        "Some preamble. Will the club sign a striker? More text.",  # clause
+        "no question words at all here",  # raw
+    ]
+    tiers = {parse_prompt(prompt).tier for prompt in prompts}
+    assert tiers == declared

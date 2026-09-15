@@ -342,9 +342,9 @@ _SCRIPT_STYLE_PATTERN = re.compile(
 
 # Cap on the rendered <background> evidence block to bound prompt size and
 # avoid lost-in-the-middle degradation when an outlier page returns a very
-# long body. Trailing organic items are dropped (Serper orders by relevance)
-# until the rendered block fits. Same trailing-drop pattern as
-# factual_research (which caps at 3000); budget set to 4000 here to fit
+# long body. peopleAlsoAsk is dropped first, then trailing organic items
+# (Serper orders organic by relevance), until the rendered block fits --
+# see _cap_evidence_block. Budget set to 4000, against factual_research's 3000, to fit
 # observed evidence sizes with headroom. On this model's 8k window it is the
 # tighter of two ceilings -- the other being what the window physically allows
 # -- so unlike the parent it binds in practice, not just in theory.
@@ -765,7 +765,14 @@ def _cap_evidence_block(
     # tighter.
     max_tokens = min(max_tokens, MAX_EVIDENCE_TOKENS)
     rendered = format_sources_data(organic_data, misc_data)
-    if budget_tokens(rendered, model) <= max_tokens or not organic_data:
+    # NB no `or not organic_data` short-circuit. The parent had one because it
+    # never trimmed peopleAlsoAsk, so with no organic items there was nothing it
+    # could drop. This file trims peopleAlsoAsk FIRST, so that clause became a
+    # hole: a PAA-only oversized response skipped BOTH loops and shipped an
+    # untrimmed block past the 8k window (measured: 21304 tokens against a 3000
+    # budget). Both loops handle an empty list -- `while trimmed and ...`
+    # short-circuits immediately.
+    if budget_tokens(rendered, model) <= max_tokens:
         return _CappedEvidence(rendered, len(organic_data), len(misc_data))
 
     # peopleAlsoAsk goes first. The parent trimmed only organic items, which is
@@ -825,6 +832,28 @@ class _CappedEvidence(NamedTuple):
         :return: True when neither an organic nor a peopleAlsoAsk item survived.
         """
         return self.organic_kept == 0 and self.misc_kept == 0
+
+
+def _clamp_max_tokens(raw: Any, ceiling: int) -> int:
+    """Coerce a requester-supplied completion budget into a usable one.
+
+    Extracted so every rejection path is testable on its own. `bool` is checked
+    before `int` because `isinstance(True, int)` is True and `int(True)` is 1 --
+    a one-token budget that cannot produce a parseable answer.
+
+    :param raw: the requester's `max_tokens`, of any type.
+    :param ceiling: the largest completion budget the window can afford.
+    :return: a positive budget no larger than `ceiling`.
+    """
+    default = int(DEFAULT_MODEL_SETTINGS["max_tokens"])
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return min(default, ceiling)
+    # int() AFTER the positivity check, not before: a small positive float such
+    # as 3e-9 passes `> 0` and then truncates to a zero budget.
+    requested = int(raw)
+    if requested <= 0:
+        return min(default, ceiling)
+    return min(requested, ceiling)
 
 
 def _evidence_budget(question: str, today: str, model: str, max_tokens: int) -> int:
@@ -1048,6 +1077,8 @@ def _flagged_null_result(
     context: str,
     tier: str,
     scan_truncated: bool = False,
+    sources_used: int = 0,
+    sources_dropped: int = 0,
 ) -> MechResponse:
     """Build the flagged null prediction returned on empty retrieval.
 
@@ -1072,6 +1103,8 @@ def _flagged_null_result(
     :param scan_truncated: whether the scan window did not cover the whole
         prompt (any non-template tier; a template match returns before the
         window can matter).
+    :param sources_used: evidence items that reached the model (0 on every null).
+    :param sources_dropped: evidence items retrieved but not sent.
     :return: the flagged-null MechResponse tuple.
     """
     print(
@@ -1089,6 +1122,12 @@ def _flagged_null_result(
         "null_reason": context,
         "parse_tier": tier,
         "scan_truncated": scan_truncated,
+        # Same keys as the healthy path. Emitting them only on success meant a
+        # consumer indexing used_params["sources_used"] hit a KeyError on
+        # exactly the deliveries it most needed to distinguish -- "no sources
+        # ever" from "sources trimmed to zero".
+        "sources_used": sources_used,
+        "sources_dropped": sources_dropped,
     }
     if return_source_content:
         used_params["source_content"] = captured_source_content
@@ -1160,23 +1199,20 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     with OpenAIClientManager(llm_api_key, endpoint) as llm_client:
         # Clamped, not trusted -- see MIN_PROMPT_BUDGET. `or` rather than a
         # get() default so an explicit null (the key present, value None) falls
-        # back too instead of raising TypeError; max(1, ...) so 0 or a negative
-        # is corrected here rather than burning three retries on a 400.
+        # back too instead of raising TypeError.
         _ceiling = MODEL_CONTEXT_WINDOW - MIN_PROMPT_BUDGET
-        # `or` catches None and 0 (both falsy); a NEGATIVE is truthy, so it
-        # would otherwise clamp to 1 -- a request that cannot produce a
-        # parseable answer. Treat every non-positive value the same way.
-        _requested = int(
-            kwargs.get("max_tokens") or DEFAULT_MODEL_SETTINGS["max_tokens"]
-        )
-        if _requested <= 0:
-            _requested = int(DEFAULT_MODEL_SETTINGS["max_tokens"])
-        max_tokens = min(_requested, _ceiling)
-        if _requested != max_tokens:
+        _raw_max_tokens = kwargs.get("max_tokens")
+        max_tokens = _clamp_max_tokens(_raw_max_tokens, _ceiling)
+        # Compare against the RAW value, not a pre-corrected one: rewriting
+        # `_requested` to the default first meant the pathological inputs this
+        # guard exists for (None / 0 / negative) never logged, because by the
+        # time of the comparison they already equalled the result.
+        if _raw_max_tokens is not None and _raw_max_tokens != max_tokens:
             print(
-                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] max_tokens {_requested} "
-                f"clamped to {max_tokens} (window {MODEL_CONTEXT_WINDOW}, "
-                f"prompt floor {MIN_PROMPT_BUDGET})"
+                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] max_tokens "
+                f"{_raw_max_tokens!r} corrected to {max_tokens} "
+                f"(window {MODEL_CONTEXT_WINDOW}, prompt floor "
+                f"{MIN_PROMPT_BUDGET})"
             )
         temperature = kwargs.get("temperature", DEFAULT_MODEL_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
@@ -1324,6 +1360,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # exists to close.
         if (organic_data or misc_data) and capped.is_empty:
             return _flagged_null_result(
+                sources_dropped=len(organic_data) + len(misc_data),
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,

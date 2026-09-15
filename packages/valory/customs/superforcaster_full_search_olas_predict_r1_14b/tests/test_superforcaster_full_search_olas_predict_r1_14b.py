@@ -22,7 +22,7 @@
 import inspect
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import openai
@@ -463,19 +463,21 @@ class TestEvidenceBlockCap:
         assert "T0" in rendered
         assert "T4" not in rendered
 
-    def test_paa_only_overflow_returns_without_loop(self) -> None:
-        """With no organic items the cap returns as-is (no marker, no infinite loop)."""
-        from packages.valory.customs.superforcaster_full_search_olas_predict_r1_14b.superforcaster_full_search_olas_predict_r1_14b import (
-            _cap_evidence_block,
-        )
-
-        huge_paa = [
-            {"question": "lorem ipsum " * 800, "link": "http://x", "snippet": "s"}
-        ]
-        rendered = _cap_evidence_block([], huge_paa, model="gpt-4.1").rendered
-        # organic is empty -- early return, no trailing-drop marker added
-        assert "[… evidence truncated …]" not in rendered
-        assert "lorem ipsum" in rendered
+    def test_paa_only_overflow_is_trimmed_not_returned_whole(self) -> None:
+        """A peopleAlsoAsk-only response must still be trimmed."""
+        # This previously asserted the opposite and pinned a real hole: the
+        # parent's `or not organic_data` early return was correct there because
+        # it never trimmed peopleAlsoAsk, but this file trims it FIRST, so the
+        # clause skipped BOTH loops. Measured before the fix: 21304 tokens
+        # returned against a 3000 budget, on an 8192 window.
+        # There is no infinite loop -- `while misc and ...: misc.pop()`
+        # terminates when misc empties.
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        huge_paa = [{"question": f"q{i}?", "snippet": page} for i in range(40)]
+        capped = module._cap_evidence_block([], huge_paa, "olas-predict-r1-14b", 3000)
+        assert module.budget_tokens(capped.rendered, "olas-predict-r1-14b") <= 3000
+        assert capped.misc_kept < len(huge_paa), "peopleAlsoAsk was not trimmed"
+        assert capped.organic_kept == 0
 
 
 class TestFetchPageContent:
@@ -1403,6 +1405,74 @@ class TestOlasPredictWiring:
             '"confidence": 0.6, "info_utility": 0.5}'
         )
         assert json.loads(canonical_prediction(closed) or "{}")["p_yes"] == 0.3
+
+    def test_clamp_max_tokens_handles_every_rejected_shape(self) -> None:
+        """Extracted so each rejection path is testable on its own."""
+        ceiling = module.MODEL_CONTEXT_WINDOW - module.MIN_PROMPT_BUDGET
+        default = module.DEFAULT_MODEL_SETTINGS["max_tokens"]
+        # bool is checked before int: isinstance(True, int) is True and
+        # int(True) is 1, a budget that cannot produce a parseable answer.
+        rejected: Tuple[Any, ...] = (None, 0, -500, True, False, "2048", [], 3.0e-9)
+        for raw in rejected:
+            assert module._clamp_max_tokens(raw, ceiling) == min(default, ceiling), raw
+        assert module._clamp_max_tokens(8000, ceiling) == ceiling
+        assert module._clamp_max_tokens(512, ceiling) == 512
+
+    def test_think_tags_match_mixed_case_too(self) -> None:
+        """Not just fully-uppercase: a `.upper()` reimplementation would slip."""
+        assert canonical_prediction('<Think> draft {"p_yes": 0.9} still') is None
+        assert canonical_prediction('<ThInK> draft {"p_yes": 0.9} still') is None
+        closed = (
+            'draft {"p_yes": 0.9}</ThInk>{"p_yes": 0.3, "p_no": 0.7, '
+            '"confidence": 0.6, "info_utility": 0.5}'
+        )
+        assert json.loads(canonical_prediction(closed) or "{}")["p_yes"] == 0.3
+
+    def test_question_cap_boundary(self) -> None:
+        """An off-by-one in the gate would not show up in the coarse tests."""
+        model = "olas-predict-r1-14b"
+        limit = module._MAX_QUESTION_TOKENS
+        short = "word " * 10
+        assert module._truncate_to_tokens(short, limit, model) == short
+        long_q = "word " * 5000
+        capped = module._truncate_to_tokens(long_q, limit, model)
+        assert module.budget_tokens(capped, model) <= limit
+        assert len(capped) < len(long_q)
+
+    def test_capped_evidence_partial_trim_is_not_empty(self) -> None:
+        """Some survivors must read as not-empty, not just all-or-nothing."""
+        page = " ".join(["token"] * module._MAX_PAGE_WORDS)
+        organic = [
+            {
+                "title": f"P{i}",
+                "link": f"https://e.com/{i}",
+                "snippet": page,
+                "date": "x",
+            }
+            for i in range(module.MAX_SOURCES)
+        ]
+        partial = module._cap_evidence_block(organic, [], "olas-predict-r1-14b", 1500)
+        assert 0 < partial.organic_kept < module.MAX_SOURCES
+        assert partial.is_empty is False
+
+    def test_source_counts_are_present_on_the_null_paths_too(self) -> None:
+        """Consumers index these unconditionally, so every path must carry them."""
+        keys = ("sources_used", "sources_dropped")
+        result = module._flagged_null_result(
+            model="m",
+            temperature=0,
+            max_tokens=2048,
+            captured_source_content=None,
+            return_source_content=False,
+            counter_callback=None,
+            context="live search",
+            tier="template",
+            sources_dropped=7,
+        )
+        used = result[4] or {}
+        for k in keys:
+            assert k in used, f"{k} missing from a flagged null"
+        assert used["sources_used"] == 0 and used["sources_dropped"] == 7
 
     def test_capped_evidence_reports_what_survived(self) -> None:
         """The cap reports counts, so nothing has to string-match the render."""

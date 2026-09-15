@@ -291,12 +291,11 @@ THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
 # `{"p_yes": 0.8, ..., "meta": {"a": 1}}` -- a perfectly good forecast with one
 # extra key -- would be skipped and the whole delivery lost to a null.
 # raw_decode handles nesting and gives the object's true extent.
-# Two wire names, one package: the code is identical for both platforms (the
-# evaluation ran this same pipeline on Omen and Polymarket), and separate names
-# let the two be scored, promoted and served independently.
-TOOL_OMEN = "superforcaster_full_search_olas_predict_r1_14b_omen"
-TOOL_POLYMARKET = "superforcaster_full_search_olas_predict_r1_14b_polymarket"
-ALLOWED_TOOLS = [TOOL_OMEN, TOOL_POLYMARKET]
+# One wire name. The two platform-suffixed names this replaces resolved to the
+# same package, the same served model, and identical code -- nothing branched on
+# which was called. Platform selection happens in the deployment env, not here.
+TOOL_NAME = "superforcaster_full_search_olas_predict_r1_14b"
+ALLOWED_TOOLS = [TOOL_NAME]
 
 # vLLM --served-model-name (the SFT warm-start checkpoint; the server renamed it
 # from `qwen-14b-sft` on 2026-09-14 and the old name now 404s), resolved from the
@@ -1209,7 +1208,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         # time of the comparison they already equalled the result.
         if _raw_max_tokens is not None and _raw_max_tokens != max_tokens:
             print(
-                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] max_tokens "
+                f"[{TOOL_NAME}] max_tokens "
                 f"{_raw_max_tokens!r} corrected to {max_tokens} "
                 f"(window {MODEL_CONTEXT_WINDOW}, prompt floor "
                 f"{MIN_PROMPT_BUDGET})"
@@ -1253,7 +1252,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 question = search_query
             question = _truncate_to_tokens(question, _MAX_QUESTION_TOKENS, model)
             print(
-                f"[{TOOL_OMEN.rsplit('_', 1)[0]}] Question too long for the "
+                f"[{TOOL_NAME}] Question too long for the "
                 f"{MODEL_CONTEXT_WINDOW}-token window; using tier={tier} "
                 f"question: {question[:120]!r}"
             )

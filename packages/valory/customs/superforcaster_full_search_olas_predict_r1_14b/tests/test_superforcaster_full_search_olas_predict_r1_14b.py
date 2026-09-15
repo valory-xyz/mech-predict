@@ -201,7 +201,7 @@ class TestSuperforcasterSourceContent:
         _stub_openai(mock_client_mgr)
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -241,7 +241,7 @@ class TestSuperforcasterSourceContent:
         _stub_openai(mock_client_mgr)
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -270,7 +270,7 @@ class TestSuperforcasterSourceContent:
             },
         }
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -295,7 +295,7 @@ class TestSuperforcasterSourceContent:
             "pages": {"http://example.com/result": _HTML_PAGE},
         }
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -318,7 +318,7 @@ class TestSuperforcasterSourceContent:
         # Old format: no `pages` key, no `mode` key.
         source_content = {"serper_response": FAKE_SERPER_RESPONSE}
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("true"),
@@ -349,7 +349,7 @@ class TestSuperforcasterSourceContent:
         _stub_openai(mock_client_mgr)
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -567,7 +567,7 @@ class TestErrorHandling:
         keys.max_retries = lambda: {"vllm_server_api_key": 1}
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             prompt=PREDICTION_PROMPT,
             api_keys=keys,
             counter_callback=None,
@@ -588,7 +588,7 @@ class TestErrorHandling:
         mock_fetch.side_effect = RuntimeError("boom")
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -610,7 +610,7 @@ class TestErrorHandling:
         mock_client.completions.return_value = OpenAIResponse(content=None)
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -647,7 +647,7 @@ class TestSerperRequest:
         mock_fetch.return_value = bad_response
 
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -667,7 +667,7 @@ class TestSourceContentModeValidation:
     def test_invalid_mode_returns_error_json(self) -> None:
         """A bad mode yields error JSON (not a silent string) via the catch-all."""
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys(source_content_mode="bogus"),
@@ -685,7 +685,7 @@ class TestMaxCostPath:
     def test_max_cost_returns_float_not_wrapped_tuple(self) -> None:
         """Without the isinstance(result, float) guard this raises TypeError."""
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -745,7 +745,7 @@ class TestIssue455EmptyRetrievalGuard:
     ) -> None:
         """Prompts with no searchable content never reach Serper at all."""
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=degenerate,
             api_keys=_make_mock_api_keys("false"),
@@ -771,7 +771,7 @@ class TestIssue455EmptyRetrievalGuard:
         mock_response.json.return_value = EMPTY_SERPER_RESPONSE
         mock_fetch.return_value = mock_response
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -788,7 +788,7 @@ class TestIssue455EmptyRetrievalGuard:
     ) -> None:
         """Both-empty cached retrieval -> flagged null with the replay reason."""
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -809,7 +809,7 @@ class TestIssue455EmptyRetrievalGuard:
         mock_response.json.return_value = {"organic": None, "peopleAlsoAsk": []}
         mock_fetch.return_value = mock_response
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -838,7 +838,7 @@ class TestIssue455RunWiring:
         mock_fetch.return_value = mock_response
         _stub_openai(mock_client_mgr)
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -863,7 +863,7 @@ class TestIssue455RunWiring:
         mock_fetch.return_value = mock_response
         _stub_openai(mock_client_mgr)
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=LONG_FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -893,7 +893,7 @@ class TestIssue455RunWiring:
         prompt = "no question words at all here. " * (module._MAX_SCAN_CHARS // 10)
         assert len(prompt) > module._MAX_SCAN_CHARS
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=prompt,
             api_keys=_make_mock_api_keys("false"),
@@ -921,7 +921,7 @@ class TestIssue455RunWiring:
         )
         assert len(prompt) > module._MAX_SCAN_CHARS
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=prompt,
             api_keys=_make_mock_api_keys("false"),
@@ -956,7 +956,7 @@ class TestIssue455RunWiring:
         mock_fetch.return_value = mock_response
         _stub_openai(mock_client_mgr)
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=LONG_FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -981,7 +981,7 @@ class TestIssue455RunWiring:
         """Cached-replay branch applies the same shape check as the live one."""
         _stub_openai(mock_client_mgr)
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=LONG_FREE_TEXT_PROMPT,
             api_keys=_make_mock_api_keys("false"),
@@ -1013,7 +1013,7 @@ class TestIssue455RunWiring:
         prompt = PREDICTION_PROMPT + " filler" * (module._MAX_SCAN_CHARS // 3)
         assert len(prompt) > module._MAX_SCAN_CHARS
         result = run(
-            tool="superforcaster_full_search_olas_predict_r1_14b_omen",
+            tool="superforcaster_full_search_olas_predict_r1_14b",
             model="gpt-4o",
             prompt=prompt,
             api_keys=_make_mock_api_keys("false"),
@@ -1026,12 +1026,14 @@ class TestIssue455RunWiring:
 class TestOlasPredictWiring:
     """The deltas from the superforcaster_full_search parent."""
 
-    def test_both_platform_wire_names_are_allowed(self) -> None:
-        """One package serves an Omen and a Polymarket name; others are rejected."""
+    def test_exactly_one_wire_name_is_allowed(self) -> None:
+        """One package, one name; anything else is rejected by run()."""
         assert module.ALLOWED_TOOLS == [
-            "superforcaster_full_search_olas_predict_r1_14b_omen",
-            "superforcaster_full_search_olas_predict_r1_14b_polymarket",
+            "superforcaster_full_search_olas_predict_r1_14b"
         ]
+        assert module.MODEL_BY_TOOL == {
+            "superforcaster_full_search_olas_predict_r1_14b": module.SERVED_MODEL
+        }
 
     def test_unknown_tool_name_is_rejected(self) -> None:
         """A wire name we do not serve must not silently run the model.
@@ -1126,7 +1128,7 @@ class TestOlasPredictWiring:
         """
         _stub_openai(mock_client_mgr)
         result = run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             model="olas-predict-r1-14b",
             api_keys=_make_mock_api_keys(),
@@ -1148,7 +1150,7 @@ class TestOlasPredictWiring:
         keys.get = lambda key, default="": services.get(key, default)
         keys.max_retries = lambda: {"openai": 1, "openrouter": 1}
         result = module.run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             model="olas-predict-r1-14b",
             api_keys=keys,
@@ -1174,7 +1176,7 @@ class TestOlasPredictWiring:
         keys.get = lambda key, default="": services.get(key, default)
         keys.max_retries = lambda: {"openai": 1, "openrouter": 1}
         result = module.run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             model="olas-predict-r1-14b",
             api_keys=keys,
@@ -1194,8 +1196,8 @@ class TestOlasPredictWiring:
 
     def test_served_model_is_resolved_from_the_tool(self) -> None:
         """Both wire names resolve to the one checkpoint this endpoint serves."""
-        assert module.resolve_model(module.TOOL_OMEN) == "olas-predict-r1-14b"
-        assert module.resolve_model(module.TOOL_POLYMARKET) == "olas-predict-r1-14b"
+        assert module.resolve_model(module.TOOL_NAME) == "olas-predict-r1-14b"
+        assert module.resolve_model(module.TOOL_NAME) == "olas-predict-r1-14b"
         assert set(module.MODEL_BY_TOOL) == set(module.ALLOWED_TOOLS)
         # component.yaml's default_model must agree: the mech shows it in the
         # tool metadata, and a drift there misreports what is being served.
@@ -1217,7 +1219,7 @@ class TestOlasPredictWiring:
         # checkpoint.
         mock_client = _stub_openai(mock_client_mgr)
         run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             model="gpt-4.1-2025-04-14",
             api_keys=_make_mock_api_keys("false"),
@@ -1233,7 +1235,7 @@ class TestOlasPredictWiring:
         with patch(f"{SF_MODULE}.OpenAIClientManager") as mock_client_mgr:
             _stub_openai(mock_client_mgr)
             result = run(
-                tool=module.TOOL_POLYMARKET,
+                tool=module.TOOL_NAME,
                 prompt=PREDICTION_PROMPT,
                 api_keys=_make_mock_api_keys("false"),
                 counter_callback=None,
@@ -1309,7 +1311,7 @@ class TestOlasPredictWiring:
         # exists to catch. Assert on what reaches the endpoint instead.
         mock_client = _stub_openai(mock_client_mgr)
         run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
             counter_callback=None,
@@ -1331,7 +1333,7 @@ class TestOlasPredictWiring:
         for bad in (None, 0, -5):
             mock_client = _stub_openai(mock_client_mgr)
             result = run(
-                tool=module.TOOL_OMEN,
+                tool=module.TOOL_NAME,
                 prompt=PREDICTION_PROMPT,
                 api_keys=_make_mock_api_keys("false"),
                 counter_callback=None,
@@ -1370,7 +1372,7 @@ class TestOlasPredictWiring:
         }
         # A completion budget that leaves the prompt almost nothing.
         result = run(
-            tool=module.TOOL_OMEN,
+            tool=module.TOOL_NAME,
             prompt=PREDICTION_PROMPT,
             api_keys=_make_mock_api_keys("false"),
             counter_callback=None,

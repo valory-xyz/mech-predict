@@ -1104,7 +1104,6 @@ def _decision_state(
         )
     if promote:
         return "promote", f"PROMOTE {len(promote)}", promote, []
-    suffix = "" if len(demote) == 1 else "s"
     if demote:
         return "demote", f"DEMOTE {len(demote)}", [], demote
     return "none", "NO CHANGE", [], []
@@ -1168,6 +1167,7 @@ def _decision_text(
             reason = verdict.removeprefix("demote:").strip().capitalize() + "."
         lines.append(f"• `{tool}`\n  {reason}")
 
+    suffix = "" if len(demote) == 1 else "s"
     if demote:
         ready = [
             tool for tool, verdict in tourn.items() if verdict.startswith("PROMOTE")

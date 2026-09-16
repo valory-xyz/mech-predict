@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from benchmark import digest_tables
 from benchmark.digest_tables import (
     RELIABILITY_GATE,
     TITLE_RULE_CHAR,
@@ -353,16 +354,16 @@ class TestConciseDecisionSummary:
         _write(results, "scores_tournament_polymarket.json", {})
 
         rolling_path = results / "rolling_scores_polymarket.json"
-        rolling_reads = 0
-        read_text = Path.read_text
+        rolling_loads = 0
+        load_payload = digest_tables._load_payload  # pylint: disable=protected-access
 
-        def counted_read(path: Path, *args: Any, **kwargs: Any) -> str:
-            nonlocal rolling_reads
+        def counted_load(path: Path) -> dict[str, Any]:
+            nonlocal rolling_loads
             if path == rolling_path:
-                rolling_reads += 1
-            return read_text(path, *args, **kwargs)
+                rolling_loads += 1
+            return load_payload(path)
 
-        monkeypatch.setattr(Path, "read_text", counted_read)
+        monkeypatch.setattr(digest_tables, "_load_payload", counted_load)
 
         payload = build_concise_digest_message(
             results,
@@ -372,7 +373,7 @@ class TestConciseDecisionSummary:
             report_url="https://example.test/report",
         )
         assert payload is not None
-        assert rolling_reads == 1
+        assert rolling_loads == 1
         assert not any(block["type"] == "table" for block in payload["blocks"])
         body = _flatten(payload)
         assert "*Decision: DEMOTE 1*" in body

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 import requests
 
@@ -1293,3 +1294,143 @@ class TestExtractionIsWiredIntoDelivery:
         assert "0.35" not in result[0]
         # The same budget cuts a retry the same way, so it is not retried.
         assert create.call_count == 1
+
+
+def _rate_limit_error(message: str = "fleet-wide 429") -> openai.RateLimitError:
+    """Build a real openai.RateLimitError so type(e).__name__ is the real name.
+
+    Skips the real constructor (which requires a live httpx.Response) and sets
+    up just the attributes the decorator under test touches -- the repo-wide
+    pattern, so the suite does not need httpx on the type-check path.
+
+    :param message: the ``str(exc)`` payload.
+    :return: a RateLimitError instance usable as a raise target in tests.
+    """
+    err: openai.RateLimitError = openai.RateLimitError.__new__(  # type: ignore[call-overload]
+        openai.RateLimitError
+    )
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+def _make_throttled_api_keys(openai_retries: int, openrouter_retries: int) -> MagicMock:
+    """Create a KeyChain-like mock whose max_retries() returns real ints."""
+    mock = _make_mock_api_keys("false")
+    mock.max_retries.return_value = {
+        "openai": openai_retries,
+        "openrouter": openrouter_retries,
+    }
+    return mock
+
+
+class TestRateLimitExhaustionNull:
+    """with_key_rotation must not let a rate-limit exhaustion escape as an exception."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_exhausted_keys_return_typed_null_not_exception(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Every key exhausted -> typed error JSON returned, no exception escapes."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(0, 0)
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "RateLimitError"
+        assert "fleet-wide 429" in parsed["error"]
+        api_keys.rotate.assert_not_called()
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_exhausted_keys_return_full_six_tuple(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The exhaustion null is the same 6-tuple shape as a normal delivery."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(0, 0)
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        assert isinstance(result, tuple)
+        assert len(result) == 6
+        assert result[1] == ""
+        assert result[2] is None
+        assert result[3] is None
+        assert result[4] is None
+        assert result[5] is api_keys
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_keys_are_rotated_before_exhaustion(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Retries left -> rotate both providers, then fall back to the typed null."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(2, 2)
+
+        result = run(
+            tool="superforcaster_full_search",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        rotated = [call.args[0] for call in api_keys.rotate.call_args_list]
+        assert rotated == ["openai", "openrouter", "openai", "openrouter"]
+        assert json.loads(result[0])["error_type"] == "RateLimitError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_generic_failure_branch_matches_the_shared_helper(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The except-Exception branch delivers exactly the helper's tuple."""
+        # Comparing the helper against itself does not prove the branch uses
+        # it -- the branch could drift to a divergent inline shape and stay
+        # green. This drives the real branch and compares field for field.
+        api_keys = _make_mock_api_keys("false")
+        boom = ValueError("boom")
+        mock_client_mgr.side_effect = boom
+
+        result = module.run(
+            tool="superforcaster_full_search",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+            source_content={"serper_response": FAKE_SERPER_RESPONSE},
+        )
+
+        expected = module._null_prediction_response(boom, api_keys)
+        assert json.loads(result[0]) == json.loads(expected[0])
+        assert result[1:] == expected[1:]
+
+    def test_null_prediction_response_is_shared_by_both_failure_paths(self) -> None:
+        """The permanent-failure branch and the rate-limit branch build the same shape."""
+        api_keys = MagicMock()
+        rate_limited = module._null_prediction_response(_rate_limit_error(), api_keys)
+        permanent = module._null_prediction_response(ValueError("boom"), api_keys)
+
+        assert json.loads(rate_limited[0]).keys() == json.loads(permanent[0]).keys()
+        assert json.loads(rate_limited[0])["error_type"] == "RateLimitError"
+        assert json.loads(permanent[0])["error_type"] == "ValueError"
+        assert rate_limited[1:] == permanent[1:] == ("", None, None, None, api_keys)

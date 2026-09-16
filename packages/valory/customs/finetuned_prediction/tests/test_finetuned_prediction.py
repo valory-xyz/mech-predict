@@ -368,6 +368,19 @@ def test_a_completion_cut_at_max_tokens_is_raised_and_not_retried() -> None:
     mock_sleep.assert_not_called()
 
 
+def test_retry_exhaustion_keeps_the_last_cause() -> None:
+    """After the last attempt the raised error names the underlying failure."""
+    client = MagicMock()
+    client.completions.side_effect = ValueError("vllm endpoint unreachable")
+    with patch(f"{MODULE_PATH}.time.sleep"):
+        with pytest.raises(RuntimeError, match="vllm endpoint unreachable") as excinfo:
+            module.generate_prediction_with_retry(
+                client=client, model="m", messages=[], temperature=0.0, max_tokens=64
+            )
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert client.completions.call_count == module.COMPLETION_RETRIES
+
+
 def test_the_reasoning_strip_runs_to_the_last_closing_tag() -> None:
     """Two closing tags: everything before the LAST one is reasoning."""
     # Stripping only to the first tag leaves the mid-reasoning 0.82 as a

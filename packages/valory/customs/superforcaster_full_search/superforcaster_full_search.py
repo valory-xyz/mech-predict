@@ -57,6 +57,33 @@ DEFAULT_DELIVERY_RATE = 100
 _MAX_SEARCH_QUERY_LEN = 150
 
 
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable typed-error null tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
+
+
 def with_key_rotation(func: Callable) -> Callable:
     """
     Decorator that retries a function with API key rotation on failure.
@@ -85,9 +112,13 @@ def with_key_rotation(func: Callable) -> Callable:
                     return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
-                # try with a new key again
+                # Rotate keys on a rate-limit hit. Once every key is exhausted,
+                # honor the null-prediction contract instead of re-raising: a
+                # raw exception raised here escapes wrapper(), because a sibling
+                # except clause of the same try cannot catch it.
                 if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
-                    raise e
+                    print(f"[superforcaster_full_search] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
                 retries_left["openai"] -= 1
                 retries_left["openrouter"] -= 1
                 api_keys.rotate("openai")
@@ -98,17 +129,7 @@ def with_key_rotation(func: Callable) -> Callable:
                 # factual_research) so downstream tournament scoring sees
                 # an explicit error rather than treating a raw exception
                 # string as a prediction.
-                error_json = json.dumps(
-                    {
-                        "p_yes": None,
-                        "p_no": None,
-                        "confidence": 0.0,
-                        "info_utility": 0.0,
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                    }
-                )
-                return error_json, "", None, None, None, api_keys
+                return _null_prediction_response(e, api_keys)
 
         return execute()
 

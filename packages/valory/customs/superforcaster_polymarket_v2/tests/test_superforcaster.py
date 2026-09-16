@@ -800,8 +800,32 @@ class TestExtractPredictionCutAndRange:
         # on-chain with no exception, so no retry and no typed-null branch.
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
-        assert parsed["error_type"] == "Exception"
+        assert parsed["error_type"] == "RuntimeError"
         assert "0.25" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_retry_exhaustion_keeps_the_last_cause(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """The typed null names what failed on the last attempt, not a bare Exception."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = REFUSAL
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["error_type"] == "RuntimeError"
+        assert "no usable forecast object" in parsed["error"]
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")
@@ -987,3 +1011,21 @@ class TestRateLimitExhaustionNull:
         assert json.loads(rate_limited[0])["error_type"] == "RateLimitError"
         assert json.loads(permanent[0])["error_type"] == "ValueError"
         assert rate_limited[1:] == permanent[1:] == ("", None, None, None, api_keys)
+
+
+class TestMaxCostPath:
+    """delivery_rate=0 returns the float max_cost untouched (float guard)."""
+
+    def test_max_cost_returns_float_not_wrapped_tuple(self) -> None:
+        """Without the isinstance(result, float) guard this is an error null."""
+        # float + tuple raises TypeError inside execute(), and the catch-all
+        # turns it into the typed null, so cost estimation would get JSON.
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=lambda **_: 0.0123,
+            delivery_rate=0,
+        )
+        assert result == 0.0123

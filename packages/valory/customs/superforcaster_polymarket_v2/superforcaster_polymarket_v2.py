@@ -55,15 +55,14 @@ _MAX_SEARCH_QUERY_LEN = 150
 
 
 def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
-    """Build the parseable null-prediction tuple for any failure path.
+    """Build the parseable typed-error null tuple for any failure path.
 
     The strict trader consumer flat-``json.loads`` the delivery, so every
     failure -- rate-limit exhaustion, a permanent API error, a schema failure --
-    must return this shape rather than let a raw exception escape. ``error_type``
-    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
-    hitting every request) from a one-off model failure. Same key set as a normal
-    delivery and the flagged null, so every exit path is schema-comparable
-    downstream.
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
 
     :param exc: the exception that caused the failure.
     :param api_keys: the KeyChain, threaded back to the caller unchanged.
@@ -92,16 +91,22 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 # Rotate keys on a rate-limit hit. Once every key is exhausted,
@@ -454,6 +459,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -498,7 +504,10 @@ def generate_prediction_with_retry(
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:

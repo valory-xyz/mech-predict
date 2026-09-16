@@ -323,9 +323,10 @@ OUTPUT_FORMAT
 # <THINK> would make a case-sensitive guard silently no-op.
 THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
 THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
-# Strip the reasoning block. The served checkpoints emit a BARE closing tag: the
-# chat template supplies the opening <think>, so it never appears in the
-# completion and a paired-tag pattern would strip nothing. Match greedily to the
+# Strip the reasoning block. The served checkpoints normally emit a BARE closing
+# tag: the chat template supplies the opening <think>, so it is not expected in
+# the completion and a paired-tag pattern would strip nothing. THINK_OPEN_RE is
+# the defensive check for a completion that does carry an opener. Match greedily to the
 # LAST closing tag so everything before the final answer is discarded; a
 # completion with no closing tag is left untouched.
 THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
@@ -536,9 +537,10 @@ def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWith
 
     The strict trader consumer flat-``json.loads`` the delivery, so every
     failure -- rate-limit exhaustion, a permanent API error, a schema failure --
-    must return this shape rather than a raw exception string. ``error_type``
-    lets an operator tell a systemic misconfiguration (a revoked key hitting
-    every request) from a one-off model failure.
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
 
     :param exc: the exception that caused the failure.
     :param api_keys: the KeyChain, threaded back to the caller unchanged.
@@ -720,6 +722,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Optional[str], Optional[Callable]]:
     """Generate a completion, retrying transient failures with a backoff."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -746,7 +749,10 @@ def generate_prediction_with_retry(
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 # ---------------------------------------------------------------------------

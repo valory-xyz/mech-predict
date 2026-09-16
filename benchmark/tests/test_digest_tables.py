@@ -264,12 +264,27 @@ class TestConciseDecisionSummary:
 
     def test_promotion_evidence_preserves_zero_edge_count(self) -> None:
         """The formatter does not replace an explicit zero with another pool."""
-        text, _ = _decision_text(
+        text, _, _ = _decision_text(
             {},
             {"candidate": "PROMOTE"},
             {"tournament": {"candidate": _stats(edge_n=0, valid_n=100)}},
         )
         assert "n=0." in text
+
+    def test_combined_decision_has_one_next_step(self) -> None:
+        """A mixed promote/demote outcome presents one coherent human action."""
+        text, _, _ = _decision_text(
+            {"live": "demote: condAcc 40%", "survivor": "keep"},
+            {"candidate": "PROMOTE"},
+            {
+                "at": {"live": _stats(conditional_accuracy_rate=0.40)},
+                "w1": {"live": _stats()},
+                "tournament": {"candidate": _stats(edge_n=50)},
+            },
+        )
+        assert text.count("*Next step:*") == 1
+        assert "Confirm each promotion" in text
+        assert "review and approve the proposed demotion" in text
 
     def test_replacement_is_promoted_before_every_tool_demotes(self) -> None:
         """A replacement must land before an all-demote roster can be actioned."""
@@ -281,7 +296,9 @@ class TestConciseDecisionSummary:
         assert promote == ["candidate"]
         assert demote == []
 
-    def test_message_has_one_decision_view_and_no_tables(self, tmp_path: Path) -> None:
+    def test_message_has_one_decision_view_and_no_tables(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The concise message keeps summary/category context and drops tables/ROI."""
         results = tmp_path / "results"
         results.mkdir()
@@ -335,6 +352,18 @@ class TestConciseDecisionSummary:
         )
         _write(results, "scores_tournament_polymarket.json", {})
 
+        rolling_path = results / "rolling_scores_polymarket.json"
+        rolling_reads = 0
+        read_text = Path.read_text
+
+        def counted_read(path: Path, *args: Any, **kwargs: Any) -> str:
+            nonlocal rolling_reads
+            if path == rolling_path:
+                rolling_reads += 1
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counted_read)
+
         payload = build_concise_digest_message(
             results,
             "polymarket",
@@ -343,6 +372,7 @@ class TestConciseDecisionSummary:
             report_url="https://example.test/report",
         )
         assert payload is not None
+        assert rolling_reads == 1
         assert not any(block["type"] == "table" for block in payload["blocks"])
         body = _flatten(payload)
         assert "*Decision: DEMOTE 1*" in body

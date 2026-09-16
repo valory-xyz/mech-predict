@@ -82,22 +82,45 @@ WINDOW_FILES = {
 # ---------------------------------------------------------------------------
 
 
+def _load_payload(path: Path) -> dict[str, Any] | None:
+    """Read one scores file once and validate its top-level shape.
+
+    :param path: path to a scores json file.
+    :return: parsed payload, or None when unavailable or malformed.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.info("digest: no usable scores at %s (%s)", path, exc)
+        return None
+    if not isinstance(payload, dict):
+        log.warning("digest: %s does not contain a JSON object", path)
+        return None
+    return payload
+
+
+def _by_tool(payload: dict[str, Any], path: Path) -> dict[str, dict[str, Any]]:
+    """Extract a validated ``by_tool`` mapping from a scores payload.
+
+    :param payload: parsed scores payload.
+    :param path: source path, used only for diagnostics.
+    :return: mapping of tool name to its stats dict; empty when unavailable.
+    """
+    by_tool = payload.get("by_tool")
+    if not isinstance(by_tool, dict):
+        log.warning("digest: %s has no by_tool mapping", path)
+        return {}
+    return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
+
+
 def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     """Read one scores file and return its ``by_tool`` mapping.
 
     :param path: path to a scores json file.
     :return: mapping of tool name to its stats dict; empty when unavailable.
     """
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.info("digest: no usable scores at %s (%s)", path, exc)
-        return {}
-    by_tool = payload.get("by_tool")
-    if not isinstance(by_tool, dict):
-        log.warning("digest: %s has no by_tool mapping", path)
-        return {}
-    return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
+    payload = _load_payload(path)
+    return _by_tool(payload, path) if payload is not None else {}
 
 
 def _as_of_date(path: Path) -> str | None:
@@ -1081,6 +1104,7 @@ def _decision_state(
         )
     if promote:
         return "promote", f"PROMOTE {len(promote)}", promote, []
+    suffix = "" if len(demote) == 1 else "s"
     if demote:
         return "demote", f"DEMOTE {len(demote)}", [], demote
     return "none", "NO CHANGE", [], []
@@ -1090,7 +1114,7 @@ def _decision_text(
     prod: dict[str, str],
     tourn: dict[str, str],
     windows: dict[str, dict[str, dict[str, Any]]],
-) -> tuple[str, set[str]]:
+) -> tuple[str, set[str], str]:
     """Render today's action and its minimum decisive evidence."""
     state, token, promote, demote = _decision_state(prod, tourn)
     lines = [f"{VERDICT_MARKER[state]} *Decision: {token}*"]
@@ -1101,7 +1125,7 @@ def _decision_text(
             "No deployed tool clears the gate. Do not demote tools one by one; "
             "treat this as a platform-level problem."
         )
-        return "\n\n".join(lines), priority
+        return "\n\n".join(lines), priority, token
 
     if not promote and not demote:
         lines.append(
@@ -1144,11 +1168,6 @@ def _decision_text(
             reason = verdict.removeprefix("demote:").strip().capitalize() + "."
         lines.append(f"• `{tool}`\n  {reason}")
 
-    if promote:
-        lines.append(
-            "*Next step:* Confirm each promotion on the required independent "
-            "window or holdout before deployment."
-        )
     if demote:
         ready = [
             tool for tool, verdict in tourn.items() if verdict.startswith("PROMOTE")
@@ -1161,12 +1180,23 @@ def _decision_text(
             f"{survivors} production {noun} would remain after the proposed "
             "demotions."
         )
-        suffix = "" if len(demote) == 1 else "s"
+    if promote and demote:
+        lines.append(
+            "*Next step:* Confirm each promotion on the required independent "
+            "window or holdout, and review and approve the proposed "
+            f"demotion{suffix}."
+        )
+    elif promote:
+        lines.append(
+            "*Next step:* Confirm each promotion on the required independent "
+            "window or holdout before deployment."
+        )
+    elif demote:
         lines.append(
             f"*Next step:* Review and approve the {len(demote)} proposed "
             f"demotion{suffix}."
         )
-    return "\n\n".join(lines), priority
+    return "\n\n".join(lines), priority, token
 
 
 def _decision_warnings(
@@ -1263,15 +1293,19 @@ def build_concise_digest_message(
     :param report_url: optional link to the unchanged Markdown artifact.
     :return: one Slack webhook payload, or None when there are no scored tools.
     """
-    windows = {
-        key: _load_by_tool(results_dir / name.format(platform=platform))
+    paths = {
+        key: results_dir / name.format(platform=platform)
         for key, name in WINDOW_FILES.items()
     }
-    rolling_path = results_dir / WINDOW_FILES["w1"].format(platform=platform)
-    try:
-        rolling_payload = json.loads(rolling_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        rolling_payload = {}
+    rolling_payload = _load_payload(paths["w1"])
+    windows = {
+        key: (
+            (_by_tool(rolling_payload, path) if rolling_payload is not None else {})
+            if key == "w1"
+            else _load_by_tool(path)
+        )
+        for key, path in paths.items()
+    }
 
     prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
     tourn_tools = _scored(windows["tournament"])
@@ -1291,7 +1325,7 @@ def build_concise_digest_message(
         sorted(prod_tools), windows["at"], deployed=True, w1=windows["w1"]
     )
     tourn = _verdicts_for(sorted(tourn_tools), windows["tournament"], deployed=False)
-    decision, priority = _decision_text(prod, tourn, windows)
+    decision, priority, token = _decision_text(prod, tourn, windows)
     at_path = results_dir / WINDOW_FILES["at"].format(platform=platform)
     as_of = _as_of_date(at_path)
     label = PLATFORM_TITLES.get(platform, platform.title())
@@ -1301,7 +1335,7 @@ def build_concise_digest_message(
     title = f"{rule}\n{line}\n{rule}"
 
     category_text = _category_signal_text(
-        rolling_payload.get("by_tool_category") or {}, prod_tools, priority
+        (rolling_payload or {}).get("by_tool_category") or {}, prod_tools, priority
     )
     blocks: list[dict[str, Any]] = [
         header(title),
@@ -1314,7 +1348,7 @@ def build_concise_digest_message(
         blocks.append(section("\n".join(warnings)))
     if report_url:
         blocks.append(context(f"<{report_url}|Full {label} report>"))
-    fallback = f"{label} {as_of or ''}: {_decision_state(prod, tourn)[1]}".strip()
+    fallback = f"{label} {as_of or ''}: {token}".strip()
     return message(fallback, blocks)
 
 

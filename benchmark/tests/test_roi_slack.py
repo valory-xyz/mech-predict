@@ -990,6 +990,7 @@ class TestNotifySlackHook:
         """Production mode suppresses the legacy digest, full tables, and ROI."""
         payload = {"text": "concise", "blocks": []}
         monkeypatch.setenv("BENCHMARK_COMPUTED_TABLES", "true")
+        monkeypatch.setattr(notify_slack, "_deployed_tools_for", lambda *a: ["live"])
         monkeypatch.setattr(
             notify_slack, "build_concise_digest_message", lambda *a, **k: payload
         )

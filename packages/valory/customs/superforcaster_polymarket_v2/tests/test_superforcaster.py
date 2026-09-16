@@ -586,6 +586,30 @@ def _make_throttled_api_keys(openai_retries: int, openrouter_retries: int) -> Ma
     return mock
 
 
+REFUSAL = "I cannot help with that request."
+
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
+
+def _sdk_response(content: str, finish_reason: str = "stop") -> MagicMock:
+    """Build a mock ``chat.completions.create`` response.
+
+    :param content: the message content the SDK reports.
+    :param finish_reason: why the provider stopped generating.
+    :return: a MagicMock shaped like an openai ChatCompletion.
+    """
+    choice = MagicMock(finish_reason=finish_reason)
+    choice.message.content = content
+    return MagicMock(
+        choices=[choice], usage=MagicMock(prompt_tokens=10, completion_tokens=5)
+    )
+
+
 class TestExtractPrediction:
     """The delivery must be the forecast object, never the reasoning block."""
 
@@ -632,9 +656,10 @@ class TestExtractPrediction:
         )
         assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
 
-    def test_a_completion_with_no_forecast_is_left_untouched(self) -> None:
-        """With nothing to extract the caller's error path must still see it."""
-        assert module.extract_prediction("no json at all") == "no json at all"
+    def test_a_completion_with_no_forecast_returns_none(self) -> None:
+        """Prose, empty and missing completions all yield None, never the text."""
+        assert module.extract_prediction("no json at all") is None
+        assert module.extract_prediction("") is None
         assert module.extract_prediction(None) is None
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
@@ -663,6 +688,221 @@ class TestExtractPrediction:
         )
         assert json.loads(result[0])["p_yes"] == 0.06
         assert "<facts>" not in result[0]
+
+
+class TestExtractPredictionCutAndRange:
+    """A max_tokens cut must not deliver a draft, and p_yes must be in range."""
+
+    def test_a_cut_mid_object_delivers_nothing(self) -> None:
+        """The reviewer counterexample: a cut after a draft must not deliver it."""
+        completion = '{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": '
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_whose_nested_object_closes_is_still_a_cut(self) -> None:
+        """An inner object closing must not be read as the outer one closing."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"p_yes": 0.31, "meta": {"src": "a"}, "p_no": '
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_a_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace that never began an object must not block delivery."""
+        completion = (
+            "See {source for details on the resolution criteria.\n"
+            '{"p_yes": 0.42, "p_no": 0.58, "confidence": 0.7, "info_utility": 0.6}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.42
+
+    def test_braces_and_escaped_quotes_inside_strings_are_ignored(self) -> None:
+        """A brace or escaped quote inside a value must not end the object."""
+        completion = (
+            '{"p_yes": 0.42, "p_no": 0.58, '
+            '"note": "resolves if } appears in the \\"title\\""}'
+        )
+        parsed = json.loads(module.extract_prediction(completion) or "")
+        assert parsed["p_yes"] == 0.42
+        assert parsed["note"] == 'resolves if } appears in the "title"'
+
+    def test_a_brace_inside_a_pending_string_does_not_hide_a_cut(self) -> None:
+        """A cut object whose pending string holds a brace is still a cut."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"p_yes": 0.31, "note": "resolves if } appears'
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_an_escaped_quote_does_not_hide_a_cut(self) -> None:
+        """An escaped quote must not be read as the end of a string value."""
+        completion = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n'
+            '{"note": "he wrote \\"} done\\" here", "p_yes": '
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # The tail after "{" is empty here, which the first version read as
+        # prose. On pretty-printed JSON a cut after "{" is a likely stop.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert module.extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert module.extract_prediction(content) is None
+
+    def test_an_out_of_range_p_yes_is_not_delivered(self) -> None:
+        """p_yes outside [0, 1] is not a probability and must be skipped."""
+        completion = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    def test_a_sole_out_of_range_object_is_not_delivered(self) -> None:
+        """When the only object is out of range there is nothing to deliver."""
+        # Was: returned the content unchanged, which put p_yes 1.7 on-chain as
+        # a normal forecast. The range check stopped a bad object beating a
+        # good one but not a bad object being the only one.
+        assert module.extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
+
+    def test_a_null_p_yes_is_skipped(self) -> None:
+        """A JSON null p_yes must not be coerced into a forecast."""
+        completion = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": null, "p_no": null}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_when_the_completion_is_cut(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() delivers nothing when max_tokens cut the answer mid-object."""
+        # Pins the WIRING on the delivery path: unwired this returns the raw
+        # completion, and with the pre-cut-detection extractor it returns the
+        # 0.25 draft as if it were the forecast.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = (
+            '{"p_yes": 0.25, "p_no": 0.75}\n{"p_yes": '
+        )
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # A typed error null, not a bare None: None would be delivered verbatim
+        # on-chain with no exception, so no retry and no typed-null branch.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "RuntimeError"
+        assert "0.25" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_retry_exhaustion_keeps_the_last_cause(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """The typed null names what failed on the last attempt, not a bare Exception."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = REFUSAL
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["error_type"] == "RuntimeError"
+        assert "no usable forecast object" in parsed["error"]
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_an_out_of_range_forecast(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() skips a trailing out-of-range object and delivers the forecast."""
+        # Pins the WIRING too: unwired this returns both objects as raw text,
+        # which the requester's json.loads rejects.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = (
+            '{"p_yes": 0.06, "p_no": 0.94, "confidence": 0.7, "info_utility": 0.6}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert json.loads(result[0])["p_yes"] == 0.06
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_prose_as_the_result(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A completion with no forecast object is a typed error null, not text."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = REFUSAL
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert "cannot help" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.openai.OpenAI")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_when_max_tokens_cut_the_prose(
+        self,
+        mock_fetch: MagicMock,
+        mock_openai: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A cut after a complete draft is a typed null, raised on the first call."""
+        # The extractor alone would deliver the 0.35 draft: only the provider's
+        # finish_reason tells this cut apart from an answer.
+        assert module.extract_prediction(DRAFT_THEN_CUT_IN_PROSE) is not None
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _sdk_response(DRAFT_THEN_CUT_IN_PROSE, "length")
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+        # The same budget cuts a retry the same way, so it is not retried.
+        assert create.call_count == 1
 
 
 class TestRateLimitExhaustionNull:
@@ -771,3 +1011,21 @@ class TestRateLimitExhaustionNull:
         assert json.loads(rate_limited[0])["error_type"] == "RateLimitError"
         assert json.loads(permanent[0])["error_type"] == "ValueError"
         assert rate_limited[1:] == permanent[1:] == ("", None, None, None, api_keys)
+
+
+class TestMaxCostPath:
+    """delivery_rate=0 returns the float max_cost untouched (float guard)."""
+
+    def test_max_cost_returns_float_not_wrapped_tuple(self) -> None:
+        """Without the isinstance(result, float) guard this is an error null."""
+        # float + tuple raises TypeError inside execute(), and the catch-all
+        # turns it into the typed null, so cost estimation would get JSON.
+        result = run(
+            tool="superforcaster-polymarket-v2",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=lambda **_: 0.0123,
+            delivery_rate=0,
+        )
+        assert result == 0.0123

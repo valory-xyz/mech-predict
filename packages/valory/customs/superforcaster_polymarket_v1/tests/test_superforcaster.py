@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import openai
 import pytest
 
 import packages.valory.customs.superforcaster_polymarket_v1.superforcaster_polymarket_v1 as module
@@ -113,7 +114,9 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
     return mock
 
 
-def _install_mock_client(mock_client_mgr: MagicMock) -> MagicMock:
+def _install_mock_client(
+    mock_client_mgr: MagicMock, content: str = PREDICTION_JSON
+) -> MagicMock:
     """Wire OpenAIClientManager to return a client whose completions() yields PREDICTION_JSON.
 
     The wrapper's call path is `OpenAIClient.completions(...)`, so the response
@@ -122,11 +125,12 @@ def _install_mock_client(mock_client_mgr: MagicMock) -> MagicMock:
     wrapper hides).
 
     :param mock_client_mgr: the patched OpenAIClientManager mock.
+    :param content: the raw completion the mocked model returns.
     :return: the inner mock_client wired into the manager's __enter__.
     """
     mock_client = MagicMock()
     mock_response = MagicMock()
-    mock_response.content = PREDICTION_JSON
+    mock_response.content = content
     mock_response.usage.prompt_tokens = 10
     mock_response.usage.completion_tokens = 5
     mock_client.completions.return_value = mock_response
@@ -470,3 +474,449 @@ class TestIssue455RunWiring:
         )
         assert result[4]["parse_tier"] == "template"
         assert result[4]["scan_truncated"] is False
+
+
+FORECAST = {"p_yes": 0.19, "p_no": 0.81, "confidence": 0.7, "info_utility": 0.6}
+
+SCAFFOLD_COMPLETION = (
+    "<facts>\n- Isak handed in a transfer request on 2025-08-01.\n</facts>\n"
+    "<no>\n- Newcastle publicly refused the bid (8/10).\n</no>\n"
+    "<yes>\n- The player is pushing for the move (6/10).\n</yes>\n"
+    "<thinking>\nThe deadline leaves little room for a new bid.\n</thinking>\n"
+    "<tentative>\n0.22\n</tentative>\n"
+    "<thinking>\nThe criterion needs a permanent transfer, not a loan.\n</thinking>\n"
+    "<answer>\n*0.19*\n</answer>\n" + json.dumps(FORECAST)
+)
+
+
+class TestExtractPrediction:
+    """extract_prediction() slices the forecast out of a scaffolded completion."""
+
+    def test_bare_json_is_returned_unchanged(self) -> None:
+        """A trader-template completion is already JSON and survives intact."""
+        bare = json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(bare) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """The seven-step block is dropped; only the JSON object is delivered."""
+        out = module.extract_prediction(SCAFFOLD_COMPLETION) or ""
+        assert json.loads(out) == FORECAST
+        assert "<facts>" not in out
+        assert "<answer>" not in out
+
+    def test_a_draft_before_the_answer_does_not_shadow_it(self) -> None:
+        """A drafted object earlier in the text loses to the final one."""
+        completion = "Draft: " + json.dumps(
+            {"p_yes": 0.8, "p_no": 0.2}
+        ) + "\n" "On reflection that is too high.\n" + json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object after the forecast with no p_yes is passed over."""
+        completion = json.dumps(FORECAST) + '\nSources used: {"count": 3}'
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_a_cut_mid_object_returns_none(self) -> None:
+        """A max_tokens cut while the answer is being written yields None."""
+        completion = SCAFFOLD_COMPLETION[: -len(json.dumps(FORECAST))] + (
+            '{"p_yes": 0.19, "p_no": 0.8'
+        )
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_whose_nested_object_closes_still_returns_none(self) -> None:
+        """A closing brace belonging to a nested object is not the answer's."""
+        completion = 'Answer:\n{"meta": {"model": "gpt-4o"}, "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_draft_before_a_cut_is_not_delivered(self) -> None:
+        """A tentative object written before a cut is a draft, not a forecast."""
+        completion = json.dumps({"p_yes": 0.8, "p_no": 0.2}) + '\n{"p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace that does not open an object leaves the forecast."""
+        completion = (
+            "See the {source for details on the resolution criterion.\n"
+            + json.dumps(FORECAST)
+        )
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_balanced_non_json_braces_are_stepped_over(self) -> None:
+        """Balanced braces that are not valid JSON do not stop the scan."""
+        completion = "Use {curly braces} sparingly.\n" + json.dumps(FORECAST)
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_a_brace_inside_a_string_value_does_not_close_the_object(self) -> None:
+        """A } inside a string value is skipped while scanning for the close."""
+        payload = dict(FORECAST, note="resolves if } appears in the filing")
+        completion = "<answer>\n*0.19*\n</answer>\n" + json.dumps(payload)
+        assert json.loads(module.extract_prediction(completion) or "") == payload
+
+    def test_escaped_quotes_inside_a_string_value_survive(self) -> None:
+        """An escaped quote does not end the string the scanner is inside."""
+        payload = dict(FORECAST, note='the club said "maybe" about the } bid')
+        completion = "<thinking>\nWeighing the quote.\n</thinking>\n" + json.dumps(
+            payload
+        )
+        assert json.loads(module.extract_prediction(completion) or "") == payload
+
+    def test_out_of_range_p_yes_is_skipped(self) -> None:
+        """A p_yes outside 0..1 is not a probability and loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": 1.4})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_null_p_yes_is_skipped(self) -> None:
+        """A null p_yes carries no forecast and loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": None})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_non_numeric_p_yes_is_skipped(self) -> None:
+        """A p_yes that will not coerce to a float loses to a valid one."""
+        completion = json.dumps(FORECAST) + "\n" + json.dumps({"p_yes": "high"})
+        assert json.loads(module.extract_prediction(completion) or "") == FORECAST
+
+    def test_numeric_string_p_yes_is_accepted(self) -> None:
+        """A p_yes quoted as a numeric string still counts as a forecast."""
+        payload = dict(FORECAST, p_yes="0.19")
+        out = module.extract_prediction(json.dumps(payload)) or ""
+        assert float(json.loads(out)["p_yes"]) == 0.19
+
+    def test_a_completion_with_no_forecast_returns_none(self) -> None:
+        """Prose with no object at all is not handed on as the forecast."""
+        # Returning the text put a result on-chain that json.loads rejects; the
+        # caller's None guard turns this into a retry and then a typed null.
+        assert module.extract_prediction("no json at all") is None
+
+    def test_empty_and_missing_content_return_none(self) -> None:
+        """An empty completion is None too, so the `is None` guard catches it."""
+        assert module.extract_prediction(None) is None
+        assert module.extract_prediction("") is None
+
+    def test_a_cut_after_a_brace_in_a_string_value_returns_none(self) -> None:
+        """A } inside a string must not make a truncated object look complete."""
+        completion = '{"note": "resolves if } appears", "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_cut_after_an_escaped_quote_returns_none(self) -> None:
+        """An escaped quote must not end the string and expose a later }."""
+        completion = '{"note": "he said \\"maybe}\\" indeed", "p_yes": 0.19'
+        assert module.extract_prediction(completion) is None
+
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # tail is empty here, which the first version read as prose. On
+        # pretty-printed JSON a cut after "{" is one of the likelier stops.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert module.extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert module.extract_prediction(content) is None
+
+    def test_a_sole_out_of_range_forecast_is_not_delivered(self) -> None:
+        """When the only object is out of range there is nothing to deliver."""
+        # Returning the content here would put p_yes 1.7 on-chain as a normal
+        # forecast; the caller's guard turns None into a retry instead.
+        assert module.extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
+
+
+REFUSAL = "I cannot help with that request."
+
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
+
+def _sdk_response(content: str, finish_reason: str = "stop") -> MagicMock:
+    """Build a mock ``chat.completions.create`` response.
+
+    :param content: the message content the SDK reports.
+    :param finish_reason: why the provider stopped generating.
+    :return: a MagicMock shaped like an openai ChatCompletion.
+    """
+    choice = MagicMock(finish_reason=finish_reason)
+    choice.message.content = content
+    return MagicMock(
+        choices=[choice], usage=MagicMock(prompt_tokens=10, completion_tokens=5)
+    )
+
+
+class TestExtractPredictionRunWiring:
+    """The extractor sits on run()'s delivery path, not only in a helper."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_delivers_parseable_json_for_a_scaffolded_completion(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Unwiring the extractor makes run() deliver the scaffold verbatim."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr, content=SCAFFOLD_COMPLETION)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert json.loads(result[0]) == FORECAST
+        assert "<facts>" not in result[0]
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_from_a_cut_completion(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A completion cut mid-answer yields a typed error null, not a draft."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        cut = json.dumps({"p_yes": 0.8, "p_no": 0.2}) + '\n{"p_yes": 0.19'
+        _install_mock_client(mock_client_mgr, content=cut)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # Not a bare None: that would be delivered verbatim as the on-chain
+        # result with no exception, so neither the retry loop nor
+        # with_key_rotation's typed-null branch would run.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "RuntimeError"
+        assert "0.8" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_retry_exhaustion_keeps_the_last_cause(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """The typed null names what failed on the last attempt, not a bare Exception."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = _install_mock_client(mock_client_mgr)
+        mock_client.completions.return_value.content = REFUSAL
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["error_type"] == "RuntimeError"
+        assert "no usable forecast object" in parsed["error"]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_prose_as_the_result(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A completion with no forecast object is a typed error null, not text."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr, content=REFUSAL)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert "cannot help" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.openai.OpenAI")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_when_max_tokens_cut_the_prose(
+        self,
+        mock_fetch: MagicMock,
+        mock_openai: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A cut after a complete draft is a typed null, raised on the first call."""
+        # The extractor alone would deliver the 0.35 draft: only the provider's
+        # finish_reason tells this cut apart from an answer.
+        assert module.extract_prediction(DRAFT_THEN_CUT_IN_PROSE) is not None
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _sdk_response(DRAFT_THEN_CUT_IN_PROSE, "length")
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+        # The same budget cuts a retry the same way, so it is not retried.
+        assert create.call_count == 1
+
+
+def _rate_limit_error(message: str = "fleet-wide 429") -> openai.RateLimitError:
+    """Build a real openai.RateLimitError so type(e).__name__ is the real name.
+
+    Skips the real constructor (which requires a live httpx.Response) and sets
+    up just the attributes the decorator under test touches -- the repo-wide
+    pattern, so the suite does not need httpx on the type-check path.
+
+    :param message: the ``str(exc)`` payload.
+    :return: a RateLimitError instance usable as a raise target in tests.
+    """
+    err: openai.RateLimitError = openai.RateLimitError.__new__(  # type: ignore[call-overload]
+        openai.RateLimitError
+    )
+    Exception.__init__(err, message)
+    err.message = message  # type: ignore[attr-defined]
+    return err
+
+
+def _make_throttled_api_keys(openai_retries: int, openrouter_retries: int) -> MagicMock:
+    """Create a KeyChain-like mock whose max_retries() returns real ints."""
+    mock = _make_mock_api_keys()
+    mock.max_retries.return_value = {
+        "openai": openai_retries,
+        "openrouter": openrouter_retries,
+    }
+    return mock
+
+
+class TestRateLimitExhaustionNull:
+    """with_key_rotation must not let a rate-limit exhaustion escape as an exception."""
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_exhausted_keys_return_typed_null_not_exception(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Every key exhausted -> typed error JSON returned, no exception escapes."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(0, 0)
+
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "RateLimitError"
+        assert "fleet-wide 429" in parsed["error"]
+        api_keys.rotate.assert_not_called()
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_exhausted_keys_return_full_six_tuple(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The exhaustion null is the same 6-tuple shape as a normal delivery."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(0, 0)
+
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+
+        assert isinstance(result, tuple)
+        assert len(result) == 6
+        assert result[1] == ""
+        assert result[2] is None
+        assert result[3] is None
+        assert result[4] is None
+        assert result[5] is api_keys
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_keys_are_rotated_before_exhaustion(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """Retries left -> rotate both providers, then fall back to the typed null."""
+        mock_client_mgr.side_effect = _rate_limit_error()
+        api_keys = _make_throttled_api_keys(2, 2)
+
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+
+        rotated = [call.args[0] for call in api_keys.rotate.call_args_list]
+        assert rotated == ["openai", "openrouter", "openai", "openrouter"]
+        assert json.loads(result[0])["error_type"] == "RateLimitError"
+
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_generic_failure_branch_matches_the_shared_helper(
+        self, mock_client_mgr: MagicMock
+    ) -> None:
+        """The except-Exception branch delivers exactly the helper's tuple."""
+        # Comparing the helper against itself does not prove the branch uses
+        # it -- the branch could drift to a divergent inline shape and stay
+        # green. This drives the real branch and compares field for field.
+        api_keys = _make_mock_api_keys()
+        boom = ValueError("boom")
+        mock_client_mgr.side_effect = boom
+
+        result = module.run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+
+        expected = module._null_prediction_response(boom, api_keys)
+        assert json.loads(result[0]) == json.loads(expected[0])
+        assert result[1:] == expected[1:]
+
+    def test_null_prediction_response_is_shared_by_both_failure_paths(self) -> None:
+        """The permanent-failure branch and the rate-limit branch build the same shape."""
+        api_keys = MagicMock()
+        rate_limited = module._null_prediction_response(_rate_limit_error(), api_keys)
+        permanent = module._null_prediction_response(ValueError("boom"), api_keys)
+
+        assert json.loads(rate_limited[0]).keys() == json.loads(permanent[0]).keys()
+        assert json.loads(rate_limited[0])["error_type"] == "RateLimitError"
+        assert json.loads(permanent[0])["error_type"] == "ValueError"
+        assert rate_limited[1:] == permanent[1:] == ("", None, None, None, api_keys)
+
+
+class TestMaxCostPath:
+    """delivery_rate=0 returns the float max_cost untouched (float guard)."""
+
+    def test_max_cost_returns_float_not_wrapped_tuple(self) -> None:
+        """Without the isinstance(result, float) guard this is an error null."""
+        # float + tuple raises TypeError inside execute(), and the catch-all
+        # turns it into the typed null, so cost estimation would get JSON.
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=lambda **_: 0.0123,
+            delivery_rate=0,
+        )
+        assert result == 0.0123

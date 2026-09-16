@@ -323,9 +323,10 @@ OUTPUT_FORMAT
 # <THINK> would make a case-sensitive guard silently no-op.
 THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
 THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
-# Strip the reasoning block. The served checkpoints emit a BARE closing tag: the
-# chat template supplies the opening <think>, so it never appears in the
-# completion and a paired-tag pattern would strip nothing. Match greedily to the
+# Strip the reasoning block. The served checkpoints normally emit a BARE closing
+# tag: the chat template supplies the opening <think>, so it is not expected in
+# the completion and a paired-tag pattern would strip nothing. THINK_OPEN_RE is
+# the defensive check for a completion that does carry an opener. Match greedily to the
 # LAST closing tag so everything before the final answer is discarded; a
 # completion with no closing tag is left untouched.
 THINK_BLOCK_RE = re.compile(r"^.*</think>\s*", re.DOTALL | re.IGNORECASE)
@@ -340,14 +341,48 @@ def _to_text(completion: Union[str, List[Dict[str, str]]]) -> str:
     return completion or ""
 
 
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
 def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
     """Every top-level JSON object in `text`, plus whether the tail is cut off.
 
     The second value is True when an object opens after the last complete one
-    and never closes. That is what a `max_tokens` cut looks like when it lands
-    while the model is writing the answer, and it has to be distinguished from
-    a complete-but-irrelevant trailing object: both leave a valid forecast
-    earlier in the text, but only one of them means that forecast is a draft.
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
 
     :param text: text that may carry JSON objects among prose.
     :return: the decoded objects, and True if the text ends mid-object.
@@ -359,21 +394,31 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
         start = text.find("{", idx)
         if start < 0:
             return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if not tail or tail.startswith('"'):
+                # Empty tail means the completion stopped ON the brace (or on
+                # the whitespace after it), which is exactly where a cut lands
+                # on pretty-printed JSON; a quoted key means a truncated object.
+                # A brace in prose is followed by something else.
+                return found, True
+            idx = start + 1
+            continue
         try:
             obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
-            # Distinguish a cut from junk by whether the opener ever closes.
-            # A `max_tokens` cut lands mid-object and leaves no closing brace
-            # at all; a malformed-but-complete object ({"p_yes": }) and a
-            # stray brace in prose both still have one. Only the first means
-            # the forecast before it is a draft.
-            if "}" not in text[start:]:
-                return found, True
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
             idx = start + 1
             continue
         if isinstance(obj, dict):
             found.append(obj)
-        idx = end
+        idx = max(end, start + 1)
 
 
 def extract_json(
@@ -492,9 +537,10 @@ def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWith
 
     The strict trader consumer flat-``json.loads`` the delivery, so every
     failure -- rate-limit exhaustion, a permanent API error, a schema failure --
-    must return this shape rather than a raw exception string. ``error_type``
-    lets an operator tell a systemic misconfiguration (a revoked key hitting
-    every request) from a one-off model failure.
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
 
     :param exc: the exception that caused the failure.
     :param api_keys: the KeyChain, threaded back to the caller unchanged.
@@ -595,6 +641,7 @@ class LLMResponse:
         """Initialise with content and an empty usage record."""
         self.content = content
         self.usage = Usage()
+        self.finish_reason: Optional[str] = None
 
 
 class VLLMClient:
@@ -625,6 +672,7 @@ class VLLMClient:
         )
         response = LLMResponse()
         response.content = provider_response.choices[0].message.content
+        response.finish_reason = provider_response.choices[0].finish_reason
         usage = provider_response.usage
         if usage is not None:
             response.usage.prompt_tokens = usage.prompt_tokens
@@ -653,6 +701,15 @@ class VLLMClientManager:
             self._client = None
 
 
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
+
+
 def generate_prediction_with_retry(
     client: VLLMClient,
     model: str,
@@ -665,6 +722,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Optional[str], Optional[Callable]]:
     """Generate a completion, retrying transient failures with a backoff."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -679,12 +737,22 @@ def generate_prediction_with_retry(
                     output_tokens=response.usage.completion_tokens,
                     model=model,
                 )
+            if response.finish_reason == "length":
+                raise TruncatedCompletionError(
+                    "Response truncated (finish_reason='length', "
+                    f"max_tokens={max_tokens})"
+                )
             return response.content, counter_callback
+        except TruncatedCompletionError:
+            raise
         except Exception as e:  # noqa: BLE001 — retry any transient inference error
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 # ---------------------------------------------------------------------------

@@ -55,15 +55,14 @@ _MAX_SEARCH_QUERY_LEN = 150
 
 
 def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
-    """Build the parseable null-prediction tuple for any failure path.
+    """Build the parseable typed-error null tuple for any failure path.
 
     The strict trader consumer flat-``json.loads`` the delivery, so every
     failure -- rate-limit exhaustion, a permanent API error, a schema failure --
-    must return this shape rather than let a raw exception escape. ``error_type``
-    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
-    hitting every request) from a one-off model failure. Same key set as a normal
-    delivery and the flagged null, so every exit path is schema-comparable
-    downstream.
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
 
     :param exc: the exception that caused the failure.
     :param api_keys: the KeyChain, threaded back to the caller unchanged.
@@ -92,16 +91,22 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except openai.RateLimitError as e:
                 # Rotate keys on a rate-limit hit. Once every key is exhausted,
@@ -175,6 +180,7 @@ class OpenAIResponse:
         """Initializes with content and usage class."""
         self.content = content
         self.usage = Usage()
+        self.finish_reason: Optional[str] = None
 
 
 class OpenAIClient:
@@ -208,6 +214,7 @@ class OpenAIClient:
         )
         response = OpenAIResponse()
         response.content = response_provider.choices[0].message.content
+        response.finish_reason = response_provider.choices[0].finish_reason
         response.usage.prompt_tokens = response_provider.usage.prompt_tokens
         response.usage.completion_tokens = response_provider.usage.completion_tokens
         return response
@@ -324,11 +331,51 @@ OUTPUT_FORMAT
 """
 
 
-def _json_objects(text: str) -> List[Dict[str, Any]]:
-    """Every top-level JSON object in `text`, in order of appearance.
+def _object_span(text: str, start: int) -> int:
+    """Index just past the object opening at `start`, or -1 if it never closes.
+
+    Scans brace depth while skipping over string literals, so a brace inside a
+    value ("resolves if } appears") does not close the object and a nested
+    object's closer does not either.
+
+    :param text: the text being scanned.
+    :param start: index of the opening brace.
+    :return: the index just past the matching close, or -1 when there is none.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
+    """Every top-level JSON object in `text`, plus whether the tail is cut off.
+
+    The second value is True when an object opens after the last complete one
+    and never closes: that is what a `max_tokens` cut looks like when it lands
+    while the answer is being written, and any forecast before it is therefore
+    a draft.
 
     :param text: text that may carry JSON objects among prose.
-    :return: the decoded objects, nested values included.
+    :return: the decoded objects, and True if the text ends mid-object.
     """
     decoder = json.JSONDecoder()
     found: List[Dict[str, Any]] = []
@@ -336,12 +383,27 @@ def _json_objects(text: str) -> List[Dict[str, Any]]:
     while True:
         start = text.find("{", idx)
         if start < 0:
-            return found
+            return found, False
+        if _object_span(text, start) < 0:
+            # An opener that never closes is a cut only if it actually began an
+            # object. A JSON object starts with a quoted key, so `{"p_yes": ` is
+            # a truncated answer while `{source for details` is a brace in
+            # prose -- treating the latter as a cut would turn a delivered
+            # forecast into an error.
+            tail = text[start + 1 :].lstrip()
+            if not tail or tail.startswith('"'):
+                # Empty tail means the completion stopped ON the brace (or on
+                # the whitespace after it), which is exactly where a cut lands
+                # on pretty-printed JSON; a quoted key means a truncated object.
+                # A brace in prose is followed by something else.
+                return found, True
+            idx = start + 1
+            continue
         try:
             obj, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
-            # Not the start of an object (a stray brace, a '{' in prose):
-            # step past it rather than giving up on the rest of the text.
+            # Balanced but not valid JSON (a stray "{" in prose, or a
+            # malformed object): step past it and keep looking.
             idx = start + 1
             continue
         if isinstance(obj, dict):
@@ -350,32 +412,39 @@ def _json_objects(text: str) -> List[Dict[str, Any]]:
 
 
 def extract_prediction(content: Optional[str]) -> Optional[str]:
-    """Return the forecast object from a completion, as a JSON string.
+    """Return the forecast object from a completion as a JSON string, or None.
 
-    The prompt asks for a seven-step reasoning scaffold AND for JSON only.
-    The model resolves that by prompt length: a short trader-template question
-    yields bare JSON, a long free-text one yields the full
-    `<facts>/<thinking>/<answer>` block with the forecast at the END. Delivering
-    the block verbatim breaks the documented output contract (tool_schemas.yaml
-    describes `result` as JSON), so slice the forecast out.
-
-    Walks candidates from the end and skips objects with no coercible `p_yes`,
-    so a tentative value written mid-reasoning cannot shadow the final answer.
-    Returns the content unchanged when no candidate qualifies, leaving the
-    existing error path to surface it.
+    None means there is nothing to deliver: an empty completion, a cut
+    mid-object, prose with no object at all (a refusal), or objects none of
+    which carries a usable `p_yes`. Handing back the text instead would put a
+    `result` on-chain that the consumer cannot `json.loads`.
 
     :param content: the raw model completion.
-    :return: the forecast object as JSON, or `content` when none is found.
+    :return: the selected forecast object as JSON, or None.
     """
     if not content:
-        return content
-    for parsed in reversed(_json_objects(content)):
+        return None
+    candidates, cut_mid_object = _json_objects(content)
+    if cut_mid_object:
+        return None
+    for parsed in reversed(candidates):
         try:
-            float(parsed["p_yes"])
+            p_yes = float(parsed["p_yes"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not 0.0 <= p_yes <= 1.0:
+            continue
         return json.dumps(parsed)
-    return content
+    return None
+
+
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
 
 
 def generate_prediction_with_retry(
@@ -390,6 +459,7 @@ def generate_prediction_with_retry(
 ) -> Tuple[Any, Optional[Callable]]:
     """Attempt to generate a prediction with retries on failure."""
     attempt = 0
+    last_error: Optional[Exception] = None
     while attempt < retries:
         try:
             response = client.completions(
@@ -414,13 +484,30 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            content = extract_prediction(response.content if response else None)
-            return content, counter_callback
+            if response is not None and response.finish_reason == "length":
+                raise TruncatedCompletionError(
+                    "Response truncated (finish_reason='length', "
+                    f"max_tokens={max_tokens})"
+                )
+            prediction = extract_prediction(response.content if response else None)
+            if prediction is None:
+                # A cut mid-object, prose with no forecast object, or only
+                # unusable objects. Returning None here would be delivered
+                # verbatim as the on-chain result with no exception, so neither
+                # the retry loop nor with_key_rotation's typed-null branch would
+                # run.
+                raise ValueError("Model completion carried no usable forecast object")
+            return prediction, counter_callback
+        except TruncatedCompletionError:
+            raise
         except Exception as e:
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    raise Exception("Failed to generate prediction after retries")
+            last_error = e
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:

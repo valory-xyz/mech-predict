@@ -96,6 +96,18 @@ PREDICTION_RAG_PROMPT = (
     "and the `yes` option represented by `Yes` and the `no` option represented by `No`, "
     "what are the respective probabilities of `p_yes` and `p_no` occurring?"
 )
+# The shape a free-text requester such as Pearl sends: instructions, question and
+# resolution criteria in one prompt, with no trader template to extract from. Tools
+# that answer it with a reasoning scaffold around the JSON fail the strict parse.
+FREE_TEXT_PREDICTION_PROMPT = (
+    "You are being asked to provide a probability estimate for a prediction market "
+    "question. Please respond with a JSON object containing p_yes, p_no, confidence "
+    "and info_utility. Question: Will the Federal Reserve cut the federal funds rate "
+    "at its December 2026 meeting? Resolution criteria: resolves YES if the FOMC "
+    "statement published at the end of the December 2026 meeting lowers the target "
+    "range. Resolution source: federalreserve.gov. Return only the JSON object and "
+    "no additional text."
+)
 DALLE_PROMPT = "Generate an image of a futuristic cityscape."
 
 
@@ -151,14 +163,14 @@ class TestPredictionRAG(BaseIsolatedToolTest):
     """Test Prediction RAG (v1)."""
 
     component_yaml = PREDICTION_REQUEST_RAG_V1_CONFIG
-    prompts = [PREDICTION_RAG_PROMPT]
+    prompts = [PREDICTION_RAG_PROMPT, FREE_TEXT_PREDICTION_PROMPT]
 
 
 class TestPredictionReasoning(BaseIsolatedToolTest):
     """Test Prediction Reasoning (v1)."""
 
     component_yaml = PREDICTION_REQUEST_REASONING_V1_CONFIG
-    prompts = [PREDICTION_PROMPT]
+    prompts = [PREDICTION_PROMPT, FREE_TEXT_PREDICTION_PROMPT]
 
 
 class TestPredictionCOT(BaseIsolatedToolTest):
@@ -180,14 +192,14 @@ class TestSuperforcaster(BaseIsolatedToolTest):
     """Test Superforcaster."""
 
     component_yaml = SUPERFORCASTER_CONFIG
-    prompts = [PREDICTION_PROMPT]
+    prompts = [PREDICTION_PROMPT, FREE_TEXT_PREDICTION_PROMPT]
 
 
 class TestSuperforcasterPolymarketV1(BaseIsolatedToolTest):
     """Test Superforcaster (Polymarket v1, uncalibrated)."""
 
     component_yaml = SUPERFORCASTER_POLYMARKET_V1_CONFIG
-    prompts = [PREDICTION_PROMPT]
+    prompts = [PREDICTION_PROMPT, FREE_TEXT_PREDICTION_PROMPT]
 
 
 # Note: no ``TestSuperforcasterPolymarketV3`` here — matches the convention
@@ -207,4 +219,4 @@ class TestFactualResearch(BaseIsolatedToolTest):
     """Test Factual Research."""
 
     component_yaml = FACTUAL_RESEARCH_CONFIG
-    prompts = [PREDICTION_PROMPT]
+    prompts = [PREDICTION_PROMPT, FREE_TEXT_PREDICTION_PROMPT]

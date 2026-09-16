@@ -32,6 +32,11 @@ from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymar
     _MAX_SCAN_CHARS,
     _MAX_SEARCH_QUERY_LEN,
     extract_prediction,
+)
+from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymarket_v3 import (
+    generate_prediction_with_retry as v3_generate_prediction_with_retry,
+)
+from packages.valory.customs.superforcaster_polymarket_v3.superforcaster_polymarket_v3 import (
     parse_prompt,
     run,
 )
@@ -782,3 +787,32 @@ class TestDeliveredPredictionIsParseable:
         assert delivered["error_type"] == "TruncatedCompletionError"
         assert "0.35" not in result[0]
         assert create.call_count == 1
+
+
+def test_max_cost_returns_float_not_wrapped_tuple() -> None:
+    """delivery_rate=0 returns the max-cost float, not an error null."""
+    result = run(
+        tool="superforcaster-polymarket-v3",
+        model=DEFAULT_OPENAI_MODEL,
+        prompt=FREE_TEXT_PROMPT,
+        api_keys=_make_mock_api_keys(),
+        counter_callback=lambda **_: 0.0123,
+        delivery_rate=0,
+    )
+    assert result == 0.0123
+
+
+def test_retry_exhaustion_chains_the_last_cause() -> None:
+    """The raised error names the last failure and keeps it as __cause__."""
+    client = MagicMock()
+    client.completions.side_effect = ValueError("provider unreachable")
+    with patch(f"{V3_MODULE}.time.sleep"):
+        with pytest.raises(RuntimeError, match="provider unreachable") as excinfo:
+            v3_generate_prediction_with_retry(
+                client=client,
+                model=DEFAULT_OPENAI_MODEL,
+                messages=[],
+                temperature=0.0,
+                max_tokens=64,
+            )
+    assert isinstance(excinfo.value.__cause__, ValueError)

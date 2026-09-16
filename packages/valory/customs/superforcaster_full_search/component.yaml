@@ -13,7 +13,7 @@ fingerprint:
   __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
   superforcaster_full_search.py: bafybeiep5wdmfm6d5ee5e5apckfjkmmvfyhudxxd7jjt5krtreuuxhgjfq
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_full_search.py: bafybeictisg7i7tskqsn4rcwqranepzhagflx6s7yt2fh4zsdbeye3bakm
+  tests/test_superforcaster_full_search.py: bafybeihog5l3rs2xnnuoy7jmau46vuuzlgxnyed7i4av7ubppxcgfwgb7e
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_full_search.py
 callable: run

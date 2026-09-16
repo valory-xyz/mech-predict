@@ -1535,3 +1535,46 @@ class TestRunDeliversTheForecastObject:
         payload = json.loads(result[0])
         assert payload["p_yes"] is None
         assert payload["error_type"] == "ValueError"
+
+
+def test_tag_form_out_of_range_p_yes_raises_value_error() -> None:
+    """The tag form holds the same [0, 1] bar as the JSON fallback."""
+    completion = (
+        "<p_yes>1.7</p_yes><p_no>-0.7</p_no>"
+        "<confidence>0.5</confidence><info_utility>0.5</info_utility>"
+    )
+    with pytest.raises(ValueError, match="not a probability"):
+        module.parser_prediction_response(completion)
+
+
+def test_tag_form_boundary_p_yes_is_accepted() -> None:
+    """p_yes of exactly 1.0 is a probability and is delivered."""
+    completion = (
+        "<p_yes>1.0</p_yes><p_no>0.0</p_no>"
+        "<confidence>0.5</confidence><info_utility>0.5</info_utility>"
+    )
+    assert json.loads(module.parser_prediction_response(completion))["p_yes"] == 1.0
+
+
+def test_run_with_an_anthropic_max_tokens_cut_delivers_the_typed_null() -> None:
+    """A real Anthropic response shape stopped at max_tokens ends as the typed null."""
+    resp = _make_anthropic_text_response(DRAFT_THEN_CUT_IN_PROSE)
+    resp.stop_reason = "max_tokens"
+    with (
+        patch("anthropic.Anthropic") as mock_anthropic,
+        patch("openai.OpenAI"),
+        patch(f"{RAG_MODULE}.fetch_additional_information") as mock_fetch,
+    ):
+        create = mock_anthropic.return_value.messages.create
+        create.return_value = resp
+        mock_fetch.return_value = ("additional info", {"pages": {}}, None)
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="claude-sonnet-4-6",
+            prompt="Will X happen?",
+            api_keys=_make_mock_api_keys(anthropic="sk-ant"),
+        )
+    payload = json.loads(result[0])
+    assert payload["p_yes"] is None
+    assert payload["error_type"] == "TruncatedCompletionError"
+    assert create.call_count == 1

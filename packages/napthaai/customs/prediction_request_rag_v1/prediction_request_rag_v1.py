@@ -84,13 +84,14 @@ _MAX_SEARCH_QUERY_LEN = 150
 
 
 def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
-    """Build the parseable null-prediction tuple for any failure path.
+    """Build the parseable typed-error null tuple for any failure path.
 
     The strict trader consumer flat-``json.loads`` the delivery, so every
     failure -- rate-limit exhaustion, a permanent API error, a schema failure --
-    must return this shape rather than a raw exception string. ``error_type``
-    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
-    hitting every request) from a one-off model failure.
+    must return this shape rather than let a raw exception escape. It carries
+    the four prediction fields of a normal delivery, nulled, plus ``error`` and
+    ``error_type``, which lets an operator tell a systemic misconfiguration (a
+    revoked key hitting every request) from a one-off model failure.
 
     :param exc: the exception that caused the failure.
     :param api_keys: the KeyChain, threaded back to the caller unchanged.
@@ -103,7 +104,7 @@ def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWith
             "confidence": 0.0,
             "info_utility": 0.0,
             "error": str(exc),
-            "error_type": exc.__class__.__name__,
+            "error_type": type(exc).__name__,
         }
     )
     return error_json, "", None, None, None, api_keys
@@ -1479,6 +1480,10 @@ def parser_prediction_response(response: str) -> str:
             print(f"response = {response}")
             raise ValueError(f"Error for {key}: {type(e).__name__}: {e}") from e
 
+    if not 0.0 <= results["p_yes"] <= 1.0:
+        # The JSON fallback above rejects an out-of-range p_yes; the tag form,
+        # which is the format the prompt asks for, must hold the same bar.
+        raise ValueError(f"p_yes {results['p_yes']} is not a probability in [0, 1]")
     return json.dumps(results)
 
 

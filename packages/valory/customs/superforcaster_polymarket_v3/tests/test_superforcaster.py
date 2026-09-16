@@ -606,6 +606,28 @@ class TestV3WithKeyRotationAnthropic:
         assert "anthropic-burned" in result[0]
         assert result[1:] == ("", None, None, None, keys)
 
+    def test_openai_pool_exhausted_returns_error_tuple(self) -> None:
+        """When the openai/openrouter pools are exhausted, the error is wrapped."""
+        # Mirror of the anthropic case above. Without it, replacing the
+        # exhaustion branch's wrapped return with a bare ``raise e`` leaves the
+        # whole suite green -- the OpenAI-side pools are never driven to zero.
+        keys = _make_v3_api_keys()
+        keys.max_retries = lambda: {
+            "openai": 0,
+            "openrouter": 0,
+            "anthropic": 5,
+        }
+
+        @v3_module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise _make_anthropic_error(
+                v3_module.openai.RateLimitError, "openai-burned"
+            )
+
+        result = fake(api_keys=keys)
+        assert "openai-burned" in result[0]
+        assert result[1:] == ("", None, None, None, keys)
+
     def test_missing_anthropic_in_retries_left_does_not_crash_rotation(self) -> None:
         """Older ``max_retries()`` without ``anthropic`` doesn't crash the rotation lookup.
 
@@ -666,8 +688,22 @@ class TestV3RunEndToEnd:
             mock_llm_client.completions.return_value = mock_response
             MockManager.return_value.__enter__.return_value = mock_llm_client
             MockManager.return_value.__exit__.return_value = None
+            # Non-empty organic results: an all-empty retrieval now returns
+            # the flagged null prediction (issue #455) instead of calling
+            # the LLM, which is covered by its own tests.
             MockFetchSources.return_value = MagicMock(
-                json=MagicMock(return_value={"organic": []})
+                json=MagicMock(
+                    return_value={
+                        "organic": [
+                            {
+                                "title": "T",
+                                "link": "https://example.test",
+                                "snippet": "S",
+                                "position": 1,
+                            }
+                        ]
+                    }
+                )
             )
 
             result = v3_module.run(

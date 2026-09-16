@@ -54,14 +54,7 @@ from typing import Any, Collection, Iterable, Sequence
 
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
-from benchmark.slack_blocks import (
-    Col,
-    context,
-    header,
-    message,
-    section,
-    table_block,
-)
+from benchmark.slack_blocks import Col, context, header, message, section, table_block
 from benchmark.slack_tables import display_width
 from benchmark.tool_usage import normalize_tool_name
 
@@ -89,22 +82,45 @@ WINDOW_FILES = {
 # ---------------------------------------------------------------------------
 
 
+def _load_payload(path: Path) -> dict[str, Any] | None:
+    """Read one scores file once and validate its top-level shape.
+
+    :param path: path to a scores json file.
+    :return: parsed payload, or None when unavailable or malformed.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.info("digest: no usable scores at %s (%s)", path, exc)
+        return None
+    if not isinstance(payload, dict):
+        log.warning("digest: %s does not contain a JSON object", path)
+        return None
+    return payload
+
+
+def _by_tool(payload: dict[str, Any], path: Path) -> dict[str, dict[str, Any]]:
+    """Extract a validated ``by_tool`` mapping from a scores payload.
+
+    :param payload: parsed scores payload.
+    :param path: source path, used only for diagnostics.
+    :return: mapping of tool name to its stats dict; empty when unavailable.
+    """
+    by_tool = payload.get("by_tool")
+    if not isinstance(by_tool, dict):
+        log.warning("digest: %s has no by_tool mapping", path)
+        return {}
+    return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
+
+
 def _load_by_tool(path: Path) -> dict[str, dict[str, Any]]:
     """Read one scores file and return its ``by_tool`` mapping.
 
     :param path: path to a scores json file.
     :return: mapping of tool name to its stats dict; empty when unavailable.
     """
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.info("digest: no usable scores at %s (%s)", path, exc)
-        return {}
-    by_tool = payload.get("by_tool")
-    if not isinstance(by_tool, dict):
-        log.warning("digest: %s has no by_tool mapping", path)
-        return {}
-    return {str(k): v for k, v in by_tool.items() if isinstance(v, dict)}
+    payload = _load_payload(path)
+    return _by_tool(payload, path) if payload is not None else {}
 
 
 def _as_of_date(path: Path) -> str | None:
@@ -930,6 +946,410 @@ def _alert_rows(
         )
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Concise decision summary
+# ---------------------------------------------------------------------------
+
+
+def _category_signal_rows(
+    by_tool_category: dict[str, dict[str, Any]],
+    tools: Collection[str],
+    priority_tools: Collection[str],
+) -> list[tuple[str, str, dict[str, Any], float, str]]:
+    """Select at most three decision-relevant tool/category rows.
+
+    Order: highest-impact negative DA lift, strongest sample-adjusted
+    positive signal (or best available), then the largest remaining slice.
+    Actioned tools are preferred when a suitable row exists.
+
+    :param by_tool_category: current-window stats keyed by ``tool | category``.
+    :param tools: production tools eligible to appear in the summary.
+    :param priority_tools: tools involved in today's deployment decision.
+    :return: selected rows with computed lift and display role, at most three.
+    """
+    permitted = set(tools)
+    priority = set(priority_tools)
+    candidates: list[tuple[str, str, dict[str, Any], float]] = []
+    for key, stats in by_tool_category.items():
+        parts = key.split(" | ", 1)
+        if len(parts) != 2 or parts[0] not in permitted:
+            continue
+        n = _num(stats.get("valid_n"))
+        brier = _num(stats.get("brier"))
+        accuracy = _num(stats.get("directional_accuracy"))
+        yes_rate = _num(stats.get("outcome_yes_rate"))
+        if (
+            n is None
+            or int(n) < MIN_SAMPLE_SIZE
+            or brier is None
+            or accuracy is None
+            or yes_rate is None
+        ):
+            continue
+        majority = max(yes_rate, 1.0 - yes_rate)
+        candidates.append((parts[0], parts[1], stats, accuracy - majority))
+
+    if not candidates:
+        return []
+
+    selected: list[tuple[str, str, dict[str, Any], float, str]] = []
+
+    def preferred(
+        pool: Sequence[tuple[str, str, dict[str, Any], float]],
+    ) -> list[tuple[str, str, dict[str, Any], float]]:
+        actioned = [row for row in pool if row[0] in priority]
+        return actioned or list(pool)
+
+    negative = preferred([row for row in candidates if row[3] < 0])
+    if negative:
+        row = max(
+            negative,
+            key=lambda item: (
+                int(item[2]["valid_n"]) * abs(item[3]),
+                int(item[2]["valid_n"]),
+                item[0],
+                item[1],
+            ),
+        )
+        selected.append((*row, "Main risk"))
+    else:
+        row = min(
+            candidates,
+            key=lambda item: (item[3], -int(item[2]["valid_n"]), item[0], item[1]),
+        )
+        selected.append((*row, "Weakest segment"))
+
+    used = {(selected[0][0], selected[0][1])}
+    remaining = [row for row in candidates if (row[0], row[1]) not in used]
+    if remaining:
+        positive = preferred([row for row in remaining if row[3] > 0])
+        pool = positive or preferred(remaining)
+        row = max(
+            pool,
+            key=lambda item: (
+                item[3] * math.sqrt(int(item[2]["valid_n"])),
+                int(item[2]["valid_n"]),
+                item[0],
+                item[1],
+            ),
+        )
+        label = "Strongest segment" if row[3] > 0 else "Best available segment"
+        selected.append((*row, label))
+        used.add((row[0], row[1]))
+
+    remaining = [row for row in candidates if (row[0], row[1]) not in used]
+    if remaining:
+        row = max(
+            preferred(remaining),
+            key=lambda item: (int(item[2]["valid_n"]), abs(item[3]), item[0], item[1]),
+        )
+        label = "Additional risk" if row[3] < 0 else "Largest remaining slice"
+        selected.append((*row, label))
+
+    return selected
+
+
+def _category_signal_text(
+    by_tool_category: dict[str, dict[str, Any]],
+    tools: Collection[str],
+    priority_tools: Collection[str],
+) -> str:
+    """Render the selected category signals as compact Slack mrkdwn."""
+    rows = _category_signal_rows(by_tool_category, tools, priority_tools)
+    if not rows:
+        return "*Tool × Category signals:*\n• _insufficient tool × category data_"
+
+    bullets = ["*Tool × Category signals:*"]
+    for tool, category, stats, lift, label in rows:
+        n = int(stats["valid_n"])
+        limited = " — limited sample" if n < 100 else ""
+        accuracy = float(stats["directional_accuracy"])
+        yes_rate = float(stats["outcome_yes_rate"])
+        majority = max(yes_rate, 1.0 - yes_rate)
+        sign = "+" if lift >= 0 else "−"
+        bullets.append(
+            f"• *{label}{limited}:* `{tool}` × `{category}`\n"
+            f"  Brier `{float(stats['brier']):.4f}` (n={n:,}); "
+            f"DirAcc {accuracy:.0%} vs majority {majority:.0%}\n"
+            f"  → *{sign}{abs(lift) * 100:.1f}pp lift*"
+        )
+    return "\n".join(bullets)
+
+
+def _decision_state(
+    prod: dict[str, str], tourn: dict[str, str]
+) -> tuple[str, str, list[str], list[str]]:
+    """Return marker state, token, promotions, and actionable demotions."""
+    promote = sorted(
+        tool for tool, verdict in tourn.items() if verdict.startswith("PROMOTE")
+    )
+    demote = sorted(
+        tool for tool, verdict in prod.items() if verdict.startswith("demote")
+    )
+    blocked = bool(prod) and not _survivors(prod)
+    if blocked:
+        if promote:
+            # A qualified candidate is the only safe next action. Demotions
+            # become actionable only after that replacement is deployed.
+            return "promote", f"PROMOTE {len(promote)} FIRST", promote, []
+        return "blocked", "NO ACTION", [], demote
+    if promote and demote:
+        return (
+            "demote",
+            f"PROMOTE {len(promote)} · DEMOTE {len(demote)}",
+            promote,
+            demote,
+        )
+    if promote:
+        return "promote", f"PROMOTE {len(promote)}", promote, []
+    if demote:
+        return "demote", f"DEMOTE {len(demote)}", [], demote
+    return "none", "NO CHANGE", [], []
+
+
+def _decision_text(
+    prod: dict[str, str],
+    tourn: dict[str, str],
+    windows: dict[str, dict[str, dict[str, Any]]],
+) -> tuple[str, set[str], str]:
+    """Render today's action and its minimum decisive evidence."""
+    state, token, promote, demote = _decision_state(prod, tourn)
+    lines = [f"{VERDICT_MARKER[state]} *Decision: {token}*"]
+    priority = set(promote) | set(demote)
+
+    if state == "blocked":
+        lines.append(
+            "No deployed tool clears the gate. Do not demote tools one by one; "
+            "treat this as a platform-level problem."
+        )
+        return "\n\n".join(lines), priority, token
+
+    if not promote and not demote:
+        lines.append(
+            "No candidate qualifies for promotion, and no production tool "
+            "meets the demotion criteria."
+        )
+
+    for tool in promote:
+        stats = windows["tournament"].get(tool) or {}
+        count = _num(stats.get("edge_n"))
+        if count is None:
+            count = _num(stats.get("valid_n"))
+        n = int(count or 0)
+        lines.append(
+            f"• `{tool}`\n"
+            f"  Promotion gate passed: floor `{_floor(stats)}`; "
+            f"condAcc `{_conditional(stats)}`; n={n:,}."
+        )
+    if token.endswith(" FIRST"):
+        lines.append(
+            "All current production tools fail the gate. Deploy a qualified "
+            "replacement before reviewing any demotion."
+        )
+
+    for tool in demote:
+        verdict = prod[tool]
+        at_stats = windows["at"].get(tool) or {}
+        w1_stats = windows["w1"].get(tool) or {}
+        if "condAcc" in verdict:
+            reason = (
+                "Loses market disagreements: " f"condAcc `{_conditional(at_stats)}`."
+            )
+        elif "no-skill" in verdict:
+            reason = (
+                "Sustained no-skill: Edge 90d "
+                f"`{_score(at_stats.get('edge'), signed=True)}`; Edge 7d "
+                f"`{_score(w1_stats.get('edge'), signed=True)}`."
+            )
+        else:
+            reason = verdict.removeprefix("demote:").strip().capitalize() + "."
+        lines.append(f"• `{tool}`\n  {reason}")
+
+    suffix = "" if len(demote) == 1 else "s"
+    if demote:
+        ready = [
+            tool for tool, verdict in tourn.items() if verdict.startswith("PROMOTE")
+        ]
+        if not ready:
+            lines.append("No tournament candidate qualifies as a replacement.")
+        survivors = len(_survivors(prod))
+        noun = "tool" if survivors == 1 else "tools"
+        lines.append(
+            f"{survivors} production {noun} would remain after the proposed "
+            "demotions."
+        )
+    if promote and demote:
+        lines.append(
+            "*Next step:* Confirm each promotion on the required independent "
+            "window or holdout, and review and approve the proposed "
+            f"demotion{suffix}."
+        )
+    elif promote:
+        lines.append(
+            "*Next step:* Confirm each promotion on the required independent "
+            "window or holdout before deployment."
+        )
+    elif demote:
+        lines.append(
+            f"*Next step:* Review and approve the {len(demote)} proposed "
+            f"demotion{suffix}."
+        )
+    return "\n\n".join(lines), priority, token
+
+
+def _decision_warnings(
+    prod: dict[str, str],
+    windows: dict[str, dict[str, dict[str, Any]]],
+    tools: Sequence[str],
+) -> list[str]:
+    """Return only warnings that qualify the decision or 7d summary."""
+    warnings: list[str] = []
+    missing = [
+        label
+        for key, label in (
+            ("w1", "Current 7d"),
+            ("w2", "Prev 7d"),
+            ("at", "90d"),
+        )
+        if not windows[key]
+    ]
+    if missing:
+        warnings.append(
+            f":warning: *Unavailable:* {', '.join(missing)} data is missing."
+        )
+
+    for tool, verdict in prod.items():
+        if verdict == "no data" or verdict.startswith("n="):
+            warnings.append(
+                f":warning: `{tool}` has insufficient data to judge ({verdict}). "
+                "Investigate prediction failures and unresolved markets before acting."
+            )
+        stats = windows["w1"].get(tool) or {}
+        valid_n = _num(stats.get("valid_n"))
+        edge_n = _num(stats.get("edge_n"))
+        counts = [int(value) for value in (valid_n, edge_n) if value is not None]
+        weekly_n = min(counts) if counts else 0
+        if (
+            verdict.startswith("demote")
+            and weekly_n < MIN_SAMPLE_SIZE
+            and "condAcc" in verdict
+        ):
+            warnings.append(
+                f":warning: `{tool}` has insufficient weekly data "
+                f"(n={weekly_n}). Its recommendation is based on the 90d "
+                "condAcc result, not the weekly trend."
+            )
+
+    judged = [
+        windows["at"][tool]
+        for tool in tools
+        if tool in windows["at"]
+        and _num(windows["at"][tool].get("edge")) is not None
+        and _has_floor(windows["at"][tool], "edge_n")
+    ]
+    if len(judged) >= 2 and all(float(stats["edge"]) < 0 for stats in judged):
+        warnings.append(
+            f":warning: *Watch:* All {len(judged)} deployed tools have negative "
+            "90d market Edge. Investigate platform calibration; this is not by "
+            "itself a deployment change."
+        )
+
+    w1_rows = sum(
+        int(_num((windows["w1"].get(tool) or {}).get("valid_n")) or 0) for tool in tools
+    )
+    w2_rows = sum(
+        int(_num((windows["w2"].get(tool) or {}).get("valid_n")) or 0) for tool in tools
+    )
+    if w2_rows and w1_rows / w2_rows < COMPLETENESS_RATIO:
+        warnings.append(
+            f":warning: Current 7d is still filling ({w1_rows / w2_rows:.0%} "
+            "of the previous window); treat its trend as provisional and use "
+            "the 90d evidence for decisions."
+        )
+    return warnings
+
+
+def build_concise_digest_message(
+    results_dir: Path,
+    platform: str,
+    summary: str,
+    allowed_tools: Collection[str] | None = None,
+    deployed_tools: Collection[str] | None = None,
+    report_url: str | None = None,
+) -> dict[str, Any] | None:
+    """Build the one-message Slack view for a human decision maker.
+
+    Full tables, legends, ROI, and unchanged rows remain in the Markdown
+    artifact. Slack carries only the decision, platform trend summary, three
+    deterministic category signals, relevant warnings, and the artifact link.
+
+    :param results_dir: directory containing the scorer output files.
+    :param platform: platform key, such as ``omen`` or ``polymarket``.
+    :param summary: short platform-level Brier trend in Slack mrkdwn.
+    :param allowed_tools: optional prediction-tool allowlist.
+    :param deployed_tools: optional live production roster.
+    :param report_url: optional link to the unchanged Markdown artifact.
+    :return: one Slack webhook payload, or None when there are no scored tools.
+    """
+    paths = {
+        key: results_dir / name.format(platform=platform)
+        for key, name in WINDOW_FILES.items()
+    }
+    rolling_payload = _load_payload(paths["w1"])
+    windows = {
+        key: (
+            (_by_tool(rolling_payload, path) if rolling_payload is not None else {})
+            if key == "w1"
+            else _load_by_tool(path)
+        )
+        for key, path in paths.items()
+    }
+
+    prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
+    tourn_tools = _scored(windows["tournament"])
+    if allowed_tools is not None:
+        permitted = set(allowed_tools)
+        prod_tools &= permitted
+        tourn_tools &= permitted
+        prod_tools |= _ran_but_unscored(windows["at"], permitted)
+        prod_tools |= _ran_but_unscored(windows["w1"], permitted)
+    if deployed_tools is not None:
+        live = {normalize_tool_name(tool) for tool in deployed_tools}
+        prod_tools = {tool for tool in prod_tools if normalize_tool_name(tool) in live}
+    if not prod_tools and not tourn_tools:
+        return None
+
+    prod = _verdicts_for(
+        sorted(prod_tools), windows["at"], deployed=True, w1=windows["w1"]
+    )
+    tourn = _verdicts_for(sorted(tourn_tools), windows["tournament"], deployed=False)
+    decision, priority, token = _decision_text(prod, tourn, windows)
+    at_path = results_dir / WINDOW_FILES["at"].format(platform=platform)
+    as_of = _as_of_date(at_path)
+    label = PLATFORM_TITLES.get(platform, platform.title())
+    stamp = f" · {as_of}" if as_of else ""
+    line = f"{label.upper()} · REPORT V2{stamp}"
+    rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
+    title = f"{rule}\n{line}\n{rule}"
+
+    category_text = _category_signal_text(
+        (rolling_payload or {}).get("by_tool_category") or {}, prod_tools, priority
+    )
+    blocks: list[dict[str, Any]] = [
+        header(title),
+        section(decision),
+        section(summary),
+        section(category_text),
+    ]
+    warnings = _decision_warnings(prod, windows, sorted(prod_tools))
+    if warnings:
+        blocks.append(section("\n".join(warnings)))
+    if report_url:
+        blocks.append(context(f"<{report_url}|Full {label} report>"))
+    fallback = f"{label} {as_of or ''}: {token}".strip()
+    return message(fallback, blocks)
 
 
 # ---------------------------------------------------------------------------

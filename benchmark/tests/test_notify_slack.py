@@ -40,6 +40,7 @@ from benchmark.notify_slack import (
     _deployed_tools_for,
     _infer_platform_label,
     _main_window_label,
+    _summary_only,
     _v1_heading,
     post_to_slack,
 )
@@ -579,6 +580,49 @@ class TestV1Heading:
         """No date in the heading -> badge without a stamp, never a crash."""
         heading = _v1_heading("Polystrat", "no heading here")
         assert "*POLYSTRAT  \u00b7  REPORT V1*" in heading
+
+
+class TestSummaryOnly:
+    """The concise path keeps only the LLM's platform-trend paragraph."""
+
+    def test_extracts_summary_before_other_sections(self) -> None:
+        """Tool rankings and generated actions do not leak into concise Slack."""
+        digest = (
+            "*Summary:* Current 7d Brier is `0.2039`.\n"
+            "Performance declined slightly.\n\n"
+            "*Tool performance:*\n"
+            "• `alpha` — details\n\n"
+            "*Recommended actions:*\n"
+            "• investigate"
+        )
+        assert _summary_only(digest) == (
+            "*Summary:* Current 7d Brier is `0.2039`.\n"
+            "Performance declined slightly."
+        )
+
+    @pytest.mark.parametrize(
+        "digest",
+        [
+            "",
+            "   ",
+            "*Summary:*",
+            "**Summary:** trend\n\n*Recommended actions:* DEMOTE all",
+        ],
+    )
+    def test_malformed_summary_cannot_leak_actions(self, digest: str) -> None:
+        """Missing or malformed summaries yield a nonempty neutral placeholder."""
+        summary = _summary_only(digest)
+        assert "Unavailable" in summary
+        assert "DEMOTE" not in summary
+
+    def test_long_summary_fits_slack(self) -> None:
+        """Even a recognized summary cannot overflow one Slack section."""
+        summary = _summary_only("*Summary:* " + "trend " * 1000)
+        assert len(summary) == 3000
+
+    def test_unstructured_fallback_is_safe(self) -> None:
+        """Unexpected model output cannot inject uncomputed decisions."""
+        assert "Unavailable" in _summary_only("plain summary")
 
 
 class TestDeployedToolsForTriState:

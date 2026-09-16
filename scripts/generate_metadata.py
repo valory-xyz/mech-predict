@@ -39,12 +39,17 @@ ALLOWED_TOOLS = "ALLOWED_TOOLS"
 AVAILABLE_TOOLS = "AVAILABLE_TOOLS"
 # Ordered — ALLOWED_TOOLS wins when a module defines both.
 TOOLS_IDENTIFIERS: Tuple[str, ...] = (ALLOWED_TOOLS, AVAILABLE_TOOLS)
+# Every Valory operated mech must identify the Mech Terms in its metadata.
+# Emitting the link from the template (rather than adding it by hand after a
+# republish) is what keeps it from being lost on a regenerate-from-source.
+TERMS_URL = "https://www.valory.xyz/terms/mechs"
 METADATA_TEMPLATE: Dict[str, Any] = {
     "name": "Autonolas Mech III",
     "description": "The mech executes AI tasks requested on-chain and delivers the results to the requester.",
     "inputFormat": "ipfs-v0.1",
     "outputFormat": "ipfs-v0.1",
     "image": "tbd",
+    "termsUrl": TERMS_URL,
     "tools": [],
     "toolMetadata": {},
 }
@@ -221,6 +226,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--description", type=str, default=METADATA_TEMPLATE["description"]
     )
     parser.add_argument("--image", type=str, default=METADATA_TEMPLATE["image"])
+    parser.add_argument("--terms-url", type=str, default=METADATA_TEMPLATE["termsUrl"])
     parser.add_argument(
         "--allow-import-errors",
         action="store_true",
@@ -248,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     template["name"] = args.name
     template["description"] = args.description
     template["image"] = args.image
+    template["termsUrl"] = args.terms_url
 
     metadata = build_tools_metadata(tools_data, registry, template, args.skip_tool)
 

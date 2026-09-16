@@ -580,14 +580,16 @@ class TestExtractPrediction:
         out = module.extract_prediction(json.dumps(payload)) or ""
         assert float(json.loads(out)["p_yes"]) == 0.19
 
-    def test_a_completion_with_no_forecast_is_left_untouched(self) -> None:
-        """With no usable object the raw text is returned for the error path."""
-        assert module.extract_prediction("no json at all") == "no json at all"
+    def test_a_completion_with_no_forecast_returns_none(self) -> None:
+        """Prose with no object at all is not handed on as the forecast."""
+        # Returning the text put a result on-chain that json.loads rejects; the
+        # caller's None guard turns this into a retry and then a typed null.
+        assert module.extract_prediction("no json at all") is None
 
-    def test_empty_and_missing_content_pass_through(self) -> None:
-        """Falsy completions are returned as they arrived."""
+    def test_empty_and_missing_content_return_none(self) -> None:
+        """An empty completion is None too, so the `is None` guard catches it."""
         assert module.extract_prediction(None) is None
-        assert module.extract_prediction("") == ""
+        assert module.extract_prediction("") is None
 
     def test_a_cut_after_a_brace_in_a_string_value_returns_none(self) -> None:
         """A } inside a string must not make a truncated object look complete."""
@@ -616,6 +618,30 @@ class TestExtractPrediction:
         # Returning the content here would put p_yes 1.7 on-chain as a normal
         # forecast; the caller's guard turns None into a retry instead.
         assert module.extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
+
+
+REFUSAL = "I cannot help with that request."
+
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
+
+def _sdk_response(content: str, finish_reason: str = "stop") -> MagicMock:
+    """Build a mock ``chat.completions.create`` response.
+
+    :param content: the message content the SDK reports.
+    :param finish_reason: why the provider stopped generating.
+    :return: a MagicMock shaped like an openai ChatCompletion.
+    """
+    choice = MagicMock(finish_reason=finish_reason)
+    choice.message.content = content
+    return MagicMock(
+        choices=[choice], usage=MagicMock(prompt_tokens=10, completion_tokens=5)
+    )
 
 
 class TestExtractPredictionRunWiring:
@@ -662,3 +688,56 @@ class TestExtractPredictionRunWiring:
         assert parsed["p_yes"] is None
         assert parsed["error_type"] == "Exception"
         assert "0.8" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_prose_as_the_result(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A completion with no forecast object is a typed error null, not text."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        _install_mock_client(mock_client_mgr, content=REFUSAL)
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert "cannot help" not in result[0]
+
+    @patch(f"{SF_MODULE}.time.sleep", return_value=None)
+    @patch(f"{SF_MODULE}.openai.OpenAI")
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_run_does_not_deliver_a_draft_when_max_tokens_cut_the_prose(
+        self,
+        mock_fetch: MagicMock,
+        mock_openai: MagicMock,
+        _mock_sleep: MagicMock,
+    ) -> None:
+        """A cut after a complete draft is a typed null, raised on the first call."""
+        # The extractor alone would deliver the 0.35 draft: only the provider's
+        # finish_reason tells this cut apart from an answer.
+        assert module.extract_prediction(DRAFT_THEN_CUT_IN_PROSE) is not None
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _sdk_response(DRAFT_THEN_CUT_IN_PROSE, "length")
+        result = run(
+            tool="superforcaster-polymarket-v1",
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+        # The same budget cuts a retry the same way, so it is not retried.
+        assert create.call_count == 1

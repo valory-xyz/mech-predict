@@ -244,6 +244,15 @@ class Usage:
         self.completion_tokens = completion_tokens
 
 
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
+
+
 # pylint: disable=too-few-public-methods
 class LLMResponse:
     """Response class."""
@@ -252,6 +261,7 @@ class LLMResponse:
         """Initializes with content and usage class."""
         self.content = content
         self.usage = Usage()
+        self.finish_reason: Optional[str] = None
 
 
 class LLMClient:
@@ -304,6 +314,12 @@ class LLMClient:
             )
             response = LLMResponse()
             response.content = response_provider.content[0].text
+            # Normalised to OpenAI's value so one check covers both providers.
+            response.finish_reason = (
+                "length"
+                if response_provider.stop_reason == "max_tokens"
+                else response_provider.stop_reason
+            )
             response.usage.prompt_tokens = response_provider.usage.input_tokens
             response.usage.completion_tokens = response_provider.usage.output_tokens
             return response
@@ -320,6 +336,7 @@ class LLMClient:
             )
             response = LLMResponse()
             response.content = response_provider.choices[0].message.content
+            response.finish_reason = response_provider.choices[0].finish_reason
             response.usage.prompt_tokens = response_provider.usage.prompt_tokens
             response.usage.completion_tokens = response_provider.usage.completion_tokens
             return response
@@ -646,9 +663,18 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
 
 
 def extract_prediction(content: Optional[str]) -> Optional[str]:
-    """Return the forecast object from a completion, as a JSON string."""
+    """Return the forecast object from a completion as a JSON string, or None.
+
+    None means there is nothing to deliver: an empty completion, a cut
+    mid-object, prose with no object at all (a refusal), or objects none of
+    which carries a usable `p_yes`. Handing back the text instead would put a
+    `result` on-chain that the consumer cannot `json.loads`.
+
+    :param content: the raw model completion.
+    :return: the selected forecast object as JSON, or None.
+    """
     if not content:
-        return content
+        return None
     candidates, cut_mid_object = _json_objects(content)
     if cut_mid_object:
         return None
@@ -660,30 +686,7 @@ def extract_prediction(content: Optional[str]) -> Optional[str]:
         if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
-    if candidates:
-        # Objects were present and none carried a usable p_yes: a sole
-        # out-of-range, null or non-numeric forecast must not be delivered just
-        # because there was nothing better to choose.
-        return None
-    return content
-
-
-def _is_forecast_object(extracted: str) -> bool:
-    """Whether `extracted` is a JSON object carrying a usable `p_yes`.
-
-    extract_prediction returns the completion unchanged when no candidate
-    qualifies, so the caller has to tell a selected forecast from a passthrough
-    before delivering it to a consumer that flat-``json.loads`` the result.
-
-    :param extracted: the extractor's return value.
-    :return: True when it parses as an object with an in-range `p_yes`.
-    """
-    try:
-        parsed = json.loads(extracted)
-        p_yes = float(parsed["p_yes"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-        return False
-    return 0.0 <= p_yes <= 1.0
+    return None
 
 
 def parser_prediction_response(response: str) -> str:
@@ -698,7 +701,7 @@ def parser_prediction_response(response: str) -> str:
         # Hand those completions to the shared extractor so the delivery is the
         # forecast object rather than the whole reasoning block.
         extracted = extract_prediction(response)
-        if extracted is not None and _is_forecast_object(extracted):
+        if extracted is not None:
             return extracted
         print("Not a valid answer from the model")
         print(f"response = {response}")
@@ -1883,23 +1886,17 @@ def run(  # pylint: disable=too-many-statements,too-many-locals
             used_params["source_content"] = source_content
 
         if not response_prediction or response_prediction.content is None:
-            return (
-                "Response Prediction Not Valid",
-                prediction_prompt,
-                None,
-                counter_callback,
-                used_params,
-            )
+            # A refusal or an empty completion. A plain-text result would reach
+            # a consumer that flat-json.loads it; raising yields the typed null.
+            raise ValueError("Model returned no content (possible refusal)")
 
-        prediction = parser_prediction_response(response_prediction.content)
-        if not prediction:
-            return (
-                "Prediction Not Valid",
-                prediction_prompt,
-                None,
-                counter_callback,
-                used_params,
+        if response_prediction.finish_reason == "length":
+            # Cut at max_tokens: an object completed before the cut is a draft.
+            raise TruncatedCompletionError(
+                "Response truncated (finish_reason='length', "
+                f"max_tokens={max_tokens})"
             )
+        prediction = parser_prediction_response(response_prediction.content)
 
         if counter_callback:
             counter_callback(

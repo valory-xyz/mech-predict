@@ -24,7 +24,7 @@ import json
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -583,6 +583,45 @@ class TestLLMClientAnthropicCompletions:
         )
         kwargs = client.client.messages.create.call_args.kwargs
         assert kwargs["system"] == module.SYSTEM_PROMPT
+
+
+class TestLLMClientFinishReason:
+    """LLMClient.completions() carries the provider's stop reason, normalised."""
+
+    def test_openai_finish_reason_is_carried(self) -> None:
+        """The value the OpenAI SDK reports reaches the response unchanged."""
+        choice = MagicMock(finish_reason="length")
+        choice.message.content = "x"
+        with patch("openai.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.return_value = MagicMock(
+                choices=[choice], usage=MagicMock(prompt_tokens=1, completion_tokens=1)
+            )
+            client = module.LLMClient(api_keys={"openai": "sk"}, llm_provider="openai")
+        response = client.completions(model="gpt-4.1-2025-04-14", messages=[])
+        assert response is not None
+        assert response.finish_reason == "length"
+
+    def test_anthropic_max_tokens_is_normalised_to_length(self) -> None:
+        """Anthropic's max_tokens stop maps onto OpenAI's 'length'."""
+        resp = _make_anthropic_text_response('{"p_yes": 0.5}')
+        resp.stop_reason = "max_tokens"
+        client = _anthropic_client(resp)
+        response = client.completions(
+            model="claude-sonnet-4-6", messages=[{"role": "user", "content": "U1"}]
+        )
+        assert response is not None
+        assert response.finish_reason == "length"
+
+    def test_anthropic_normal_stop_is_not_a_cut(self) -> None:
+        """A normal Anthropic stop is carried as-is and never reads as a cut."""
+        resp = _make_anthropic_text_response('{"p_yes": 0.5}')
+        resp.stop_reason = "end_turn"
+        client = _anthropic_client(resp)
+        response = client.completions(
+            model="claude-sonnet-4-6", messages=[{"role": "user", "content": "U1"}]
+        )
+        assert response is not None
+        assert response.finish_reason == "end_turn"
 
 
 class TestWithKeyRotationAnthropic:
@@ -1392,15 +1431,26 @@ class TestExtractPrediction:
         """A sole null p_yes yields None, not the unusable object."""
         assert extract_prediction('{"p_yes": null, "p_no": null}') is None
 
-    def test_prose_without_json_passes_through(self) -> None:
-        """A completion with no object at all is returned unchanged."""
-        completion = "I cannot estimate this probability."
-        assert extract_prediction(completion) == completion
+    def test_prose_without_json_returns_none(self) -> None:
+        """A completion with no object at all is not handed on as text."""
+        assert extract_prediction("I cannot estimate this probability.") is None
 
     @pytest.mark.parametrize("content", [None, ""])
-    def test_empty_content_is_returned_unchanged(self, content: Any) -> None:
-        """Empty or missing content is handed back as-is."""
-        assert extract_prediction(content) == content
+    def test_empty_content_returns_none(self, content: Any) -> None:
+        """Empty or missing content yields None, never an empty delivery."""
+        assert extract_prediction(content) is None
+
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # The tail after "{" is empty here, which the first version read as
+        # prose. On pretty-printed JSON a cut after "{" is a likely stop.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert extract_prediction(content) is None
 
 
 class TestParserPredictionResponse:
@@ -1443,11 +1493,21 @@ class TestParserPredictionResponse:
             parser_prediction_response("<p_yes>maybe</p_yes>")
 
 
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
+
 class TestFreeTextAnswerDelivery:
     """run(): the extractor sits on the path that returns the completion."""
 
     @staticmethod
-    def _run_with_completion(content: str) -> tuple:
+    def _run_with_completion(
+        content: Optional[str], finish_reason: str = "stop"
+    ) -> tuple:
         """Run the tool end to end with the prediction model returning `content`."""
         with (
             patch(f"{REASONING_MODULE}.LLMClientManager") as mock_mgr,
@@ -1460,6 +1520,7 @@ class TestFreeTextAnswerDelivery:
             mock_llm.completions.return_value = MagicMock(
                 content=content,
                 usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+                finish_reason=finish_reason,
             )
             return run(
                 tool="prediction-request-reasoning-v1",
@@ -1485,3 +1546,26 @@ class TestFreeTextAnswerDelivery:
         parsed = json.loads(result[0])
         assert parsed["p_yes"] is None
         assert parsed["error_type"] == "ValueError"
+
+    def test_a_completion_cut_at_max_tokens_delivers_the_typed_null(self) -> None:
+        """A cut after a complete draft is the typed null, not the draft."""
+        # The draft is complete and the cut lands in prose, so the parser alone
+        # would deliver 0.35 as the forecast.
+        assert (
+            json.loads(parser_prediction_response(DRAFT_THEN_CUT_IN_PROSE))["p_yes"]
+            == 0.35
+        )
+        result = self._run_with_completion(
+            DRAFT_THEN_CUT_IN_PROSE, finish_reason="length"
+        )
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+
+    def test_a_missing_completion_delivers_the_typed_null(self) -> None:
+        """No content (a refusal) is the typed null, not a plain-text result."""
+        result = self._run_with_completion(None)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "ValueError"

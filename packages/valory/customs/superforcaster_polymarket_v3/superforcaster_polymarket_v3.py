@@ -289,9 +289,18 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
 
 
 def extract_prediction(content: Optional[str]) -> Optional[str]:
-    """Return the forecast object from a completion, as a JSON string."""
+    """Return the forecast object from a completion as a JSON string, or None.
+
+    None means there is nothing to deliver: an empty completion, a cut
+    mid-object, prose with no object at all (a refusal), or objects none of
+    which carries a usable `p_yes`. Handing back the text instead would put a
+    `result` on-chain that the consumer cannot `json.loads`.
+
+    :param content: the raw model completion.
+    :return: the selected forecast object as JSON, or None.
+    """
     if not content:
-        return content
+        return None
     candidates, cut_mid_object = _json_objects(content)
     if cut_mid_object:
         return None
@@ -303,12 +312,7 @@ def extract_prediction(content: Optional[str]) -> Optional[str]:
         if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
-    if candidates:
-        # Objects were present and none carried a usable p_yes: a sole
-        # out-of-range, null or non-numeric forecast must not be delivered just
-        # because there was nothing better to choose.
-        return None
-    return content
+    return None
 
 
 class LLMClientManager:
@@ -358,6 +362,15 @@ class OpenAIResponse:
         """Initializes with content and usage class."""
         self.content = content
         self.usage = Usage()
+
+
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
 
 
 class LLMClient:
@@ -410,11 +423,14 @@ class LLMClient:
             500) because claude-fable-5's ``ThinkingBlock`` shares the
             ``max_tokens`` budget with the JSON output — small caps
             routinely truncate the response.
-        :raises ValueError: on the Anthropic branch when the response is
-            truncated (``stop_reason == "max_tokens"``) or has no
-            ``TextBlock``. Both conditions previously returned ``None``
-            content (or partial JSON) silently and bypassed the caller's
-            retry loop.
+        :raises TruncatedCompletionError: when the response was cut at
+            ``max_tokens`` (``stop_reason == "max_tokens"`` on the Anthropic
+            branch, ``finish_reason == "length"`` on the OpenAI branch). A cut
+            completion can carry a complete draft object that parses as the
+            answer.
+        :raises ValueError: on the Anthropic branch when the response has no
+            ``TextBlock``, which previously returned ``None`` content silently
+            and bypassed the caller's retry loop.
         :return: ``OpenAIResponse`` carrying ``.content`` (text) and
             ``.usage`` (prompt/completion-token counts).
         """
@@ -462,7 +478,7 @@ class LLMClient:
                     for b in resp.content
                     if getattr(b, "type", None) == "text"
                 )
-                raise ValueError(
+                raise TruncatedCompletionError(
                     f"Response truncated (stop_reason='max_tokens', "
                     f"max_tokens={anthropic_max_tokens}, text_len={text_len}); "
                     f"raise max_tokens for this call site"
@@ -502,6 +518,14 @@ class LLMClient:
             timeout=150,
             stop=None,
         )
+        # Same truncation guard as the Anthropic branch: a completion cut at
+        # max_tokens can end in prose after a complete draft object, which the
+        # extractor cannot tell from an answer.
+        if response_provider.choices[0].finish_reason == "length":
+            raise TruncatedCompletionError(
+                "Response truncated (finish_reason='length', "
+                f"max_tokens={max_tokens})"
+            )
         # OpenAI return path: same extraction as the Anthropic branch above,
         # so both providers deliver the forecast object rather than prose.
         response.content = extract_prediction(
@@ -659,12 +683,12 @@ def generate_prediction_with_retry(
                 )
 
             content = response.content if response else None
-            # Empty content must engage the retry loop, NOT return None
-            # as the prediction. The Anthropic branch can produce this
-            # state if a future code path stops raising on missing-text
-            # (today the LLMClient raises in that case); guard here too.
+            # The client slices the forecast out with extract_prediction, which
+            # returns None for a cut, prose with no forecast object, or only
+            # unusable objects. That must engage the retry loop, NOT be
+            # returned as the prediction.
             if content is None:
-                raise ValueError("LLM returned empty content")
+                raise ValueError("Model completion carried no usable forecast object")
             return content, counter_callback
         except (
             openai.RateLimitError,
@@ -683,12 +707,12 @@ def generate_prediction_with_retry(
             # claude-fable-5 (new model, key tier may not yet authorize it).
             raise
         except Exception as e:
-            # Don't retry deterministic truncation: ``stop_reason ==
-            # 'max_tokens'`` won't recover on retry with the same budget,
-            # so re-raise immediately and let the caller surface a real
-            # error instead of burning the retry budget on a guaranteed
-            # failure.
-            if "Response truncated" in str(e):
+            # Don't retry deterministic truncation (``stop_reason ==
+            # 'max_tokens'`` or ``finish_reason == 'length'``): it won't
+            # recover on retry with the same budget, so re-raise immediately
+            # and let the caller surface a real error instead of burning the
+            # retry budget on a guaranteed failure.
+            if isinstance(e, TruncatedCompletionError):
                 raise
             last_error = e
             print(f"Attempt {attempt + 1} failed with error: {e}")

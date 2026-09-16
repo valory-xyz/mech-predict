@@ -155,6 +155,7 @@ class OpenAIResponse:
         """Initializes with content and usage class."""
         self.content = content
         self.usage = usage if usage is not None else Usage()
+        self.finish_reason: Optional[str] = None
 
 
 class OpenAIClient:
@@ -188,6 +189,7 @@ class OpenAIClient:
         )
         response = OpenAIResponse()
         response.content = response_provider.choices[0].message.content
+        response.finish_reason = response_provider.choices[0].finish_reason
         response.usage.prompt_tokens = response_provider.usage.prompt_tokens
         response.usage.completion_tokens = response_provider.usage.completion_tokens
         return response
@@ -399,9 +401,18 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
 
 
 def extract_prediction(content: Optional[str]) -> Optional[str]:
-    """Return the forecast object from a completion, as a JSON string."""
+    """Return the forecast object from a completion as a JSON string, or None.
+
+    None means there is nothing to deliver: an empty completion, a cut
+    mid-object, prose with no object at all (a refusal), or objects none of
+    which carries a usable `p_yes`. Handing back the text instead would put a
+    `result` on-chain that the consumer cannot `json.loads`.
+
+    :param content: the raw model completion.
+    :return: the selected forecast object as JSON, or None.
+    """
     if not content:
-        return content
+        return None
     candidates, cut_mid_object = _json_objects(content)
     if cut_mid_object:
         return None
@@ -413,12 +424,16 @@ def extract_prediction(content: Optional[str]) -> Optional[str]:
         if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
-    if candidates:
-        # Objects were present and none carried a usable p_yes: a sole
-        # out-of-range, null or non-numeric forecast must not be delivered just
-        # because there was nothing better to choose.
-        return None
-    return content
+    return None
+
+
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
 
 
 def generate_prediction_with_retry(
@@ -462,6 +477,12 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
+            if response.finish_reason == "length":
+                raise TruncatedCompletionError(
+                    "Response truncated (finish_reason='length', "
+                    f"max_tokens={max_tokens})"
+                )
+
             # Slice the forecast out here, on the path that returns the
             # completion to run(): the prompt asks for a reasoning scaffold
             # AND for JSON only, so a free-text request answers with the
@@ -469,13 +490,13 @@ def generate_prediction_with_retry(
             # while the documented contract is a JSON `result`.
             prediction = extract_prediction(response.content)
             if prediction is None:
-                # The completion was cut mid-object: any forecast written
-                # before the cut is a draft, so there is nothing to deliver.
-                raise ValueError(
-                    "Model completion was truncated before the forecast object"
-                )
+                # A cut mid-object, prose with no forecast object, or only
+                # unusable objects: there is nothing to deliver.
+                raise ValueError("Model completion carried no usable forecast object")
 
             return prediction, counter_callback
+        except TruncatedCompletionError:
+            raise
         except Exception as e:  # noqa: BLE001
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)

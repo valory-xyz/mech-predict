@@ -639,6 +639,7 @@ class LLMResponse:
         """Initialise with content and an empty usage record."""
         self.content = content
         self.usage = Usage()
+        self.finish_reason: Optional[str] = None
 
 
 class VLLMClient:
@@ -669,6 +670,7 @@ class VLLMClient:
         )
         response = LLMResponse()
         response.content = provider_response.choices[0].message.content
+        response.finish_reason = provider_response.choices[0].finish_reason
         usage = provider_response.usage
         if usage is not None:
             response.usage.prompt_tokens = usage.prompt_tokens
@@ -697,6 +699,15 @@ class VLLMClientManager:
             self._client = None
 
 
+class TruncatedCompletionError(ValueError):
+    """The provider stopped the completion at its max_tokens budget.
+
+    Raised before any parsing: an object completed before the cut is a draft,
+    not the answer, and no text heuristic can see a cut that lands in prose
+    after one. It is not retried, because the same budget cuts the same way.
+    """
+
+
 def generate_prediction_with_retry(
     client: VLLMClient,
     model: str,
@@ -723,7 +734,14 @@ def generate_prediction_with_retry(
                     output_tokens=response.usage.completion_tokens,
                     model=model,
                 )
+            if response.finish_reason == "length":
+                raise TruncatedCompletionError(
+                    "Response truncated (finish_reason='length', "
+                    f"max_tokens={max_tokens})"
+                )
             return response.content, counter_callback
+        except TruncatedCompletionError:
+            raise
         except Exception as e:  # noqa: BLE001 — retry any transient inference error
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)

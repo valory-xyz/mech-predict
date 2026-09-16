@@ -332,6 +332,42 @@ def test_a_stray_brace_in_prose_after_the_answer_is_not_a_cut() -> None:
     assert parsed["p_yes"] == 0.3
 
 
+def test_a_completion_ending_on_the_opening_brace_is_a_cut() -> None:
+    """A cut landing ON the brace must not deliver an earlier draft."""
+    # The tail after "{" is empty here, which the first version read as prose.
+    assert canonical_prediction('{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{') is None
+
+
+def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut() -> None:
+    """Whitespace after the opening brace is still a cut, not prose."""
+    assert canonical_prediction('{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n ') is None
+
+
+def test_a_completion_cut_at_max_tokens_is_raised_and_not_retried() -> None:
+    """finish_reason 'length' fails fast instead of handing a draft to the parser."""
+    # The draft is complete and the cut lands in prose, so canonical_prediction
+    # alone would deliver 0.3 as the answer.
+    completion = '</think>\nDraft {"p_yes": 0.3, "p_no": 0.7} looks low given the ne'
+    assert canonical_prediction(completion) is not None
+    choice = MagicMock(finish_reason="length")
+    choice.message.content = completion
+    with (
+        patch(f"{MODULE_PATH}.openai.OpenAI") as mock_openai,
+        patch(f"{MODULE_PATH}.time.sleep") as mock_sleep,
+    ):
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = MagicMock(
+            choices=[choice], usage=MagicMock(prompt_tokens=10, completion_tokens=5)
+        )
+        client = module.VLLMClient(api_key="k", base_url=ENDPOINT)
+        with pytest.raises(module.TruncatedCompletionError):
+            module.generate_prediction_with_retry(
+                client=client, model="m", messages=[], temperature=0.0, max_tokens=64
+            )
+    assert create.call_count == 1
+    mock_sleep.assert_not_called()
+
+
 def test_the_reasoning_strip_runs_to_the_last_closing_tag() -> None:
     """Two closing tags: everything before the LAST one is reasoning."""
     # Stripping only to the first tag leaves the mid-reasoning 0.82 as a

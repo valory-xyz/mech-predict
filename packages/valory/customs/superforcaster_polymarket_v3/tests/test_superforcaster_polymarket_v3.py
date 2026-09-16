@@ -507,6 +507,15 @@ SCAFFOLD_COMPLETION = (
 # A max_tokens cut that lands while the answer object is being written.
 CUT_COMPLETION = '<answer>\n{"p_yes": 0.62, "p_no"'
 
+REFUSAL = "I cannot help with that request."
+
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
 
 def _openai_sdk_response(content: str) -> MagicMock:
     """Build a mock ``chat.completions.create`` response carrying *content*.
@@ -588,15 +597,14 @@ class TestExtractPrediction:
         content = FORECAST_JSON + '\n{"p_yes": null, "p_no": null}'
         assert json.loads(extract_prediction(content) or "") == FORECAST
 
-    def test_no_candidate_returns_content_unchanged(self) -> None:
-        """With no forecast object at all the raw completion is left as-is."""
-        content = "I cannot answer this question."
-        assert extract_prediction(content) == content
+    def test_no_candidate_returns_none(self) -> None:
+        """With no forecast object at all the raw completion is not handed on."""
+        assert extract_prediction("I cannot answer this question.") is None
 
-    def test_empty_content_passes_through(self) -> None:
-        """Empty and None completions are returned as-is, not crashed on."""
+    def test_empty_content_returns_none(self) -> None:
+        """Empty and None completions yield None, not an empty delivery."""
         assert extract_prediction(None) is None
-        assert extract_prediction("") == ""
+        assert extract_prediction("") is None
 
     def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
         """A cut landing ON the brace must not deliver an earlier draft."""
@@ -693,3 +701,84 @@ class TestDeliveredPredictionIsParseable:
         assert delivered["p_yes"] is None
         assert "<answer>" not in result[0]
         assert create.call_count == 3
+
+    @patch(f"{V3_MODULE}.time.sleep")
+    @patch(f"{V3_MODULE}.openai.OpenAI")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_openai_cut_at_max_tokens_is_not_delivered_or_retried(
+        self, mock_fetch: MagicMock, mock_openai: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """finish_reason 'length' fails fast, like stop_reason on the Anthropic branch."""
+        # The draft is complete and the cut lands in prose, so the extractor
+        # alone would deliver 0.35 as the forecast.
+        assert extract_prediction(DRAFT_THEN_CUT_IN_PROSE) is not None
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _openai_sdk_response(DRAFT_THEN_CUT_IN_PROSE)
+        create.return_value.choices[0].finish_reason = "length"
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_OPENAI_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        delivered = json.loads(result[0])
+        assert delivered["p_yes"] is None
+        assert delivered["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+        assert create.call_count == 1
+
+    @patch(f"{V3_MODULE}.time.sleep")
+    @patch(f"{V3_MODULE}.openai.OpenAI")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_prose_completion_is_not_delivered(
+        self, mock_fetch: MagicMock, mock_openai: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """A completion with no forecast object reaches the retry loop, not the caller."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_openai.return_value.chat.completions.create
+        create.return_value = _openai_sdk_response(REFUSAL)
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_OPENAI_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        delivered = json.loads(result[0])
+        assert delivered["p_yes"] is None
+        assert "cannot help" not in result[0]
+        assert create.call_count == 3
+
+    @patch(f"{V3_MODULE}.time.sleep")
+    @patch(f"{V3_MODULE}.Anthropic")
+    @patch(f"{V3_MODULE}.fetch_additional_sources")
+    def test_anthropic_cut_at_max_tokens_is_not_retried(
+        self, mock_fetch: MagicMock, mock_anthropic: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """stop_reason 'max_tokens' fails fast with the same error type as OpenAI's cut."""
+        # Fail-fast keys on the exception class, so a truncation raised as a
+        # plain ValueError would be retried three times with the same budget.
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        create = mock_anthropic.return_value.messages.create
+        create.return_value = _anthropic_sdk_response(DRAFT_THEN_CUT_IN_PROSE)
+        create.return_value.stop_reason = "max_tokens"
+
+        result = run(
+            tool="superforcaster-polymarket-v3",
+            model=DEFAULT_ANTHROPIC_MODEL,
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        delivered = json.loads(result[0])
+        assert delivered["p_yes"] is None
+        assert delivered["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+        assert create.call_count == 1

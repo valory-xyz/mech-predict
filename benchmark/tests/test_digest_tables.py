@@ -357,7 +357,7 @@ class TestConciseDecisionSummary:
         rolling_loads = 0
         load_payload = digest_tables._load_payload  # pylint: disable=protected-access
 
-        def counted_load(path: Path) -> dict[str, Any]:
+        def counted_load(path: Path) -> dict[str, Any] | None:
             nonlocal rolling_loads
             if path == rolling_path:
                 rolling_loads += 1

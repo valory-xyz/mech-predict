@@ -1149,6 +1149,24 @@ class TestExtractPrediction:
         assert extract_prediction(None) is None
         assert extract_prediction("") == ""
 
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # tail is empty here, which the first version read as prose. On
+        # pretty-printed JSON a cut after "{" is one of the likelier stops.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert extract_prediction(content) is None
+
+    def test_a_sole_out_of_range_forecast_is_not_delivered(self) -> None:
+        """When the only object is out of range there is nothing to deliver."""
+        # Returning the content here would put p_yes 1.7 on-chain as a normal
+        # forecast; the caller's guard turns None into a retry instead.
+        assert extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
+
 
 class TestExtractionIsWiredIntoDelivery:
     """The extractor sits on run()'s delivery path, not only in a helper."""

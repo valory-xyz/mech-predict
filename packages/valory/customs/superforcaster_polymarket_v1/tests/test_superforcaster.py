@@ -599,6 +599,24 @@ class TestExtractPrediction:
         completion = '{"note": "he said \\"maybe}\\" indeed", "p_yes": 0.19'
         assert module.extract_prediction(completion) is None
 
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # tail is empty here, which the first version read as prose. On
+        # pretty-printed JSON a cut after "{" is one of the likelier stops.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert module.extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert module.extract_prediction(content) is None
+
+    def test_a_sole_out_of_range_forecast_is_not_delivered(self) -> None:
+        """When the only object is out of range there is nothing to deliver."""
+        # Returning the content here would put p_yes 1.7 on-chain as a normal
+        # forecast; the caller's guard turns None into a retry instead.
+        assert module.extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
+
 
 class TestExtractPredictionRunWiring:
     """The extractor sits on run()'s delivery path, not only in a helper."""
@@ -626,7 +644,7 @@ class TestExtractPredictionRunWiring:
     def test_run_does_not_deliver_a_draft_from_a_cut_completion(
         self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
     ) -> None:
-        """A completion cut mid-answer is delivered as None, not as a draft."""
+        """A completion cut mid-answer yields a typed error null, not a draft."""
         mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
         cut = json.dumps({"p_yes": 0.8, "p_no": 0.2}) + '\n{"p_yes": 0.19'
         _install_mock_client(mock_client_mgr, content=cut)
@@ -637,4 +655,10 @@ class TestExtractPredictionRunWiring:
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
-        assert result[0] is None
+        # Not a bare None: that would be delivered verbatim as the on-chain
+        # result with no exception, so neither the retry loop nor
+        # with_key_rotation's typed-null branch would run.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "Exception"
+        assert "0.8" not in result[0]

@@ -400,7 +400,11 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
             # prose -- treating the latter as a cut would turn a delivered
             # forecast into an error.
             tail = text[start + 1 :].lstrip()
-            if tail.startswith('"'):
+            if not tail or tail.startswith('"'):
+                # Empty tail means the completion stopped ON the brace (or on
+                # the whitespace after it), which is exactly where a cut lands
+                # on pretty-printed JSON; a quoted key means a truncated object.
+                # A brace in prose is followed by something else.
                 return found, True
             idx = start + 1
             continue

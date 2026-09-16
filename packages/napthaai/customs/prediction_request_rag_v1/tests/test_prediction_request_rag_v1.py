@@ -1129,6 +1129,22 @@ class TestSearchQueryPlumbing:
         )
         assert queries == ["short q", "query two"]
 
+    def test_multi_queries_dedup_ignores_case(self) -> None:
+        """Dedup compares case-insensitively, so a recased duplicate is dropped."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>  Will Isak Transfer?  \nalpha</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query="will isak transfer?",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["Will Isak Transfer?", "alpha"]
+
     @patch(f"{RAG_MODULE}.get_urls_from_queries_serper", return_value=[])
     @patch(f"{RAG_MODULE}.multi_queries", side_effect=RuntimeError("boom"))
     def test_brainstorm_failure_falls_back_to_search_query(
@@ -1306,14 +1322,32 @@ class TestExtractPrediction:
         assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.3
 
     def test_null_p_yes_is_not_a_forecast(self) -> None:
-        """A null p_yes is skipped, so the content comes back unchanged."""
+        """A sole null p_yes yields None, not the unusable object."""
+        # Previously this returned the content unchanged, which delivered the
+        # unusable object on-chain when it was the ONLY candidate. Objects were
+        # present and none carried a usable p_yes, so there is nothing to
+        # deliver and the caller's guard turns it into a retry.
         content = '{"p_yes": null, "p_no": null}'
-        assert module.extract_prediction(content) == content
+        assert module.extract_prediction(content) is None
 
     def test_empty_content_is_returned_unchanged(self) -> None:
         """Empty or missing content is passed straight back."""
         assert module.extract_prediction("") == ""
         assert module.extract_prediction(None) is None
+
+    @patch(f"{RAG_MODULE}.requests.request")
+    def test_a_systemic_http_status_is_not_swallowed(
+        self, mock_request: MagicMock
+    ) -> None:
+        """A 401/403/429 fails every query alike, so it must surface."""
+        # HTTPError subclasses RequestException: without a dedicated arm it
+        # lands in the transport bucket, urls ends empty and the delivery is a
+        # flagged null indistinguishable on-chain from a genuine zero-hit.
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("401 Unauthorized")
+        mock_request.return_value = resp
+        with pytest.raises(requests.HTTPError):
+            module.get_urls_from_queries_serper(["q1", "q2"], "key", num=3)
 
 
 class TestParserPredictionResponse:

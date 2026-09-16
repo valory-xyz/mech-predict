@@ -691,7 +691,18 @@ def get_urls_from_queries_serper(
             # integration (a quota-error body hits every query alike), not a
             # zero-hit -- surface it as an error null instead of swallowing.
             raise
-        except Exception as e:
+        except requests.HTTPError:
+            # An auth or quota status (401/403/429) is systemic: every query in
+            # the loop fails it identically, so swallowing leaves urls empty and
+            # the tool delivers a flagged null that is indistinguishable on-chain
+            # from a genuine zero-hit. HTTPError subclasses RequestException, so
+            # this arm must precede the transport arm below to be reachable.
+            raise
+        except requests.RequestException as e:
+            # A genuine per-query transport blip (connection reset, read
+            # timeout): the other queries can still succeed, so skip this one.
+            print(f"Transport error fetching URLs for query '{query}': {e}")
+        except Exception as e:  # noqa: BLE001
             print(f"Error fetching URLs for query '{query}': {e}")
     return list(set(urls))
 
@@ -1374,7 +1385,11 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
             # prose -- treating the latter as a cut would turn a delivered
             # forecast into an error.
             tail = text[start + 1 :].lstrip()
-            if tail.startswith('"'):
+            if not tail or tail.startswith('"'):
+                # Empty tail means the completion stopped ON the brace (or on
+                # the whitespace after it), which is exactly where a cut lands
+                # on pretty-printed JSON; a quoted key means a truncated object.
+                # A brace in prose is followed by something else.
                 return found, True
             idx = start + 1
             continue
@@ -1405,6 +1420,11 @@ def extract_prediction(content: Optional[str]) -> Optional[str]:
         if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
+    if candidates:
+        # Objects were present and none carried a usable p_yes: a sole
+        # out-of-range, null or non-numeric forecast must not be delivered just
+        # because there was nothing better to choose.
+        return None
     return content
 
 

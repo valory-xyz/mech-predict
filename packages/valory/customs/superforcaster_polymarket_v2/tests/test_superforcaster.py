@@ -723,10 +723,12 @@ class TestExtractPredictionCutAndRange:
         )
         assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.06
 
-    def test_a_sole_out_of_range_object_leaves_the_error_path_the_content(self) -> None:
-        """With only an out-of-range object there is no forecast to deliver."""
-        completion = '{"p_yes": 1.7, "p_no": -0.7}'
-        assert module.extract_prediction(completion) == completion
+    def test_a_sole_out_of_range_object_is_not_delivered(self) -> None:
+        """When the only object is out of range there is nothing to deliver."""
+        # Was: returned the content unchanged, which put p_yes 1.7 on-chain as
+        # a normal forecast. The range check stopped a bad object beating a
+        # good one but not a bad object being the only one.
+        assert module.extract_prediction('{"p_yes": 1.7, "p_no": -0.7}') is None
 
     def test_a_null_p_yes_is_skipped(self) -> None:
         """A JSON null p_yes must not be coerced into a forecast."""
@@ -757,7 +759,11 @@ class TestExtractPredictionCutAndRange:
             api_keys=_make_mock_api_keys(),
             counter_callback=None,
         )
-        assert result[0] is None
+        # A typed error null, not a bare None: None would be delivered verbatim
+        # on-chain with no exception, so no retry and no typed-null branch.
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "Exception"
 
     @patch(f"{SF_MODULE}.OpenAIClientManager")
     @patch(f"{SF_MODULE}.fetch_additional_sources")

@@ -1384,15 +1384,13 @@ class TestExtractPrediction:
         completion = f'{FORECAST_JSON}\nScaled: {{"p_yes": 83, "p_no": 17}}'
         assert json.loads(extract_prediction(completion) or "")["p_yes"] == 0.83
 
-    def test_lone_out_of_range_p_yes_passes_the_content_through(self) -> None:
-        """With no usable candidate the completion is returned unchanged."""
-        completion = '{"p_yes": 83, "p_no": 17}'
-        assert extract_prediction(completion) == completion
+    def test_a_lone_out_of_range_p_yes_is_not_delivered(self) -> None:
+        """A sole out-of-range forecast yields None rather than being delivered."""
+        assert extract_prediction('{"p_yes": 83, "p_no": 17}') is None
 
     def test_null_p_yes_is_not_a_forecast(self) -> None:
-        """A null p_yes is skipped, so the completion passes through unchanged."""
-        completion = '{"p_yes": null, "p_no": null}'
-        assert extract_prediction(completion) == completion
+        """A sole null p_yes yields None, not the unusable object."""
+        assert extract_prediction('{"p_yes": null, "p_no": null}') is None
 
     def test_prose_without_json_passes_through(self) -> None:
         """A completion with no object at all is returned unchanged."""

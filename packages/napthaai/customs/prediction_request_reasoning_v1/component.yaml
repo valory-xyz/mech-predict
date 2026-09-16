@@ -8,9 +8,9 @@ license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeibcbvmr7v5n2vintaunxjix2jxopbvjij5hytewh3xtlca4mfwhky
-  prediction_request_reasoning_v1.py: bafybeibrc4pex222mmqwlmapbprclq5unth6lujmtu722cvyj64nkrzmiy
+  prediction_request_reasoning_v1.py: bafybeidls3pnxdm7gjcubo52yztqbdw4fa7zgz6mzwmvg4oyrwmryqtev4
   tests/__init__.py: bafybeieu3toasuyaehkqounrtylk5bjer7qgvnt6ccjcsi6jlfig7wfrka
-  tests/test_prediction_request_reasoning_v1.py: bafybeih4csyctyewx5saigujjymihg5dhb4n6lckkgnfey442saj2qg4zu
+  tests/test_prediction_request_reasoning_v1.py: bafybeigicmxs2xr7a366vg5v4vfmjjezcuqiaxzlzvmqhwxrzfjqvic6am
 fingerprint_ignore_patterns: []
 entry_point: prediction_request_reasoning_v1.py
 callable: run

@@ -408,7 +408,11 @@ def _json_objects(text: str) -> Tuple[List[Dict[str, Any]], bool]:
             # prose -- treating the latter as a cut would turn a delivered
             # forecast into an error.
             tail = text[start + 1 :].lstrip()
-            if tail.startswith('"'):
+            if not tail or tail.startswith('"'):
+                # Empty tail means the completion stopped ON the brace (or on
+                # the whitespace after it), which is exactly where a cut lands
+                # on pretty-printed JSON; a quoted key means a truncated object.
+                # A brace in prose is followed by something else.
                 return found, True
             idx = start + 1
             continue
@@ -439,6 +443,11 @@ def extract_prediction(content: Optional[str]) -> Optional[str]:
         if not 0.0 <= p_yes <= 1.0:
             continue
         return json.dumps(parsed)
+    if candidates:
+        # Objects were present and none carried a usable p_yes: a sole
+        # out-of-range, null or non-numeric forecast must not be delivered just
+        # because there was nothing better to choose.
+        return None
     return content
 
 
@@ -478,8 +487,14 @@ def generate_prediction_with_retry(
                     token_counter=count_tokens,
                 )
 
-            content = extract_prediction(response.content if response else None)
-            return content, counter_callback
+            prediction = extract_prediction(response.content if response else None)
+            if prediction is None:
+                # A detected cut, or a completion whose only forecast object is
+                # unusable. Returning None here would be delivered verbatim as
+                # the on-chain result with no exception, so neither the retry
+                # loop nor with_key_rotation's typed-null branch would run.
+                raise ValueError("Model completion carried no usable forecast object")
+            return prediction, counter_callback
         except Exception as e:
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)

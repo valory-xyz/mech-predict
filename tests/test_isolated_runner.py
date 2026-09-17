@@ -64,9 +64,9 @@ def test_a_typed_error_null_fails_and_surfaces_the_tool_error() -> None:
         }
     )
     errors = validate_response(_response(null))
-    assert len(errors) == 1
-    assert "not a probability" in errors[0]
-    assert "Response truncated" in errors[0]
+    assert [e.split("'")[1] for e in errors] == ["p_yes", "p_no"]
+    assert all("not a probability" in error for error in errors)
+    assert all("Response truncated" in error for error in errors)
 
 
 def test_an_out_of_range_p_yes_fails() -> None:
@@ -101,3 +101,31 @@ def test_non_prediction_tools_skip_the_payload_check() -> None:
     """An image tool's delivery is not JSON, and validate_prediction=False allows it."""
     delivery = _response("https://example.com/cityscape.png")
     assert validate_response(delivery, validate_prediction=False) == []
+
+
+def test_the_range_bounds_are_inclusive() -> None:
+    """0.0 and 1.0 are probabilities: a tool certain either way must pass."""
+    certain_no = dict(FORECAST, p_yes=0.0, p_no=1.0, confidence=1.0, info_utility=0.0)
+    assert validate_response(_response(json.dumps(certain_no))) == []
+
+
+def test_integer_probabilities_pass() -> None:
+    """JSON `0` and `1` decode as int, which is as usable as 0.0 and 1.0."""
+    integral = {"p_yes": 0, "p_no": 1, "confidence": 1, "info_utility": 0}
+    assert validate_response(_response(json.dumps(integral))) == []
+
+
+def test_a_non_numeric_field_other_than_p_yes_fails() -> None:
+    """Every prediction field is checked, not only p_yes."""
+    errors = validate_response(_response(json.dumps(dict(FORECAST, confidence="n/a"))))
+    assert len(errors) == 1
+    assert "'confidence' is not a probability" in errors[0]
+
+
+def test_a_null_field_other_than_p_yes_fails() -> None:
+    """A null info_utility is not a number, so it cannot be scored."""
+    errors = validate_response(
+        _response(json.dumps(dict(FORECAST, info_utility=None)))
+    )
+    assert len(errors) == 1
+    assert "'info_utility' is not a probability" in errors[0]

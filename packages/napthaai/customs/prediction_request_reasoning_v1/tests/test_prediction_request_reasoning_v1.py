@@ -1590,6 +1590,42 @@ def test_tag_form_boundary_p_yes_is_accepted() -> None:
     assert json.loads(parser_prediction_response(completion))["p_yes"] == 1.0
 
 
+def test_json_form_lower_boundary_p_yes_is_accepted() -> None:
+    """The JSON path keeps a p_yes of exactly 0.0 as well."""
+    content = '{"p_yes": 0.0, "p_no": 1.0, "confidence": 0.5, "info_utility": 0.5}'
+    delivered = extract_prediction(content)
+    assert delivered is not None
+    assert json.loads(delivered)["p_yes"] == 0.0
+
+
+def test_tag_form_lower_boundary_p_yes_is_accepted() -> None:
+    """p_yes of exactly 0.0 is a probability too: the guard excludes neither bound."""
+    completion = (
+        "<p_yes>0.0</p_yes><p_no>1.0</p_no>"
+        "<confidence>0.5</confidence><info_utility>0.5</info_utility>"
+    )
+    assert json.loads(parser_prediction_response(completion))["p_yes"] == 0.0
+
+
+def test_max_cost_request_returns_the_float() -> None:
+    """A delivery_rate of 0 asks for a cost estimate, not a forecast.
+
+    with_key_rotation used to append api_keys unconditionally, so the float
+    hit `float + tuple` and the wrapper delivered a typed TypeError null.
+    """
+    keys = MagicMock()
+    keys.max_retries = lambda: {"openai": 1, "anthropic": 1, "openrouter": 1}
+    result = run(
+        prompt="Will it rain tomorrow?",
+        tool="prediction-request-reasoning-v1",
+        model="gpt-4.1-2025-04-14",
+        api_keys=keys,
+        delivery_rate=0,
+        counter_callback=lambda **kwargs: 12345.0,
+    )
+    assert result == 12345.0
+
+
 def test_run_with_an_anthropic_max_tokens_cut_delivers_the_typed_null() -> None:
     """A real Anthropic response shape stopped at max_tokens ends as the typed null."""
     resp = _make_anthropic_text_response(DRAFT_THEN_CUT_IN_PROSE)

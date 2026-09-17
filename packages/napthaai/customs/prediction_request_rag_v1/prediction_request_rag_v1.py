@@ -57,6 +57,7 @@ MechResponseWithKeys = Tuple[
 MechResponse = Tuple[
     str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
 ]
+MaxCostResponse = float
 
 # Regular expression patterns
 IMG_TAG_PATTERN = r"<img[^>]*>"
@@ -120,16 +121,22 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
         retries_left: Dict[str, int] = api_keys.max_retries()
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except anthropic.RateLimitError as e:
                 # Rotate keys on a rate-limit hit. Once the pool is exhausted,
@@ -1490,7 +1497,7 @@ def parser_prediction_response(response: str) -> str:
 @with_key_rotation
 def run(  # pylint: disable=too-many-locals
     **kwargs: Any,
-) -> Union[float, MechResponse]:
+) -> Union[MaxCostResponse, MechResponse]:
     """Run the task"""
     tool = kwargs["tool"]
     model = kwargs.get("model")

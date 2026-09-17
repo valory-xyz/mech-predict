@@ -197,11 +197,16 @@ def _validate_prediction_payload(deliver_msg: str) -> List[str]:
         for field in PREDICTION_FIELDS
         if field not in payload
     ]
-    p_yes = payload.get("p_yes")
-    usable = isinstance(p_yes, (int, float)) and not isinstance(p_yes, bool)
-    if "p_yes" in payload and not (usable and 0.0 <= p_yes <= 1.0):
-        detail = str(payload.get("error") or deliver_msg)[:ERROR_MSG_TRUNCATE_LENGTH]
-        errors.append(f"'p_yes' is not a probability in [0, 1] ({p_yes!r}): {detail}")
+    detail = str(payload.get("error") or deliver_msg)[:ERROR_MSG_TRUNCATE_LENGTH]
+    for field in PREDICTION_FIELDS:
+        if field not in payload:
+            continue
+        value = payload[field]
+        usable = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not (usable and 0.0 <= value <= 1.0):
+            errors.append(
+                f"'{field}' is not a probability in [0, 1] ({value!r}): {detail}"
+            )
     return errors
 
 

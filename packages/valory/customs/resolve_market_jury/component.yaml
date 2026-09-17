@@ -14,8 +14,6 @@ fingerprint:
 fingerprint_ignore_patterns: []
 entry_point: resolve_market_jury.py
 callable: run
-params:
-  default_model: claude-sonnet-4-20250514
 dependencies:
   openai:
     version: ==1.93.0

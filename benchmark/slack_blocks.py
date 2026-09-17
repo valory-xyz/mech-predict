@@ -125,10 +125,13 @@ def table_block(
 def section(text: str) -> dict[str, Any]:
     """Build a mrkdwn section block, used as a table's caption.
 
-    :param text: Slack mrkdwn.
+    :param text: Slack mrkdwn; bounded to 3000 characters with a blank placeholder.
     :return: a ``section`` block.
     """
-    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+    return {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": text[:3000] if text.strip() else EMPTY_CELL},
+    }
 
 
 def header(text: str) -> dict[str, Any]:

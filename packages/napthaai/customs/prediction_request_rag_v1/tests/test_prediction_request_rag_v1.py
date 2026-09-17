@@ -20,10 +20,11 @@
 """Unit tests for prediction_request_rag: thread-safe client, offline tiktoken, and source_content."""
 
 import inspect
+import json
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -39,6 +40,12 @@ from packages.napthaai.customs.prediction_request_rag_v1.prediction_request_rag_
     multi_queries,
     run,
 )
+
+# Aliases for module-private caps: one disable each here, so call sites stay
+# clean and the suppression cannot drift under formatter line-wrapping.
+_QUERY_CAP = module._MAX_SEARCH_QUERY_LEN  # pylint: disable=protected-access
+_SCAN_CAP = module._MAX_SCAN_CHARS  # pylint: disable=protected-access
+_SHAPE_SERPER = module._shape_serper_sources  # pylint: disable=protected-access
 
 
 class TestLLMClientManager:
@@ -104,6 +111,23 @@ class TestFunctionsAcceptClient:
         """fetch_additional_information requires client as first param."""
         params = list(inspect.signature(fetch_additional_information).parameters)
         assert params[0] == "client"
+
+    def test_multi_queries_search_query_is_required(self) -> None:
+        """multi_queries takes search_query as a required param right after prompt."""
+        params = inspect.signature(multi_queries).parameters
+        assert list(params)[:3] == ["client", "prompt", "search_query"]
+        assert params["search_query"].default is inspect.Parameter.empty
+
+    def test_fetch_additional_information_search_query_is_required(self) -> None:
+        """fetch_additional_information takes search_query as a required param."""
+        params = inspect.signature(fetch_additional_information).parameters
+        assert list(params)[:4] == [
+            "client",
+            "client_embedding",
+            "prompt",
+            "search_query",
+        ]
+        assert params["search_query"].default is inspect.Parameter.empty
 
 
 RAG_MODULE = (
@@ -260,6 +284,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -301,6 +326,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -346,6 +372,7 @@ class TestFetchReplayPath:
             client=MagicMock(),
             client_embedding=MagicMock(),
             prompt="test",
+            search_query="test",
             model="gpt-4.1-2025-04-14",
             google_api_key=None,
             google_engine_id=None,
@@ -367,6 +394,7 @@ class TestFetchReplayPath:
                 client=MagicMock(),
                 client_embedding=MagicMock(),
                 prompt="test",
+                search_query="test",
                 model="gpt-4.1-2025-04-14",
                 google_api_key=None,
                 google_engine_id=None,
@@ -376,7 +404,9 @@ class TestFetchReplayPath:
             )
 
 
-def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
+def _make_mock_api_keys(
+    return_source_content: str = "false", **overrides: Any
+) -> MagicMock:
     """Create a mock api_keys object (KeyChain-like) for run()."""
     services = {
         "openai": "sk-test",
@@ -386,6 +416,7 @@ def _make_mock_api_keys(return_source_content: str = "false") -> MagicMock:
         "search_provider": "google",
         "return_source_content": return_source_content,
     }
+    services.update(overrides)
     mock_keys = MagicMock()
     mock_keys.__getitem__ = MagicMock(side_effect=lambda k: services[k])
     mock_keys.get = MagicMock(
@@ -577,6 +608,45 @@ class TestLLMClientAnthropicCompletions:
         assert kwargs["system"] == module.SYSTEM_PROMPT
 
 
+class TestLLMClientFinishReason:
+    """LLMClient.completions() carries the provider's stop reason, normalised."""
+
+    def test_openai_finish_reason_is_carried(self) -> None:
+        """The value the OpenAI SDK reports reaches the response unchanged."""
+        choice = MagicMock(finish_reason="length")
+        choice.message.content = "x"
+        with patch("openai.OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.return_value = MagicMock(
+                choices=[choice], usage=MagicMock(prompt_tokens=1, completion_tokens=1)
+            )
+            client = module.LLMClient(api_keys={"openai": "sk"}, llm_provider="openai")
+        response = client.completions(model="gpt-4.1-2025-04-14", messages=[])
+        assert response is not None
+        assert response.finish_reason == "length"
+
+    def test_anthropic_max_tokens_is_normalised_to_length(self) -> None:
+        """Anthropic's max_tokens stop maps onto OpenAI's 'length'."""
+        resp = _make_anthropic_text_response('{"p_yes": 0.5}')
+        resp.stop_reason = "max_tokens"
+        client = _anthropic_client(resp)
+        response = client.completions(
+            model="claude-sonnet-4-6", messages=[{"role": "user", "content": "U1"}]
+        )
+        assert response is not None
+        assert response.finish_reason == "length"
+
+    def test_anthropic_normal_stop_is_not_a_cut(self) -> None:
+        """A normal Anthropic stop is carried as-is and never reads as a cut."""
+        resp = _make_anthropic_text_response('{"p_yes": 0.5}')
+        resp.stop_reason = "end_turn"
+        client = _anthropic_client(resp)
+        response = client.completions(
+            model="claude-sonnet-4-6", messages=[{"role": "user", "content": "U1"}]
+        )
+        assert response is not None
+        assert response.finish_reason == "end_turn"
+
+
 class TestWithKeyRotationAnthropic:
     """Cover the ``anthropic.RateLimitError`` branch of ``with_key_rotation``."""
 
@@ -609,16 +679,20 @@ class TestWithKeyRotationAnthropic:
         assert [c.args[0] for c in keys.rotate.call_args_list] == ["anthropic"]
         assert result[-1] is keys
 
-    def test_anthropic_pool_exhausted_reraises(self) -> None:
-        """When the anthropic pool is exhausted, the error re-raises so the task fails."""
+    def test_anthropic_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted anthropic pool delivers the typed null, not a raised error."""
         keys = self._keys(anthropic_budget=0)
 
         @module.with_key_rotation
         def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
             raise _make_anthropic_error(module.anthropic.RateLimitError, "burned")
 
-        with pytest.raises(module.anthropic.RateLimitError, match="burned"):
-            fake(api_keys=keys)
+        result = fake(api_keys=keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "RateLimitError"
+        assert payload["error"] == "burned"
+        assert result[-1] is keys
 
 
 class TestCountTokensAnthropic:
@@ -645,3 +719,819 @@ class TestCountTokensAnthropic:
         result = count_tokens("hello world", "claude-sonnet-4-6", client=mock_client)
         assert isinstance(result, int)
         assert result > 0
+
+
+# ---------------------------------------------------------------------------
+# issue-455 free-text input contract, ported from superforcaster-polymarket-v4:
+# parse_prompt tiers, the no-alphanumeric short-circuit, the empty-retrieval
+# flagged null, and the typed Serper shape errors.
+# ---------------------------------------------------------------------------
+
+# Trader-template format prompt (regression: previous callers must still work)
+TRADER_PROMPT = (
+    'Given the question "Will X happen?" and the `yes` answer criterion, ...'
+)
+# Free-text prompt that would return degraded Serper results if passed raw
+LONG_FREE_TEXT_PROMPT = (
+    "Please predict the following market: Will Alexander Isak permanently transfer "
+    "to Liverpool FC before the end of the summer 2025 transfer window (September 2, "
+    "2025 23:59 UTC)? Resolution source: official club announcements or BBC Sport. "
+    "The market resolves YES if a permanent transfer (not a loan) is confirmed by "
+    "the resolution source before the deadline."
+)
+
+
+# A real Serper peopleAlsoAsk entry carries a link, not just question/snippet.
+# The link is what makes the "misc is not a retrieval source" assertions
+# discriminating: a harvester that reached into misc would return this URL,
+# so a fixture without it cannot tell the two behaviours apart.
+PAA_WITH_LINK = [
+    {
+        "question": "Q?",
+        "snippet": "A.",
+        "title": "PAA answer",
+        "link": "http://paa.example.com/answer",
+    },
+]
+
+
+def _mock_client_manager(mock_mgr: MagicMock) -> tuple:
+    """Configure a mocked LLMClientManager and return its (llm, embed) pair."""
+    mock_llm = MagicMock()
+    mock_embed = MagicMock()
+    mock_mgr.return_value.__enter__ = MagicMock(return_value=(mock_llm, mock_embed))
+    mock_mgr.return_value.__exit__ = MagicMock(return_value=False)
+    return mock_llm, mock_embed
+
+
+VALID_TAGGED_COMPLETION = (
+    "<p_yes>0.5</p_yes><p_no>0.5</p_no><confidence>0.5</confidence>"
+    "<info_utility>0.5</info_utility>"
+)
+
+
+class TestParsePromptContract:
+    """parse_prompt() -> (question_for_llm, search_query, tier)."""
+
+    def test_trader_template_uses_extracted_question_for_both(self) -> None:
+        """Trader-template path: the bare question serves as both values."""
+        question, query, tier = module.parse_prompt(TRADER_PROMPT)
+        assert question == "Will X happen?"
+        assert query == question
+        assert tier == "template"
+
+    def test_free_text_llm_gets_full_prompt(self) -> None:
+        """Free-text input: the LLM question is the whole prompt."""
+        question, _, tier = module.parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert question == LONG_FREE_TEXT_PROMPT
+        assert tier == "clause"
+
+    def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
+        """The query anchors at the market question, dropping the lead-in."""
+        _, query, _ = module.parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert query.startswith("Will Alexander Isak")
+        assert query.endswith("?")
+        assert len(query) <= _QUERY_CAP
+
+
+class TestDegenerateShortCircuit:
+    """Prompts with nothing searchable never reach the brainstorm or search."""
+
+    @pytest.mark.parametrize("degenerate", ["", "   ", "???", '"""'])
+    @patch(f"{RAG_MODULE}.get_urls_from_queries_serper")
+    @patch(f"{RAG_MODULE}.get_urls_from_queries")
+    @patch(f"{RAG_MODULE}.multi_queries")
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_degenerate_prompt_short_circuits_with_zero_search_calls(
+        self,
+        mock_mgr: MagicMock,
+        mock_queries: MagicMock,
+        mock_google: MagicMock,
+        mock_serper: MagicMock,
+        degenerate: str,
+    ) -> None:
+        """Degenerate prompts return the flagged null before any network call."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=degenerate,
+            api_keys=_make_mock_api_keys(),
+        )
+        mock_queries.assert_not_called()
+        mock_google.assert_not_called()
+        mock_serper.assert_not_called()
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "empty query"
+        assert result[4]["scan_truncated"] is False
+
+    @patch(f"{RAG_MODULE}.get_urls_from_queries_serper")
+    @patch(f"{RAG_MODULE}.get_urls_from_queries")
+    @patch(f"{RAG_MODULE}.find_similar_chunks")
+    @patch(f"{RAG_MODULE}.get_embeddings")
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_replay_with_degenerate_query_uses_the_cached_capture(
+        self,
+        mock_mgr: MagicMock,
+        mock_queries: MagicMock,
+        mock_embeddings: MagicMock,
+        mock_similar: MagicMock,
+        mock_google: MagicMock,
+        mock_serper: MagicMock,
+    ) -> None:
+        """A replay carries its own documents, so the short-circuit must not fire."""
+        # The derived query is never used on the replay path: gating the
+        # short-circuit on source_content is what keeps a captured-document
+        # replay from being answered with the "empty query" null.
+        mock_llm, _ = _mock_client_manager(mock_mgr)
+        cached_doc = ExtendedDocument(
+            text="cached evidence here", url="http://cached.example.com"
+        )
+        mock_embeddings.return_value = [cached_doc]
+        mock_similar.return_value = [cached_doc]
+        mock_llm.completions.return_value = MagicMock(
+            content=VALID_TAGGED_COMPLETION,
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+        )
+        source_content = {
+            "mode": "cleaned",
+            "pages": {"http://cached.example.com": "cached evidence here"},
+            "pdfs": {},
+        }
+
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt="???",
+            api_keys=_make_mock_api_keys("true"),
+            source_content=source_content,
+        )
+
+        mock_google.assert_not_called()
+        mock_serper.assert_not_called()
+        assert "empty_retrieval" not in result[4]
+        assert result[4]["source_content"] is source_content
+        assert "cached evidence here" in result[1]
+        assert json.loads(result[0])["p_yes"] == 0.5
+
+
+class TestEmptyRetrievalFlaggedNull:
+    """Empty retrieval converges on the flagged null, not an error string."""
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_zero_hit_null_reason_is_live_search(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """A genuine zero-hit records null_reason='live search'."""
+        _mock_client_manager(mock_mgr)
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {"organic": [], "peopleAlsoAsk": []}
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=LONG_FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(
+                    search_provider="serper", serperapi="serper-test"
+                ),
+            )
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "live search"
+        assert result[4]["parse_tier"] == "clause"
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_empty_cached_replay_null_reason_is_cached_replay(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """An empty cached capture on replay records null_reason='cached replay'."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content={"pages": {}, "pdfs": {}},
+        )
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "cached replay"
+
+    def test_malformed_serper_body_raises_typed_error(self) -> None:
+        """A missing/malformed organic key raises instead of being swallowed."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {"organic": None}
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            with pytest.raises(ValueError, match="organic"):
+                module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+
+    def test_empty_serper_body_returns_no_urls(self) -> None:
+        """A well-formed zero-hit body yields no URLs without raising."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {"organic": [], "peopleAlsoAsk": []}
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            assert not module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+
+    def test_misc_only_body_is_well_formed_but_yields_no_urls(self) -> None:
+        """Organic empty with peopleAlsoAsk populated: no raise, and no URL."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        # The PAA entry carries a link: if misc were ever harvested, that link
+        # would come back here and this assertion would fail.
+        serper_resp.json.return_value = {
+            "organic": [],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            assert not module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+
+    def test_misc_links_are_not_harvested_alongside_organic(self) -> None:
+        """With both present, only the organic link becomes a source URL."""
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {
+            "organic": [{"title": "T", "link": "http://organic.example.com/a"}],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            urls = module.get_urls_from_queries_serper(["q"], api_key="k", num=5)
+        assert urls == ["http://organic.example.com/a"]
+
+    def test_shaper_returns_misc_that_the_harvester_drops(self) -> None:
+        """The shaper hands misc back; dropping it is the call site's choice."""
+        body = {
+            "organic": [{"title": "T", "link": "http://organic.example.com/a"}],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        organic, misc = _SHAPE_SERPER(body, "live search")
+        assert organic == body["organic"]
+        assert misc == PAA_WITH_LINK
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_misc_only_body_converges_on_the_flagged_null(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """This tool retrieves from organic links only, so PAA alone is a zero-hit."""
+        _mock_client_manager(mock_mgr)
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {
+            "organic": [],
+            "peopleAlsoAsk": PAA_WITH_LINK,
+        }
+        empty_capture = {"mode": "cleaned", "pages": {}, "pdfs": {}}
+        with (
+            patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp),
+            patch(
+                f"{RAG_MODULE}.extract_texts", return_value=([], empty_capture)
+            ) as mock_extract,
+        ):
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=LONG_FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(
+                    search_provider="serper", serperapi="serper-test"
+                ),
+            )
+        # Stubbing the fetcher keeps this offline AND discriminating: harvesting
+        # the linked PAA entry would hand extract_texts a URL to retrieve from.
+        assert mock_extract.call_args.kwargs["urls"] == []
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "live search"
+
+
+class TestRunTypedErrorNull:
+    """A non-EmptyRetrieval failure reaches the requester as a parseable null."""
+
+    @patch(f"{RAG_MODULE}.multi_queries", return_value=(["market question"], None))
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_malformed_serper_body_is_a_typed_error_null(
+        self, mock_mgr: MagicMock, mock_queries: MagicMock
+    ) -> None:
+        """A reshaped Serper body lands as error_type='ValueError', not a raw string."""
+        _mock_client_manager(mock_mgr)
+        serper_resp = MagicMock()
+        serper_resp.raise_for_status.return_value = None
+        serper_resp.json.return_value = {"organic": None, "peopleAlsoAsk": []}
+        with patch(f"{RAG_MODULE}.requests.request", return_value=serper_resp):
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=LONG_FREE_TEXT_PROMPT,
+                api_keys=_make_mock_api_keys(
+                    search_provider="serper", serperapi="serper-test"
+                ),
+            )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0
+        assert parsed["info_utility"] == 0.0
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{RAG_MODULE}.LLMClientManager")
+    def test_invalid_source_content_mode_is_a_typed_error_null(
+        self, mock_mgr: MagicMock
+    ) -> None:
+        """An unsupported source_content_mode uses the same typed-null shape."""
+        _mock_client_manager(mock_mgr)
+        result = run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(source_content_mode="bogus"),
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+
+class TestRunParityAndParseMetadata:
+    """run() wiring: LLM-input parity on the template path + parse metadata."""
+
+    @staticmethod
+    def _run_with_fetch_mock(prompt: str) -> tuple:
+        """Run the tool with fetch + LLM mocked; return (result, fetch kwargs)."""
+        with (
+            patch(f"{RAG_MODULE}.LLMClientManager") as mock_mgr,
+            patch(f"{RAG_MODULE}.fetch_additional_information") as mock_fetch,
+        ):
+            mock_llm, _ = _mock_client_manager(mock_mgr)
+            mock_fetch.return_value = ("additional info", {"pages": {}}, None)
+            mock_llm.completions.return_value = MagicMock(
+                content=VALID_TAGGED_COMPLETION,
+                usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+            )
+            result = run(
+                tool="prediction-request-rag-v1",
+                model="gpt-4.1-2025-04-14",
+                prompt=prompt,
+                api_keys=_make_mock_api_keys(),
+            )
+            return result, mock_fetch.call_args.kwargs
+
+    def test_trader_template_feeds_extracted_question_everywhere(self) -> None:
+        """LLM-input parity: template path is byte-identical to extract_question."""
+        result, fetch_kwargs = self._run_with_fetch_mock(TRADER_PROMPT)
+        assert fetch_kwargs["prompt"] == "Will X happen?"
+        assert fetch_kwargs["search_query"] == "Will X happen?"
+        assert "Will X happen?" in result[1]
+        assert result[4]["parse_tier"] == "template"
+
+    def test_long_template_prompt_is_not_marked_truncated(self) -> None:
+        """Template past the scan window is NOT flagged as truncated."""
+        prompt = TRADER_PROMPT + " filler" * (_SCAN_CAP // 3)
+        assert len(prompt) > _SCAN_CAP
+        result, _ = self._run_with_fetch_mock(prompt)
+        assert result[4]["parse_tier"] == "template"
+        assert result[4]["scan_truncated"] is False
+
+    def test_raw_tier_past_window_is_marked_truncated(self) -> None:
+        """Question-free prompt past the window: raw tier AND truncated."""
+        prompt = "no question words at all here. " * (_SCAN_CAP // 10)
+        assert len(prompt) > _SCAN_CAP
+        result, _ = self._run_with_fetch_mock(prompt)
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
+
+    def test_clause_tier_past_window_is_marked_truncated(self) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        prompt = "Will the ECB cut rates at its next meeting? " + "filler " * (
+            _SCAN_CAP // 3
+        )
+        assert len(prompt) > _SCAN_CAP
+        result, _ = self._run_with_fetch_mock(prompt)
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
+    def test_free_text_llm_receives_full_prompt_and_short_query(self) -> None:
+        """Free text: the LLM sees the whole prompt; search gets the clause."""
+        result, fetch_kwargs = self._run_with_fetch_mock(LONG_FREE_TEXT_PROMPT)
+        assert "official club announcements or BBC Sport" in result[1]
+        assert fetch_kwargs["prompt"] == LONG_FREE_TEXT_PROMPT
+        assert fetch_kwargs["search_query"].startswith("Will Alexander Isak")
+
+
+class TestSearchQueryPlumbing:
+    """The compressed query replaces the raw prompt at the direct-search site."""
+
+    def test_multi_queries_appends_search_query_not_prompt(self) -> None:
+        """The direct query appended to the brainstormed ones is search_query."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>\nquery one\nquery two\n</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt="LONG PROMPT",
+            search_query="short q",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries[-1] == "short q"
+        assert "LONG PROMPT" not in queries
+        # The other half of the split: the brainstorming LLM still sees the
+        # whole prompt, and never the compressed query.
+        user_messages = [
+            message["content"]
+            for message in client.completions.call_args.kwargs["messages"]
+            if message["role"] == "user"
+        ]
+        assert len(user_messages) == 1
+        assert "LONG PROMPT" in user_messages[0]
+        assert "short q" not in user_messages[0]
+
+    def test_multi_queries_dedups_repeated_search_query(self) -> None:
+        """A brainstormed query equal to search_query is not searched twice."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>\nshort q\nquery two\n</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt="LONG PROMPT",
+            search_query="short q",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["short q", "query two"]
+
+    def test_multi_queries_dedup_ignores_case(self) -> None:
+        """Dedup compares case-insensitively, so a recased duplicate is dropped."""
+        client = MagicMock()
+        client.completions.return_value = MagicMock(
+            content="<queries>  Will Isak Transfer?  \nalpha</queries>",
+            usage=MagicMock(prompt_tokens=1, completion_tokens=1),
+        )
+        queries, _ = multi_queries(
+            client=client,
+            prompt=LONG_FREE_TEXT_PROMPT,
+            search_query="will isak transfer?",
+            model="gpt-4.1-2025-04-14",
+            num_queries=2,
+        )
+        assert queries == ["Will Isak Transfer?", "alpha"]
+
+    @patch(f"{RAG_MODULE}.get_urls_from_queries_serper", return_value=[])
+    @patch(f"{RAG_MODULE}.multi_queries", side_effect=RuntimeError("boom"))
+    def test_brainstorm_failure_falls_back_to_search_query(
+        self, mock_queries: MagicMock, mock_serper: MagicMock
+    ) -> None:
+        """When the brainstorm fails, the fallback query is search_query."""
+        with pytest.raises(module.EmptyRetrievalError):
+            fetch_additional_information(
+                client=MagicMock(),
+                client_embedding=MagicMock(),
+                prompt=LONG_FREE_TEXT_PROMPT,
+                search_query="short q",
+                model="gpt-4.1-2025-04-14",
+                google_api_key=None,
+                google_engine_id=None,
+                serper_api_key="k",
+                search_provider="serper",
+            )
+        mock_serper.assert_called_once()
+        assert mock_serper.call_args.kwargs["queries"] == ["short q"]
+
+
+def _make_bare_error(cls: type, message: str = "simulated") -> Exception:
+    """Build an SDK error instance without a live transport response."""
+    err: Exception = cls.__new__(cls)  # type: ignore[call-overload]
+    Exception.__init__(err, message)
+    return err
+
+
+def _make_google_http_error(status: int, message: str = "simulated") -> Exception:
+    """Build a googleapiclient HttpError carrying the given status code."""
+    err = _make_bare_error(module.googleapiclient.errors.HttpError, message)
+    err.resp = SimpleNamespace(  # type: ignore[attr-defined]
+        status=status, reason=message
+    )
+    err.content = message.encode()  # type: ignore[attr-defined]
+    err.uri = None  # type: ignore[attr-defined]
+    err.error_details = ""  # type: ignore[attr-defined]
+    err.reason = message  # type: ignore[attr-defined]
+    return err
+
+
+class TestWithKeyRotationNullContract:
+    """No failure branch of with_key_rotation may let an exception escape."""
+
+    @staticmethod
+    def _keys() -> MagicMock:
+        """Build an api_keys mock with every retry budget exhausted."""
+        keys = MagicMock()
+        keys.max_retries = lambda: {
+            "openai": 0,
+            "openrouter": 0,
+            "anthropic": 0,
+            "google_api_key": 0,
+        }
+        keys.rotate = MagicMock()
+        return keys
+
+    @staticmethod
+    def _deliver(exc: Exception, keys: MagicMock) -> tuple:
+        """Wrap a function that always raises exc and call it."""
+
+        @module.with_key_rotation
+        def fake(api_keys: Any) -> tuple:  # pylint: disable=unused-argument
+            raise exc
+
+        return fake(api_keys=keys)
+
+    def test_openai_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted openai/openrouter pool delivers the typed null."""
+        keys = self._keys()
+        result = self._deliver(
+            _make_bare_error(module.openai.RateLimitError, "burned"), keys
+        )
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["p_no"] is None
+        assert payload["error_type"] == "RateLimitError"
+        assert result[-1] is keys
+
+    def test_google_pool_exhausted_returns_typed_null(self) -> None:
+        """An exhausted google key pool on a 429 delivers the typed null."""
+        keys = self._keys()
+        result = self._deliver(_make_google_http_error(429, "quota"), keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "HttpError"
+        assert result[-1] is keys
+
+    def test_google_non_rate_limit_error_returns_typed_null(self) -> None:
+        """A non-429 google failure delivers the typed null instead of escaping."""
+        keys = self._keys()
+        result = self._deliver(_make_google_http_error(403, "forbidden"), keys)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "HttpError"
+        assert result[-1] is keys
+
+
+# Completion shapes the extractor has to survive. The forecast object is the
+# one with an in-range p_yes; everything else in the string is noise.
+FORECAST = {"p_yes": 0.62, "p_no": 0.38, "confidence": 0.7, "info_utility": 0.6}
+FORECAST_JSON = json.dumps(FORECAST)
+SCAFFOLD_COMPLETION = (
+    "<facts>Isak has not been transferred.</facts>\n"
+    "<thinking>Base rate for a deadline-day move is low.</thinking>\n"
+    "<answer>\n" + FORECAST_JSON + "\n</answer>"
+)
+
+
+class TestExtractPrediction:
+    """The shared extractor: which object of a completion is the forecast."""
+
+    def test_bare_json_passes_through(self) -> None:
+        """A completion that is only the forecast object round-trips."""
+        assert json.loads(module.extract_prediction(FORECAST_JSON) or "") == FORECAST
+
+    def test_reasoning_scaffold_yields_only_the_forecast(self) -> None:
+        """The scaffold's prose is dropped and the answer object kept."""
+        extracted = module.extract_prediction(SCAFFOLD_COMPLETION)
+        assert json.loads(extracted or "") == FORECAST
+        assert "<thinking>" not in (extracted or "")
+
+    def test_draft_before_the_answer_loses_to_the_final_object(self) -> None:
+        """A mid-reasoning draft cannot shadow the final forecast."""
+        content = (
+            'Draft: {"p_yes": 0.2, "p_no": 0.8} -- revising upward.\n' + FORECAST_JSON
+        )
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_trailing_non_forecast_object_is_skipped(self) -> None:
+        """An object after the forecast with no p_yes is not delivered."""
+        content = FORECAST_JSON + '\n{"sources": ["bbc.co.uk"]}'
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_cut_mid_object_returns_none(self) -> None:
+        """A max_tokens cut while writing the answer yields no forecast."""
+        content = 'Reasoning done.\n{"p_yes": 0.62, "p_no": 0.3'
+        assert module.extract_prediction(content) is None
+
+    def test_cut_after_an_inner_object_closed_returns_none(self) -> None:
+        """A cut whose nested object closed is still a cut, not a forecast."""
+        content = '{"p_yes": 0.62, "meta": {"model": "x"}, "p_no": 0.3'
+        assert module.extract_prediction(content) is None
+
+    def test_draft_before_a_cut_is_not_delivered(self) -> None:
+        """A complete draft followed by a cut answer is not the forecast."""
+        content = '{"p_yes": 0.2, "p_no": 0.8}\nFinal answer:\n{"p_yes": 0.6'
+        assert module.extract_prediction(content) is None
+
+    def test_stray_brace_in_prose_is_not_a_cut(self) -> None:
+        """An unclosed brace in prose must not suppress the forecast."""
+        content = FORECAST_JSON + "\nSee {source for details"
+        assert json.loads(module.extract_prediction(content) or "") == FORECAST
+
+    def test_braces_and_escaped_quotes_inside_values_survive(self) -> None:
+        """Braces and escaped quotes inside a string value do not break the scan."""
+        payload: Dict[str, Any] = dict(FORECAST)
+        payload["info"] = 'resolves if } appears in the "final" text'
+        content = "Answer:\n" + json.dumps(payload)
+        assert json.loads(module.extract_prediction(content) or "") == payload
+
+    def test_out_of_range_p_yes_is_not_a_forecast(self) -> None:
+        """An out-of-range p_yes is skipped, not delivered as a forecast."""
+        # The earlier fixture was byte-identical to json.dumps of its own
+        # parse, so passthrough and extraction were indistinguishable and the
+        # mutant survived. Pair it with a valid object so the two differ.
+        # The out-of-range object must be LAST: the walk runs in reverse, so
+        # a valid object after it would be found first and the skip would
+        # never be exercised.
+        completion = (
+            '{"p_yes": 0.3, "p_no": 0.7, "confidence": 0.6, "info_utility": 0.5}\n'
+            '{"p_yes": 1.7, "p_no": -0.7}'
+        )
+        assert json.loads(module.extract_prediction(completion) or "")["p_yes"] == 0.3
+
+    def test_null_p_yes_is_not_a_forecast(self) -> None:
+        """A sole null p_yes yields None, not the unusable object."""
+        # Previously this returned the content unchanged, which delivered the
+        # unusable object on-chain when it was the ONLY candidate. Objects were
+        # present and none carried a usable p_yes, so there is nothing to
+        # deliver and the caller's guard turns it into a retry.
+        content = '{"p_yes": null, "p_no": null}'
+        assert module.extract_prediction(content) is None
+
+    def test_empty_content_returns_none(self) -> None:
+        """Empty or missing content yields None, never an empty delivery."""
+        assert module.extract_prediction("") is None
+        assert module.extract_prediction(None) is None
+
+    def test_prose_without_a_forecast_returns_none(self) -> None:
+        """A completion with no object at all is not handed on as text."""
+        assert module.extract_prediction("I cannot answer that question.") is None
+
+    def test_a_completion_ending_on_the_opening_brace_is_a_cut(self) -> None:
+        """A cut landing ON the brace must not deliver an earlier draft."""
+        # The tail after "{" is empty here, which the first version read as
+        # prose. On pretty-printed JSON a cut after "{" is a likely stop.
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{'
+        assert module.extract_prediction(content) is None
+
+    def test_a_completion_ending_on_brace_plus_whitespace_is_a_cut(self) -> None:
+        """Whitespace after the opening brace is still a cut, not prose."""
+        content = '{"p_yes": 0.9, "p_no": 0.1}\n<answer>\n{\n '
+        assert module.extract_prediction(content) is None
+
+    @patch(f"{RAG_MODULE}.requests.request")
+    def test_a_systemic_http_status_is_not_swallowed(
+        self, mock_request: MagicMock
+    ) -> None:
+        """A 401/403/429 fails every query alike, so it must surface."""
+        # HTTPError subclasses RequestException: without a dedicated arm it
+        # lands in the transport bucket, urls ends empty and the delivery is a
+        # flagged null indistinguishable on-chain from a genuine zero-hit.
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("401 Unauthorized")
+        mock_request.return_value = resp
+        with pytest.raises(requests.HTTPError):
+            module.get_urls_from_queries_serper(["q1", "q2"], "key", num=3)
+
+
+class TestParserPredictionResponse:
+    """parser_prediction_response: tag form, JSON fallback, and error surfacing."""
+
+    def test_tag_form_still_parsed(self) -> None:
+        """The documented tag form keeps producing the four-field JSON."""
+        parsed = json.loads(module.parser_prediction_response(VALID_TAGGED_COMPLETION))
+        assert parsed == {
+            "p_yes": 0.5,
+            "p_no": 0.5,
+            "info_utility": 0.5,
+            "confidence": 0.5,
+        }
+
+    def test_json_answer_falls_back_to_the_extractor(self) -> None:
+        """A JSON answer with no tags is parsed by the extractor, not rejected."""
+        parsed = json.loads(module.parser_prediction_response(SCAFFOLD_COMPLETION))
+        assert parsed == FORECAST
+
+    def test_missing_tag_raises_value_error_naming_the_tag(self) -> None:
+        """A half-written tag block raises ValueError carrying the real error."""
+        broken = "<p_yes>0.5</p_yes><p_no>0.5</p_no>"
+        with pytest.raises(ValueError) as excinfo:
+            module.parser_prediction_response(broken)
+        assert "info_utility" in str(excinfo.value)
+        assert "IndexError" in str(excinfo.value)
+        assert not isinstance(excinfo.value, UnboundLocalError)
+
+    def test_non_numeric_tag_value_raises_value_error(self) -> None:
+        """A non-numeric tag value reports the float failure, not an unbound name."""
+        broken = (
+            "<p_yes>very likely</p_yes><p_no>0.5</p_no>"
+            "<confidence>0.5</confidence><info_utility>0.5</info_utility>"
+        )
+        with pytest.raises(ValueError) as excinfo:
+            module.parser_prediction_response(broken)
+        assert "p_yes" in str(excinfo.value)
+        assert "UnboundLocalError" not in str(excinfo.value)
+
+    def test_prose_without_a_forecast_raises_value_error(self) -> None:
+        """A completion with neither tags nor a forecast object is an error."""
+        with pytest.raises(ValueError, match="No forecast object"):
+            module.parser_prediction_response("I cannot answer that question.")
+
+
+# A max_tokens cut that lands in prose AFTER a complete draft object. Nothing is
+# left unclosed, so no text heuristic can tell the draft from an answer.
+DRAFT_THEN_CUT_IN_PROSE = (
+    '<facts>x</facts>\n<thinking>\nDraft estimate {"p_yes": 0.35, "p_no": 0.65} '
+    "seems too low, let me reconsider given the news that changes the probabi"
+)
+
+
+def _run_with_completion(
+    content: Optional[str],
+    prompt: str = "Will X happen?",
+    finish_reason: str = "stop",
+) -> tuple:
+    """Run the tool end to end with fetch + the LLM mocked to deliver content."""
+    with (
+        patch(f"{RAG_MODULE}.LLMClientManager") as mock_mgr,
+        patch(f"{RAG_MODULE}.fetch_additional_information") as mock_fetch,
+    ):
+        mock_llm, _ = _mock_client_manager(mock_mgr)
+        mock_fetch.return_value = ("additional info", {"pages": {}}, None)
+        mock_llm.completions.return_value = MagicMock(
+            content=content,
+            usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+            finish_reason=finish_reason,
+        )
+        return run(
+            tool="prediction-request-rag-v1",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+        )
+
+
+class TestRunDeliversTheForecastObject:
+    """run() wiring: the extractor must sit on the delivery path, not beside it."""
+
+    def test_free_text_json_completion_is_delivered_as_the_forecast(self) -> None:
+        """A JSON answer to a free-text prompt is delivered as the forecast object."""
+        result = _run_with_completion(SCAFFOLD_COMPLETION, LONG_FREE_TEXT_PROMPT)
+        assert json.loads(result[0]) == FORECAST
+        assert "<thinking>" not in result[0]
+
+    def test_bare_json_completion_is_delivered_unwrapped(self) -> None:
+        """A bare JSON completion reaches the caller as a parseable forecast."""
+        result = _run_with_completion(FORECAST_JSON)
+        assert json.loads(result[0])["p_yes"] == 0.62
+
+    def test_tagged_completion_delivery_is_unchanged(self) -> None:
+        """The tag-form path still delivers the four-field JSON."""
+        result = _run_with_completion(VALID_TAGGED_COMPLETION)
+        assert json.loads(result[0]) == {
+            "p_yes": 0.5,
+            "p_no": 0.5,
+            "info_utility": 0.5,
+            "confidence": 0.5,
+        }
+
+    def test_truncated_completion_delivers_the_typed_error_null(self) -> None:
+        """A cut-off answer becomes the typed null, never an escaping exception."""
+        result = _run_with_completion('Reasoning.\n{"p_yes": 0.62, "p_no": 0.3')
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "ValueError"
+
+    def test_a_completion_cut_at_max_tokens_delivers_the_typed_null(self) -> None:
+        """A cut after a complete draft is the typed null, not the draft."""
+        # The draft is complete and the cut lands in prose, so the parser alone
+        # would deliver 0.35 as the forecast.
+        assert (
+            json.loads(module.parser_prediction_response(DRAFT_THEN_CUT_IN_PROSE))[
+                "p_yes"
+            ]
+            == 0.35
+        )
+        result = _run_with_completion(DRAFT_THEN_CUT_IN_PROSE, finish_reason="length")
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "TruncatedCompletionError"
+        assert "0.35" not in result[0]
+
+    def test_a_missing_completion_delivers_the_typed_null(self) -> None:
+        """No content (a refusal) is the typed null, not a plain-text result."""
+        result = _run_with_completion(None)
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert payload["error_type"] == "ValueError"

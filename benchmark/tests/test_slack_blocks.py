@@ -31,6 +31,7 @@ from benchmark.slack_blocks import (
     MAX_TABLE_CHARS,
     cell,
     message,
+    section,
     table_block,
 )
 
@@ -102,3 +103,14 @@ class TestMessage:
         payload = message("1a. Production", [table_block((Col("a"),), [("x",)])])
         assert payload["text"] == "1a. Production"
         assert payload["blocks"][0]["type"] == "table"
+
+
+class TestSectionBudget:
+    """Section payloads stay valid for empty and oversized narratives."""
+
+    @pytest.mark.parametrize("text", ["", "   ", "x" * 3001])
+    def test_section_text_is_nonempty_and_bounded(self, text: str) -> None:
+        """Slack accepts neither blank text nor more than 3000 characters."""
+        rendered = section(text)["text"]["text"]
+        assert rendered.strip()
+        assert len(rendered) <= 3000

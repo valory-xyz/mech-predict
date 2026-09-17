@@ -42,7 +42,6 @@ from typing import Dict, Set
 import pytest
 import yaml
 
-
 PACKAGES = Path(__file__).parent.parent / "packages"
 TASK_EXECUTION_PIN = "skill/valory/task_execution/0.1.0"
 GATEWAY = "https://gateway.autonolas.tech/ipfs"
@@ -66,26 +65,18 @@ EXEMPT: Dict[str, str] = {
 # while they are outstanding. The check still runs and, the day the finding is
 # released and re-pinned, the entry no longer matches a real defect, this test
 # fails, and whoever re-pinned is told to delete it. It cannot rot.
-KNOWN_UNPRICED: Dict[str, str] = {
-    # `params.default_model: claude-sonnet-4-20250514` is VESTIGIAL. This tool
-    # never reads the requester/default model: `run` builds its voters from
-    # VOTER_CONFIG and judges with JUDGE_MODEL_CLAUDE, and deliberately reports
-    # `used_params["model"] = None` because a jury has no single model. All five
-    # models it actually calls are priced. The stale field is harmless today but
-    # is a trap the day someone wires `default_model` up, so it should be
-    # corrected to a model the tool really uses. Deferred only because editing
-    # component.yaml re-hashes the package and cascades the agent and service
-    # CIDs, which does not belong in a test-only PR.
-    "resolve_market_jury": "vestigial params.default_model, never read by run()",
-}
+KNOWN_UNPRICED: Dict[str, str] = {}
 
 
 def _vendored_benchmarks_source() -> str:
     """Return the vendored `benchmarks.py` source that the deployed agent runs.
 
     Prefers the synced copy on disk. That copy is gitignored and only populated
-    by `autonomy packages sync`, which CI runs in the linter job and not in the
-    test job, so fall back to fetching the pinned CID.
+    by `autonomy packages sync` (the integration-tests env, which runs this
+    file, syncs first), so a run without a prior sync falls back to fetching
+    the pinned CID.
+
+    :return: the source text of the pinned `task_execution/utils/benchmarks.py`.
     """
     on_disk = PACKAGES / "valory/skills/task_execution/utils/benchmarks.py"
     if on_disk.is_file():
@@ -108,6 +99,8 @@ def _priced_models() -> Set[str]:
 
     Parsed as text rather than imported: mech-predict vendors `task_execution`,
     so an import can silently resolve to a different copy than the pinned one.
+
+    :return: the model names that have an entry in TOKEN_PRICES.
     """
     source = _vendored_benchmarks_source()
     block = re.search(r"TOKEN_PRICES\s*=\s*\{(.*?)\n    \}", source, re.DOTALL)
@@ -121,6 +114,9 @@ def _declared_models(tool_dir: Path) -> Set[str]:
     Two surfaces, because tools use both: `default_model` in component.yaml
     (which task_execution passes when the requester omits `model`) and the
     `*MODEL*` / `*ENGINE*` constants in the sources.
+
+    :param tool_dir: the tool package directory (holding component.yaml).
+    :return: the non-empty model names the tool declares.
     """
     declared: Set[str] = set()
 

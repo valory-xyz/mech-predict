@@ -57,7 +57,7 @@ class TestOpenAIClientManager:
 
             with mgr as client:
                 assert client is mock_instance
-                MockClient.assert_called_once_with(api_key="sk-test")
+                MockClient.assert_called_once_with(api_key="sk-test", base_url=None)
 
             mock_instance.close.assert_called_once()
 
@@ -142,8 +142,16 @@ PREDICTION_PROMPT = (
 )
 
 
+VLLM_KEYS = {
+    "vllm_server_api_key": ["vllm-test"],
+    "vllm_server_url": ["http://vllm.test/v1"],
+}
+
+
 def _make_mock_api_keys(
-    return_source_content: str = "false", source_content_mode: str = "cleaned"
+    return_source_content: str = "false",
+    source_content_mode: str = "cleaned",
+    extra: Optional[dict] = None,
 ) -> MagicMock:
     """Create a mock KeyChain-like api_keys object."""
     services = {
@@ -151,6 +159,7 @@ def _make_mock_api_keys(
         "serperapi": ["serper-test"],
         "return_source_content": [return_source_content],
         "source_content_mode": [source_content_mode],
+        **(extra or {}),
     }
     mock = MagicMock()
     mock.__getitem__ = lambda self, key: services[key][0]
@@ -1563,6 +1572,127 @@ class TestMaxCostPath:
             delivery_rate=0,
         )
         assert result == 0.0123
+
+
+class TestToolVariants:
+    """One package, two wire names: the olas variant differs only in client and budgets."""
+
+    @pytest.mark.parametrize("live", [False, True])
+    @pytest.mark.parametrize(
+        "tool, key, base_url, model, max_tokens, evidence_cap",
+        [
+            (
+                module.TOOL_NAME,
+                "sk-test",
+                None,
+                "gpt-4o",
+                999,
+                module.MAX_EVIDENCE_TOKENS,
+            ),
+            (
+                module.OLAS_TOOL_NAME,
+                "vllm-test",
+                "http://vllm.test/v1",
+                module.OLAS_MODEL,
+                module.OLAS_MAX_TOKENS,
+                module.OLAS_MAX_EVIDENCE_TOKENS,
+            ),
+        ],
+    )
+    @patch(f"{SF_MODULE}._fetch_page_content", side_effect=_fake_fetch)
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    @patch(f"{SF_MODULE}._cap_evidence_block", return_value="evidence")
+    @patch(f"{SF_MODULE}.OpenAIClientManager")
+    def test_tool_selects_client_model_and_budgets(  # pylint: disable=too-many-arguments
+        self,
+        mock_client_mgr: MagicMock,
+        mock_cap: MagicMock,
+        mock_fetch: MagicMock,
+        _mock_page_fetch: MagicMock,
+        tool: str,
+        key: str,
+        base_url: Optional[str],
+        model: str,
+        max_tokens: int,
+        evidence_cap: int,
+        live: bool,
+    ) -> None:
+        """The requester's model and max_tokens only reach the GPT variant.
+
+        Runs both evidence branches: cached replay and live search.
+
+        :param mock_client_mgr: the patched OpenAIClientManager.
+        :param mock_cap: the patched evidence capper.
+        :param mock_fetch: the patched Serper fetch.
+        :param _mock_page_fetch: the patched page fetch.
+        :param tool: wire name under test.
+        :param key: expected API key.
+        :param base_url: expected client base URL.
+        :param model: expected model.
+        :param max_tokens: expected completion budget.
+        :param evidence_cap: expected evidence cap.
+        :param live: run the live-search branch instead of cached replay.
+        """
+        mock_fetch.return_value.json.return_value = FAKE_SERPER_RESPONSE
+        client = _stub_openai(mock_client_mgr)
+        result = run(
+            tool=tool,
+            model="gpt-4o",
+            max_tokens=999,
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(
+                extra=VLLM_KEYS if tool == module.OLAS_TOOL_NAME else None
+            ),
+            counter_callback=None,
+            source_content=(
+                None if live else {"serper_response": FAKE_SERPER_RESPONSE}
+            ),
+        )
+        mock_client_mgr.assert_called_once_with(key, base_url)
+        call = client.beta.chat.completions.parse.call_args.kwargs
+        assert (call["model"], call["max_tokens"]) == (model, max_tokens)
+        assert mock_cap.call_args.args[3] == evidence_cap
+        assert json.loads(result[0])["p_yes"] == 0.5
+
+    @pytest.mark.parametrize("missing", list(VLLM_KEYS))
+    @patch(f"{SF_MODULE}.fetch_additional_sources")
+    def test_olas_empty_endpoint_config_fails_before_any_call(
+        self, mock_fetch: MagicMock, missing: str
+    ) -> None:
+        """An empty vLLM key or URL is named in the error and nothing is fetched.
+
+        :param mock_fetch: the patched Serper fetch.
+        :param missing: the KeyChain entry left empty.
+        """
+        result = run(
+            tool=module.OLAS_TOOL_NAME,
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys(extra={**VLLM_KEYS, missing: [""]}),
+            counter_callback=None,
+        )
+        payload = json.loads(result[0])
+        assert payload["p_yes"] is None
+        assert missing in payload["error"]
+        mock_fetch.assert_not_called()
+
+    def test_olas_max_cost_uses_olas_model(self) -> None:
+        """The max-cost estimate is priced on the served model, not the requested one."""
+        seen = {}
+
+        def _counter(**kwargs: Any) -> float:
+            seen.update(kwargs)
+            return 0.01
+
+        run(
+            tool=module.OLAS_TOOL_NAME,
+            model="gpt-4o",
+            prompt=PREDICTION_PROMPT,
+            api_keys=_make_mock_api_keys("false"),
+            counter_callback=_counter,
+            delivery_rate=0,
+        )
+        assert seen["models_calls"] == (module.OLAS_MODEL,)
 
 
 # --- issue #455: free-text contract (ported from superforcaster-polymarket-v4,

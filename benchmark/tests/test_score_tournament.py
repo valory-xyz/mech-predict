@@ -25,8 +25,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from benchmark.score_tournament import (
+    _reconcile_scored_arms,
     check_omen_resolutions,
     check_polymarket_resolutions,
+    dedupe_arm_rows,
     load_predictions,
     score_tournament,
 )
@@ -350,6 +352,7 @@ class TestScoreTournament:
         # Two predictions for same market (different tools)
         p1 = _prediction(row_id="tourn_a_1", market_address="0xabc")
         p2 = _prediction(row_id="tourn_b_2", market_address="0xabc")
+        p2["tool_name"] = "superforcaster"
         pred_path.write_text(json.dumps(p1) + "\n" + json.dumps(p2) + "\n")
 
         mock_omen.return_value = {
@@ -498,3 +501,130 @@ class TestLoadPredictions:  # pylint: disable=too-few-public-methods
         rows = load_predictions(f)
         assert len(rows) == 2
         assert rows[0]["row_id"] == "r1"
+
+
+# ---------------------------------------------------------------------------
+# drop_superseded_blind_rows
+# ---------------------------------------------------------------------------
+
+
+class TestDedupeArmRows:
+    """One row survives per tool, CID, market and model across the two arms."""
+
+    @staticmethod
+    def _row(market_context: bool, market_address: str = "0xabc") -> dict[str, Any]:
+        """Build a pending row for one arm.
+
+        :param market_context: the arm the row was produced in.
+        :param market_address: the market the row predicts.
+        :return: a pending tournament row.
+        """
+        row = _prediction(
+            row_id=f"tourn_{market_address}_{int(market_context)}",
+            market_address=market_address,
+        )
+        row["tool_ipfs_hash"] = "bafycid1"
+        row["market_context"] = market_context
+        return row
+
+    def test_unscoreable_priced_row_never_supersedes(self) -> None:
+        """A timed-out priced row must not kill a usable blind prediction."""
+        blind = self._row(False)
+        priced = self._row(True)
+        priced["prediction_parse_status"] = "skipped_global_timeout"
+        priced["p_yes"] = None
+
+        kept = dedupe_arm_rows([blind, priced])
+
+        assert [r["market_context"] for r in kept] == [False]
+
+    def test_different_models_are_different_experiments(self) -> None:
+        """A priced row for one model does not supersede another model's row."""
+        blind = self._row(False)
+        blind["model"] = "gpt-4.1"
+        priced = self._row(True)
+        priced["model"] = "claude-fable-5"
+
+        kept = dedupe_arm_rows([blind, priced])
+
+        assert len(kept) == 2
+
+    def test_two_unpriced_rows_are_still_deduped(self) -> None:
+        """A priced-arm run that got no price must not double count a market."""
+        first = self._row(False)
+        second = self._row(False)
+        second["row_id"] = "tourn_second"
+
+        kept = dedupe_arm_rows([first, second])
+
+        assert [r["row_id"] for r in kept] == [first["row_id"]]
+
+    def test_blind_row_dropped_when_priced_sibling_exists(self) -> None:
+        """The transition to --market-context does not double count a market."""
+        kept = dedupe_arm_rows([self._row(False), self._row(True)])
+        assert [r["market_context"] for r in kept] == [True]
+
+    def test_blind_row_kept_without_priced_sibling(self) -> None:
+        """A market only predicted blind still scores."""
+        kept = dedupe_arm_rows([self._row(False)])
+        assert len(kept) == 1
+
+    def test_other_market_unaffected(self) -> None:
+        """Supersession is per tool, CID and market, not global."""
+        rows = [self._row(True, "0xabc"), self._row(False, "0xdef")]
+        kept = dedupe_arm_rows(rows)
+        assert [r["market_address"] for r in kept] == ["0xabc", "0xdef"]
+
+    def test_legacy_rows_without_column_are_blind(self) -> None:
+        """Rows written before the column existed count as the blind arm."""
+        legacy = self._row(False)
+        del legacy["market_context"]
+        kept = dedupe_arm_rows([legacy, self._row(True)])
+        assert [r.get("market_context") for r in kept] == [True]
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_scored_arms
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileScoredArms:
+    """A scored row from an earlier cycle yields to the other arm's row."""
+
+    @staticmethod
+    def _scored(market_context: bool, row_id: str) -> dict[str, Any]:
+        """Build a scored row for one arm.
+
+        :param market_context: whether the row's context carried a price.
+        :param row_id: the row id.
+        :return: a scored tournament row.
+        """
+        row = _prediction(row_id=row_id, final_outcome=True)
+        row["tool_ipfs_hash"] = "bafycid1"
+        row["market_context"] = market_context
+        return row
+
+    def test_stale_blind_scored_row_is_dropped(self, tmp_path: Path) -> None:
+        """The cross-cycle case the pending-only dedup cannot see."""
+        path = tmp_path / "scored.jsonl"
+        rows = [self._scored(False, "blind"), self._scored(True, "priced")]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+        _reconcile_scored_arms(path)
+
+        kept = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [r["row_id"] for r in kept] == ["priced"]
+
+    def test_untouched_when_nothing_duplicates(self, tmp_path: Path) -> None:
+        """A file with one row per prediction is not rewritten."""
+        path = tmp_path / "scored.jsonl"
+        original = json.dumps(self._scored(True, "priced")) + "\n"
+        path.write_text(original)
+
+        _reconcile_scored_arms(path)
+
+        assert path.read_text() == original
+
+    def test_missing_file_is_a_no_op(self, tmp_path: Path) -> None:
+        """Reconciling before the first scored row exists must not raise."""
+        _reconcile_scored_arms(tmp_path / "absent.jsonl")

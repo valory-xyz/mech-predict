@@ -125,6 +125,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         family="superforcaster",
     ),
+    # valory/superforcaster_market_aware_v1 -- adds the NO-side disconfirmation
+    # check that superforcaster_market_aware's evidence-reliability screen lacks
+    # (issue #493). Same extended PredictionResult, two more reasoning fields.
+    "superforcaster-market-aware-v1": ToolSpec(
+        module=(
+            "packages.valory.customs.superforcaster_market_aware_v1"
+            ".superforcaster_market_aware_v1"
+        ),
+        family="superforcaster",
+    ),
     # valory/superforcaster_polymarket_v1
     "superforcaster-polymarket-v1": ToolSpec(
         module=(

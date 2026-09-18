@@ -129,14 +129,15 @@ def with_key_rotation(func: Callable) -> Callable:
 class OpenAIClientManager:
     """Context manager that creates and closes a local OpenAI client."""
 
-    def __init__(self, api_key: str):
-        """Initializes with API key."""
+    def __init__(self, api_key: str, base_url: Optional[str] = None):
+        """Initializes with API key and an optional OpenAI-compatible base URL."""
         self.api_key = api_key
+        self.base_url = base_url
         self._client: Optional[OpenAI] = None
 
     def __enter__(self) -> OpenAI:
         """Initializes and returns the OpenAI client."""
-        self._client = OpenAI(api_key=self.api_key)
+        self._client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         return self._client
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
@@ -171,7 +172,27 @@ DEFAULT_OPENAI_SETTINGS = {
     "temperature": 0,
 }
 DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
-ALLOWED_TOOLS = ["superforcaster-market-aware"]
+TOOL_NAME = "superforcaster-market-aware"
+# Same pipeline, forecaster swapped for Olas-Predict-R1-14B on the self-hosted
+# vLLM endpoint (OpenAI-compatible, so only base_url and key differ).
+OLAS_TOOL_NAME = "superforcaster-market-aware-olas-predict-r1-14b"
+ALLOWED_TOOLS = [TOOL_NAME, OLAS_TOOL_NAME]
+# The served model is fixed by the tool, not taken from the request: the mech's
+# `model` kwarg defaults to this package's default_model (gpt-4.1), which the
+# vLLM endpoint does not serve. KeyChain names match the olas_predict_r1_14b tool.
+OLAS_MODEL = "olas-predict-r1-14b"
+VLLM_SERVER_API_KEY = "vllm_server_api_key"
+VLLM_SERVER_URL = "vllm_server_url"
+# vLLM serves an 8192-token window shared by prompt and completion. Budgets are
+# counted with tiktoken (no Qwen encoding), which under-counts Qwen tokens by up
+# to ~1.16x, so they leave headroom: ~1.1k prompt template + up to ~1.4k market
+# blocks + 2.5k evidence, scaled by 1.25, plus a 1.5k completion leaves room for
+# a template question. Live completions on this schema measured 360-762 tokens.
+# A free-text question over ~1k tokens is not budgeted and vLLM rejects it
+# (400 -> null delivery). max_tokens is fixed rather than requester-supplied for
+# the same reason.
+OLAS_MAX_TOKENS = 1500
+OLAS_MAX_EVIDENCE_TOKENS = 2500
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2
@@ -675,8 +696,7 @@ def _parse_completion(
             raise RuntimeError(
                 f"Structured completion truncated: max_tokens={max_tokens} is "
                 f"too small for the {response_format.__name__} schema "
-                f"({len(response_format.model_fields)} fields). Raise "
-                "DEFAULT_OPENAI_SETTINGS['max_tokens']."
+                f"({len(response_format.model_fields)} fields)."
             ) from e
         except (
             openai.APIConnectionError,
@@ -1301,7 +1321,8 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
     if tool not in ALLOWED_TOOLS:
         raise ValueError(f"Tool {tool} is not supported.")
 
-    model = kwargs.get("model")
+    is_olas = tool == OLAS_TOOL_NAME
+    model = OLAS_MODEL if is_olas else kwargs.get("model")
     if model is None:
         raise ValueError("Model not supplied.")
 
@@ -1321,7 +1342,18 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         )
         return max_cost
 
-    openai_api_key = kwargs["api_keys"]["openai"]
+    api_keys = kwargs["api_keys"]
+    if is_olas:
+        llm_api_key, base_url = api_keys[VLLM_SERVER_API_KEY], api_keys[VLLM_SERVER_URL]
+        if not llm_api_key or not base_url:
+            raise ValueError(
+                f"Set '{VLLM_SERVER_API_KEY}' and '{VLLM_SERVER_URL}' in the mech's API_KEYS."
+            )
+        max_tokens, evidence_cap = OLAS_MAX_TOKENS, OLAS_MAX_EVIDENCE_TOKENS
+    else:
+        llm_api_key, base_url = api_keys["openai"], None
+        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
+        evidence_cap = MAX_EVIDENCE_TOKENS
     source_content = kwargs.get("source_content", None)
     return_source_content = (
         kwargs["api_keys"].get("return_source_content", "false") == "true"
@@ -1331,8 +1363,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
         raise ValueError(
             f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
         )
-    with OpenAIClientManager(openai_api_key) as llm_client:
-        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
+    with OpenAIClientManager(llm_api_key, base_url) as llm_client:
         temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
         prompt = kwargs["prompt"]
 
@@ -1398,7 +1429,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
             # every cached page.
             cached_mode = source_content.get("mode", "cleaned")
             _hydrate_organic_from_pages(organic_data, cached_pages, cached_mode)
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            sources = _cap_evidence_block(organic_data, misc_data, model, evidence_cap)
         else:
             if not any(ch.isalnum() for ch in search_query):
                 # Nothing searchable: no alphanumeric character at all (empty,
@@ -1460,7 +1491,7 @@ def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
                 "pages": captured_pages,
             }
             print("Formatting sources...")
-            sources = _cap_evidence_block(organic_data, misc_data, model)
+            sources = _cap_evidence_block(organic_data, misc_data, model, evidence_cap)
 
         print("Updating prompt...")
         prediction_prompt = PREDICTION_PROMPT.format(

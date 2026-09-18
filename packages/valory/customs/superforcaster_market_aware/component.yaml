@@ -9,14 +9,16 @@ description: A tool for making binary predictions on prediction markets. It esti
   forecasting prompt instead of relying on Serper snippets alone, and returns its
   forecast via OpenAI Structured Outputs. It optionally accepts market context on
   the request and reports objective properties of the question alongside the forecast;
-  it never advises a trade action.
+  it never advises a trade action. Serves two tools, superforcaster-market-aware (GPT-4.1)
+  and superforcaster-market-aware-olas-predict-r1-14b (the same pipeline with Olas-Predict-R1-14B
+  on a self-hosted vLLM endpoint).
 license: Apache-2.0
 aea_version: '>=1.0.0, <2.0.0'
 fingerprint:
   __init__.py: bafybeid6bfykvdv4tejg2xfnpv3mrzzxlzuqfni5av4yfigz6l3qckffde
-  superforcaster_market_aware.py: bafybeic2yvx4vobimh6ch2sw5h6rqeyl6vpmxrhfz27tzschmeu2op2ch4
+  superforcaster_market_aware.py: bafybeignobsvtfljzku455oygtevknrtrm6blrpytluikie2yjin6zbspm
   tests/__init__.py: bafybeidegv7yfxpdytmvepvcqquzawanqjczrqdp2cesxxdx5vvdfmdgue
-  tests/test_superforcaster_market_aware.py: bafybeic4vnv44sfhxsyntci6s2bjl3b5ftholwcpfe7rzfoinzryb5ib4a
+  tests/test_superforcaster_market_aware.py: bafybeia7xeu4sipexplpcwljsrizxbep7ub3t72wfqreu3xsgto4gfcshq
 fingerprint_ignore_patterns: []
 entry_point: superforcaster_market_aware.py
 callable: run

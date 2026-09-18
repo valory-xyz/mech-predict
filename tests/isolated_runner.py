@@ -172,9 +172,41 @@ def _validate_deliver_msg(deliver_msg: str, validate_prediction: bool) -> List[s
         errors.append(f"Unexpected error in delivered message: {deliver_msg[:ERROR_MSG_TRUNCATE_LENGTH]}")
     if not validate_prediction:
         return errors
+    errors.extend(_validate_prediction_payload(deliver_msg))
+    return errors
+
+
+def _validate_prediction_payload(deliver_msg: str) -> List[str]:
+    """Read the delivery the way a strict consumer does: json.loads, then the fields.
+
+    A substring check passes on a reasoning scaffold that merely contains the
+    field names, and on a typed error null whose p_yes is null. Neither is a
+    forecast a requester can use.
+
+    :param deliver_msg: the tool's delivered result string.
+    :return: the validation errors, empty when the delivery is a usable forecast.
+    """
+    try:
+        payload = json.loads(deliver_msg)
+    except json.JSONDecodeError:
+        return [f"Delivered message is not JSON: {deliver_msg[:ERROR_MSG_TRUNCATE_LENGTH]}"]
+    if not isinstance(payload, dict):
+        return [f"Delivered message is not a JSON object: {deliver_msg[:ERROR_MSG_TRUNCATE_LENGTH]}"]
+    errors = [
+        f"Missing '{field}' in delivered message."
+        for field in PREDICTION_FIELDS
+        if field not in payload
+    ]
+    detail = str(payload.get("error") or deliver_msg)[:ERROR_MSG_TRUNCATE_LENGTH]
     for field in PREDICTION_FIELDS:
-        if field not in deliver_msg:
-            errors.append(f"Missing '{field}' in delivered message.")
+        if field not in payload:
+            continue
+        value = payload[field]
+        usable = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if not (usable and 0.0 <= value <= 1.0):
+            errors.append(
+                f"'{field}' is not a probability in [0, 1] ({value!r}): {detail}"
+            )
     return errors
 
 

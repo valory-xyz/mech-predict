@@ -143,7 +143,9 @@ def with_key_rotation(func: Callable) -> Callable:
     """
 
     @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> MechResponseWithKeys:
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
         # this is expected to be a KeyChain object,
         # although it is not explicitly typed as such
         api_keys = kwargs["api_keys"]
@@ -155,10 +157,14 @@ def with_key_rotation(func: Callable) -> Callable:
         retries_left.setdefault("openai", 0)
         retries_left.setdefault("openrouter", 0)
 
-        def execute() -> MechResponseWithKeys:
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
             """Retry the function with a new key."""
             try:
-                result: MechResponse = func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Max-cost path returns a float; pass through without
+                # appending api_keys (tuple concatenation would fail).
+                if isinstance(result, float):
+                    return result
                 return result + (api_keys,)
             except (
                 openai.RateLimitError,
@@ -718,11 +724,11 @@ def generate_prediction_with_retry(
             print(f"Attempt {attempt + 1} failed with error: {e}")
             time.sleep(delay)
             attempt += 1
-    # Surface the last underlying error so the failure is diagnosable
-    # (was opaque "Failed to generate prediction after retries" before).
-    raise Exception(
-        f"Failed to generate prediction after retries; last error: {last_error}"
-    )
+    # Surface the last underlying error so the failure is diagnosable, and chain
+    # it so the traceback and __cause__ keep the real exception.
+    raise RuntimeError(
+        f"Failed to generate prediction after retries: {last_error}"
+    ) from last_error
 
 
 def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:

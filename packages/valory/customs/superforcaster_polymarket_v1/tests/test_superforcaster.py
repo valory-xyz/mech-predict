@@ -920,3 +920,65 @@ class TestMaxCostPath:
             delivery_rate=0,
         )
         assert result == 0.0123
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+def test_retry_exhaustion_chains_the_last_cause(_mock_sleep: MagicMock) -> None:
+    """The raised error names the last failure and keeps it as __cause__."""
+    client = MagicMock()
+    client.completions.side_effect = ValueError("provider unreachable")
+    with pytest.raises(RuntimeError, match="provider unreachable") as excinfo:
+        generate_prediction_with_retry(
+            client=client,
+            model="gpt-4.1-2025-04-14",
+            messages=[],
+            temperature=0.0,
+            max_tokens=64,
+        )
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+@patch(f"{SF_MODULE}.openai.OpenAI")
+@patch(f"{SF_MODULE}.fetch_additional_sources")
+def test_finish_reason_stop_delivers_the_forecast(
+    mock_fetch: MagicMock, mock_openai: MagicMock, _mock_sleep: MagicMock
+) -> None:
+    """An explicit normal stop reaches the extractor and delivers the forecast."""
+    mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+    create = mock_openai.return_value.chat.completions.create
+    create.return_value = _sdk_response(PREDICTION_JSON, "stop")
+    result = run(
+        tool="superforcaster-polymarket-v1",
+        model="gpt-4.1-2025-04-14",
+        prompt=PREDICTION_PROMPT,
+        api_keys=_make_mock_api_keys(),
+        counter_callback=None,
+    )
+    assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
+    assert create.call_count == 1
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+@patch(f"{SF_MODULE}.openai.OpenAI")
+@patch(f"{SF_MODULE}.fetch_additional_sources")
+def test_a_complete_answer_cut_at_max_tokens_is_still_an_error(
+    mock_fetch: MagicMock, mock_openai: MagicMock, _mock_sleep: MagicMock
+) -> None:
+    """finish_reason 'length' is an error even when the JSON before it is complete."""
+    # Intended: a length stop means the budget ran out, so the object that
+    # parsed may not be the answer the model would have given.
+    mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+    create = mock_openai.return_value.chat.completions.create
+    create.return_value = _sdk_response(PREDICTION_JSON, "length")
+    result = run(
+        tool="superforcaster-polymarket-v1",
+        model="gpt-4.1-2025-04-14",
+        prompt=PREDICTION_PROMPT,
+        api_keys=_make_mock_api_keys(),
+        counter_callback=None,
+    )
+    parsed = json.loads(result[0])
+    assert parsed["p_yes"] is None
+    assert parsed["error_type"] == "TruncatedCompletionError"
+    assert create.call_count == 1

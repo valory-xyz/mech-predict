@@ -286,6 +286,10 @@ jobs:
       OPENROUTER_API_KEYS: ${{ secrets.OPENROUTER_API_KEYS }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
+      # superforcaster, superforcaster-polymarket-v1 and factual_research search with Serper.
+      # Without a key every live search returns 403, those tools deliver a typed error
+      # null, and only a strict parse of the delivery notices.
+      SERPER_API_KEY: ${{ secrets.BENCHMARK_SERPER_API_KEY }}
     steps:
       - uses: actions/checkout@v6
         with:

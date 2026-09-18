@@ -1434,3 +1434,59 @@ class TestRateLimitExhaustionNull:
         assert json.loads(rate_limited[0])["error_type"] == "RateLimitError"
         assert json.loads(permanent[0])["error_type"] == "ValueError"
         assert rate_limited[1:] == permanent[1:] == ("", None, None, None, api_keys)
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+def test_retry_exhaustion_chains_the_last_cause(_mock_sleep: MagicMock) -> None:
+    """The raised error names the last failure and keeps it as __cause__."""
+    client = MagicMock()
+    client.completions.side_effect = ValueError("provider unreachable")
+    with pytest.raises(RuntimeError, match="provider unreachable") as excinfo:
+        generate_prediction_with_retry(
+            client=client, model="gpt-4o", messages=[], temperature=0.0, max_tokens=64
+        )
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+@patch(f"{SF_MODULE}.openai.OpenAI")
+def test_finish_reason_stop_delivers_the_forecast(
+    mock_openai: MagicMock, _mock_sleep: MagicMock
+) -> None:
+    """An explicit normal stop reaches the extractor and delivers the forecast."""
+    create = mock_openai.return_value.chat.completions.create
+    create.return_value = _sdk_response(PREDICTION_JSON, "stop")
+    result = run(
+        tool="superforcaster_full_search",
+        model="gpt-4o",
+        prompt=PREDICTION_PROMPT,
+        api_keys=_make_mock_api_keys("false"),
+        counter_callback=None,
+        source_content={"serper_response": FAKE_SERPER_RESPONSE},
+    )
+    assert json.loads(result[0]) == json.loads(PREDICTION_JSON)
+    assert create.call_count == 1
+
+
+@patch(f"{SF_MODULE}.time.sleep", return_value=None)
+@patch(f"{SF_MODULE}.openai.OpenAI")
+def test_a_complete_answer_cut_at_max_tokens_is_still_an_error(
+    mock_openai: MagicMock, _mock_sleep: MagicMock
+) -> None:
+    """finish_reason 'length' is an error even when the JSON before it is complete."""
+    # Intended: a length stop means the budget ran out, so the object that
+    # parsed may not be the answer the model would have given.
+    create = mock_openai.return_value.chat.completions.create
+    create.return_value = _sdk_response(PREDICTION_JSON, "length")
+    result = run(
+        tool="superforcaster_full_search",
+        model="gpt-4o",
+        prompt=PREDICTION_PROMPT,
+        api_keys=_make_mock_api_keys("false"),
+        counter_callback=None,
+        source_content={"serper_response": FAKE_SERPER_RESPONSE},
+    )
+    parsed = json.loads(result[0])
+    assert parsed["p_yes"] is None
+    assert parsed["error_type"] == "TruncatedCompletionError"
+    assert create.call_count == 1

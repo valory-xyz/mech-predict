@@ -186,12 +186,13 @@ VLLM_SERVER_URL = "vllm_server_url"
 # vLLM serves an 8192-token window shared by prompt and completion. Budgets are
 # counted with tiktoken (no Qwen encoding), which under-counts Qwen tokens by up
 # to ~1.16x, so they leave headroom: ~1.1k prompt template + up to ~1.4k market
-# blocks + 1.5k evidence, scaled by 1.25, plus a 2.5k completion leaves room for
-# a template question. A free-text question over ~1k tokens is not budgeted and
-# vLLM rejects it (400 -> null delivery). max_tokens is fixed rather than
-# requester-supplied for the same reason.
-OLAS_MAX_TOKENS = 2500
-OLAS_MAX_EVIDENCE_TOKENS = 1500
+# blocks + 2.5k evidence, scaled by 1.25, plus a 1.5k completion leaves room for
+# a template question. Live completions on this schema measured 360-762 tokens.
+# A free-text question over ~1k tokens is not budgeted and vLLM rejects it
+# (400 -> null delivery). max_tokens is fixed rather than requester-supplied for
+# the same reason.
+OLAS_MAX_TOKENS = 1500
+OLAS_MAX_EVIDENCE_TOKENS = 2500
 MAX_SOURCES = 5
 COMPLETION_RETRIES = 3
 COMPLETION_DELAY = 2

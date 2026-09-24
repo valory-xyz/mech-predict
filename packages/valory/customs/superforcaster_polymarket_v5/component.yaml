@@ -1,0 +1,32 @@
+name: superforcaster_polymarket_v5
+author: valory
+version: 0.1.0
+type: custom
+description: A tool for making binary predictions on markets using the Serper API
+  and LLMs. v5 adds a mandatory resolution-window screen to v4 (classify the resolution
+  criterion as WINDOW vs POINT, and for a WINDOW criterion derive the probability
+  from the number of chances the span contains instead of reporting whether the condition
+  already holds) for systematic errors on "met at any point in a span" markets (#503).
+license: Apache-2.0
+aea_version: '>=1.0.0, <2.0.0'
+fingerprint:
+  __init__.py: bafybeidr6ok7hgnywgtlggdajgklohlpaxnxmvpo2wn5fayq7fhzrr2sli
+  superforcaster_polymarket_v5.py: bafybeickkk43wfzmh3ulwccj2g3cdrpp6ayupukyk4qtjindinbcbfsh7a
+  tests/__init__.py: bafybeigf7jeqv5jjnfrky3ecxnsh2o63u77r5jpxhfix5pzqvskpcnrbd4
+  tests/test_superforcaster_polymarket_v5.py: bafybeigunm3gx2qpwi7mq675zucyleqaxjyfri6x37jrhqn27n6xbfvema
+fingerprint_ignore_patterns: []
+entry_point: superforcaster_polymarket_v5.py
+callable: run
+params:
+  default_model: gpt-4.1-2025-04-14
+dependencies:
+  openai:
+    version: ==1.93.0
+  httpx:
+    version: ==0.25.2
+  tiktoken:
+    version: ==0.12.0
+  pydantic:
+    version: '>=2.0.0,<3.0.0'
+  requests:
+    version: ==2.32.5

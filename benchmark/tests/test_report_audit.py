@@ -1,0 +1,282 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+"""Regression coverage for complete rosters, decisive evidence, and offline replay."""
+
+import copy
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+from benchmark import notify_slack, report_audit, tool_usage
+from benchmark.digest_tables import WINDOW_FILES
+from benchmark.report_audit import initialize, post, prepare, replay
+
+NEW_TOOL = "superforcaster-market-aware-olas-predict-r1-14b"
+
+
+def _stats(**changes: Any) -> dict[str, Any]:
+    result = {
+        "n": 100,
+        "valid_n": 100,
+        "brier": 0.20,
+        "baseline_brier": 0.24,
+        "edge": -0.01,
+        "edge_n": 80,
+        "edge_sd": 0.05,
+        "conditional_accuracy_rate": 0.60,
+        "disagree_n": 40,
+        "reliability": 1.0,
+    }
+    result.update(changes)
+    return result
+
+
+def _payloads(rows: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: {"by_tool": copy.deepcopy(rows) if key != "tournament" else {}}
+        for key in WINDOW_FILES
+    }
+
+
+@pytest.fixture(name="audit_run")
+def _audit_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Create deterministic input structure with real fresh timestamps."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("GITHUB_SHA", "source-sha")
+    results, output = tmp_path / "results", tmp_path / "audit"
+    results.mkdir()
+    snapshot = {
+        "release_ref": "v-test",
+        "deployments": {
+            name: {
+                "platform": platform,
+                "status": "complete",
+                "tools": ["bad", "good", NEW_TOOL],
+            }
+            for name, platform in tool_usage.DEPLOYMENT_TO_PLATFORM.items()
+        },
+    }
+    initialize(results, output, snapshot)
+    for platform in ("omen", "polymarket"):
+        payloads = _payloads(
+            {"bad": _stats(brier=0.31), "good": _stats(), NEW_TOOL: _stats()}
+        )
+        for key, payload in payloads.items():
+            payload.update(
+                generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                requested_window={
+                    "start": "2026-09-01T00:00:00Z",
+                    "end": "2026-09-29T00:00:00Z",
+                    "timestamp_field": "requested_at",
+                },
+            )
+            (results / WINDOW_FILES[key].format(platform=platform)).write_text(
+                json.dumps(payload)
+            )
+        (results / f"analysis_scores_{platform}.json").write_text(
+            json.dumps(payloads["at"])
+        )
+        (results / f"report_{platform}.md").write_text(
+            "# Platform report\n\nBrier summary.\n"
+        )
+    return results, output
+
+
+def test_bundle_replays_without_network_llm_or_live_roster(
+    audit_run: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation and replay share exact inputs and saved narrative."""
+
+    def unexpected(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("External dependency reached")
+
+    monkeypatch.setattr(notify_slack, "summarize_report", unexpected)
+    monkeypatch.setattr(tool_usage, "fetch_valid_tools", unexpected)
+    monkeypatch.setattr(tool_usage, "_http_get", unexpected)
+    results, output = audit_run
+    bundle = prepare(results, output, "polymarket", "*Summary:* Saved narrative.")
+    monkeypatch.setenv("BENCHMARK_ROLLING_WINDOW_DAYS", "14")
+    monkeypatch.setenv("USE_MECH_ANALYTICS_ROWS", "false")
+    payload = replay(bundle)
+    record = json.loads((bundle / "decision.json").read_text())
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert record["decision"]["token"] == "DEMOTE 1"
+    assert manifest["run"]["source_commit"] == "source-sha"
+    assert manifest["run"]["run_attempt"] == "2"
+    assert manifest["files"]["summary.txt"]
+    assert (
+        record["windows"]["at"]["requested_window"]["timestamp_field"] == "requested_at"
+    )
+    assert "Saved narrative" in json.dumps(payload)
+    assert "Deployment decision" in (results / "report_polymarket.md").read_text()
+    assert all(
+        len(block.get("text", {}).get("text", "")) <= 3000
+        for block in payload["blocks"]
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "stale", "bad-timestamp", "malformed", "bad-shape", "nan"]
+)
+def test_failed_current_input_is_never_presented_as_current(
+    audit_run: tuple[Path, Path], failure: str
+) -> None:
+    """A rejected current window remains auditable but cannot support actions."""
+    results, output = audit_run
+    path = results / "rolling_scores_polymarket.json"
+    if failure == "missing":
+        path.unlink()
+    elif failure in ("stale", "bad-timestamp"):
+        payload = json.loads(path.read_text())
+        payload["generated_at"] = "2000-01-01T00:00:00Z" if failure == "stale" else 1
+        path.write_text(json.dumps(payload))
+    else:
+        path.write_text(
+            {"malformed": "{", "bad-shape": "[]", "nan": '{"x": NaN}'}[failure]
+        )
+    bundle = prepare(results, output, "polymarket", "Saved summary")
+    record = json.loads((bundle / "decision.json").read_text())
+    assert record["decision"]["token"] == "DECISION UNAVAILABLE"
+    assert record["decision"]["demote"] == []
+    assert record["windows"]["w1"]["generated_at"] is None
+    assert "rolling_scores_polymarket.json" in " ".join(record["errors"])
+    replay(bundle)
+
+
+def test_initialize_removes_derived_outputs_and_preserves_resume_state(
+    tmp_path: Path,
+) -> None:
+    """Yesterday's report cannot survive a failed current scoring step."""
+    results = tmp_path / "results"
+    results.mkdir()
+    for name in (
+        "report_omen.md",
+        "trailing_scores_omen.json",
+        "rolling_scores_omen.json",
+        "scores_omen.json",
+    ):
+        (results / name).write_text("old")
+    initialize(results, tmp_path / "run", {"deployments": {}})
+    assert (results / "scores_omen.json").read_text() == "old"
+    assert not (results / "report_omen.md").exists()
+    assert not (results / "trailing_scores_omen.json").exists()
+    with pytest.raises(FileExistsError):
+        initialize(results, tmp_path / "run", {"deployments": {}})
+
+
+def test_tampering_or_omitting_an_input_hash_fails_replay(
+    audit_run: tuple[Path, Path],
+) -> None:
+    """Hashes cover every captured input, including fields unused by the gate."""
+    results, output = audit_run
+    bundle = prepare(results, output, "polymarket", "Summary")
+    path = bundle / "trailing_scores_polymarket.json"
+    path.write_text(path.read_text() + " ")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        replay(bundle)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["files"][path.name]
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="every consumed file"):
+        replay(bundle)
+
+
+def test_changed_policy_is_detected_even_with_intact_input_hashes(
+    audit_run: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay checks results as well as archive integrity."""
+    results, output = audit_run
+    bundle = prepare(results, output, "polymarket", "Summary")
+    original = report_audit.build_decision_record
+
+    def changed(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        record = original(*args, **kwargs)
+        record["decision"]["token"] = "WRONG"
+        return record
+
+    monkeypatch.setattr(report_audit, "build_decision_record", changed)
+    with pytest.raises(ValueError, match="Decision replay differs"):
+        replay(bundle)
+
+
+def test_post_sends_saved_content_with_only_artifact_link_added(
+    audit_run: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Posting never refreshes data or generates another summary."""
+    results, output = audit_run
+    bundle = prepare(results, output, "polymarket", "Saved summary")
+    saved = replay(bundle)
+    sent = []
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://example.invalid/webhook")
+    monkeypatch.setenv("REPORT_ARTIFACT_URL", "https://example.invalid/artifact")
+    monkeypatch.setattr(
+        notify_slack, "post_to_slack", lambda _url, payload: sent.append(payload)
+    )
+    post(bundle)
+    assert sent[0]["blocks"][:-1] == saved["blocks"]
+    assert sent[0]["text"] == saved["text"]
+    assert "example.invalid/artifact" in json.dumps(sent[0]["blocks"][-1])
+
+
+def test_roster_snapshot_rejects_partial_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit capture is strict even though the legacy resolver is permissive."""
+    monkeypatch.setattr(
+        tool_usage,
+        "_post_graphql",
+        lambda *_: {
+            "meches": [
+                {"address": "0xa", "service": {"metadata": [{"metadata": "0x11"}]}},
+                {"address": "0xb", "service": None},
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="Missing metadata"):
+        tool_usage.resolve_mech_tools(["0xa", "0xb"], "https://example.invalid", {})
+
+
+def test_roster_snapshot_retains_manifest_ids_and_partial_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The captured provenance explains both membership and lookup failures."""
+    monkeypatch.setattr(tool_usage, "latest_trader_ref", lambda: "v-test")
+    monkeypatch.setattr(
+        tool_usage, "_http_get", lambda _url: 'valid_mechs: ${VALID_MECHS:list:["0xa"]}'
+    )
+
+    def resolve(_addresses: Any, url: str, provenance: dict[str, Any]) -> list[str]:
+        if "polygon" in url:
+            raise ValueError("missing mech")
+        provenance["mechs"] = {"0xa": "0x11"}
+        provenance["manifests"] = {"f0170122011": [NEW_TOOL]}
+        return [NEW_TOOL]
+
+    monkeypatch.setattr(tool_usage, "resolve_mech_tools", resolve)
+    snapshot = tool_usage.fetch_deployment_snapshot()
+    assert snapshot["release_ref"] == "v-test"
+    assert snapshot["deployments"]["omenstrat Pearl"]["manifests"]
+    assert tool_usage.platform_roster(snapshot, "omen")["tools"] == [NEW_TOOL]
+    assert tool_usage.platform_roster(snapshot, "polymarket")["status"] == "unavailable"
+    assert tool_usage.snapshot_valid_tools(snapshot)["polystrat Pearl"] is None

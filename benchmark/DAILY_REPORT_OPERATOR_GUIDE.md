@@ -26,7 +26,7 @@ Slack is the action inbox. Each platform posts one concise message:
 | **Summary** | Current 7d platform Brier and its movement vs the main and previous windows | for platform health |
 | **Tool × Category signals** | at most three current-window rows: main risk, strongest positive (or best available), and largest remaining slice | to see whether the result is concentrated or broad |
 | **Warnings** | only caveats that qualify the decision or make the 7d trend provisional | before acting |
-| **Full report** | link to the unchanged Markdown artifact | when you need every table, legend, candidate, or audit detail |
+| **Full report** | link to the Markdown report and reproducible decision inputs | when you need every table, legend, candidate, or audit detail |
 
 Category rows require at least 30 scored predictions (`valid_n`); all sample
 counts and selection weights use this scored pool. Rows with 30–99 samples are labelled
@@ -49,7 +49,18 @@ any demotion. A combined `PROMOTE n · DEMOTE m` lists both proposed actions.
 For the detailed Slack table sequence and ROI companion, run the notifier with
 `--detailed-tables` (`ROI_SECTION=off` omits ROI). `BENCHMARK_COMPUTED_TABLES=true`
 selects the concise computed view by default; unset it for the legacy V1 narrative.
-The Markdown report is generated independently and remains unchanged.
+The daily workflow saves a shared decision record, appends its full evidence to
+Markdown, and uploads the report and exact inputs before posting Slack. The
+execution registry no longer excludes deployed tools from the concise decision.
+Unscored and unclassified manifest tools are explicitly accounted for. Remaining
+**deployed** tools and remaining **assessed and retained** tools are separate
+counts. Incomplete roster discovery or unavailable decision inputs produces
+`DECISION UNAVAILABLE`.
+
+For offline replay, artifact contents, and failure behavior, see
+[DECISION_AUDIT.md](DECISION_AUDIT.md). The direct notifier and detailed-table
+opt-out remain available for diagnostics; the daily workflow posts only a
+verified saved bundle.
 
 A failed or cancelled job posts a separate message, `benchmark-flywheel did not complete`, naming the broken jobs with a link to the run. Treat anything else posted that morning as partial - open the run before acting.
 
@@ -77,7 +88,7 @@ Low reliability (`rel` < 80%) never decides — it annotates: `PROMOTE (rel 60%)
 | `keep (floor ok, condAcc NN%)` | passes the bar but condAcc dipped below 50% | keep an eye on it |
 | `demote: condAcc NN%` | deployed tool loses its disagreements | start the demote flow (§5) |
 | `demote: no-skill` | worse than its own base rate, in both windows | demote flow (§5) |
-| `n=X < 30` | too few scored markets to judge | nothing — *not enough data ≠ no improvement* |
+| `n=X < 30` | too few priced predictions to judge | nothing — *not enough data ≠ no improvement* |
 | `no data` | nothing scored in the window | nothing; check collection if persistent |
 | `no spread` | edge exists but no variance recorded (n < 2) | nothing |
 | `needs --rebuild` | scores file predates the spread field — migration state, not a data state | wait for the nightly rebuild; flag if it persists |

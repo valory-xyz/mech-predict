@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 from benchmark import notify_slack, report_audit, tool_usage
-from benchmark.digest_tables import WINDOW_FILES
+from benchmark.digest_tables import WINDOW_FILES, build_concise_digest_message
 from benchmark.report_audit import initialize, post, prepare, replay
 
 NEW_TOOL = "superforcaster-market-aware-olas-predict-r1-14b"
@@ -156,11 +156,70 @@ def test_failed_current_input_is_never_presented_as_current(
         )
     bundle = prepare(results, output, "polymarket", "Saved summary")
     record = json.loads((bundle / "decision.json").read_text())
-    assert record["decision"]["token"] == "DECISION UNAVAILABLE"
+    assert record["decision"]["token"] == "NO CHANGE"
     assert record["decision"]["demote"] == []
     assert record["windows"]["w1"]["generated_at"] is None
-    assert "rolling_scores_polymarket.json" in " ".join(record["errors"])
+    assert record["input_status"]["w1"]
+    assert record["production"]["bad"]["verdict"].startswith("unavailable")
+    assert record["production"]["good"]["verdict"] == "keep"
+    assert record["counts"]["remaining_unassessed"] == 1
     replay(bundle)
+
+
+@pytest.mark.parametrize("window", ["at", "w2", "tournament"])
+@pytest.mark.parametrize("failure", ["missing", "stale", "malformed"])
+def test_rejected_windows_only_disable_dependent_evaluations(
+    audit_run: tuple[Path, Path], window: str, failure: str
+) -> None:
+    """Optional failures retain production findings and exact offline replay."""
+    results, output = audit_run
+    name = WINDOW_FILES[window].format(platform="polymarket")
+    path = results / name
+    if failure == "missing":
+        path.unlink()
+    elif failure == "stale":
+        payload = json.loads(path.read_text())
+        payload["generated_at"] = "2000-01-01T00:00:00Z"
+        path.write_text(json.dumps(payload))
+    else:
+        path.write_text("{rejected")
+    bundle = prepare(results, output, "polymarket", "Original trend narrative")
+    record = json.loads((bundle / "decision.json").read_text())
+    message = json.dumps(replay(bundle))
+    if window == "at":
+        assert record["decision"]["token"] == "DECISION UNAVAILABLE"
+        assert record["decision"]["demote"] == []
+        assert record["counts"]["remaining_assessed"] == 0
+    else:
+        assert record["decision"]["demote"] == ["bad"]
+    if window == "tournament":
+        assert "Candidate evaluation unavailable" in message
+        assert "No tournament candidate qualifies" not in message
+        assert "Original trend narrative" in message
+    if window == "w2":
+        assert "Prev 7d unavailable" in message
+        assert "Original trend narrative" not in message
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["input_status"][name]
+    if failure != "missing":
+        assert (bundle / name).read_bytes() == path.read_bytes()
+        assert name in manifest["files"]
+
+
+def test_direct_notifier_preserves_production_without_optional_windows(
+    audit_run: tuple[Path, Path],
+) -> None:
+    """The unaudited entry point uses the same scoped input decisions."""
+    results, _ = audit_run
+    for window in ("w2", "tournament"):
+        (results / WINDOW_FILES[window].format(platform="polymarket")).unlink()
+    payload = build_concise_digest_message(
+        results, "polymarket", "Summary", deployed_tools=["bad", "good", NEW_TOOL]
+    )
+    assert payload is not None
+    text = json.dumps(payload)
+    assert "Decision: DEMOTE 1" in text
+    assert "Candidate evaluation unavailable" in text
 
 
 def test_initialize_removes_derived_outputs_and_preserves_resume_state(

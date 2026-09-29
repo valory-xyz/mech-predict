@@ -178,29 +178,28 @@ def _capture_inputs(
 
 def _decision_inputs(
     bundle: Path, manifest: dict[str, Any]
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
     """Load only accepted scores; rejected snapshots remain auditable."""
     payloads: dict[str, dict[str, Any]] = {}
-    errors = []
+    statuses = {}
     for key, template in WINDOW_FILES.items():
         name = template.format(platform=manifest["platform"])
         status = manifest["input_status"][name]
         payloads[key] = {} if status else _read(bundle / name)
-        if status:
-            errors.append(f"{name}: {status}.")
-    return payloads, errors
+        statuses[key] = status
+    return payloads, statuses
 
 
 def _rebuild(bundle: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     """Recompute decisions using saved roster, registry scope, and scores."""
-    payloads, errors = _decision_inputs(bundle, manifest)
+    payloads, statuses = _decision_inputs(bundle, manifest)
     snapshot = _read(bundle / "deployment_snapshot.json")
     return build_decision_record(
         manifest["platform"],
         payloads,
         platform_roster(snapshot, manifest["platform"]),
         manifest["run"]["prediction_tools"],
-        input_errors=errors,
+        input_status=statuses,
     )
 
 
@@ -218,10 +217,22 @@ def _render(
             name = template.format(platform=manifest["platform"])
             if manifest["input_status"][name] is None:
                 shutil.copyfile(bundle / name, accepted / name)
+        summary = (bundle / "summary.txt").read_text(encoding="utf-8")
+        # Saved prose can refer to a rejected comparison. Keep it in the
+        # artifact, but do not present that narrative as a verified trend.
+        if any(
+            manifest["input_status"][name]
+            for name in (
+                WINDOW_FILES["w1"].format(platform=manifest["platform"]),
+                WINDOW_FILES["w2"].format(platform=manifest["platform"]),
+                f"analysis_scores_{manifest['platform']}.json",
+            )
+        ):
+            summary = "*Summary:* Trend summary unavailable because an analysis or comparison input was rejected; consult the available decision evidence."
         payload = build_concise_digest_message(
             accepted,
             manifest["platform"],
-            (bundle / "summary.txt").read_text(encoding="utf-8"),
+            summary,
             decision_record=record,
         )
         if payload is None:

@@ -25,7 +25,7 @@ No clocks, network calls, or LLM output participate in the decision.
 
 from __future__ import annotations
 
-from typing import Any, Collection
+from typing import Any, Collection, Mapping
 
 from benchmark.decision_policy import (
     COIN_FLIP,
@@ -34,11 +34,13 @@ from benchmark.decision_policy import (
     PROMOTE_DELTA,
     RELIABILITY_GATE,
     Z_ONE_SIDED_95,
+    _below_no_skill,
     _decision_state,
     _edge_lower_bound,
     _num,
     _survivors,
     _verdict,
+    _verdict_core,
 )
 from benchmark.tool_usage import normalize_tool_name
 
@@ -54,6 +56,12 @@ METRICS = (
     "disagree_n",
     "reliability",
 )
+WINDOW_LABELS = {
+    "at": "90d",
+    "w1": "Current 7d",
+    "w2": "Prev 7d",
+    "tournament": "Tournament",
+}
 
 
 def policy_parameters() -> dict[str, Any]:
@@ -90,7 +98,15 @@ def _rule(verdict: str) -> str:
     if verdict.startswith(("PROMOTE", "keep (floor ok")):
         return "promotion_floor"
     if verdict.startswith(
-        ("no data", "n=", "no spread", "needs --rebuild", "unknown", "ambiguous")
+        (
+            "no data",
+            "n=",
+            "no spread",
+            "needs --rebuild",
+            "unknown",
+            "ambiguous",
+            "unavailable",
+        )
     ):
         return "insufficient_evidence"
     return "no_action_threshold_met"
@@ -100,12 +116,58 @@ def _index(payload: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
     """Index aliases without merging possibly overlapping scored pools."""
     result: dict[str, Any] = {}
     ambiguous: set[str] = set()
-    for name, stats in (payload.get("by_tool") or {}).items():
+    for name, stats in sorted((payload.get("by_tool") or {}).items()):
         canonical = normalize_tool_name(name)
         if canonical in result:
             ambiguous.add(canonical)
         result[canonical] = (name, stats)
+    for canonical in ambiguous:
+        del result[canonical]
     return result, ambiguous
+
+
+def _production_verdict(
+    at: dict[str, Any], week: dict[str, Any], issues: dict[str, str]
+) -> str:
+    """Reject only inputs reached by this tool's existing policy gates.
+
+    A failed week differs from a valid, empty week. Do not let the policy's
+    absent-week fallback turn an unevaluated baseline gate into a survivor.
+    """
+    if "at" in issues:
+        return issues["at"]
+    if "w1" in issues and _below_no_skill(at) and _verdict_core(at, True) == "keep":
+        return issues["w1"]
+    return _verdict(at, True, week)
+
+
+def _candidate_records(payload: dict[str, Any], known: set[str]) -> dict[str, Any]:
+    """Assess candidates independently, retaining the existing eligibility scope."""
+    # Retain the existing tournament eligibility scope; this PR repairs
+    # production membership without broadening the candidate policy.
+    candidates: dict[str, Any] = {}
+    tournament, collisions = _index(payload)
+    for canonical in sorted(set(tournament) | collisions):
+        candidate_aliases = {
+            name: stats
+            for name, stats in payload.get("by_tool", {}).items()
+            if normalize_tool_name(name) == canonical
+        }
+        name = sorted(candidate_aliases)[0]
+        stats = tournament.get(canonical, (None, {}))[1]
+        if canonical not in known or not any(
+            _num(row.get("brier")) is not None for row in candidate_aliases.values()
+        ):
+            continue
+        verdict = _verdict(stats, False)
+        if canonical in collisions:
+            verdict = "ambiguous score aliases"
+        candidates[name] = {
+            "verdict": verdict,
+            "rule": _rule(verdict),
+            "evidence": {"tournament": _evidence(stats)},
+        }
+    return candidates
 
 
 def build_decision_record(
@@ -114,7 +176,7 @@ def build_decision_record(
     roster: dict[str, Any],
     prediction_tools: Collection[str],
     *,
-    input_errors: Collection[str] = (),
+    input_status: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
     """Account for the full roster and apply the existing policy once.
 
@@ -122,32 +184,59 @@ def build_decision_record(
     :param payloads: exact scores keyed by at, w1, w2, tournament.
     :param roster: saved platform deployment snapshot with status and tools.
     :param prediction_tools: known forecasting tools, including unscored ones.
-    :param input_errors: missing, malformed, or stale required inputs.
+    :param input_status: rejection reasons keyed by input window; None is accepted.
     :return: JSON-serializable evidence and actionable decision.
     """
+    statuses = {
+        key: (input_status or {}).get(key) or (None if payloads.get(key) else "missing")
+        for key in WINDOW_LABELS
+    }
+    for key, payload in payloads.items():
+        groups = payload.get("by_tool")
+        if (
+            key in statuses
+            and not statuses[key]
+            and (
+                not isinstance(groups, dict)
+                or any(not isinstance(stats, dict) for stats in groups.values())
+            )
+        ):
+            statuses[key] = "malformed tool statistics"
+    payloads = {key: {} if statuses[key] else payloads[key] for key in WINDOW_LABELS}
     indexes = {key: _index(value) for key, value in payloads.items()}
     known = {normalize_tool_name(name) for name in prediction_tools}
     names: dict[str, list[str]] = {}
     for name in roster.get("tools", []):
         names.setdefault(normalize_tool_name(name), []).append(name)
-    errors = list(input_errors)
+    errors = []
     if roster.get("status") != "complete":
         errors.append("Deployment roster is incomplete or unavailable.")
     production: dict[str, Any] = {}
-    candidates: dict[str, Any] = {}
     for canonical, aliases in sorted(names.items()):
         at = indexes.get("at", ({}, set()))[0].get(canonical, (None, {}))[1]
         week = indexes.get("w1", ({}, set()))[0].get(canonical, (None, {}))[1]
-        scored_names = [
-            index[canonical][0]
-            for key, (index, _) in indexes.items()
-            if key != "tournament" and canonical in index
-        ]
-        name = sorted(set(scored_names))[0] if scored_names else sorted(aliases)[0]
-        ambiguous = any(canonical in collisions for _, collisions in indexes.values())
+        name = min(
+            [
+                index[canonical][0]
+                for key, (index, _) in indexes.items()
+                if key != "tournament" and canonical in index
+            ]
+            or aliases
+        )
+        issues = {
+            key: (
+                f"unavailable {WINDOW_LABELS[key]} scores: {statuses[key]}"
+                if statuses[key]
+                else f"ambiguous score aliases in {WINDOW_LABELS[key]}"
+            )
+            for key in ("at", "w1")
+            if statuses[key] or canonical in indexes[key][1]
+        }
         has_prediction = any(
-            _num(index.get(canonical, (None, {}))[1].get("brier")) is not None
-            for index, _ in indexes.values()
+            _num(stats.get("brier")) is not None
+            for payload in payloads.values()
+            for scored_name, stats in payload.get("by_tool", {}).items()
+            if normalize_tool_name(scored_name) == canonical
         )
         classification = (
             "prediction"
@@ -163,7 +252,7 @@ def build_decision_record(
             )
         )
         verdict = (
-            _verdict(at, True, week)
+            _production_verdict(at, week, issues)
             if classification == "prediction"
             else (
                 "not a prediction tool"
@@ -171,32 +260,16 @@ def build_decision_record(
                 else "unknown tool classification"
             )
         )
-        if ambiguous:
-            verdict = "ambiguous score aliases"
-            errors.append(f"{name}: multiple score keys normalize to {canonical}.")
         production[name] = {
             "canonical_name": canonical,
             "manifest_names": sorted(set(aliases)),
             "classification": classification,
             "verdict": verdict,
             "rule": _rule(verdict),
+            "input_issues": issues,
             "evidence": {"at": _evidence(at), "w1": _evidence(week)},
         }
-    # Retain the existing tournament eligibility scope; this PR repairs
-    # production membership without broadening the candidate policy.
-    tournament, collisions = indexes.get("tournament", ({}, set()))
-    for canonical, (name, stats) in sorted(tournament.items()):
-        if canonical not in known or _num(stats.get("brier")) is None:
-            continue
-        verdict = _verdict(stats, False)
-        if canonical in collisions:
-            verdict = "ambiguous score aliases"
-            errors.append(f"{name}: ambiguous tournament score aliases.")
-        candidates[name] = {
-            "verdict": verdict,
-            "rule": _rule(verdict),
-            "evidence": {"tournament": _evidence(stats)},
-        }
+    candidates = _candidate_records(payloads["tournament"], known)
     prod = {
         name: row["verdict"]
         for name, row in production.items()
@@ -204,6 +277,8 @@ def build_decision_record(
     }
     tourn = {name: row["verdict"] for name, row in candidates.items()}
     state, token, promote, demote = _decision_state(prod, tourn)
+    if statuses["at"] and not promote:
+        errors.append("Production evaluation unavailable: 90d scores were rejected.")
     if errors:
         state, token, promote, demote = "unavailable", "DECISION UNAVAILABLE", [], []
     # Blocked policy results are findings, not proposed removals.
@@ -224,6 +299,12 @@ def build_decision_record(
             for key, value in payloads.items()
         },
         "roster_status": roster.get("status"),
+        "input_status": statuses,
+        "ambiguous_inputs": {
+            key: sorted(collisions)
+            for key, (_, collisions) in indexes.items()
+            if collisions
+        },
         "production": production,
         "tournament": candidates,
         "decision": {
@@ -309,6 +390,11 @@ def evidence_text(row: dict[str, Any]) -> str:
 def decision_text(record: dict[str, Any]) -> str:
     """Render the action, roster accounting, and decisive evidence for Slack."""
     action = record["decision"]
+    candidate_status = record["input_status"]["tournament"]
+    ambiguous_candidates = any(
+        row["verdict"].startswith("ambiguous") for row in record["tournament"].values()
+    )
+    candidates_complete = not candidate_status and not ambiguous_candidates
     lines = [f"*Decision: {action['token']}*"]
     if action["state"] == "unavailable":
         lines.extend(record["errors"])
@@ -318,9 +404,18 @@ def decision_text(record: dict[str, Any]) -> str:
             "No production tool has an assessed keep verdict. Resolve unassessed tools and review failures at platform level before removing tools."
         )
     elif action["token"] == "NO CHANGE":
-        lines.append(
-            "No candidate qualifies for promotion, and no assessed production tool meets the demotion criteria."
-        )
+        lines.append("No assessed production tool meets the demotion criteria.")
+    for key, status in record["input_status"].items():
+        if status:
+            label = (
+                "Candidate evaluation" if key == "tournament" else WINDOW_LABELS[key]
+            )
+            lines.append(f"Warning: {label} unavailable — {status}.")
+    for key in ("w2", "tournament"):
+        for name in record["ambiguous_inputs"].get(key, []):
+            lines.append(
+                f"Warning: `{name}` — ambiguous score aliases in {WINDOW_LABELS[key]}; excluded from that evaluation."
+            )
     for kind, cohort in (("promote", "tournament"), ("demote", "production")):
         for name in action[kind]:
             row = record[cohort][name]
@@ -343,8 +438,10 @@ def decision_text(record: dict[str, Any]) -> str:
             and row["classification"] != "non_prediction"
         ):
             lines.append(f"Warning: `{name}` — {row['verdict']}.")
-    if action["demote"] and not action["promote"]:
+    if action["demote"] and not action["promote"] and candidates_complete:
         lines.append("No tournament candidate qualifies as a replacement.")
+    elif action["token"] == "NO CHANGE" and candidates_complete:
+        lines.append("No candidate qualifies for promotion.")
     if action["promote"] or action["demote"]:
         lines.append(
             "*Next step:* Review the proposed changes; confirm promotions on an independent window or holdout before deployment."

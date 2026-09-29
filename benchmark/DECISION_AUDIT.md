@@ -101,10 +101,19 @@ message without sending it; `notify_slack=false` still disables workflow posts.
 
 ## Failure behavior
 
-- Missing, malformed, or stale decision windows: **DECISION UNAVAILABLE**;
-  available per-tool findings remain in the full report.
-- Partial deployment lookup or ambiguous score aliases: **DECISION UNAVAILABLE**;
-  no claim that a proposed removal leaves adequate coverage.
+- Missing, malformed, or stale inputs only disable dependent evaluations:
+  90d scores are required for production verdicts; Current 7d scores are required
+  for the sustained-baseline gate; tournament scores gate candidates; Prev 7d
+  scores only affect comparisons. Rejected candidate inputs mean **candidate
+  evaluation unavailable**, not that no candidate qualifies. A failed weekly
+  input cannot turn an unevaluated baseline gate into an assessed survivor;
+  a valid empty or thin week retains the existing policy behavior.
+- A rejected analysis/comparison input suppresses the saved trend narrative in
+  Slack, while preserving it in the artifact. Production evidence remains usable.
+- Ambiguous aliases are excluded only from the affected tool/window evaluation.
+  Aggregates are never merged or picked arbitrarily; original inputs remain saved.
+- Partial deployment lookup: **DECISION UNAVAILABLE**; no claim that a proposed
+  removal leaves adequate coverage. Available findings remain in the full report.
 - A deployed tool with no usable scores: explicitly unassessed, retained in the
   roster and remaining-deployed count.
 - Every assessed forecaster fails: preserve the existing replace-first/platform

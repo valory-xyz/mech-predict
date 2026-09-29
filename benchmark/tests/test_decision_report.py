@@ -21,6 +21,7 @@
 import copy
 from typing import Any
 
+import pytest
 from benchmark.decision_report import (
     build_decision_record,
     decision_markdown,
@@ -97,7 +98,7 @@ def test_unscored_unknown_and_non_prediction_tools_are_accounted_for() -> None:
 
 
 def test_aliases_match_across_windows_without_merging_duplicate_score_keys() -> None:
-    """Cross-window spelling changes work; within-window collisions block actions."""
+    """Only collisions in inputs consumed by the verdict prevent assessment."""
     payloads = _payloads({"tool_name": _stats()})
     payloads["w1"]["by_tool"] = {"tool-name": _stats(brier=0.30)}
     roster = {"status": "complete", "tools": ["tool-name", "tool_name"]}
@@ -108,8 +109,92 @@ def test_aliases_match_across_windows_without_merging_duplicate_score_keys() -> 
     assert row["evidence"]["at"]["brier"] == 0.20
     payloads["w1"]["by_tool"]["tool_name"] = _stats()
     record = build_decision_record("omen", payloads, roster, [])
-    assert record["decision"]["token"] == "DECISION UNAVAILABLE"
-    assert "multiple score keys" in " ".join(record["errors"])
+    assert record["production"]["tool_name"]["verdict"] == "keep"
+    assert record["production"]["tool_name"]["evidence"]["w1"]["brier"] is None
+    payloads["at"]["by_tool"]["tool_name"]["brier"] = 0.31
+    record = build_decision_record("omen", payloads, roster, [])
+    assert record["production"]["tool_name"]["verdict"].startswith("ambiguous")
+    assert record["counts"]["remaining_assessed"] == 0
+    assert record["decision"]["token"] == "NO ACTION"
+
+
+@pytest.mark.parametrize("window", ["at", "w1", "w2", "tournament"])
+def test_alias_collision_is_local_to_tool_and_consumed_window(window: str) -> None:
+    """Neither optional-window aliases nor an unrelated tool suppress verdicts."""
+    rows = {
+        "bad": _stats(brier=0.31),
+        "good": _stats(),
+        "alias-tool": _stats(brier=0.31),
+    }
+    payloads = _payloads(rows)
+    payloads[window]["by_tool"].update(
+        {"alias-tool": _stats(brier=0.31), "alias_tool": _stats(brier=0.33)}
+    )
+    record = build_decision_record(
+        "omen", payloads, {"status": "complete", "tools": list(rows)}, list(rows)
+    )
+    assert "bad" in record["decision"]["demote"]
+    row = record["production"]["alias-tool"]
+    if window in ("at", "w1"):
+        assert row["verdict"].startswith("ambiguous")
+        assert row["evidence"][window]["brier"] is None
+        assert record["counts"]["remaining_unassessed"] == 1
+    else:
+        assert "alias-tool" in record["decision"]["demote"]
+    assert record["errors"] == []
+
+
+def test_ambiguous_candidate_does_not_block_other_promotions() -> None:
+    """Overlapping candidate aggregates are not merged or selected arbitrarily."""
+    payloads = _payloads({"good": _stats()})
+    payloads["tournament"]["by_tool"] = {
+        name: _stats(edge=0.20) for name in ("alias-tool", "alias_tool", "candidate")
+    }
+    record = build_decision_record(
+        "omen",
+        payloads,
+        {"status": "complete", "tools": ["good"]},
+        ["alias-tool", "candidate"],
+    )
+    assert record["decision"]["promote"] == ["candidate"]
+    assert record["tournament"]["alias-tool"]["evidence"]["tournament"]["brier"] is None
+
+
+def test_failed_week_cannot_supply_a_survivor_but_valid_empty_week_keeps_policy() -> (
+    None
+):
+    """An unavailable baseline confirmation cannot justify another removal."""
+    rows = {
+        "conditional": _stats(conditional_accuracy_rate=0.40),
+        "baseline": _stats(brier=0.31),
+    }
+    payloads = _payloads(rows)
+    payloads["w1"] = {}
+    roster = {"status": "complete", "tools": list(rows)}
+    record = build_decision_record("omen", payloads, roster, list(rows))
+    assert record["production"]["conditional"]["verdict"].startswith("demote")
+    assert record["production"]["baseline"]["verdict"].startswith("unavailable")
+    assert record["decision"]["demote"] == []
+    assert record["counts"]["remaining_assessed"] == 0
+    payloads["w1"] = {"by_tool": {}}
+    record = build_decision_record("omen", payloads, roster, list(rows))
+    assert record["production"]["baseline"]["verdict"] == "keep"
+    assert record["decision"]["demote"] == ["conditional"]
+
+
+def test_conditional_demotion_and_floor_keep_do_not_require_week() -> None:
+    """Existing earlier gates can establish a safe action without weekly data."""
+    rows = {
+        "conditional": _stats(conditional_accuracy_rate=0.40),
+        "floor": _stats(edge=0.20, brier=0.31),
+    }
+    payloads = _payloads(rows)
+    payloads["w1"] = {}
+    record = build_decision_record(
+        "omen", payloads, {"status": "complete", "tools": list(rows)}, list(rows)
+    )
+    assert record["decision"]["demote"] == ["conditional"]
+    assert record["production"]["floor"]["verdict"] == "keep (floor ok)"
 
 
 def test_roster_failure_suppresses_proposals_and_remaining_count() -> None:

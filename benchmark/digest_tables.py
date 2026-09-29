@@ -961,13 +961,17 @@ def _align_evidence_names(
         key: {
             display_names.get(normalize_tool_name(name), name): stats
             for name, stats in rows.items()
+            if normalize_tool_name(name)
+            not in decision_record.get("ambiguous_inputs", {}).get(key, [])
         }
         for key, rows in windows.items()
     }
     categories = {}
     for key, stats in (rolling_payload.get("by_tool_category") or {}).items():
         tool, separator, category = key.partition(" | ")
-        if separator:
+        if separator and normalize_tool_name(tool) not in decision_record.get(
+            "ambiguous_inputs", {}
+        ).get("w1", []):
             display = display_names.get(normalize_tool_name(tool), tool)
             categories[f"{display} | {category}"] = stats
     return windows, categories
@@ -1018,9 +1022,6 @@ def build_concise_digest_message(
             payloads,
             roster,
             allowed_tools or (),
-            input_errors=[
-                f"Missing {key} scores." for key in paths if not payloads[key]
-            ],
         )
     prod = {
         name: row["verdict"]

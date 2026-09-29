@@ -52,20 +52,15 @@ import math
 from pathlib import Path
 from typing import Any, Collection, Iterable, Sequence
 
-from benchmark.decision_policy import COIN_FLIP as COIN_FLIP
-from benchmark.decision_policy import NO_SKILL_MARGIN as NO_SKILL_MARGIN
-from benchmark.decision_policy import PROMOTE_DELTA as PROMOTE_DELTA
-from benchmark.decision_policy import Z_ONE_SIDED_95 as Z_ONE_SIDED_95
-from benchmark.decision_policy import _below_no_skill as _below_no_skill
-from benchmark.decision_policy import _below_reliability as _below_reliability
-from benchmark.decision_policy import _decision_state as _decision_state
-from benchmark.decision_policy import _edge_lower_bound as _edge_lower_bound
-from benchmark.decision_policy import _has_floor as _has_floor
-from benchmark.decision_policy import _num as _num
-from benchmark.decision_policy import _survivors as _survivors
-from benchmark.decision_policy import _verdict as _verdict
-from benchmark.decision_policy import _verdict_core as _verdict_core
-from benchmark.decision_policy import _verdicts_for as _verdicts_for
+from benchmark.decision_policy import (
+    PROMOTE_DELTA,
+    _edge_lower_bound,
+    _has_floor,
+    _num,
+    _survivors,
+    _verdicts_for,
+)
+from benchmark.decision_report import build_decision_record, decision_text
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 from benchmark.slack_blocks import Col, context, header, message, section, table_block
@@ -880,96 +875,6 @@ def _category_signal_text(
     return "\n".join(bullets)
 
 
-def _decision_text(
-    prod: dict[str, str],
-    tourn: dict[str, str],
-    windows: dict[str, dict[str, dict[str, Any]]],
-) -> tuple[str, set[str], str]:
-    """Render today's action and its minimum decisive evidence."""
-    state, token, promote, demote = _decision_state(prod, tourn)
-    lines = [f"{VERDICT_MARKER[state]} *Decision: {token}*"]
-    priority = set(promote) | set(demote)
-
-    if state == "blocked":
-        lines.append(
-            "No deployed tool clears the gate. Do not demote tools one by one; "
-            "treat this as a platform-level problem."
-        )
-        return "\n\n".join(lines), priority, token
-
-    if not promote and not demote:
-        lines.append(
-            "No candidate qualifies for promotion, and no production tool "
-            "meets the demotion criteria."
-        )
-
-    for tool in promote:
-        stats = windows["tournament"].get(tool) or {}
-        count = _num(stats.get("edge_n"))
-        if count is None:
-            count = _num(stats.get("valid_n"))
-        n = int(count or 0)
-        lines.append(
-            f"• `{tool}`\n"
-            f"  Promotion gate passed: floor `{_floor(stats)}`; "
-            f"condAcc `{_conditional(stats)}`; n={n:,}."
-        )
-    if token.endswith(" FIRST"):
-        lines.append(
-            "All current production tools fail the gate. Deploy a qualified "
-            "replacement before reviewing any demotion."
-        )
-
-    for tool in demote:
-        verdict = prod[tool]
-        at_stats = windows["at"].get(tool) or {}
-        w1_stats = windows["w1"].get(tool) or {}
-        if "condAcc" in verdict:
-            reason = (
-                "Loses market disagreements: " f"condAcc `{_conditional(at_stats)}`."
-            )
-        elif "no-skill" in verdict:
-            reason = (
-                "Sustained no-skill: Edge 90d "
-                f"`{_score(at_stats.get('edge'), signed=True)}`; Edge 7d "
-                f"`{_score(w1_stats.get('edge'), signed=True)}`."
-            )
-        else:
-            reason = verdict.removeprefix("demote:").strip().capitalize() + "."
-        lines.append(f"• `{tool}`\n  {reason}")
-
-    suffix = "" if len(demote) == 1 else "s"
-    if demote:
-        ready = [
-            tool for tool, verdict in tourn.items() if verdict.startswith("PROMOTE")
-        ]
-        if not ready:
-            lines.append("No tournament candidate qualifies as a replacement.")
-        survivors = len(_survivors(prod))
-        noun = "tool" if survivors == 1 else "tools"
-        lines.append(
-            f"{survivors} production {noun} would remain after the proposed "
-            "demotions."
-        )
-    if promote and demote:
-        lines.append(
-            "*Next step:* Confirm each promotion on the required independent "
-            "window or holdout, and review and approve the proposed "
-            f"demotion{suffix}."
-        )
-    elif promote:
-        lines.append(
-            "*Next step:* Confirm each promotion on the required independent "
-            "window or holdout before deployment."
-        )
-    elif demote:
-        lines.append(
-            f"*Next step:* Review and approve the {len(demote)} proposed "
-            f"demotion{suffix}."
-        )
-    return "\n\n".join(lines), priority, token
-
-
 def _decision_warnings(
     prod: dict[str, str],
     windows: dict[str, dict[str, dict[str, Any]]],
@@ -1042,6 +947,32 @@ def _decision_warnings(
     return warnings
 
 
+def _align_evidence_names(
+    decision_record: dict[str, Any],
+    windows: dict[str, Any],
+    rolling_payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Use the decision's display name across window and category aliases."""
+    display_names = {
+        row["canonical_name"]: name
+        for name, row in decision_record["production"].items()
+    }
+    windows = {
+        key: {
+            display_names.get(normalize_tool_name(name), name): stats
+            for name, stats in rows.items()
+        }
+        for key, rows in windows.items()
+    }
+    categories = {}
+    for key, stats in (rolling_payload.get("by_tool_category") or {}).items():
+        tool, separator, category = key.partition(" | ")
+        if separator:
+            display = display_names.get(normalize_tool_name(tool), tool)
+            categories[f"{display} | {category}"] = stats
+    return windows, categories
+
+
 def build_concise_digest_message(
     results_dir: Path,
     platform: str,
@@ -1049,6 +980,7 @@ def build_concise_digest_message(
     allowed_tools: Collection[str] | None = None,
     deployed_tools: Collection[str] | None = None,
     report_url: str | None = None,
+    decision_record: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Build the one-message Slack view for a human decision maker.
 
@@ -1061,42 +993,48 @@ def build_concise_digest_message(
     :param summary: short platform-level Brier trend in Slack mrkdwn.
     :param allowed_tools: optional prediction-tool allowlist.
     :param deployed_tools: optional live production roster.
-    :param report_url: optional link to the unchanged Markdown artifact.
-    :return: one Slack webhook payload, or None when there are no scored tools.
+    :param report_url: optional link to the complete audit artifact.
+    :param decision_record: saved shared decision; no roster lookup when supplied.
+    :return: one Slack webhook payload, including unavailable-input notices.
     """
     paths = {
         key: results_dir / name.format(platform=platform)
         for key, name in WINDOW_FILES.items()
     }
-    rolling_payload = _load_payload(paths["w1"])
-    windows = {
-        key: (
-            (_by_tool(rolling_payload, path) if rolling_payload is not None else {})
-            if key == "w1"
-            else _load_by_tool(path)
+    payloads = {key: _load_payload(path) or {} for key, path in paths.items()}
+    windows = {key: _by_tool(payloads[key], path) for key, path in paths.items()}
+    rolling_payload = payloads["w1"]
+    if decision_record is None:
+        roster = {
+            "status": "complete" if deployed_tools is not None else "unavailable",
+            "tools": sorted(
+                deployed_tools
+                if deployed_tools is not None
+                else (_scored(windows["at"]) | _scored(windows["w1"]))
+            ),
+        }
+        decision_record = build_decision_record(
+            platform,
+            payloads,
+            roster,
+            allowed_tools or (),
+            input_errors=[
+                f"Missing {key} scores." for key in paths if not payloads[key]
+            ],
         )
-        for key, path in paths.items()
+    prod = {
+        name: row["verdict"]
+        for name, row in decision_record["production"].items()
+        if row["classification"] != "non_prediction"
     }
-
-    prod_tools = _scored(windows["at"]) | _scored(windows["w1"])
-    tourn_tools = _scored(windows["tournament"])
-    if allowed_tools is not None:
-        permitted = set(allowed_tools)
-        prod_tools &= permitted
-        tourn_tools &= permitted
-        prod_tools |= _ran_but_unscored(windows["at"], permitted)
-        prod_tools |= _ran_but_unscored(windows["w1"], permitted)
-    if deployed_tools is not None:
-        live = {normalize_tool_name(tool) for tool in deployed_tools}
-        prod_tools = {tool for tool in prod_tools if normalize_tool_name(tool) in live}
-    if not prod_tools and not tourn_tools:
-        return None
-
-    prod = _verdicts_for(
-        sorted(prod_tools), windows["at"], deployed=True, w1=windows["w1"]
+    prod_tools = set(prod)
+    windows, categories = _align_evidence_names(
+        decision_record, windows, rolling_payload
     )
-    tourn = _verdicts_for(sorted(tourn_tools), windows["tournament"], deployed=False)
-    decision, priority, token = _decision_text(prod, tourn, windows)
+    action = decision_record["decision"]
+    priority = set(action["promote"]) | set(action["demote"])
+    token = action["token"]
+    decision = decision_text(decision_record)
     at_path = results_dir / WINDOW_FILES["at"].format(platform=platform)
     as_of = _as_of_date(at_path)
     label = PLATFORM_TITLES.get(platform, platform.title())
@@ -1105,12 +1043,10 @@ def build_concise_digest_message(
     rule = TITLE_RULE_CHAR * max(TITLE_RULE_MIN, display_width(line))
     title = f"{rule}\n{line}\n{rule}"
 
-    category_text = _category_signal_text(
-        (rolling_payload or {}).get("by_tool_category") or {}, prod_tools, priority
-    )
+    category_text = _category_signal_text(categories, prod_tools, priority)
     blocks: list[dict[str, Any]] = [
         header(title),
-        section(decision),
+        *[section(part) for part in decision.split("\n\n")],
         section(summary),
         section(category_text),
     ]

@@ -267,7 +267,9 @@ def fetch_tools_for_metadata(metadata_hash: str) -> list[str]:
     return tools
 
 
-def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
+def resolve_mech_tools(
+    addresses: list[str], subgraph_url: str, provenance: dict[str, Any] | None = None
+) -> list[str]:
     """Resolve a deployment's ``valid_mechs`` to the union of tools they offer.
 
     Looks up each address' on-chain metadata CID via the marketplace
@@ -292,6 +294,7 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
 
     :param addresses: mech contract addresses (the parsed ``valid_mechs``).
     :param subgraph_url: marketplace subgraph endpoint for the chain.
+    :param provenance: optional audit output; requires metadata for every mech.
     :return: sorted union of advertised tool names; ``[]`` when ``addresses``
         is empty (a real "no mechs allow-listed" state, not a failure).
     :raises ValueError: when the subgraph does not return every requested
@@ -313,10 +316,21 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
         )
 
     metadata_hashes: set[str] = set()
+    missing_metadata: list[str] = []
+    if provenance is not None:
+        provenance["mechs"] = {}
     for mech in meches:
         manifests = (mech.get("service") or {}).get("metadata") or []
         if manifests and manifests[0].get("metadata"):
-            metadata_hashes.add(manifests[0]["metadata"])
+            metadata_hash = manifests[0]["metadata"]
+            metadata_hashes.add(metadata_hash)
+            if provenance is not None:
+                provenance["mechs"][mech["address"].lower()] = metadata_hash
+        else:
+            missing_metadata.append(mech["address"])
+
+    if provenance is not None and missing_metadata:
+        raise ValueError("Missing metadata for mech(s): " + ", ".join(missing_metadata))
 
     if not metadata_hashes:
         raise ValueError(
@@ -324,8 +338,14 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
         )
 
     tools: set[str] = set()
-    for metadata_hash in metadata_hashes:
-        tools.update(fetch_tools_for_metadata(metadata_hash))
+    if provenance is not None:
+        provenance["manifests"] = {}
+    for metadata_hash in sorted(metadata_hashes):
+        manifest_tools = fetch_tools_for_metadata(metadata_hash)
+        tools.update(manifest_tools)
+        if provenance is not None:
+            digest = metadata_hash.removeprefix("0x")
+            provenance["manifests"][CID_PREFIX + digest] = manifest_tools
     return sorted(tools)
 
 
@@ -363,3 +383,63 @@ def fetch_valid_tools() -> dict[str, list[str] | None]:
             log.warning("%s selectable-tools resolution failed: %s", deployment, exc)
 
     return valid
+
+
+def fetch_deployment_snapshot() -> dict[str, Any]:
+    """Capture deployment membership and immutable manifest references once.
+
+    :return: serializable snapshot; failures are explicit per deployment.
+    """
+    snapshot: dict[str, Any] = {"release_ref": None, "deployments": {}}
+    try:
+        snapshot["release_ref"] = latest_trader_ref()
+    except (URLError, ValueError, OSError) as exc:
+        snapshot["error"] = str(exc)
+    for name, (service, chain, platform) in _DEPLOYMENTS.items():
+        row: dict[str, Any] = {
+            "platform": platform,
+            "status": "unavailable",
+            "tools": [],
+        }
+        snapshot["deployments"][name] = row
+        if snapshot["release_ref"] is None:
+            continue
+        try:
+            url = TRADER_SERVICE_YAML_URL.format(
+                ref=snapshot["release_ref"], service=service
+            )
+            source = _http_get(url)
+            row["service_url"] = url
+            row["valid_mechs"] = parse_valid_mechs(source)
+            row["tools"] = resolve_mech_tools(
+                row["valid_mechs"], MARKETPLACE_SUBGRAPH_URL[chain], row
+            )
+            row["status"] = "complete"
+        except (URLError, ValueError, OSError) as exc:
+            row["error"] = str(exc)
+            log.warning("%s audit roster unavailable: %s", name, exc)
+    return snapshot
+
+
+def snapshot_valid_tools(snapshot: dict[str, Any]) -> dict[str, list[str] | None]:
+    """Adapt a frozen snapshot to the existing Markdown analysis API."""
+    return {
+        name: row["tools"] if row["status"] == "complete" else None
+        for name, row in snapshot["deployments"].items()
+    }
+
+
+def platform_roster(snapshot: dict[str, Any], platform: str) -> dict[str, Any]:
+    """Select a complete platform roster, retaining explicit failure status."""
+    rows = [
+        snapshot.get("deployments", {}).get(name, {})
+        for name in deployments_for_platform(platform)
+    ]
+    return {
+        "status": (
+            "complete"
+            if rows and all(row.get("status") == "complete" for row in rows)
+            else "unavailable"
+        ),
+        "tools": sorted({tool for row in rows for tool in row.get("tools", [])}),
+    }

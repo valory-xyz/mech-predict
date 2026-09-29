@@ -10,8 +10,13 @@ The existing promotion and demotion thresholds are unchanged.
 1. Check **roster coverage**. Every distinct deployed manifest tool is accounted
    for, including tools absent from the execution registry. A usable prediction
    establishes forecasting capability. Registry membership also identifies a
-   forecaster that has no scores. Otherwise the tool is explicitly unclassified;
-   a zero score count is never proof that it is a non-prediction tool.
+   forecaster that has no scores. The explicit component-role mapping in
+   `tool_usage.NON_PREDICTION_TOOLS` identifies `propose-question` (question
+   creation) and `resolve-market-jury-v1` (resolution). Their source paths and
+   classification are frozen in the deployment snapshot; they remain visible
+   as confirmed non-prediction manifest members, outside forecasting counts.
+   Otherwise the tool is explicitly unclassified; a zero score count is never
+   proof that it is a non-prediction tool.
 2. Read the actual trigger. A sustained-baseline demotion shows the Brier,
    baseline, difference, and scored count in both production windows. Conditional
    accuracy shows its disagreement count; the Edge lower bound and priced count

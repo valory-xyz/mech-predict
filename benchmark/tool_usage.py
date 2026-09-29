@@ -71,6 +71,15 @@ DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
     {name: platform for name, (_service, _chain, platform) in _DEPLOYMENTS.items()}
 )
 
+# Explicit component roles, never inferred from absent forecast scores. Capture
+# this mapping in the audit snapshot so replay cannot pick up later additions.
+NON_PREDICTION_TOOLS: Mapping[str, str] = MappingProxyType(
+    {
+        "propose-question": "packages/valory/customs/propose_question/propose_question.py",
+        "resolve-market-jury-v1": "packages/valory/customs/resolve_market_jury/resolve_market_jury.py",
+    }
+)
+
 
 def deployments_for_platform(platform: str) -> tuple[str, ...]:
     """Return the deployment names belonging to ``platform``, in declared order.
@@ -390,7 +399,11 @@ def fetch_deployment_snapshot() -> dict[str, Any]:
 
     :return: serializable snapshot; failures are explicit per deployment.
     """
-    snapshot: dict[str, Any] = {"release_ref": None, "deployments": {}}
+    snapshot: dict[str, Any] = {
+        "release_ref": None,
+        "deployments": {},
+        "non_prediction_tools": dict(NON_PREDICTION_TOOLS),
+    }
     try:
         snapshot["release_ref"] = latest_trader_ref()
     except (URLError, ValueError, OSError) as exc:
@@ -435,11 +448,17 @@ def platform_roster(snapshot: dict[str, Any], platform: str) -> dict[str, Any]:
         snapshot.get("deployments", {}).get(name, {})
         for name in deployments_for_platform(platform)
     ]
+    tools = sorted({tool for row in rows for tool in row.get("tools", [])})
     return {
         "status": (
             "complete"
             if rows and all(row.get("status") == "complete" for row in rows)
             else "unavailable"
         ),
-        "tools": sorted({tool for row in rows for tool in row.get("tools", [])}),
+        "tools": tools,
+        "non_prediction_tools": [
+            tool
+            for tool in tools
+            if normalize_tool_name(tool) in snapshot.get("non_prediction_tools", {})
+        ],
     }

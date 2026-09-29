@@ -339,3 +339,54 @@ def test_roster_snapshot_retains_manifest_ids_and_partial_failures(
     assert tool_usage.platform_roster(snapshot, "omen")["tools"] == [NEW_TOOL]
     assert tool_usage.platform_roster(snapshot, "polymarket")["status"] == "unavailable"
     assert tool_usage.snapshot_valid_tools(snapshot)["polystrat Pearl"] is None
+
+
+def test_captured_utility_classifications_flow_through_prepare_and_replay(
+    audit_run: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real capture classifies known utilities; replay uses only saved roles."""
+    monkeypatch.setattr(tool_usage, "latest_trader_ref", lambda: "v-test")
+    monkeypatch.setattr(
+        tool_usage, "_http_get", lambda _url: 'valid_mechs: ${VALID_MECHS:list:["0xa"]}'
+    )
+    monkeypatch.setattr(
+        tool_usage,
+        "resolve_mech_tools",
+        lambda *_: ["good", "propose_question", "resolve-market-jury-v1", "unknown"],
+    )
+    snapshot = tool_usage.fetch_deployment_snapshot()
+    results, output = audit_run
+    (output / "deployment_snapshot.json").write_text(json.dumps(snapshot))
+    bundle = prepare(results, output, "omen", "Summary")
+    record = json.loads((bundle / "decision.json").read_text())
+    assert record["counts"]["manifest_tools"] == 4
+    assert record["counts"]["non_prediction"] == 2
+    assert record["counts"]["forecasting_or_unknown"] == 2
+    assert record["counts"]["remaining_unassessed"] == 1
+    for tool in ("propose_question", "resolve-market-jury-v1"):
+        assert record["production"][tool]["classification"] == "non_prediction"
+    assert record["production"]["unknown"]["classification"] == "unknown"
+    monkeypatch.setattr(tool_usage, "NON_PREDICTION_TOOLS", {})
+    text = json.dumps(replay(bundle))
+    assert "2 confirmed non-prediction" in text
+    assert "Warning: `propose_question`" not in text
+    assert "Warning: `resolve-market-jury-v1`" not in text
+    assert snapshot["non_prediction_tools"]["propose-question"].endswith(
+        "propose_question.py"
+    )
+
+
+def test_direct_notifier_classifies_manifest_utilities(
+    audit_run: tuple[Path, Path],
+) -> None:
+    """The direct report also distinguishes known utility roles from no data."""
+    results, _ = audit_run
+    payload = build_concise_digest_message(
+        results,
+        "omen",
+        "Summary",
+        deployed_tools=["good", "propose-question", "resolve-market-jury-v1"],
+    )
+    assert "2 confirmed non-prediction" in json.dumps(payload)
+    assert "unknown tool classification" not in json.dumps(payload)

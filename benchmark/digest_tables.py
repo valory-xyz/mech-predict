@@ -65,7 +65,7 @@ from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
 from benchmark.slack_blocks import Col, context, header, message, section, table_block
 from benchmark.slack_tables import display_width
-from benchmark.tool_usage import normalize_tool_name
+from benchmark.tool_usage import NON_PREDICTION_TOOLS, normalize_tool_name
 
 log = logging.getLogger(__name__)
 
@@ -1016,6 +1016,7 @@ def build_concise_digest_message(
                 if deployed_tools is not None
                 else (_scored(windows["at"]) | _scored(windows["w1"]))
             ),
+            "non_prediction_tools": list(NON_PREDICTION_TOOLS),
         }
         decision_record = build_decision_record(
             platform,

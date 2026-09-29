@@ -315,6 +315,7 @@ def build_decision_record(
         },
         "counts": {
             "manifest_tools": len(production),
+            "non_prediction": len(production) - len(prod),
             "forecasting_or_unknown": len(prod),
             "assessed": len(_survivors(prod))
             + sum(v.startswith("demote") for v in prod.values()),
@@ -425,7 +426,9 @@ def decision_text(record: dict[str, Any]) -> str:
     counts = record["counts"]
     if record["roster_status"] == "complete":
         lines.append(
-            f"Roster: {counts['forecasting_or_unknown']} forecasting/unknown tools; "
+            f"Roster: {counts['manifest_tools']} manifest tools; "
+            f"{counts['non_prediction']} confirmed non-prediction; "
+            f"{counts['forecasting_or_unknown']} forecasting/unknown tools; "
             f"{counts['assessed']} assessed. After proposed demotions: "
             f"{counts['remaining_deployed']} remain deployed; "
             f"{counts['remaining_assessed']} assessed and retained, "

@@ -302,6 +302,7 @@ def test_roster_snapshot_rejects_partial_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Audit capture is strict even though the legacy resolver is permissive."""
+    monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", lambda _: ["good"])
     monkeypatch.setattr(
         tool_usage,
         "_post_graphql",
@@ -390,3 +391,56 @@ def test_direct_notifier_classifies_manifest_utilities(
     )
     assert "2 confirmed non-prediction" in json.dumps(payload)
     assert "unknown tool classification" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing-address", "missing-metadata", "manifest-failure"]
+)
+def test_partial_roster_retains_findings_but_blocks_actions(
+    audit_run: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Resolved manifest members survive a failed sibling mech for audit evidence."""
+    monkeypatch.setattr(tool_usage, "latest_trader_ref", lambda: "v-test")
+    monkeypatch.setattr(
+        tool_usage,
+        "_http_get",
+        lambda _: 'valid_mechs: ${VALID_MECHS:list:["0xa","0xb"]}',
+    )
+    meches: list[dict[str, Any]] = [
+        {"address": "0xa", "service": {"metadata": [{"metadata": "0x11"}]}}
+    ]
+    if failure != "missing-address":
+        meches.append(
+            {
+                "address": "0xb",
+                "service": (
+                    None
+                    if failure == "missing-metadata"
+                    else {"metadata": [{"metadata": "0x22"}]}
+                ),
+            }
+        )
+    monkeypatch.setattr(tool_usage, "_post_graphql", lambda *_: {"meches": meches})
+
+    def manifest(metadata_hash: str) -> list[str]:
+        if metadata_hash == "0x22":
+            raise ValueError("unavailable manifest")
+        return ["bad", "good"]
+
+    monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", manifest)
+    snapshot = tool_usage.fetch_deployment_snapshot()
+    assert tool_usage.platform_roster(snapshot, "omen")["status"] == "unavailable"
+    assert tool_usage.platform_roster(snapshot, "omen")["tools"] == ["bad", "good"]
+    results, output = audit_run
+    (output / "deployment_snapshot.json").write_text(json.dumps(snapshot))
+    bundle = prepare(results, output, "omen", "Summary")
+    record = json.loads((bundle / "decision.json").read_text())
+    assert record["decision"]["token"] == "DECISION UNAVAILABLE"
+    assert record["decision"]["demote"] == []
+    assert record["counts"]["remaining_deployed"] is None
+    text = json.dumps(replay(bundle))
+    assert "finding only; action blocked" in text
+    assert "Brier 0.3100" in text
+    assert "remain deployed" not in text

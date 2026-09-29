@@ -54,8 +54,11 @@ Markdown, and uploads the report and exact inputs before posting Slack. The
 execution registry no longer excludes deployed tools from the concise decision.
 Unscored and unclassified manifest tools are explicitly accounted for. Remaining
 **deployed** tools and remaining **assessed and retained** tools are separate
-counts. Incomplete roster discovery or unavailable decision inputs produces
-`DECISION UNAVAILABLE`.
+counts. Known question-creation and resolution tools are counted separately as
+confirmed non-prediction tools. Input failures affect only dependent evaluations:
+tournament failures disable candidate evaluation, and previous-week failures
+disable comparisons. Incomplete roster discovery blocks deployment proposals,
+but available demotion findings and evidence remain visible as action-blocked.
 
 For offline replay, artifact contents, and failure behavior, see
 [DECISION_AUDIT.md](DECISION_AUDIT.md). The direct notifier and detailed-table

@@ -209,6 +209,11 @@ def test_roster_failure_suppresses_proposals_and_remaining_count() -> None:
     assert record["decision"]["demote"] == []
     assert record["counts"]["remaining_deployed"] is None
     assert "remain deployed" not in decision_text(record)
+    text = decision_text(record)
+    assert "finding only; action blocked" in text
+    assert "Brier 0.3000" in text and "baseline 0.2400" in text
+    assert "Roster incomplete: 2 resolved manifest tools" in text
+    assert "*Next step:*" not in text
 
 
 def test_unassessed_tool_does_not_allow_removing_every_assessed_tool() -> None:
@@ -227,6 +232,8 @@ def test_unassessed_tool_does_not_allow_removing_every_assessed_tool() -> None:
     assert record["counts"]["remaining_flagged"] == 1
     assert record["counts"]["remaining_unassessed"] == 1
     assert "1 flagged but retained" in decision_text(record)
+    assert "finding only; action blocked" in decision_text(record)
+    assert "Brier 0.3000" in decision_text(record)
 
 
 def test_baseline_reason_shows_both_gaps_and_correct_denominators() -> None:

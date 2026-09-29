@@ -303,7 +303,8 @@ def resolve_mech_tools(
 
     :param addresses: mech contract addresses (the parsed ``valid_mechs``).
     :param subgraph_url: marketplace subgraph endpoint for the chain.
-    :param provenance: optional audit output; requires metadata for every mech.
+    :param provenance: optional audit output; retains resolved tools on partial
+        failure but still requires metadata/manifests for every mech to succeed.
     :return: sorted union of advertised tool names; ``[]`` when ``addresses``
         is empty (a real "no mechs allow-listed" state, not a failure).
     :raises ValueError: when the subgraph does not return every requested
@@ -319,10 +320,13 @@ def resolve_mech_tools(
     returned = {(mech.get("address") or "").lower() for mech in meches}
     requested = {addr.lower() for addr in addresses}
     missing = requested - returned
+    failures = []
     if missing:
-        raise ValueError(
+        failures.append(
             "subgraph did not return mech address(es): " + ", ".join(sorted(missing))
         )
+        if provenance is None:
+            raise ValueError(failures[0])
 
     metadata_hashes: set[str] = set()
     missing_metadata: list[str] = []
@@ -339,22 +343,32 @@ def resolve_mech_tools(
             missing_metadata.append(mech["address"])
 
     if provenance is not None and missing_metadata:
-        raise ValueError("Missing metadata for mech(s): " + ", ".join(missing_metadata))
+        failures.append("Missing metadata for mech(s): " + ", ".join(missing_metadata))
 
     if not metadata_hashes:
         raise ValueError(
-            "subgraph returned all addresses but none have on-chain metadata"
+            "; ".join(failures)
+            or "subgraph returned all addresses but none have on-chain metadata"
         )
 
     tools: set[str] = set()
     if provenance is not None:
         provenance["manifests"] = {}
     for metadata_hash in sorted(metadata_hashes):
-        manifest_tools = fetch_tools_for_metadata(metadata_hash)
+        try:
+            manifest_tools = fetch_tools_for_metadata(metadata_hash)
+        except (URLError, ValueError, OSError) as exc:
+            if provenance is None:
+                raise
+            failures.append(f"Manifest {metadata_hash}: {exc}")
+            continue
         tools.update(manifest_tools)
         if provenance is not None:
             digest = metadata_hash.removeprefix("0x")
             provenance["manifests"][CID_PREFIX + digest] = manifest_tools
+            provenance["tools"] = sorted(tools)
+    if failures:
+        raise ValueError("; ".join(failures))
     return sorted(tools)
 
 

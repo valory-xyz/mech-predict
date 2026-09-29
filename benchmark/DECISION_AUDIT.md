@@ -118,7 +118,13 @@ message without sending it; `notify_slack=false` still disables workflow posts.
 - Ambiguous aliases are excluded only from the affected tool/window evaluation.
   Aggregates are never merged or picked arbitrarily; original inputs remain saved.
 - Partial deployment lookup: **DECISION UNAVAILABLE**; no claim that a proposed
-  removal leaves adequate coverage. Available findings remain in the full report.
+  removal leaves adequate coverage. Successfully resolved manifests and tool
+  findings survive failures elsewhere in the lookup. Slack and Markdown show
+  their demotion evidence as **finding only; action blocked**, with deployment
+  totals explicitly unavailable. The same distinction applies when the survivor
+  guard blocks removal of every assessed forecaster.
+- Tool assessment warnings have one owner in the shared decision record and
+  appear once in Slack. Trend warnings remain separate.
 - A deployed tool with no usable scores: explicitly unassessed, retained in the
   roster and remaining-deployed count.
 - Every assessed forecaster fails: preserve the existing replace-first/platform

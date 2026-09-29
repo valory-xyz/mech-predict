@@ -133,6 +133,11 @@ def _production_verdict(
 
     A failed week differs from a valid, empty week. Do not let the policy's
     absent-week fallback turn an unevaluated baseline gate into a survivor.
+
+    :param at: accepted, unambiguous trailing scores for this tool.
+    :param week: accepted, unambiguous recent scores for this tool.
+    :param issues: unavailable or ambiguous input reasons keyed by window.
+    :return: existing policy verdict or the unavailable prerequisite.
     """
     if "at" in issues:
         return issues["at"]
@@ -170,6 +175,73 @@ def _candidate_records(payload: dict[str, Any], known: set[str]) -> dict[str, An
     return candidates
 
 
+def _assessment_warnings(record: dict[str, Any]) -> list[str]:
+    """Own input and tool assessment warnings for both Slack and Markdown."""
+    warnings = []
+    for key, status in record["input_status"].items():
+        if status:
+            label = (
+                "Candidate evaluation" if key == "tournament" else WINDOW_LABELS[key]
+            )
+            warnings.append(f"Warning: {label} unavailable — {status}.")
+    for key in ("w2", "tournament"):
+        for name in record["ambiguous_inputs"].get(key, []):
+            warnings.append(
+                f"Warning: `{name}` — ambiguous score aliases in {WINDOW_LABELS[key]}; excluded from that evaluation."
+            )
+    for name, row in record["production"].items():
+        verdict = row["verdict"]
+        if verdict == "no data" or verdict.startswith("n="):
+            warnings.append(
+                f":warning: `{name}` has insufficient data to judge ({verdict}). "
+                "Investigate prediction failures and unresolved markets before acting."
+            )
+        elif (
+            not verdict.startswith(("keep", "demote"))
+            and row["classification"] != "non_prediction"
+        ):
+            warnings.append(f"Warning: `{name}` — {verdict}.")
+        if (
+            verdict.startswith("demote")
+            and "condAcc" in verdict
+            and "w1" not in row["input_issues"]
+        ):
+            week = row["evidence"]["w1"]
+            counts = [_num(week.get(key)) for key in ("valid_n", "edge_n")]
+            weekly_n = min(
+                (int(value) for value in counts if value is not None), default=0
+            )
+            if weekly_n < MIN_SAMPLE_SIZE:
+                warnings.append(
+                    f":warning: `{name}` has insufficient weekly data (n={weekly_n}). "
+                    "Its finding is based on the 90d condAcc result, not the weekly trend."
+                )
+    return warnings
+
+
+def _accepted_inputs(
+    payloads: dict[str, dict[str, Any]], input_status: Mapping[str, str | None] | None
+) -> tuple[dict[str, dict[str, Any]], dict[str, str | None]]:
+    """Apply audit rejections and basic shape checks to direct notifier inputs."""
+    statuses = {
+        key: (input_status or {}).get(key) or (None if payloads.get(key) else "missing")
+        for key in WINDOW_LABELS
+    }
+    for key, payload in payloads.items():
+        groups = payload.get("by_tool")
+        if (
+            key in statuses
+            and not statuses[key]
+            and (
+                not isinstance(groups, dict)
+                or any(not isinstance(stats, dict) for stats in groups.values())
+            )
+        ):
+            statuses[key] = "malformed tool statistics"
+    payloads = {key: {} if statuses[key] else payloads[key] for key in WINDOW_LABELS}
+    return payloads, statuses
+
+
 def build_decision_record(
     platform: str,
     payloads: dict[str, dict[str, Any]],
@@ -187,22 +259,7 @@ def build_decision_record(
     :param input_status: rejection reasons keyed by input window; None is accepted.
     :return: JSON-serializable evidence and actionable decision.
     """
-    statuses = {
-        key: (input_status or {}).get(key) or (None if payloads.get(key) else "missing")
-        for key in WINDOW_LABELS
-    }
-    for key, payload in payloads.items():
-        groups = payload.get("by_tool")
-        if (
-            key in statuses
-            and not statuses[key]
-            and (
-                not isinstance(groups, dict)
-                or any(not isinstance(stats, dict) for stats in groups.values())
-            )
-        ):
-            statuses[key] = "malformed tool statistics"
-    payloads = {key: {} if statuses[key] else payloads[key] for key in WINDOW_LABELS}
+    payloads, statuses = _accepted_inputs(payloads, input_status)
     indexes = {key: _index(value) for key, value in payloads.items()}
     known = {normalize_tool_name(name) for name in prediction_tools}
     names: dict[str, list[str]] = {}
@@ -285,7 +342,7 @@ def build_decision_record(
     if state == "blocked":
         demote = []
     remaining = {name: verdict for name, verdict in prod.items() if name not in demote}
-    return {
+    record = {
         "schema_version": SCHEMA_VERSION,
         "platform": platform,
         "policy": policy_parameters(),
@@ -332,6 +389,8 @@ def build_decision_record(
         },
         "errors": sorted(set(errors)),
     }
+    record["warnings"] = _assessment_warnings(record)
+    return record
 
 
 def _number(value: Any, *, signed: bool = False) -> str:
@@ -406,21 +465,15 @@ def decision_text(record: dict[str, Any]) -> str:
         )
     elif action["token"] == "NO CHANGE":
         lines.append("No assessed production tool meets the demotion criteria.")
-    for key, status in record["input_status"].items():
-        if status:
-            label = (
-                "Candidate evaluation" if key == "tournament" else WINDOW_LABELS[key]
-            )
-            lines.append(f"Warning: {label} unavailable — {status}.")
-    for key in ("w2", "tournament"):
-        for name in record["ambiguous_inputs"].get(key, []):
-            lines.append(
-                f"Warning: `{name}` — ambiguous score aliases in {WINDOW_LABELS[key]}; excluded from that evaluation."
-            )
     for kind, cohort in (("promote", "tournament"), ("demote", "production")):
         for name in action[kind]:
             row = record[cohort][name]
             lines.append(f"• `{name}` — {row['verdict']}\n  {evidence_text(row)}")
+        for name, row in record[cohort].items():
+            if row["verdict"].lower().startswith(kind) and name not in action[kind]:
+                lines.append(
+                    f"• `{name}` — {row['verdict']} (*finding only; action blocked*)\n  {evidence_text(row)}"
+                )
     if action["token"].endswith(" FIRST"):
         lines.append("Deploy a qualified replacement before reviewing any demotion.")
     counts = record["counts"]
@@ -435,12 +488,12 @@ def decision_text(record: dict[str, Any]) -> str:
             f"{counts['remaining_flagged']} flagged but retained, "
             f"{counts['remaining_unassessed']} unassessed."
         )
-    for name, row in record["production"].items():
-        if (
-            not row["verdict"].startswith(("keep", "demote"))
-            and row["classification"] != "non_prediction"
-        ):
-            lines.append(f"Warning: `{name}` — {row['verdict']}.")
+    else:
+        lines.append(
+            f"Roster incomplete: {counts['manifest_tools']} resolved manifest tools; "
+            f"{counts['assessed']} assessed. Total deployment and remaining counts unavailable."
+        )
+    lines.extend(record["warnings"])
     if action["demote"] and not action["promote"] and candidates_complete:
         lines.append("No tournament candidate qualifies as a replacement.")
     elif action["token"] == "NO CHANGE" and candidates_complete:
@@ -448,6 +501,8 @@ def decision_text(record: dict[str, Any]) -> str:
     if action["promote"] or action["demote"]:
         lines.append(
             "*Next step:* Review the proposed changes; confirm promotions on an independent window or holdout before deployment."
+            if action["promote"]
+            else "*Next step:* Review the proposed demotions."
         )
     return "\n\n".join(lines)
 

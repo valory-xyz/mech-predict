@@ -260,6 +260,7 @@ class TestConciseDecisionSummary:
         assert payload is not None
         text = _flatten(payload)
         assert "`live` has insufficient data to judge (no data)" in text
+        assert text.count("`live`") == 1
         assert "retired" not in text
 
     def test_empty_live_roster_does_not_fall_back_to_historical_tools(
@@ -280,6 +281,7 @@ class TestConciseDecisionSummary:
         payload = build_concise_digest_message(results, "polymarket", "summary")
         assert payload is not None
         assert "insufficient data to judge (n=12 < 30)" in _flatten(payload)
+        assert _flatten(payload).count("`live`") == 1
 
     def test_promotion_evidence_preserves_zero_edge_count(self) -> None:
         """The formatter does not replace an explicit zero with another pool."""

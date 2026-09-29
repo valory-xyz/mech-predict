@@ -875,49 +875,12 @@ def _category_signal_text(
     return "\n".join(bullets)
 
 
-def _decision_warnings(
-    prod: dict[str, str],
+def _trend_warnings(
     windows: dict[str, dict[str, dict[str, Any]]],
     tools: Sequence[str],
 ) -> list[str]:
     """Return only warnings that qualify the decision or 7d summary."""
     warnings: list[str] = []
-    missing = [
-        label
-        for key, label in (
-            ("w1", "Current 7d"),
-            ("w2", "Prev 7d"),
-            ("at", "90d"),
-        )
-        if not windows[key]
-    ]
-    if missing:
-        warnings.append(
-            f":warning: *Unavailable:* {', '.join(missing)} data is missing."
-        )
-
-    for tool, verdict in prod.items():
-        if verdict == "no data" or verdict.startswith("n="):
-            warnings.append(
-                f":warning: `{tool}` has insufficient data to judge ({verdict}). "
-                "Investigate prediction failures and unresolved markets before acting."
-            )
-        stats = windows["w1"].get(tool) or {}
-        valid_n = _num(stats.get("valid_n"))
-        edge_n = _num(stats.get("edge_n"))
-        counts = [int(value) for value in (valid_n, edge_n) if value is not None]
-        weekly_n = min(counts) if counts else 0
-        if (
-            verdict.startswith("demote")
-            and weekly_n < MIN_SAMPLE_SIZE
-            and "condAcc" in verdict
-        ):
-            warnings.append(
-                f":warning: `{tool}` has insufficient weekly data "
-                f"(n={weekly_n}). Its recommendation is based on the 90d "
-                "condAcc result, not the weekly trend."
-            )
-
     judged = [
         windows["at"][tool]
         for tool in tools
@@ -938,7 +901,7 @@ def _decision_warnings(
     w2_rows = sum(
         int(_num((windows["w2"].get(tool) or {}).get("valid_n")) or 0) for tool in tools
     )
-    if w2_rows and w1_rows / w2_rows < COMPLETENESS_RATIO:
+    if windows["w1"] and w2_rows and w1_rows / w2_rows < COMPLETENESS_RATIO:
         warnings.append(
             f":warning: Current 7d is still filling ({w1_rows / w2_rows:.0%} "
             "of the previous window); treat its trend as provisional and use "
@@ -1052,7 +1015,7 @@ def build_concise_digest_message(
         section(summary),
         section(category_text),
     ]
-    warnings = _decision_warnings(prod, windows, sorted(prod_tools))
+    warnings = _trend_warnings(windows, sorted(prod_tools))
     if warnings:
         blocks.append(section("\n".join(warnings)))
     if report_url:

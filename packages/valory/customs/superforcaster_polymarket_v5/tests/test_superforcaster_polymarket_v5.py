@@ -1,0 +1,1101 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+
+"""Unit tests for superforcaster-polymarket-v5's structured-output and free-text-input contract."""
+
+import inspect
+import json
+from importlib import import_module
+from unittest.mock import MagicMock, patch
+
+import pytest
+import requests
+from pydantic import ValidationError
+
+from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+    PredictionResult,
+    _parse_completion,
+    parse_prompt,
+    run,
+)
+
+V4_MODULE = (
+    "packages.valory.customs.superforcaster_polymarket_v5."
+    "superforcaster_polymarket_v5"
+)
+
+FAKE_SERPER_RESPONSE = {
+    "organic": [{"title": "T", "link": "https://example.test", "snippet": "S"}],
+    "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
+}
+
+EMPTY_SERPER_RESPONSE: dict = {"organic": [], "peopleAlsoAsk": []}
+
+FAKE_PREDICTION = PredictionResult(
+    facts="Fact 1. Fact 2.",
+    reasons_no="No 1 (strength 6).",
+    reasons_yes="Yes 1 (strength 5).",
+    evidence_reliability_screen=(
+        "(a) no market odds. (b) no intent language. (c) 1 TYPE A, 0 TYPE B. "
+        "(d) criterion directly confirmed."
+    ),
+    resolution_window_screen=(
+        "(a) WINDOW -- 'by September 2'. (b) n/a. (c) span 6 days, 6 chances, "
+        "0.06 per chance, window probability 1-(1-0.06)^6 = 0.31. (d) n/a, no "
+        "numeric threshold."
+    ),
+    aggregation="Base rate 0.5. Tentative: 0.32.",
+    reflection="Passes the sanity checks.",
+    p_yes=0.32,
+    p_no=0.68,
+    confidence=0.7,
+    info_utility=0.4,
+)
+
+# Trader-template format prompt (regression: previous callers must still work)
+TRADER_PROMPT = (
+    'Given the question "Will X happen?" and the `yes` answer criterion, ...'
+)
+# Free-text format prompt: the advertised contract (issue #455)
+FREE_TEXT_PROMPT = "Will Alexander Isak join Liverpool before September 2 2025?"
+# Long free-text prompt that would return empty Serper results if passed raw
+LONG_FREE_TEXT_PROMPT = (
+    "Please predict the following market: Will Alexander Isak permanently transfer "
+    "to Liverpool FC before the end of the summer 2025 transfer window (September 2, "
+    "2025 23:59 UTC)? Resolution source: official club announcements or BBC Sport. "
+    "The market resolves YES if a permanent transfer (not a loan) is confirmed by "
+    "the resolution source before the deadline."
+)
+
+
+def _make_mock_api_keys() -> MagicMock:
+    """Create a mock KeyChain-like api_keys object."""
+    services = {"openai": ["sk-test"], "serperapi": ["serper-test"]}
+    mock = MagicMock()
+    mock.__getitem__ = lambda self, key: services[key][0]
+    mock.get = lambda key, default="": services.get(key, [default])[0]
+    return mock
+
+
+def _mock_parse_response() -> MagicMock:
+    """Fake response matching the beta.chat.completions.parse shape."""
+    return MagicMock(
+        choices=[MagicMock(message=MagicMock(parsed=FAKE_PREDICTION, refusal=None))],
+        usage=MagicMock(prompt_tokens=10, completion_tokens=5),
+    )
+
+
+class TestParsePrompt:
+    """parse_prompt() -> (question_for_llm, search_query)."""
+
+    def test_trader_template_uses_extracted_question_for_both(self) -> None:
+        """Trader-template path: the bare question serves as both values."""
+        question, query, _ = parse_prompt(TRADER_PROMPT)
+        assert question == "Will X happen?"
+        assert query == question
+
+    def test_free_text_llm_gets_full_prompt(self) -> None:
+        """Free-text input: the LLM question is the whole prompt."""
+        question, _, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert question == FREE_TEXT_PROMPT
+        question, _, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        assert question == LONG_FREE_TEXT_PROMPT
+
+    def test_short_free_text_query_is_the_question(self) -> None:
+        """A bare free-text question is its own search query."""
+        _, query, _ = parse_prompt(FREE_TEXT_PROMPT)
+        assert query == FREE_TEXT_PROMPT
+        assert query.endswith("?")
+
+    def test_boilerplate_prefix_is_dropped_from_query(self) -> None:
+        """The query anchors at the question word, dropping instruction text."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        _, query, _ = parse_prompt(LONG_FREE_TEXT_PROMPT)
+        # "Please predict the following market: " is gone; the clause survives
+        # whole, including the deadline and the trailing '?'.
+        assert query.startswith("Will Alexander Isak")
+        assert query.endswith("?")
+        assert len(query) <= _MAX_SEARCH_QUERY_LEN
+
+    def test_lowercase_auxiliary_in_boilerplate_is_not_the_anchor(self) -> None:
+        """Boilerplate 'you are being asked...' must not anchor; the real question wins."""
+        prompt = (
+            "You are being asked to provide a probability estimate for a "
+            "prediction market question. Please respond with a JSON object. "
+            "Question: Will Bitcoin reach $150,000 or higher on any major "
+            "exchange by December 31, 2026? Resolution source: TradingView."
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach")
+        assert query.endswith("2026?")
+
+    def test_embedded_dots_do_not_cut_the_clause(self) -> None:
+        """Abbreviation dots inside the question no longer truncate the query."""
+        prompt = (
+            "Will Anthropic release the next Mythos-class model (e.g. a Fable "
+            "successor in that class) AND make it available to the public by "
+            "August 31, 2026, 11:59 PM ET? Resolution source: official "
+            "announcements."
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Anthropic release the next Mythos-class")
+
+    def test_double_quotes_are_stripped_from_query_only(self) -> None:
+        """Quoted spans become exact-match Serper terms; drop them from the query."""
+        prompt = (
+            'Will any candle have a final "High" price >= 82000 in the window? '
+            "Resolution source: Binance."
+        )
+        question, query, _ = parse_prompt(prompt)
+        assert '"' not in query
+        assert "High" in query
+        assert '"High"' in question  # the LLM still sees the exact wording
+
+    def test_no_question_clause_truncates(self) -> None:
+        """A prompt with no question clause falls back to the capped prompt."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        no_q = "x" * 300
+        question, query, _ = parse_prompt(no_q)
+        assert question == no_q
+        assert len(query) == _MAX_SEARCH_QUERY_LEN
+
+
+class TestClauseSelection:
+    """The scored selector must pick the market question, not boilerplate."""
+
+    @pytest.mark.parametrize(
+        "prompt, expected_start",
+        [
+            (
+                "Can you estimate the probability of the following market? "
+                "Will Alexander Isak join Liverpool before September 2, 2025?",
+                "Will Alexander Isak",
+            ),
+            (
+                "What is your probability estimate for this market? "
+                "Will the Fed cut rates in March 2026?",
+                "Will the Fed",
+            ),
+            (
+                "Could you analyse this? Will Bitcoin reach $150,000 by "
+                "December 31, 2026?",
+                "Will Bitcoin",
+            ),
+            (
+                "Resolution criteria: What counts as a launch? Will Anthropic "
+                "release Claude 5 by 2026-12-31?",
+                "Will Anthropic",
+            ),
+            (
+                "What follows is a prediction market question. Will BTC hit "
+                "100k by 2026?",
+                "Will BTC hit",
+            ),
+            # The boilerplate clause carries digits while the market clause
+            # has none; the responder-addressed clause is excluded from the
+            # market-shaped pool by the _META_STEM_RE filter (the score
+            # penalty alone no longer decides this case).
+            (
+                "Can you give me 3 quick estimates with 95% confidence? "
+                "Will the ECB cut rates at the next meeting?",
+                "Will the ECB",
+            ),
+            # Dated clarifiers must not outscore a digit-free market question:
+            # the LAST market-verb-shaped clause wins (round-3 review cases).
+            # This row also pins the _NEAR_BEST_WINDOW boundary: the market
+            # clause scores exactly best - 3, so shrinking the window to 2
+            # flips the outcome (verified by mutation).
+            (
+                "Resolution criteria: Does a loan count as a transfer before "
+                "September 2, 2025? Will Alexander Isak join Liverpool?",
+                "Will Alexander Isak",
+            ),
+            (
+                "Note: Which of the 3 listed sources is authoritative? "
+                "Will Anthropic release Claude 5?",
+                "Will Anthropic",
+            ),
+            (
+                "How many sources should you cite, 3 or 5? "
+                "Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            (
+                "What are the top 5 sources for this? Will Isak join Liverpool?",
+                "Will Isak",
+            ),
+            # ...but a TRAILING meta clause must not win by being last.
+            (
+                "Will Isak join Liverpool? What is your probability estimate?",
+                "Will Isak",
+            ),
+            # Trailing responder-addressed questions with market verbs and
+            # digits must be EXCLUDED from the market-shaped pool, not just
+            # penalized (round-5 review cases -- the digit bonus exactly
+            # cancels the meta penalty at the window edge).
+            (
+                "Will BTC hit 100k by 2026? Is your answer calibrated to 2 "
+                "decimals?",
+                "Will BTC",
+            ),
+            (
+                "Will Isak join Liverpool? Are your sources dated within 7 " "days?",
+                "Will Isak",
+            ),
+            (
+                "Will the Fed cut rates in March 2026? Do you have access to "
+                "news after 2025?",
+                "Will the Fed",
+            ),
+            (
+                "Will Anthropic release Claude 5? Did you check all 3 " "sources?",
+                "Will Anthropic",
+            ),
+        ],
+    )
+    def test_leading_instruction_question_does_not_win(
+        self, prompt: str, expected_start: str
+    ) -> None:
+        """A responder-addressed or scaffolding question must not be the query."""
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith(expected_start), query
+        assert tier == "clause"
+
+    def test_no_market_verb_clause_falls_back_to_best_score(self) -> None:
+        """With no market-verb candidate, the best-scoring clause wins (round-4).
+
+        Kills the fallback mutation (max -> min picks the lowercase inner
+        clause instead).
+        """
+        prompt = "How will the price move? Whether this resolves YES depends on it."
+        _, query, tier = parse_prompt(prompt)
+        assert query.startswith("How will the price move")
+        assert tier == "clause"
+
+    def test_digit_bonus_magnitude_pins_fallback_ordering(self) -> None:
+        """The digit bonus (+3) outranks capitalization (+2) in the fallback.
+
+        Both clauses lack a market verb; the digit-bearing lowercase clause
+        must beat the capitalized digit-free one. Halving the digit bonus to
+        +2 flips this outcome (verified by mutation).
+        """
+        prompt = (
+            "consider, how many of the 5 apply? What happens when the "
+            "deadline passes without an official announcement?"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("how many of the 5 apply")
+
+    def test_typographic_quotes_do_not_break_the_anchor(self) -> None:
+        """A market question inside typographic quotes anchors cleanly."""
+        prompt = (
+            "This market is about crypto. \u201cWill Bitcoin reach 100k by "
+            "March 2027?\u201d"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("Will Bitcoin reach 100k")
+
+    def test_truncation_cuts_on_a_word_boundary(self) -> None:
+        """An over-long clause is capped without a dangling partial word."""
+        prompt = "Will " + "a very long qualifying clause " * 8 + "happen by 2026?"
+        _, query, _ = parse_prompt(prompt)
+        assert len(query) <= 150
+        assert not query.endswith(" ")
+        # the cut must land between words, not inside one
+        assert query.split()[-1] in prompt.split()
+
+    def test_tier_is_reported(self) -> None:
+        """The tier tags template / clause / raw explicitly."""
+        assert parse_prompt(TRADER_PROMPT)[2] == "template"
+        assert parse_prompt(FREE_TEXT_PROMPT)[2] == "clause"
+        assert parse_prompt("no question mark here at all")[2] == "raw"
+
+
+class TestDegeneratePromptsAndScanBounds:
+    """Degenerate prompts never send an empty query; the scan is bounded."""
+
+    @pytest.mark.parametrize(
+        "degenerate",
+        [
+            "",
+            "   ",
+            '"""',
+            "'''",
+            "\u201c\u201d\u2018\u2019",
+            "?",
+            "...",
+            "---",
+            "#",
+            "()",
+        ],
+    )
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_degenerate_prompt_never_sends_an_empty_query(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, degenerate: str
+    ) -> None:
+        """Prompts with no searchable content never reach Serper at all."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=degenerate,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        mock_fetch.assert_not_called()
+        assert json.loads(result[0])["p_yes"] == 0.5
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "empty query"
+        assert result[4]["scan_truncated"] is False
+
+    def test_quote_only_prompt_falls_back_to_unstripped_head(self) -> None:
+        """Quote stripping must not strip the query down to nothing."""
+        _, query, _ = parse_prompt('"""')
+        assert query == '"""'
+
+    def test_cap_on_a_space_keeps_the_last_word(self) -> None:
+        """A cap landing exactly on a space must not drop a full token."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _truncate_query,
+        )
+
+        query = "aa " * 50 + "bcdef"  # char 150 is 'b', char 149 is a space
+        assert len(_truncate_query(query)) == 149
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_null_organic_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """organic: null must surface as the shape error, not a TypeError."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {"organic": None, "peopleAlsoAsk": []}
+        )
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_free_text_llm_receives_the_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Integration pin: the LLM gets the WHOLE prompt, not the derived query."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # criteria text that the derived query drops must still reach the LLM
+        assert "official club announcements or BBC Sport" in result[1]
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_long_template_prompt_is_not_marked_truncated(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Template past the window is NOT flagged: question precedes the scan."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = TRADER_PROMPT + " filler" * (_MAX_SCAN_CHARS // 3)
+        assert len(prompt) > _MAX_SCAN_CHARS
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "template"
+        assert result[4]["scan_truncated"] is False
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_truncation_with_in_window_clause_is_marked(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A clause-tier pick on a longer-than-window prompt is still marked."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        prompt = (
+            "Can I clarify the resolution source by 2025? "
+            + "filler " * (_MAX_SCAN_CHARS // 6)
+            + "Will the ECB cut rates at the next meeting?"
+        )
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "clause"
+        assert result[4]["scan_truncated"] is True
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_zero_hit_null_reason_is_live_search(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A genuine zero-hit records null_reason='live search' (not skipped)."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["empty_retrieval"] is True
+        assert result[4]["null_reason"] == "live search"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"organic": {"not": "a list"}, "peopleAlsoAsk": []},
+            {"organic": "reshaped", "peopleAlsoAsk": []},
+            {"organic": [{"title": "T"}], "peopleAlsoAsk": None},
+        ],
+    )
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_malformed_serper_bodies_raise_typed_errors(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock, body: dict
+    ) -> None:
+        """Non-list organic OR peopleAlsoAsk surfaces as the shape ValueError."""
+        mock_fetch.return_value = MagicMock(json=lambda: body)
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_scan_truncation_is_observable(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """Raw tier from an exhausted scan window is marked, not silent."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        # the only '?' sits past the scan window -> raw tier via truncation
+        prompt = "word " * (_MAX_SCAN_CHARS // 4) + "Will it happen by 2027?"
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=prompt,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        assert result[4]["parse_tier"] == "raw"
+        assert result[4]["scan_truncated"] is True
+
+    def test_scan_window_bounds_candidate_search(self) -> None:
+        """The scan must not see past the window (deterministic cap killer).
+
+        The only question clause sits beyond _MAX_SCAN_CHARS: a bounded scan
+        finds nothing (raw tier); removing the cap finds the clause and flips
+        the tier, failing this test with no reliance on wall-clock.
+        """
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SCAN_CHARS,
+        )
+
+        prompt = "x" * (3 * _MAX_SCAN_CHARS) + " Will X happen by 2027?"
+        question, query, tier = parse_prompt(prompt)
+        assert tier == "raw"
+        assert question == prompt  # the LLM still gets everything
+
+    def test_candidate_scan_is_bounded_timing_smoke(self) -> None:
+        """Smoke: a multi-MB prompt parses in well under the task budget.
+
+        (Unbounded, this size measures ~1.7s and grows ~4x per 2x; bounded it
+        is sub-millisecond. The deterministic cap killer is the test above.)
+        """
+        import time
+
+        prompt = "Will the market resolve YES by 2027? " + "This is a report. " * 160000
+        t0 = time.monotonic()
+        question, query, tier = parse_prompt(prompt)
+        assert time.monotonic() - t0 < 2.0
+        assert query.startswith("Will the market resolve YES")
+
+    def test_meta_penalty_decides_the_fallback(self) -> None:
+        """The -3 meta penalty must flip a fallback-path winner on its own.
+
+        Both clauses lack a capitalized market verb, so neither reaches the
+        market-shaped pool; only the score penalty demotes the
+        responder-addressed clause. Neutering the penalty flips the winner
+        (verified by mutation).
+        """
+        prompt = (
+            "What is your probability estimate for the 5 outcomes? "
+            "consider, how many of the 5 apply?"
+        )
+        _, query, _ = parse_prompt(prompt)
+        assert query.startswith("how many of the 5 apply")
+
+
+class TestGuardObservability:
+    """The flagged null must be distinguishable and Serper breakage must raise."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_carries_empty_retrieval_marker(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """used_params marks the guard result so requesters can discount it."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["parse_tier"] == "clause"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_flagged_null_metadata_carries_capture_when_requested(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """With return_source_content on, used_params carries marker AND capture."""
+        services = {
+            "openai": ["sk-test"],
+            "serperapi": ["serper-test"],
+            "return_source_content": ["true"],
+        }
+        api_keys = MagicMock()
+        api_keys.__getitem__ = lambda self, key: services[key][0]
+        api_keys.get = lambda key, default="": services.get(key, [default])[0]
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=api_keys,
+            counter_callback=None,
+        )
+        used_params = result[4]
+        assert used_params["empty_retrieval"] is True
+        assert used_params["source_content"]["serper_response"] == EMPTY_SERPER_RESPONSE
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_reshaped_serper_body_is_an_error_not_a_flagged_null(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A 200 body without the organic key must surface as an error null."""
+        mock_fetch.return_value = MagicMock(json=lambda: {"message": "quota exceeded"})
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None  # error null, not the 0.5 flagged null
+        assert parsed["error_type"] == "ValueError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_cached_replay_missing_organic_key_is_an_error(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A corrupted cache entry raises, mirroring the live-branch shape check."""
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+            source_content={"serper_response": {"snapshot": "corrupted"}},
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "ValueError"
+        mock_fetch.assert_not_called()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_organic_empty_but_misc_present_still_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The guard needs BOTH lists empty; PAA alone keeps the LLM path."""
+        mock_fetch.return_value = MagicMock(
+            json=lambda: {
+                "organic": [],
+                "peopleAlsoAsk": [{"question": "Q?", "snippet": "A."}],
+            }
+        )
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+        assert json.loads(result[0])["p_yes"] == 0.32
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_trader_request_sends_extracted_question_to_serper(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """End-to-end pin: a trader request searches the bare extracted question."""
+        serper_resp = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_fetch.return_value = serper_resp
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=TRADER_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        # the HTTP-error guard must actually run on the happy path (a MagicMock
+        # would silently absorb its removal otherwise)
+        serper_resp.raise_for_status.assert_called_once()
+        query_sent = mock_fetch.call_args[0][0]
+        assert query_sent == "Will X happen?"
+        # and the LLM prompt carries the bare question, not the full template
+        llm_prompt = mock_client.client.beta.chat.completions.parse.call_args[1][
+            "messages"
+        ][1]["content"]
+        assert "Will X happen?" in llm_prompt
+        assert "`yes` answer criterion" not in llm_prompt
+
+
+class TestStructuredOutputContract:
+    """v4 uses OpenAI Structured Outputs; the on-chain result is always clean JSON."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_uses_structured_parse_not_raw_create(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """run() calls beta.chat.completions.parse with response_format=PredictionResult."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parse = mock_client.client.beta.chat.completions.parse
+        parse.assert_called_once()
+        assert parse.call_args.kwargs["response_format"] is PredictionResult
+        # The raw (prose-leaking) completion path must NOT be used.
+        mock_client.client.chat.completions.create.assert_not_called()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_on_chain_result_is_flat_json_loads_parseable(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """The on-chain result flat-json.loads-parses to exactly the four mech fields."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        # This is exactly the trader's consumer path -- it must NOT raise.
+        parsed = json.loads(on_chain)
+        assert on_chain.startswith("{")
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        # No reasoning field leaks on-chain.
+        assert "facts" not in parsed and "evidence_reliability_screen" not in parsed
+        assert parsed["p_yes"] == 0.32 and parsed["p_no"] == 0.68
+
+
+class TestEmptyRetrievalGuard:
+    """v4 returns a valid null prediction when Serper returns no results (issue #455)."""
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_empty_serper_live_returns_null_prediction(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """An empty Serper response on the live path returns p_yes=0.5, confidence=0."""
+        mock_fetch.return_value = MagicMock(json=lambda: EMPTY_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert on_chain.startswith("{")
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["p_no"] == 0.5
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        # The LLM must NOT be called on an empty retrieval.
+        mock_client.client.beta.chat.completions.parse.assert_not_called()
+
+    def test_empty_serper_cached_replay_returns_null_prediction(self) -> None:
+        """An empty cached source_content returns p_yes=0.5, confidence=0."""
+        empty_source_content = {
+            "mode": "cleaned",
+            "serper_response": EMPTY_SERPER_RESPONSE,
+        }
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            source_content=empty_source_content,
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)
+        assert set(parsed.keys()) == {"p_yes", "p_no", "confidence", "info_utility"}
+        assert parsed["p_yes"] == 0.5 and parsed["confidence"] == 0.0
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_free_text_with_results_calls_llm(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A free-text prompt with good Serper results still calls the LLM normally."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] == 0.32  # LLM was called and returned FAKE_PREDICTION
+        mock_client.client.beta.chat.completions.parse.assert_called_once()
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_serper_query_uses_short_query_not_full_prompt(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """For a long free-text prompt, Serper receives a short query, not the full prompt."""
+        from packages.valory.customs.superforcaster_polymarket_v5.superforcaster_polymarket_v5 import (
+            _MAX_SEARCH_QUERY_LEN,
+        )
+
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client.client.beta.chat.completions.parse.return_value = (
+            _mock_parse_response()
+        )
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=LONG_FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        # fetch_additional_sources was called with the compressed query, not the
+        # full LONG_FREE_TEXT_PROMPT (which is >150 chars and would return organic:[]).
+        call_args = mock_fetch.call_args
+        query_sent = call_args[0][0] if call_args[0] else call_args[1]["question"]
+        assert len(query_sent) <= _MAX_SEARCH_QUERY_LEN
+        assert query_sent != LONG_FREE_TEXT_PROMPT
+
+
+class TestResolutionWindowScreen:
+    """Issue #503: the resolution-window screen is a required reasoning field."""
+
+    def test_screen_field_is_required(self) -> None:
+        """Omitting the screen fails validation, so the stage cannot skip it."""
+        fields = dict(FAKE_PREDICTION.__dict__)
+        fields.pop("resolution_window_screen")
+        with pytest.raises(ValidationError):
+            PredictionResult(**fields)
+
+    def test_screen_precedes_the_numerics(self) -> None:
+        """The screen is reasoned BEFORE the numbers it is meant to condition."""
+        order = list(PredictionResult.model_fields)
+        assert order.index("resolution_window_screen") < order.index("p_yes")
+        assert order.index("evidence_reliability_screen") < order.index(
+            "resolution_window_screen"
+        )
+
+    def test_prompt_orders_the_screen_before_aggregation(self) -> None:
+        """PREDICTION_PROMPT must ask for the screen before the aggregation step."""
+        prompt = import_module(V4_MODULE).PREDICTION_PROMPT
+        assert prompt.index("- resolution_window_screen:") < prompt.index(
+            "- aggregation:"
+        )
+
+
+class TestPredictionResultSchema:
+    """The Pydantic schema enforces the mech numeric contract."""
+
+    def test_valid_prediction_carries_the_numbers(self) -> None:
+        """A well-formed prediction constructs and carries the four numbers."""
+        assert FAKE_PREDICTION.p_yes == 0.32
+        assert FAKE_PREDICTION.p_no == 0.68
+
+    def test_validator_rejects_mismatched_sum(self) -> None:
+        """p_yes + p_no must equal 1 (guards against an inconsistent forecast)."""
+        with pytest.raises(ValidationError):
+            PredictionResult(
+                facts="f",
+                reasons_no="n",
+                reasons_yes="y",
+                evidence_reliability_screen="s",
+                aggregation="a",
+                reflection="r",
+                p_yes=0.7,
+                p_no=0.7,
+                confidence=0.5,
+                info_utility=0.5,
+            )
+
+    def test_parse_completion_takes_client_and_schema(self) -> None:
+        """_parse_completion takes the client and a response_format schema."""
+        params = list(inspect.signature(_parse_completion).parameters)
+        assert "client" in params and "response_format" in params
+
+    def test_numeric_fields_are_declared_last(self) -> None:
+        """The four numeric fields stay last in the schema.
+
+        Structured outputs emit fields in declaration order, so keeping the
+        numbers after the reasoning chain is what preserves v4's calibration.
+        A future reorder that breaks this must fail here.
+        """
+        assert list(PredictionResult.model_fields)[-4:] == [
+            "p_yes",
+            "p_no",
+            "confidence",
+            "info_utility",
+        ]
+
+
+class TestFailurePathContract:
+    """Any failure still yields a flat-json.loads-parseable null prediction."""
+
+    @patch(f"{V4_MODULE}._parse_completion", side_effect=RuntimeError("boom"))
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_run_failure_returns_parseable_null_prediction(
+        self,
+        mock_fetch: MagicMock,
+        mock_client_mgr: MagicMock,
+        _mock_parse: MagicMock,
+    ) -> None:
+        """A raising run() still yields flat-json.loads null JSON, p_yes None."""
+        mock_fetch.return_value = MagicMock(json=lambda: FAKE_SERPER_RESPONSE)
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+
+        on_chain = result[0]
+        parsed = json.loads(on_chain)  # trader consumer path -- must NOT raise
+        assert on_chain.startswith("{")
+        assert parsed["p_yes"] is None and parsed["p_no"] is None
+        assert parsed["confidence"] == 0.0 and parsed["info_utility"] == 0.0
+        # error + error_type let ops tell a systemic failure from a one-off.
+        assert parsed["error"] and parsed["error_type"] == "RuntimeError"
+
+    @patch(f"{V4_MODULE}.OpenAIClientManager")
+    @patch(f"{V4_MODULE}.fetch_additional_sources")
+    def test_serper_http_error_surfaces_as_null_prediction(
+        self, mock_fetch: MagicMock, mock_client_mgr: MagicMock
+    ) -> None:
+        """A Serper 4xx/5xx (raise_for_status) yields the null-prediction JSON."""
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("402 no credits")
+        mock_fetch.return_value = resp
+        mock_client = MagicMock()
+        mock_client_mgr.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_client_mgr.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = run(
+            tool="superforcaster-polymarket-v5",
+            model="gpt-4.1-2025-04-14",
+            prompt=FREE_TEXT_PROMPT,
+            api_keys=_make_mock_api_keys(),
+            counter_callback=None,
+        )
+        parsed = json.loads(result[0])
+        assert parsed["p_yes"] is None
+        assert parsed["error_type"] == "HTTPError"
+
+
+class TestParseCompletion:
+    """_parse_completion's own retry / refusal / success behaviour."""
+
+    def test_returns_parsed_on_success(self) -> None:
+        """A successful parse returns the model instance (schema is honored)."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.return_value = _mock_parse_response()
+        parsed, _ = _parse_completion(
+            client=client,
+            model="gpt-4.1-2025-04-14",
+            messages=[{"role": "user", "content": "x"}],
+            response_format=PredictionResult,
+            counter_callback=None,
+        )
+        assert parsed is FAKE_PREDICTION
+        assert (
+            client.beta.chat.completions.parse.call_args.kwargs["response_format"]
+            is PredictionResult
+        )
+
+    def test_refusal_retries_then_raises_chained_runtimeerror(self) -> None:
+        """A refusal (parsed=None) retries and raises RuntimeError with the cause."""
+        client = MagicMock()
+        client.beta.chat.completions.parse.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(parsed=None, refusal="policy"))]
+        )
+        with pytest.raises(RuntimeError, match="after 2 attempts"):
+            _parse_completion(
+                client=client,
+                model="gpt-4.1-2025-04-14",
+                messages=[{"role": "user", "content": "x"}],
+                response_format=PredictionResult,
+                retries=2,
+                delay=0,
+            )
+        assert client.beta.chat.completions.parse.call_count == 2

@@ -209,6 +209,10 @@
     "superforcaster-market-aware-olas-predict-r1-14b": {
       "parent": "superforcaster_full_search",
       "reason": "Market-aware variant of superforcaster_full_search with Olas-Predict-R1-14B as the forecaster (self-hosted vLLM, `olas-predict-r1-14b`), served from the superforcaster_market_aware package as a second wire name: same pipeline and schema as superforcaster-market-aware, with max_tokens and the evidence cap reduced to fit the model's 8192-token window."
+    },
+    "superforcaster-polymarket-v5": {
+      "parent": "superforcaster-polymarket-v4",
+      "reason": "Add a mandatory resolution-window screen to the PredictionResult schema and PREDICTION_PROMPT: classify the resolution criterion as WINDOW (met at any point in a stated span) vs POINT (one stated instant), and for a WINDOW criterion derive the probability from the number of chances the span contains."
     }
   }
 }

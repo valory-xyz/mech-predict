@@ -1,0 +1,1004 @@
+# -*- coding: utf-8 -*-
+# ------------------------------------------------------------------------------
+#
+#   Copyright 2023-2026 Valory AG
+#
+#   Licensed under the Apache License, Version 2.0 (the "License");
+#   you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#   See the License for the specific language governing permissions and
+#   limitations under the License.
+#
+# ------------------------------------------------------------------------------
+"""Contains the job definitions.
+
+What superforcaster-polymarket-v5 does (vs superforcaster-polymarket-v1)
+-----------------------------------------------------------------------
+v4 adds a mandatory evidence-reliability screen as the ``evidence_reliability_
+screen`` field of the PredictionResult schema (4th in reasoning order, filled
+before the numbers; gate-visible: downstream of source_content injection,
+exercised by PR-CI's cached replay) and raises max_tokens from 500 to 4096 so
+the full chain-of-thought executes before the numbers are emitted. The response
+is a single structured object, not prose plus a trailing JSON blob. It targets systematic
+overconfident-YES on Polymarket (high Brier in the >=0.9 p_yes bucket). One
+coherent mechanism -- evidence classification before probability formation --
+via four sub-steps:
+
+(4a) Prediction-market-odds filter: discard circular self-referential odds
+     embedded in sources (polymarket.com, metaculus, manifold, predictit,
+     kalshi); they are the price of the market being resolved, not evidence.
+
+(4b) Forward-looking intent discount: apply a 40-60% materialization discount
+     to intent/expectation language ("is set to", "is expected to", "plans to",
+     "scheduled to") -- announced intent, not a completed fact.
+
+(4c) Temporal-evidence classification: TYPE A (within-window dated) vs TYPE B
+     (perennial/undated standing pages), with a base-rate fallback when all
+     evidence is TYPE B. Fixes "X in headlines this week" markets that scored
+     p_yes=0.99 on standing pages and resolved NO (20.9% of issue #374 W-1
+     Brier mass).
+
+(4d) Criterion-specificity check: require TYPE A evidence that directly confirms
+     the exact resolution criterion (an exact phrase said at a named event, a
+     word in a named outlet's headline), not mere topic salience (32.2% of
+     issue #374 W-1 Brier mass).
+
+Consolidates the abandoned superforcaster-polymarket v4/v5 PR (#375) -- based
+off a stale branch, never merged -- into a single v4 off v1.
+
+What superforcaster-polymarket-v5 adds (vs v4)
+----------------------------------------------
+v5 adds ONE mechanism: a mandatory resolution-window screen, as the
+``resolution_window_screen`` field of the PredictionResult schema (filled after
+the evidence screen and before the numbers; gate-visible, so PR-CI's cached
+replay exercises it) plus the matching step in PREDICTION_PROMPT's reasoning
+order.
+
+Issue #503: on the T-1 window v4 answered questions whose criterion is met if
+the condition holds at ANY point in a stated span ("... by <date>", "... during
+<event>", "... this week", "hit (HIGH)/(LOW) $X Week of ...") by reporting
+whether the condition held at prediction time -- a point-in-time test -- and so
+never priced the remaining chances in the span. It scored Brier 0.4201 on those
+rows against a market price of 0.1054, versus 0.2086 on the point-in-time rows
+in the same window under the same code. Every one of the 20 rows it priced more
+than 20 points below the market resolved YES. The signature is an ordering
+violation the evidence cannot explain: across 80 ordered barrier pairs v4's
+probabilities were non-monotone in the barrier 31.2% of the time, against 5.0%
+for the market price and 0.0% for the realised outcomes.
+
+The screen makes the stage resolve the criterion's temporal structure first and,
+for a window criterion, derive the probability from how many chances the span
+contains -- rather than reporting whether the condition is already true.
+"""
+
+import functools
+import json
+import re
+import time
+from datetime import date
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    NamedTuple,
+    Optional,
+    Tuple,
+    Union,
+)
+
+import openai
+import requests
+from pydantic import BaseModel, Field, model_validator
+from tiktoken import encoding_for_model
+
+MechResponseWithKeys = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]], Any
+]
+MechResponse = Tuple[
+    str, Optional[str], Optional[Dict[str, Any]], Any, Optional[Dict[str, Any]]
+]
+MaxCostResponse = float
+
+N_MODEL_CALLS = 1
+DEFAULT_DELIVERY_RATE = 100
+# Serper degrades sharply on prompt-shaped queries (instruction boilerplate,
+# JSON-format text), in the worst case to zero organic results (issue #455).
+_MAX_SEARCH_QUERY_LEN = 150
+
+
+class PredictionResult(BaseModel):
+    """superforcaster-polymarket-v5 structured output.
+
+    The text fields carry v4's reasoning chain (facts -> reasons -> the
+    mandatory evidence-reliability screen -> aggregation -> reflection). Only
+    the four numeric fields at the bottom are returned on-chain per the mech
+    protocol. Using OpenAI structured outputs guarantees the completion parses,
+    so no prompt-side JSON-format instruction or output extraction is needed.
+    """
+
+    facts: str = Field(
+        ...,
+        description=(
+            "Core factual points compiled from the sources and relevant "
+            "background. Specific, relevant, no conclusions about how a fact "
+            "influences the forecast."
+        ),
+    )
+    reasons_no: str = Field(
+        ...,
+        description="Reasons the answer might be NO, each rated 1-10 for strength.",
+    )
+    reasons_yes: str = Field(
+        ...,
+        description="Reasons the answer might be YES, each rated 1-10 for strength.",
+    )
+    evidence_reliability_screen: str = Field(
+        ...,
+        description=(
+            "MANDATORY evidence-reliability screen, completed BEFORE forming a "
+            "tentative probability. (a) Prediction-market-odds filter: discard "
+            "any prediction-market trading price (polymarket / metaculus / "
+            "manifold / predictit / kalshi) as circular self-referential "
+            "evidence. (b) Forward-looking-intent discount: for intent or "
+            "expectation language ('is set to', 'is expected to', 'plans to', "
+            "'scheduled to', 'is poised to'), treat the outcome as only 40-60% "
+            "likely to materialize absent strong specific evidence. (c) "
+            "Temporal-evidence filter: classify each source TYPE A (dated within "
+            "the resolution window, or directly states the criterion was met) vs "
+            "TYPE B (undated, outside the window, or a standing page); state the "
+            "TYPE A and TYPE B counts; if ALL sources are TYPE B, anchor on the "
+            "category base rate (20-40% YES for 'X in headlines this week'-style "
+            "markets). (d) Criterion-specificity check: does any TYPE A evidence "
+            "directly confirm the exact resolution condition (not merely that the "
+            "topic is active)? If not, add uncertainty toward the base rate."
+        ),
+    )
+    # Issue #503: v4 answered "met at any point in a span" criteria as a
+    # point-in-time test, so it never priced the span's remaining chances.
+    resolution_window_screen: str = Field(
+        ...,
+        description=(
+            "MANDATORY resolution-window screen, completed BEFORE forming any "
+            "probability. (a) Classify the resolution criterion and quote the "
+            "words that decide it: WINDOW if it resolves YES when the condition "
+            "holds at ANY point inside a stated span ('by <date>', 'during "
+            "<event>', 'this week', 'Week of <date>', 'hit (HIGH)/(LOW) $X', "
+            "'at any point'), or POINT if one stated instant decides it "
+            "('closes above $X on <date>', 'finish the week above $X'). "
+            "(b) If POINT: say so and evaluate that single instant. (c) If "
+            "WINDOW: do NOT report whether the condition holds right now as the "
+            "answer -- that is the most common error on these markets. State "
+            "the span, how many distinct chances it contains (trading sessions "
+            "left, days until the deadline, minutes of the speech), the "
+            "probability per chance, and the resulting window probability, "
+            "which equals 1 - (1 - per_chance)^chances and is therefore ALWAYS "
+            "at or above the probability that the condition holds at the single "
+            "closing instant. Evidence that the condition is not YET met, or is "
+            "not YET scheduled, is a starting state, not a NO. If the evidence "
+            "shows the condition has ALREADY been met inside the span, the "
+            "answer is at or above 0.95. (d) Ordering check, for a numeric "
+            "threshold: state the current level and the signed distance to the "
+            "threshold, then confirm your probability respects the ordering "
+            "that a threshold NEARER the current level must never receive a "
+            "LOWER probability than one FURTHER away in the same direction over "
+            "the same span. Revise the number if it does not."
+        ),
+    )
+    aggregation: str = Field(
+        ...,
+        description=(
+            "Aggregate the remaining considerations after the screen. Weigh how "
+            "competing factors interact; adjust for news negativity and "
+            "sensationalism bias. End by stating a tentative probability in [0,1]."
+        ),
+    )
+    reflection: str = Field(
+        ...,
+        description=(
+            "Sanity checks and finalisation: over/underconfidence, conjunctive "
+            "or disjunctive conditions, priors vs case-specific evidence. Be "
+            "precise with tail probabilities; never change the forecast for "
+            "modesty or balance alone. Highlight the key factors informing the "
+            "final forecast."
+        ),
+    )
+    # IMPORTANT: the four numeric fields below MUST stay LAST in this schema.
+    # Structured outputs generate JSON fields in declaration order, so keeping
+    # the numbers after the reasoning fields is what conditions them on the
+    # chain-of-thought -- i.e. it preserves v4's calibration. Do not reorder or
+    # alphabetize (Pydantic won't complain and the schema still validates).
+    p_yes: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event in the Question occurs.",
+    )
+    p_no: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Estimated probability that the event does NOT occur.",
+    )
+    confidence: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the prediction (0 = lowest, 1 = highest).",
+    )
+    info_utility: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Utility of the information in the sources to inform the prediction "
+            "(0 = lowest, 1 = highest)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_p_yes_p_no_sum(self) -> "PredictionResult":
+        """Validate that p_yes + p_no is approximately 1."""
+        if abs(self.p_yes + self.p_no - 1.0) > 0.01:
+            raise ValueError(
+                f"p_yes + p_no must equal 1 (got {self.p_yes} + {self.p_no} = "
+                f"{self.p_yes + self.p_no})"
+            )
+        return self
+
+
+def _null_prediction_response(exc: Exception, api_keys: Any) -> MechResponseWithKeys:
+    """Build the parseable null-prediction tuple for any failure path.
+
+    The strict trader consumer flat-``json.loads`` the delivery, so every
+    failure -- rate-limit exhaustion, a permanent API error, a schema failure --
+    must return this shape rather than a raw exception string. ``error_type``
+    lets an operator distinguish a systemic misconfiguration (e.g. a revoked key
+    hitting every request) from a one-off model failure.
+
+    :param exc: the exception that caused the failure.
+    :param api_keys: the KeyChain, threaded back to the caller unchanged.
+    :return: the null-prediction MechResponseWithKeys tuple.
+    """
+    error_json = json.dumps(
+        {
+            "p_yes": None,
+            "p_no": None,
+            "confidence": 0.0,
+            "info_utility": 0.0,
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+        }
+    )
+    return error_json, "", None, None, None, api_keys
+
+
+def _flagged_null_result(
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    captured_source_content: Optional[Dict[str, Any]],
+    return_source_content: bool,
+    counter_callback: Optional[Callable[..., Any]],
+    context: str,
+    tier: str,
+    scan_truncated: bool = False,
+) -> MechResponse:
+    """Build the flagged null prediction returned on empty retrieval.
+
+    Unlike _null_prediction_response this is a VALID prediction
+    (p_yes = p_no = 0.5) with zero confidence and info_utility, so the strict
+    trader consumer still parses it (issue #455). The on-chain JSON carries
+    only the four standard fields; the explicit marker for requesters lives in
+    used_params["empty_retrieval"] (off-chain metadata.params), intended for
+    off-chain consumers (not yet wired up -- the benchmark scorer's
+    null-vs-forecast branch is a follow-up).
+
+    :param model: the model name recorded in used_params.
+    :param temperature: the temperature recorded in used_params.
+    :param max_tokens: the max_tokens recorded in used_params.
+    :param captured_source_content: the (empty) retrieval capture.
+    :param return_source_content: whether to attach the capture to used_params.
+    :param counter_callback: the cost callback, threaded back unchanged.
+    :param context: why the null was produced; recorded unconditionally in
+        used_params["null_reason"] so a skipped Serper call ("empty query")
+        stays distinguishable from a genuine zero-hit ("live search").
+    :param tier: the parse_prompt tier that produced the search query.
+    :param scan_truncated: whether the scan window did not cover the whole
+        prompt (any non-template tier; a template match returns before the
+        window can matter).
+    :return: the flagged-null MechResponse tuple.
+    """
+    print(
+        f"[superforcaster-polymarket-v5] {context}: empty retrieval"
+        " -- returning null prediction"
+    )
+    null_result = json.dumps(
+        {"p_yes": 0.5, "p_no": 0.5, "confidence": 0.0, "info_utility": 0.0}
+    )
+    used_params: Dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "empty_retrieval": True,
+        "null_reason": context,
+        "parse_tier": tier,
+        "scan_truncated": scan_truncated,
+    }
+    if return_source_content:
+        used_params["source_content"] = captured_source_content
+    return null_result, "", None, counter_callback, used_params
+
+
+def with_key_rotation(func: Callable) -> Callable:
+    """
+    Decorator that retries a function with API key rotation on failure.
+
+    :param func: The function to be decorated.
+    :type func: Callable
+    :returns: Callable -- the wrapped function that handles retries with key rotation.
+    """
+
+    @functools.wraps(func)
+    def wrapper(
+        *args: Any, **kwargs: Any
+    ) -> Union[MaxCostResponse, MechResponseWithKeys]:
+        # this is expected to be a KeyChain object,
+        # although it is not explicitly typed as such
+        api_keys = kwargs["api_keys"]
+        retries_left: Dict[str, int] = api_keys.max_retries()
+
+        def execute() -> Union[MaxCostResponse, MechResponseWithKeys]:
+            """Retry the function with a new key."""
+            try:
+                result = func(*args, **kwargs)
+                # Max-cost queries return a bare float; do NOT append api_keys
+                # (the pricing caller expects the float, not a 6-tuple).
+                if isinstance(result, float):
+                    return result
+                return result + (api_keys,)
+            except openai.RateLimitError as e:
+                # Rotate keys on a rate-limit hit. Once every key is exhausted,
+                # honor the null-prediction contract instead of re-raising: a
+                # raw exception raised here escapes wrapper() (a sibling except
+                # cannot catch it), breaking the exact contract this tool exists
+                # to hold on the path -- fleet-wide throttling -- most likely to
+                # hit many requests at once.
+                if retries_left["openai"] <= 0 and retries_left["openrouter"] <= 0:
+                    print(f"[superforcaster-polymarket-v5] rate-limit exhausted: {e}")
+                    return _null_prediction_response(e, api_keys)
+                retries_left["openai"] -= 1
+                retries_left["openrouter"] -= 1
+                api_keys.rotate("openai")
+                api_keys.rotate("openrouter")
+                return execute()
+            except Exception as e:  # noqa: BLE001
+                # Log the permanent failure (repo convention: the custom tools
+                # print) -- an AuthenticationError / BadRequestError etc. lands
+                # here on the first attempt with no retry or rotation.
+                print(f"[superforcaster-polymarket-v5] permanent failure: {e}")
+                return _null_prediction_response(e, api_keys)
+
+        mech_response = execute()
+        return mech_response
+
+    return wrapper
+
+
+class OpenAIClientManager:
+    """Client context manager for OpenAI."""
+
+    def __init__(self, api_key: str):
+        """Initializes with API keys"""
+        self.api_key = api_key
+        self._client: Optional["OpenAIClient"] = None
+
+    def __enter__(self) -> "OpenAIClient":
+        """Initializes and returns LLM client."""
+        self._client = OpenAIClient(api_key=self.api_key)
+        return self._client
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        """Closes the LLM client"""
+        if self._client is not None:
+            self._client.client.close()
+            self._client = None
+
+
+class OpenAIClient:
+    """OpenAI Client"""
+
+    def __init__(self, api_key: str):
+        """Initializes with API keys and client."""
+        self.api_key = api_key
+        self.client = openai.OpenAI(api_key=self.api_key)
+
+
+def count_tokens(text: str, model: str) -> int:
+    """Count the number of tokens in a text."""
+    enc = encoding_for_model(model)
+    return len(enc.encode(text))
+
+
+DEFAULT_OPENAI_SETTINGS = {
+    # 4096 (matches superforcaster_calibrated_full_search): the six reasoning
+    # fields -- notably the long evidence-reliability screen -- need headroom to
+    # complete before the numbers, otherwise a truncated completion raises
+    # openai.LengthFinishReasonError and degrades to a null prediction.
+    "max_tokens": 4096,
+    "limit_max_tokens": 4096,
+    "temperature": 0,
+}
+DEFAULT_OPENAI_MODEL = "gpt-4.1-2025-04-14"
+ALLOWED_TOOLS = ["superforcaster-polymarket-v5"]
+ALLOWED_MODELS = [DEFAULT_OPENAI_MODEL]
+MAX_SOURCES = 5
+COMPLETION_RETRIES = 3
+COMPLETION_DELAY = 2
+
+
+PREDICTION_PROMPT = """
+You are an advanced AI system which has been finetuned to provide calibrated probabilistic
+forecasts under uncertainty, with your performance evaluated according to the Brier score. When
+forecasting, do not treat 0.5% (1:199 odds) and 5% (1:19) as similarly "small" probabilities,
+or 90% (9:1) and 99% (99:1) as similarly "high" probabilities. As the odds show, they are
+markedly different, so output your probabilities accordingly.
+
+Question:
+{question}
+
+Today's date: {today}
+Your pretraining knowledge cutoff: October 2023
+
+We have retrieved the following information for this question:
+<background>{sources}</background>
+
+Recall the question you are forecasting:
+{question}
+
+Produce a structured forecast by filling every field of the required output schema,
+reasoning in this order:
+
+- facts: compress the sources and useful background into specific, relevant core factual
+  points. Do NOT draw conclusions about how a fact influences the answer here.
+- reasons_no: a few reasons the answer might be NO, each rated 1-10 for strength.
+- reasons_yes: a few reasons the answer might be YES, each rated 1-10 for strength.
+- evidence_reliability_screen: MANDATORY, and completed BEFORE you form any probability.
+  Follow every part of that field's instructions: the prediction-market-odds filter, the
+  forward-looking-intent discount, the temporal-evidence TYPE A / TYPE B classification
+  (state both counts), and the criterion-specificity check.
+- resolution_window_screen: MANDATORY, and completed BEFORE you form any probability.
+  Follow every part of that field's instructions: classify the criterion WINDOW vs POINT
+  and quote the deciding words; for a WINDOW criterion state the span, the number of
+  distinct chances in it, the per-chance probability and the resulting window probability
+  (1 - (1 - per_chance)^chances) rather than reporting whether the condition holds today;
+  then run the numeric-threshold ordering check.
+- aggregation: after both screens, weigh how the competing factors interact. We have detected
+  that you overestimate conflict, drama, violence and crises (news negativity bias) and
+  dramatic or emotionally charged news (sensationalism bias); adjust for both. Think like a
+  superforecaster and end by stating a tentative probability in [0,1].
+- reflection: sanity checks -- over/underconfidence, conjunctive or disjunctive conditions,
+  priors vs case-specific evidence. Be precise with tail probabilities; never change the
+  forecast for modesty or balance alone. Highlight the key factors informing the final
+  forecast.
+- p_yes, p_no, confidence, info_utility: your final numbers. Each must be in [0,1] and
+  p_yes + p_no must equal 1. p_yes is the probability the event occurs; confidence is your
+  confidence in the prediction; info_utility is how useful the sources were.
+"""
+
+
+def _parse_completion(
+    client: Any,
+    model: str,
+    messages: List[Dict[str, str]],
+    response_format: Any,
+    temperature: float = 0,
+    max_tokens: int = 4096,
+    retries: int = COMPLETION_RETRIES,
+    delay: int = COMPLETION_DELAY,
+    counter_callback: Optional[Callable] = None,
+) -> Tuple[Any, Optional[Callable]]:
+    """Call OpenAI Structured Outputs and parse into a Pydantic model.
+
+    ``client.beta.chat.completions.parse()`` guarantees the completion is
+    well-formed JSON matching the schema's field names and types, so no
+    prompt-side JSON-format instruction or output extraction is required. It
+    does NOT enforce the custom ``model_validator`` (``p_yes + p_no ~= 1``):
+    that raises ``pydantic.ValidationError`` (a ``ValueError``) inside
+    ``.parse()``, which is why ``ValueError`` is in the retry tuple below.
+
+    :param client: an initialised ``openai.OpenAI`` client.
+    :param model: OpenAI model identifier.
+    :param messages: chat messages list (role + content dicts).
+    :param response_format: Pydantic model class used as the structured-output schema.
+    :param temperature: sampling temperature (0 = deterministic).
+    :param max_tokens: maximum tokens to generate.
+    :param retries: number of retry attempts on transient / validation failure.
+    :param delay: delay in seconds between retries.
+    :param counter_callback: optional callback tracking token usage.
+    :return: tuple of (parsed model instance, counter_callback).
+    :raises RuntimeError: if all retries are exhausted without a successful parse.
+    """
+    attempt = 0
+    last_error: Optional[Exception] = None
+    while attempt < retries:
+        try:
+            response = client.beta.chat.completions.parse(
+                model=model,
+                messages=messages,
+                response_format=response_format,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=150,
+            )
+
+            parsed = response.choices[0].message.parsed
+
+            if parsed is None:
+                refusal = response.choices[0].message.refusal
+                raise ValueError(
+                    f"Model refused or returned unparseable output: {refusal}"
+                )
+
+            if counter_callback is not None:
+                counter_callback(
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens,
+                    model=model,
+                    token_counter=count_tokens,
+                )
+
+            return parsed, counter_callback
+        except (
+            openai.APIConnectionError,
+            openai.InternalServerError,
+            ValueError,
+        ) as e:
+            # NB: openai.RateLimitError is deliberately NOT caught here.
+            # Letting it propagate to the with_key_rotation decorator lets the
+            # decorator rotate API keys on a rate-limit hit -- retrying in-place
+            # on the same throttled key never rotates. Transient connection /
+            # server / validation failures stay here and retry on the same key.
+            print(f"[superforcaster-polymarket-v5] Attempt {attempt + 1} failed: {e}")
+            last_error = e
+            time.sleep(delay)
+            attempt += 1
+
+    raise RuntimeError(
+        f"Failed to get structured LLM completion after {retries} attempts: "
+        f"{last_error}"
+    ) from last_error
+
+
+def fetch_additional_sources(question: Any, serper_api_key: Any) -> requests.Response:
+    """Fetches additional sources for the given question using the Serper API."""
+    url = "https://google.serper.dev/search"
+    payload = json.dumps({"q": question})
+    headers = {
+        "X-API-KEY": serper_api_key,
+        "Content-Type": "application/json",
+    }
+
+    # timeout matches the fleet's other Serper callers (factual_research,
+    # superforcaster_calibrated_full_search); a hung connection must not block
+    # the task indefinitely.
+    response = requests.request("POST", url, headers=headers, data=payload, timeout=30)
+
+    return response
+
+
+def format_sources_data(organic_data: Any, misc_data: Any) -> str:
+    """Formats organic search results and "People Also Ask" data into a human-readable string."""
+    sources = ""
+
+    if len(organic_data) > 0:
+        print("Adding organic data...")
+
+        sources = """
+        Organic Results:
+        """
+
+        for item in organic_data:
+            sources += f"""{item.get('position', 'N/A')}. **Title:** {item.get("title", 'N/A')}
+            - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
+            - **Snippet:** {item.get("snippet", 'N/A')}
+            """
+
+    if len(misc_data) > 0:
+        print("Adding misc data...")
+
+        sources += "People Also Ask:\n"
+
+        counter = 1
+        for item in misc_data:
+            sources += f"""{counter}. **Question:** {item.get("question", 'N/A')}
+            - **Link:** [{item.get("link", '#')}]({item.get("link", '#')})
+            - **Snippet:** {item.get("snippet", 'N/A')}
+            """
+            counter += 1
+
+    return sources
+
+
+# Matches from 'question "' to '" and the `yes`' to handle nested quotes.
+_TRADER_TEMPLATE_RE = re.compile(r'question\s+"(.+?)"\s+and\s+the\s+`yes`', re.DOTALL)
+# Question-clause candidates: every question-word occurrence starts one, running
+# to the FIRST '?' after it (via str.find; tolerates embedded dots --
+# abbreviations, decimals, market ids -- which sentence-boundary splitting
+# would cut on).
+# Candidates may overlap; a feature score selects the market question among
+# them (see _score_clause).
+_QUESTION_WORD_RE = re.compile(
+    r"(?:will|is|are|was|were|does|do|did|can|could|who|what|when|where|which"
+    r"|how|whether)\b",
+    re.IGNORECASE,
+)
+# Meta/instruction stems: a question addressed at the RESPONDER ("Can you
+# estimate...", "What is your probability...") or prompt scaffolding ("What
+# follows is..."), never the market question itself. Second-person only:
+# first-person clauses ("Will we...", "Do I...") occur in real market wording.
+_META_STEM_RE = re.compile(
+    r"^(?:(?:can|could|would|will|do|does|did|is|are)\s+(?:you|your)\b"
+    r"|what\s+(?:is|are)\s+(?:your|the\s+(?:respective\s+)?probabilit)"
+    r"|what\s+follows\b)",
+    re.IGNORECASE,
+)
+# Deliberately case-sensitive (unlike the IGNORECASE _QUESTION_WORD_RE): a
+# capitalized market verb marks a sentence-initial market question, and adding
+# IGNORECASE here would double-count lowercase occurrences via the +1 bonus.
+_MARKET_VERB_RE = re.compile(
+    r"^(?:Will|Is|Are|Was|Were|Does|Do|Did|Which|Who|When|Whether)\b"
+)
+# Chars that may directly precede a sentence-initial question word: whitespace,
+# sentence punctuation, ASCII quotes/paren, and typographic quotes.
+_CLAUSE_BOUNDARY = " \t\n.!?:\"'(\u201c\u201d\u2018\u2019"
+# Candidate scanning is bounded to the prompt head: every question-word
+# occurrence starts a candidate and each candidate scans forward for '?', so
+# an unbounded scan is quadratic. Measured cost is small at the mech's cap
+# (~6.6ms unbounded at 100KB, the MAX_PROMPT_BYTES limit in the mech repo's
+# valory/task_execution skill) but grows ~4x per 2x and benchmark/direct
+# calls are not capped at all (multi-MB prompts reach seconds) -- the window
+# is defence-in-depth for those paths. Market questions sit in the prompt
+# head in practice (the longest observed production prompt is under 1KB), so
+# a 10KB window loses nothing on real traffic.
+_MAX_SCAN_CHARS = 10_000
+# Near-best window for the last-market-verb tiebreaker. Equals the largest
+# single-feature weight (the digit bonus in _score_clause) so a market clause
+# can never be pushed out of contention by one feature alone.
+_NEAR_BEST_WINDOW = 3
+
+
+def _score_clause(prompt: str, start: int, clause: str) -> int:
+    """Score a question-clause candidate; the market question should win.
+
+    Features: digits (market questions carry deadlines/quantities; instruction
+    and clarifying questions rarely do), a market-shaped opening verb, a
+    sentence-initial capitalized start, a penalty for responder-addressed /
+    scaffolding stems, and a penalty for sweeping across a sentence boundary.
+
+    :param prompt: the full prompt (for boundary context).
+    :param start: the clause's start offset in the prompt.
+    :param clause: the candidate clause text.
+    :return: the feature score (higher = more market-question-shaped).
+    """
+    score = 0
+    if any(ch.isdigit() for ch in clause):
+        score += 3
+    if _MARKET_VERB_RE.match(clause):
+        score += 1
+    if clause[0].isupper() and (start == 0 or prompt[start - 1] in _CLAUSE_BOUNDARY):
+        score += 2
+    if _META_STEM_RE.match(clause):
+        score -= 3
+    if ". " in clause:
+        score -= 1
+    return score
+
+
+def _shape_serper_sources(
+    raw: Dict[str, Any], context: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Validate a serper_response body and slice it into (organic, misc).
+
+    A body without the organic key is a broken or reshaped integration (a
+    quota-error body, a renamed key, a corrupted cache entry), not a genuine
+    zero-hit -- raise so it surfaces as an error null with error_type instead
+    of collapsing into the flagged null.
+
+    :param raw: the serper_response dict (live or cached).
+    :param context: short label for the error message (live vs cached replay).
+    :return: the (organic, peopleAlsoAsk) lists, organic capped at MAX_SOURCES.
+    """
+    if not isinstance(raw.get("organic"), list):
+        raise ValueError(
+            f"{context}: Serper response missing or malformed 'organic' key; "
+            f"got keys: {sorted(raw)[:8]}"
+        )
+    misc = raw.get("peopleAlsoAsk", [])
+    if not isinstance(misc, list):
+        raise ValueError(
+            f"{context}: Serper response has a malformed 'peopleAlsoAsk' key; "
+            f"got {type(misc).__name__}"
+        )
+    return raw["organic"][:MAX_SOURCES], misc
+
+
+def _truncate_query(query: str) -> str:
+    """Cap the query at _MAX_SEARCH_QUERY_LEN, cutting on a word boundary.
+
+    :param query: the derived search query.
+    :return: the query, truncated without a dangling partial word.
+    """
+    if len(query) <= _MAX_SEARCH_QUERY_LEN:
+        return query
+    cut = query[:_MAX_SEARCH_QUERY_LEN]
+    if not query[_MAX_SEARCH_QUERY_LEN].isspace() and not cut.endswith(" "):
+        cut = cut.rsplit(None, 1)[0] if " " in cut else cut
+    return cut.rstrip()
+
+
+class ParsedPrompt(NamedTuple):
+    """parse_prompt's result: the LLM question, the Serper query, the tier."""
+
+    question: str
+    query: str
+    tier: Literal["template", "clause", "raw"]
+
+
+def parse_prompt(prompt: str) -> ParsedPrompt:
+    """Split a request prompt into the LLM question and the Serper search query.
+
+    Trader-template prompts carry the bare market question between known
+    delimiters: it serves as both values, keeping that path byte-identical to
+    previous releases. Any other prompt is free text under the advertised
+    input contract (issue #455): the LLM receives the WHOLE prompt (resolution
+    criteria, source, and deadline stay in context) while the search query is
+    the best-scoring question clause (see _score_clause), with double quotes
+    dropped (Serper treats quoted spans as exact-match terms) and the length
+    capped on a word boundary.
+
+    :param prompt: the raw prompt passed to run().
+    :return: a ParsedPrompt -- tier is 'template' (trader regex matched),
+        'clause' (a scored question clause), or 'raw' (no clause found;
+        capped prompt head).
+    """
+    match = _TRADER_TEMPLATE_RE.findall(prompt)
+    if match:
+        question = match[0]
+        return ParsedPrompt(question, question, "template")
+    scan = prompt[:_MAX_SCAN_CHARS]
+    candidates = []
+    for word in _QUESTION_WORD_RE.finditer(scan):
+        start = word.start()
+        if start > 0 and scan[start - 1].isalnum():
+            continue
+        end = scan.find("?", start)
+        if end == -1:
+            continue
+        clause = scan[start : end + 1]
+        candidates.append(
+            (_score_clause(scan, start, clause), len(clause), -start, clause)
+        )
+    tier: Literal["template", "clause", "raw"]
+    if candidates:
+        # Clarifying questions (inside resolution criteria) often carry the
+        # dates/counts that outscore a digit-free market question. In free
+        # text the market question is reliably the LAST market-verb-shaped
+        # question -- clarifiers and instructions precede it -- so among
+        # candidates near the best score, prefer the last market-verb one.
+        best_score = max(candidates)[0]
+        market_shaped = [
+            c
+            for c in candidates
+            if c[0] >= best_score - _NEAR_BEST_WINDOW
+            and _MARKET_VERB_RE.match(c[3])
+            and not _META_STEM_RE.match(c[3])
+        ]
+        chosen = (
+            min(market_shaped, key=lambda c: c[2]) if market_shaped else max(candidates)
+        )
+        query, tier = chosen[3], "clause"
+    else:
+        query, tier = scan, "raw"
+    query = _truncate_query(query.replace('"', "").strip())
+    if not query:
+        # Degenerate prompts (only quotes/whitespace) must not strip down to
+        # an empty Serper query -- fall back to the unstripped prompt head.
+        query = _truncate_query(prompt.strip())
+    return ParsedPrompt(prompt, query, tier)
+
+
+@with_key_rotation
+def run(**kwargs: Any) -> Union[MaxCostResponse, MechResponse]:
+    """Run the task"""
+    tool = kwargs["tool"]
+    if tool not in ALLOWED_TOOLS:
+        raise ValueError(f"Tool {tool} is not supported.")
+
+    model = kwargs.get("model")
+    if model is None:
+        raise ValueError("Model not supplied.")
+
+    delivery_rate = int(kwargs.get("delivery_rate", DEFAULT_DELIVERY_RATE))
+    counter_callback: Optional[Callable[..., Any]] = kwargs.get(
+        "counter_callback", None
+    )
+    if delivery_rate == 0:
+        if not counter_callback:
+            raise ValueError(
+                "A delivery rate of `0` was passed, but no counter callback was given to calculate the max cost with."
+            )
+
+        max_cost = counter_callback(
+            max_cost=True,
+            models_calls=(model,) * N_MODEL_CALLS,
+        )
+        return max_cost
+
+    openai_api_key = kwargs["api_keys"]["openai"]
+    source_content = kwargs.get("source_content", None)
+    return_source_content = (
+        kwargs["api_keys"].get("return_source_content", "false") == "true"
+    )
+    source_content_mode = kwargs["api_keys"].get("source_content_mode", "cleaned")
+    if source_content_mode not in ("cleaned", "raw"):
+        raise ValueError(
+            f"Invalid source_content_mode: {source_content_mode!r}. Must be 'cleaned' or 'raw'."
+        )
+    with OpenAIClientManager(openai_api_key) as llm_client:
+        max_tokens = kwargs.get("max_tokens", DEFAULT_OPENAI_SETTINGS["max_tokens"])
+        temperature = kwargs.get("temperature", DEFAULT_OPENAI_SETTINGS["temperature"])
+        prompt = kwargs["prompt"]
+
+        today = date.today()
+        d = today.strftime("%d/%m/%Y")
+
+        question, search_query, tier = parse_prompt(prompt)
+        # The scan window not covering the whole prompt is observable on its
+        # own: even a clause-tier pick may have missed the real question
+        # sitting past the window (not only the raw-tier no-clause case).
+        # A template match is exempt: it returns the exact question before
+        # the window plays any role, so nothing can have been missed.
+        scan_truncated = tier != "template" and len(prompt) > _MAX_SCAN_CHARS
+        if scan_truncated:
+            print(
+                f"[superforcaster-polymarket-v5] Scan window exhausted: "
+                f"prompt is {len(prompt)} chars, scanned the first "
+                f"{_MAX_SCAN_CHARS}; tier={tier}, query: {search_query!r}"
+            )
+        elif tier == "raw":
+            print(
+                "[superforcaster-polymarket-v5] No question clause found; "
+                f"using capped prompt head as the search query: {search_query!r}"
+            )
+        elif tier == "clause":
+            print(
+                f"[superforcaster-polymarket-v5] Free-text prompt (tier={tier}); "
+                f"derived search query: {search_query!r}"
+            )
+
+        if source_content is not None:
+            print("Using provided source content (cached replay)...")
+            captured_source_content = source_content
+            serper_data = source_content.get("serper_response", source_content)
+            organic_data, misc_data = _shape_serper_sources(
+                serper_data, "cached replay"
+            )
+            if not organic_data and not misc_data:
+                return _flagged_null_result(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=captured_source_content,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="cached replay",
+                    tier=tier,
+                    scan_truncated=scan_truncated,
+                )
+            sources = format_sources_data(organic_data, misc_data)
+        else:
+            if not any(ch.isalnum() for ch in search_query):
+                # Nothing searchable: no alphanumeric character at all (empty,
+                # whitespace, quotes, or bare punctuation) -- skip the wasted
+                # Serper call and return the flagged null directly.
+                return _flagged_null_result(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=None,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="empty query",
+                    tier=tier,
+                    scan_truncated=scan_truncated,
+                )
+            serper_api_key = kwargs["api_keys"]["serperapi"]
+            print("Fetching additional sources...")
+            serper_response = fetch_additional_sources(search_query, serper_api_key)
+            # Raise on a 4xx/5xx error body (credit / auth error) instead of
+            # calling .json() on it and feeding the model an empty <background>
+            # block that looks like a healthy run (matches the fleet pattern).
+            serper_response.raise_for_status()
+            sources_data = serper_response.json()
+            # mode tag included for consistency across tools; content is identical
+            # regardless of mode since Serper returns structured JSON, not HTML
+            captured_source_content = {
+                "mode": source_content_mode,
+                "serper_response": sources_data,
+            }
+            print(f"Additional sources fetched: {sources_data}")
+            organic_data, misc_data = _shape_serper_sources(sources_data, "live search")
+            if not organic_data and not misc_data:
+                return _flagged_null_result(
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    captured_source_content=captured_source_content,
+                    return_source_content=return_source_content,
+                    counter_callback=counter_callback,
+                    context="live search",
+                    tier=tier,
+                    scan_truncated=scan_truncated,
+                )
+            print("Formating sources...")
+            sources = format_sources_data(organic_data, misc_data)
+
+        print("Updating prompt...")
+        prediction_prompt = PREDICTION_PROMPT.format(
+            question=question, today=d, sources=sources
+        )
+        print(f"\n{prediction_prompt=}\n")
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prediction_prompt},
+        ]
+        print("Getting prompt response...")
+        # OpenAI structured outputs: the model reasons INTO the PredictionResult
+        # schema fields and the SDK returns a validated object, so the on-chain
+        # result is a clean, flat-``json.loads``-parseable JSON object -- no
+        # reasoning prose can leak into it (the bug v4 previously shipped).
+        prediction: PredictionResult
+        prediction, counter_callback = _parse_completion(
+            client=llm_client.client,
+            model=model,
+            messages=messages,
+            response_format=PredictionResult,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            counter_callback=counter_callback,
+        )
+        print(
+            f"[superforcaster-polymarket-v5] Result: p_yes={prediction.p_yes}, "
+            f"p_no={prediction.p_no}, confidence={prediction.confidence}, "
+            f"info_utility={prediction.info_utility}"
+        )
+
+        # On-chain result -- only the four standard mech fields.
+        result = json.dumps(
+            {
+                "p_yes": prediction.p_yes,
+                "p_no": prediction.p_no,
+                "confidence": prediction.confidence,
+                "info_utility": prediction.info_utility,
+            }
+        )
+
+        used_params = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "parse_tier": tier,
+            "scan_truncated": scan_truncated,
+        }
+        if return_source_content:
+            used_params["source_content"] = captured_source_content
+        return result, prediction_prompt, None, counter_callback, used_params

@@ -333,7 +333,11 @@ def build_decision_record(
         if row["classification"] != "non_prediction"
     }
     tourn = {name: row["verdict"] for name, row in candidates.items()}
-    state, token, promote, demote = _decision_state(prod, tourn)
+    # Rejected production evidence cannot establish a replacement sequence.
+    # Keep its rows/counts, but evaluate independent candidates on their own.
+    state, token, promote, demote = _decision_state(
+        {} if statuses["at"] else prod, tourn
+    )
     if statuses["at"] and not promote:
         errors.append("Production evaluation unavailable: 90d scores were rejected.")
     if errors:

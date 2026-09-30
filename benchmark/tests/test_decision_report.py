@@ -74,6 +74,35 @@ def test_seventh_deployed_tool_is_not_filtered_by_execution_registry() -> None:
     assert "3 remain deployed" in decision_text(record)
 
 
+@pytest.mark.parametrize("failure", ["missing", "stale", "malformed"])
+def test_rejected_production_window_does_not_imply_replace_first(failure: str) -> None:
+    """Candidate promotion can stand alone without inventing production failures."""
+    payloads = _payloads({"live": _stats(brier=0.31)})
+    payloads["tournament"]["by_tool"] = {"candidate": _stats(edge=0.20)}
+    roster = {"status": "complete", "tools": ["live"]}
+    record = build_decision_record(
+        "omen", payloads, roster, ["live", "candidate"], input_status={"at": failure}
+    )
+    assert record["decision"]["token"] == "PROMOTE 1"
+    assert record["decision"]["demote"] == []
+    assert record["counts"]["remaining_deployed"] == 1
+    assert record["counts"]["assessed"] == 0
+    assert record["counts"]["remaining_unassessed"] == 1
+    text = decision_text(record)
+    assert "90d unavailable" in text
+    assert "qualified replacement before" not in text
+    # A genuinely assessed failure still requires a replacement first.
+    assessed = build_decision_record("omen", payloads, roster, ["live", "candidate"])
+    assert assessed["decision"]["token"] == "PROMOTE 1 FIRST"
+    # Missing roster coverage remains a separate action blocker.
+    roster["status"] = "unavailable"
+    blocked = build_decision_record(
+        "omen", payloads, roster, ["live", "candidate"], input_status={"at": failure}
+    )
+    assert blocked["decision"]["token"] == "DECISION UNAVAILABLE"
+    assert blocked["decision"]["promote"] == []
+
+
 def test_unscored_unknown_and_non_prediction_tools_are_accounted_for() -> None:
     """Lack of scores never silently removes a manifest member."""
     record = build_decision_record(

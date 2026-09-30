@@ -122,6 +122,19 @@ def table_block(
     }
 
 
+def escape_mrkdwn(text: str) -> str:
+    """Escape literal control characters while retaining mrkdwn styling.
+
+    Use on report body text, before adding intentional Slack links. Raw names
+    and decision inputs stay unchanged. Escape ampersands first so introduced
+    entities are encoded exactly once.
+
+    :param text: original, unescaped display text.
+    :return: text safe from Slack's angle-bracket link and mention parsing.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def section(text: str) -> dict[str, Any]:
     """Build a mrkdwn section block, used as a table's caption.
 

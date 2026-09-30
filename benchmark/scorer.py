@@ -2446,10 +2446,20 @@ def score_period_split_by_platform(
         matches the shape of ``score_period_split``. Unknown-platform
         rows stay in ``"all"`` only.
     """
+    as_of = datetime.now(timezone.utc)
     prod_rows, tourn_rows = _load_period_rows(
-        logs_dir, days, tournament_input, offset_days
+        logs_dir, days, tournament_input, offset_days, as_of=as_of
     )
-    return _score_rows_by_platform(prod_rows, tourn_rows)
+    result = _score_rows_by_platform(prod_rows, tourn_rows)
+    window_end = as_of - timedelta(days=offset_days)
+    for pair in result.values():
+        for payload in pair:
+            payload["requested_window"] = {
+                "start": (window_end - timedelta(days=days)).isoformat(),
+                "end": window_end.isoformat(),
+                "timestamp_field": "predicted_at",
+            }
+    return result
 
 
 def score_period_split_by_platform_from_mech_analytics(
@@ -2537,7 +2547,15 @@ def score_period_split_by_platform_from_mech_analytics(
     # mech-analytics has no tournament partition — the endpoint serves
     # only production-mode scored rows. Return empty tournament rows so
     # the return shape matches the legacy path exactly.
-    return _score_rows_by_platform(prod_rows, [])
+    result = _score_rows_by_platform(prod_rows, [])
+    for pair in result.values():
+        for payload in pair:
+            payload["requested_window"] = {
+                "start": window_start.isoformat(),
+                "end": window_end.isoformat(),
+                "timestamp_field": "requested_at",
+            }
+    return result
 
 
 def _parse_predicted_at(value: Any) -> datetime | None:
@@ -2566,6 +2584,8 @@ def _load_period_rows(
     days: int,
     tournament_input: Path | None,
     offset_days: int = 0,
+    *,
+    as_of: datetime | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Load + filter + mode-partition period rows.
 
@@ -2576,6 +2596,7 @@ def _load_period_rows(
     :param offset_days: number of days to shift the window back from "now".
         ``0`` means the trailing window ending at "now" (current window);
         ``days`` means the immediately-preceding non-overlapping window.
+    :param as_of: optional frozen clock shared with the saved window bounds.
     :return: ``(production_rows, tournament_rows)`` both filtered to the
         period window.
     :raises ValueError: when ``days`` or ``offset_days`` is negative.
@@ -2585,7 +2606,7 @@ def _load_period_rows(
             f"days and offset_days must be >= 0 (got days={days},"
             f" offset_days={offset_days})"
         )
-    now = datetime.now(timezone.utc)
+    now = as_of or datetime.now(timezone.utc)
     window_end = now - timedelta(days=offset_days)
     window_start = window_end - timedelta(days=days)
 

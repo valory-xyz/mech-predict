@@ -71,6 +71,15 @@ DEPLOYMENT_TO_PLATFORM: Mapping[str, str] = MappingProxyType(
     {name: platform for name, (_service, _chain, platform) in _DEPLOYMENTS.items()}
 )
 
+# Explicit component roles, never inferred from absent forecast scores. Capture
+# this mapping in the audit snapshot so replay cannot pick up later additions.
+NON_PREDICTION_TOOLS: Mapping[str, str] = MappingProxyType(
+    {
+        "propose-question": "packages/valory/customs/propose_question/propose_question.py",
+        "resolve-market-jury-v1": "packages/valory/customs/resolve_market_jury/resolve_market_jury.py",
+    }
+)
+
 
 def deployments_for_platform(platform: str) -> tuple[str, ...]:
     """Return the deployment names belonging to ``platform``, in declared order.
@@ -267,7 +276,9 @@ def fetch_tools_for_metadata(metadata_hash: str) -> list[str]:
     return tools
 
 
-def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
+def resolve_mech_tools(
+    addresses: list[str], subgraph_url: str, provenance: dict[str, Any] | None = None
+) -> list[str]:
     """Resolve a deployment's ``valid_mechs`` to the union of tools they offer.
 
     Looks up each address' on-chain metadata CID via the marketplace
@@ -292,6 +303,8 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
 
     :param addresses: mech contract addresses (the parsed ``valid_mechs``).
     :param subgraph_url: marketplace subgraph endpoint for the chain.
+    :param provenance: optional audit output; retains resolved tools on partial
+        failure but still requires metadata/manifests for every mech to succeed.
     :return: sorted union of advertised tool names; ``[]`` when ``addresses``
         is empty (a real "no mechs allow-listed" state, not a failure).
     :raises ValueError: when the subgraph does not return every requested
@@ -307,25 +320,55 @@ def resolve_mech_tools(addresses: list[str], subgraph_url: str) -> list[str]:
     returned = {(mech.get("address") or "").lower() for mech in meches}
     requested = {addr.lower() for addr in addresses}
     missing = requested - returned
+    failures = []
     if missing:
-        raise ValueError(
+        failures.append(
             "subgraph did not return mech address(es): " + ", ".join(sorted(missing))
         )
+        if provenance is None:
+            raise ValueError(failures[0])
 
     metadata_hashes: set[str] = set()
+    missing_metadata: list[str] = []
+    if provenance is not None:
+        provenance["mechs"] = {}
     for mech in meches:
         manifests = (mech.get("service") or {}).get("metadata") or []
         if manifests and manifests[0].get("metadata"):
-            metadata_hashes.add(manifests[0]["metadata"])
+            metadata_hash = manifests[0]["metadata"]
+            metadata_hashes.add(metadata_hash)
+            if provenance is not None:
+                provenance["mechs"][mech["address"].lower()] = metadata_hash
+        else:
+            missing_metadata.append(mech["address"])
+
+    if provenance is not None and missing_metadata:
+        failures.append("Missing metadata for mech(s): " + ", ".join(missing_metadata))
 
     if not metadata_hashes:
         raise ValueError(
-            "subgraph returned all addresses but none have on-chain metadata"
+            "; ".join(failures)
+            or "subgraph returned all addresses but none have on-chain metadata"
         )
 
     tools: set[str] = set()
-    for metadata_hash in metadata_hashes:
-        tools.update(fetch_tools_for_metadata(metadata_hash))
+    if provenance is not None:
+        provenance["manifests"] = {}
+    for metadata_hash in sorted(metadata_hashes):
+        try:
+            manifest_tools = fetch_tools_for_metadata(metadata_hash)
+        except (URLError, ValueError, OSError) as exc:
+            if provenance is None:
+                raise
+            failures.append(f"Manifest {metadata_hash}: {exc}")
+            continue
+        tools.update(manifest_tools)
+        if provenance is not None:
+            digest = metadata_hash.removeprefix("0x")
+            provenance["manifests"][CID_PREFIX + digest] = manifest_tools
+            provenance["tools"] = sorted(tools)
+    if failures:
+        raise ValueError("; ".join(failures))
     return sorted(tools)
 
 
@@ -363,3 +406,76 @@ def fetch_valid_tools() -> dict[str, list[str] | None]:
             log.warning("%s selectable-tools resolution failed: %s", deployment, exc)
 
     return valid
+
+
+def fetch_deployment_snapshot() -> dict[str, Any]:
+    """Capture deployment membership and immutable manifest references once.
+
+    :return: serializable snapshot; failures are explicit per deployment.
+    """
+    snapshot: dict[str, Any] = {
+        "release_ref": None,
+        "deployments": {},
+        "non_prediction_tools": dict(NON_PREDICTION_TOOLS),
+    }
+    try:
+        snapshot["release_ref"] = latest_trader_ref()
+    except Exception as exc:  # pylint: disable=broad-except
+        # External discovery must not stop scoring or persistence of resume
+        # state. Audit-file writes remain outside this recovery boundary.
+        snapshot["error"] = f"{type(exc).__name__}: {exc}"
+        log.warning("audit release discovery unavailable: %s", snapshot["error"])
+    for name, (service, chain, platform) in _DEPLOYMENTS.items():
+        row: dict[str, Any] = {
+            "platform": platform,
+            "status": "unavailable",
+            "tools": [],
+        }
+        snapshot["deployments"][name] = row
+        if snapshot["release_ref"] is None:
+            continue
+        try:
+            url = TRADER_SERVICE_YAML_URL.format(
+                ref=snapshot["release_ref"], service=service
+            )
+            source = _http_get(url)
+            row["service_url"] = url
+            row["valid_mechs"] = parse_valid_mechs(source)
+            row["tools"] = resolve_mech_tools(
+                row["valid_mechs"], MARKETPLACE_SUBGRAPH_URL[chain], row
+            )
+            row["status"] = "complete"
+        except Exception as exc:  # pylint: disable=broad-except
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            log.warning("%s audit roster unavailable: %s", name, exc)
+    return snapshot
+
+
+def snapshot_valid_tools(snapshot: dict[str, Any]) -> dict[str, list[str] | None]:
+    """Adapt a frozen snapshot to the existing Markdown analysis API."""
+    return {
+        name: row["tools"] if row["status"] == "complete" else None
+        for name, row in snapshot["deployments"].items()
+    }
+
+
+def platform_roster(snapshot: dict[str, Any], platform: str) -> dict[str, Any]:
+    """Select a complete platform roster, retaining explicit failure status."""
+    rows = [
+        snapshot.get("deployments", {}).get(name, {})
+        for name in deployments_for_platform(platform)
+    ]
+    tools = sorted({tool for row in rows for tool in row.get("tools", [])})
+    return {
+        "status": (
+            "complete"
+            if rows and all(row.get("status") == "complete" for row in rows)
+            else "unavailable"
+        ),
+        "tools": tools,
+        "non_prediction_tools": [
+            tool
+            for tool in tools
+            if normalize_tool_name(tool) in snapshot.get("non_prediction_tools", {})
+        ],
+    }

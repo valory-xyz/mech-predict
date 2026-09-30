@@ -42,7 +42,11 @@ from benchmark.scoring_primitives import (
     LARGE_TRADE_THRESHOLD,
     MIN_SAMPLE_SIZE,
 )
-from benchmark.tool_usage import deployments_for_platform, fetch_valid_tools
+from benchmark.tool_usage import (
+    deployments_for_platform,
+    fetch_valid_tools,
+    snapshot_valid_tools,
+)
 from benchmark.tournament_tools import TOURNAMENT_TOOLS_JSON, load_tournament_tools
 
 log = logging.getLogger(__name__)
@@ -257,6 +261,7 @@ def _build_scores_from_mech_analytics(
     current_month = datetime.now(timezone.utc).strftime("%Y-%m")
     scores = _empty_scores(current_month)
 
+    until = until or datetime.now(timezone.utc)
     n_rows = 0
     for row in iter_scored_rows(
         since=since,
@@ -275,7 +280,13 @@ def _build_scores_from_mech_analytics(
             f"mech-analytics returned zero rows for platform={platform} "
             f"since={since.isoformat()} until={until.isoformat() if until else 'now'}"
         )
-    return _finalize_scores(scores)
+    result = _finalize_scores(scores)
+    result["requested_window"] = {
+        "start": since.isoformat(),
+        "end": until.isoformat(),
+        "timestamp_field": "requested_at",
+    }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -3080,6 +3091,11 @@ def main() -> None:
             "now. Ignored when the flag is off."
         ),
     )
+    parser.add_argument(
+        "--deployment-snapshot",
+        type=Path,
+        help="Use a captured roster without a live lookup.",
+    )
     args = parser.parse_args()
     results_dir = DEFAULT_RESULTS_DIR
     history = load_history(args.history)
@@ -3131,8 +3147,8 @@ def main() -> None:
         # tournament partition.
         since_defaulted = args.since is None
         since = args.since or _start_of_current_month_utc()
-        until = args.until
-        now = datetime.now(timezone.utc)
+        now = args.until or datetime.now(timezone.utc)
+        until = now
         window = timedelta(days=ROLLING_WINDOW_DAYS)
         allow_empty_scores = _allow_empty_main_scores(since_defaulted, now.day)
         scores = _build_scores_from_mech_analytics(
@@ -3142,7 +3158,7 @@ def main() -> None:
         # is legitimate); the main scores window is not (empty means the
         # nightly job would silently render a plausible all-N/A report).
         rolling = _build_scores_from_mech_analytics(
-            platform, now - window, None, allow_empty=True
+            platform, now - window, now, allow_empty=True
         )
         prev_rolling = _build_scores_from_mech_analytics(
             platform, now - 2 * window, now - window, allow_empty=True
@@ -3174,6 +3190,14 @@ def main() -> None:
         f"{len(history)} months of history"
     )
 
+    # Preserve the actual main-window input too: on the HTTP path it is
+    # MTD, while the cumulative scores_<platform>.json has a different scope.
+    _write_rolling_json(results_dir / f"analysis_scores_{platform}.json", scores)
+    valid_tools = None
+    if args.deployment_snapshot:
+        valid_tools = snapshot_valid_tools(
+            json.loads(args.deployment_snapshot.read_text())
+        )
     report = generate_report(
         scores,
         history,
@@ -3183,6 +3207,7 @@ def main() -> None:
         include_tournament=args.include_tournament,
         scores_tournament=scores_tournament,
         active_tournament_cids=active_tournament_cids,
+        valid_tools=valid_tools,
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

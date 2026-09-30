@@ -75,10 +75,9 @@ jobs:
     # actions: read is needed by `Download previous benchmark data` (the
     # action calls the Actions REST API to locate the prior run's
     # benchmark-data artifact carrying tool_improvement_triage_state.json,
-    # scores.json, and the fetch cursor) and by `Resolve report artifact
-    # URL` (gh api .../actions/runs/.../artifacts). Without it those calls
-    # 403 silently (both wrap continue-on-error), state restore fails
-    # every day, and duplicate-suppression breaks.
+    # scores.json, and the fetch cursor). Without it the restore request
+    # 403s silently (continue-on-error), state restore fails every day,
+    # and duplicate-suppression breaks.
     # If TOOL_IMPROVEMENT_GH_TOKEN secret is set, it overrides github.token
     # for that step (lets the issue be authored by a dedicated bot account
     # rather than github-actions[bot]); these permissions still apply.
@@ -90,6 +89,7 @@ jobs:
     # time in benchmark/analyze.py) and the --period-days flag passed to
     # the scorer below, keeping the report and the scoring step in sync.
     env:
+      REPORT_AUDIT_DIR: benchmark/results/decision_audit/${{ github.run_id }}-${{ github.run_attempt }}
       BENCHMARK_ROLLING_WINDOW_DAYS: ${{ github.event.inputs.rolling_window_days || '7' }}
       # Feature flag: when 'true', scorer's --rebuild path and analyze.py
       # source their rows from mech-analytics instead of the local log
@@ -152,6 +152,11 @@ jobs:
       # re-creates it, and its absence correctly disables the T-1 tier.
       - name: Drop stale tournament rows from the restored artifact
         run: rm -f benchmark/results/tournament_scored.jsonl
+
+      # Capture the roster once for both reports. This also removes restored
+      # derived windows/reports before scoring; cumulative resume state stays.
+      - name: Initialize decision audit and capture deployment roster
+        run: python -m benchmark.report_audit init --output "$REPORT_AUDIT_DIR"
 
       # Self-healing backfill: delivery rows are occasionally written to
       # the daily shards before their response is available upstream
@@ -503,11 +508,11 @@ jobs:
           echo "::warning title=Trailing 90d scoring failed::'Score trailing 90d window' failed or hit its 10-minute budget; today's report has no trailing-90d section. See that step's log."
 
       - name: Analyze (Omenstrat)
-        run: python -m benchmark.analyze --platform omen --include-tournament
+        run: python -m benchmark.analyze --platform omen --include-tournament --deployment-snapshot "$REPORT_AUDIT_DIR/deployment_snapshot.json"
 
       - name: Analyze (Polystrat)
         if: always() && !cancelled()
-        run: python -m benchmark.analyze --platform polymarket --include-tournament
+        run: python -m benchmark.analyze --platform polymarket --include-tournament --deployment-snapshot "$REPORT_AUDIT_DIR/deployment_snapshot.json"
 
       # Stale ROI outputs are restored from artifact and re-rendered
       # by notify_slack as if live — delete on flag-on so the section
@@ -558,6 +563,33 @@ jobs:
             fi
           done
 
+      # Prepare independently so one platform's failure cannot suppress the
+      # other. All computation and optional LLM work happens before upload.
+      - name: Prepare Omenstrat decision bundle
+        if: always() && !cancelled() && hashFiles('benchmark/results/decision_audit/**/run.json') != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+        run: python -m benchmark.report_audit prepare --output "$REPORT_AUDIT_DIR" --platform omen
+
+      - name: Prepare Polystrat decision bundle
+        if: always() && !cancelled() && hashFiles('benchmark/results/decision_audit/**/run.json') != ''
+        env:
+          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
+        run: python -m benchmark.report_audit prepare --output "$REPORT_AUDIT_DIR" --platform polymarket
+
+      # Separate from resume state: prior audit snapshots are never restored
+      # as current scorer inputs. The artifact URL is the sole addition made
+      # to the verified saved Slack payload after upload.
+      - name: Upload decision evidence
+        id: decision-audit
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-decision-audit-${{ github.run_attempt }}
+          path: ${{ env.REPORT_AUDIT_DIR }}
+          retention-days: 90
+          if-no-files-found: error
+
       # Upload state + scores (small, needed for next run).
       # include-hidden-files: true is required so .fetch_state.json
       # (leading dot = hidden under v4's default filter) actually ships
@@ -596,46 +628,27 @@ jobs:
             benchmark/results/tournament_scored.jsonl
           retention-days: 90
 
-      - name: Resolve report artifact URL
-        id: artifact-url
-        run: |
-          AID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-            --jq '.artifacts[] | select(.name=="benchmark-data") | .id' 2>/dev/null || true)
-          if [ -n "$AID" ]; then
-            echo "url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/$AID" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      # The hashFiles() guard keeps the per-platform Slack post independent
-      # of the other platform's Analyze step: if report_<platform>.md was
-      # not written (because Analyze crashed before writing it), we skip
-      # the Slack post for that platform rather than firing notify_slack
-      # against a missing file. The neighboring platform's Slack post
-      # still runs, since each step gates on its own report file.
+      # Posting consumes the uploaded, replay-verified payload only. No live
+      # deployment lookup, scoring, or LLM call can change the proposed action.
       - name: Post Omenstrat summary to Slack
-        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_omen.md') != ''
+        if: always() && !cancelled() && steps.decision-audit.outcome == 'success' && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
         env:
-          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
-          REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-          BENCHMARK_COMPUTED_TABLES: 'true'
+          REPORT_ARTIFACT_URL: ${{ steps.decision-audit.outputs.artifact-url }}
         run: |
-          python -m benchmark.notify_slack \
-            --report benchmark/results/report_omen.md \
-            --platform-label Omenstrat
+          if [ -f "$REPORT_AUDIT_DIR/omen/manifest.json" ]; then
+            python -m benchmark.report_audit post --bundle "$REPORT_AUDIT_DIR/omen"
+          fi
 
       - name: Post Polystrat summary to Slack
-        if: always() && !cancelled() && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false') && hashFiles('benchmark/results/report_polymarket.md') != ''
+        if: always() && !cancelled() && steps.decision-audit.outcome == 'success' && (github.event.inputs.notify_slack != 'false') && (vars.ENABLE_SLACK_NOTIFY != 'false')
         env:
-          OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.BENCHMARK_SLACK_WEBHOOK_URL }}
-          REPORT_ARTIFACT_URL: ${{ steps.artifact-url.outputs.url }}
-          BENCHMARK_COMPUTED_TABLES: 'true'
+          REPORT_ARTIFACT_URL: ${{ steps.decision-audit.outputs.artifact-url }}
         run: |
-          python -m benchmark.notify_slack \
-            --report benchmark/results/report_polymarket.md \
-            --platform-label Polystrat
+          if [ -f "$REPORT_AUDIT_DIR/polymarket/manifest.json" ]; then
+            python -m benchmark.report_audit post --bundle "$REPORT_AUDIT_DIR/polymarket"
+          fi
 
       # Tool-improvement triage: assess every tool on the W-1 -> C-1 -> T-1
       # ladder (calendar rolling scores produced above; production count

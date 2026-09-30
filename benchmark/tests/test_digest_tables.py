@@ -21,6 +21,7 @@
 Each test asserts a specific cell against a specific input field.
 """
 
+import html
 import json
 import os
 import subprocess
@@ -30,19 +31,25 @@ from typing import Any
 
 import pytest
 from benchmark import digest_tables
+from benchmark.decision_policy import (
+    _decision_state,
+    _edge_lower_bound,
+    _survivors,
+    _verdict,
+)
+from benchmark.decision_report import (
+    build_decision_record,
+    decision_text,
+    evidence_text,
+)
 from benchmark.digest_tables import (
     RELIABILITY_GATE,
     TITLE_RULE_CHAR,
     VERDICT_MARKER,
     _category_signal_rows,
     _category_signal_text,
-    _decision_state,
-    _decision_text,
-    _edge_lower_bound,
     _headline,
     _no_replacement_note,
-    _survivors,
-    _verdict,
     build_concise_digest_message,
     build_digest_messages,
 )
@@ -177,7 +184,7 @@ def _flatten(payload: dict[str, Any]) -> str:
             lines.append(block["text"]["text"])
         elif block["type"] == "context":
             lines.extend(e["text"] for e in block["elements"])
-    return "\n".join(lines)
+    return html.unescape("\n".join(lines))
 
 
 class TestConciseDecisionSummary:
@@ -254,7 +261,20 @@ class TestConciseDecisionSummary:
         assert payload is not None
         text = _flatten(payload)
         assert "`live` has insufficient data to judge (no data)" in text
+        assert text.count("`live`") == 1
         assert "retired" not in text
+
+    def test_empty_live_roster_does_not_fall_back_to_historical_tools(
+        self, tmp_path: Path
+    ) -> None:
+        """A successful empty lookup is distinct from an unavailable lookup."""
+        results = _results_dir(tmp_path, at={"retired": _stats(edge_sd=0.05)})
+        payload = build_concise_digest_message(
+            results, "polymarket", "summary", deployed_tools=[]
+        )
+        assert payload is not None
+        assert "retired" not in _flatten(payload)
+        assert "0 forecasting/unknown tools" in _flatten(payload)
 
     def test_thin_deployed_tool_warns(self, tmp_path: Path) -> None:
         """A numeric score below the decision floor is not a clean bill of health."""
@@ -262,30 +282,53 @@ class TestConciseDecisionSummary:
         payload = build_concise_digest_message(results, "polymarket", "summary")
         assert payload is not None
         assert "insufficient data to judge (n=12 < 30)" in _flatten(payload)
+        assert _flatten(payload).count("`live`") == 1
 
     def test_promotion_evidence_preserves_zero_edge_count(self) -> None:
         """The formatter does not replace an explicit zero with another pool."""
-        text, _, _ = _decision_text(
-            {},
-            {"candidate": "PROMOTE"},
-            {"tournament": {"candidate": _stats(edge_n=0, valid_n=100)}},
+        text = evidence_text(
+            {
+                "rule": "promotion_floor",
+                "evidence": {"tournament": _stats(edge_n=0, valid_n=100)},
+            }
         )
-        assert "n=0." in text
+        assert "priced n=0" in text
 
     def test_combined_decision_has_one_next_step(self) -> None:
         """A mixed promote/demote outcome presents one coherent human action."""
-        text, _, _ = _decision_text(
-            {"live": "demote: condAcc 40%", "survivor": "keep"},
-            {"candidate": "PROMOTE"},
+        record = build_decision_record(
+            "omen",
             {
-                "at": {"live": _stats(conditional_accuracy_rate=0.40)},
-                "w1": {"live": _stats()},
-                "tournament": {"candidate": _stats(edge_n=50)},
+                "at": {
+                    "by_tool": {
+                        "live": _stats(conditional_accuracy_rate=0.40, edge_sd=0.05),
+                        "survivor": _stats(
+                            edge_sd=0.05,
+                            brier=0.20,
+                            baseline_brier=0.24,
+                            conditional_accuracy_rate=0.60,
+                        ),
+                    }
+                },
+                "w1": {"by_tool": {}},
+                "tournament": {
+                    "by_tool": {
+                        "candidate": _stats(
+                            edge=0.20,
+                            edge_n=100,
+                            edge_sd=0.05,
+                            conditional_accuracy_rate=0.60,
+                        )
+                    }
+                },
             },
+            {"status": "complete", "tools": ["live", "survivor"]},
+            ["candidate"],
         )
+        text = decision_text(record)
+        assert record["decision"]["token"] == "PROMOTE 1 · DEMOTE 1"
         assert text.count("*Next step:*") == 1
-        assert "Confirm each promotion" in text
-        assert "review and approve the proposed demotion" in text
+        assert "confirm promotions" in text
 
     def test_replacement_is_promoted_before_every_tool_demotes(self) -> None:
         """A replacement must land before an all-demote roster can be actioned."""
@@ -370,6 +413,7 @@ class TestConciseDecisionSummary:
             "polymarket",
             "*Summary:* Current 7d Brier regressed.",
             allowed_tools={"bad", "good"},
+            deployed_tools={"bad", "good"},
             report_url="https://example.test/report",
         )
         assert payload is not None
@@ -377,7 +421,9 @@ class TestConciseDecisionSummary:
         assert not any(block["type"] == "table" for block in payload["blocks"])
         body = _flatten(payload)
         assert "*Decision: DEMOTE 1*" in body
-        assert "Sustained no-skill" in body
+        assert "Brier − baseline" in body
+        assert "gap +0.0700" in body
+        assert "gap +0.1000" in body
         assert "*Summary:* Current 7d Brier regressed." in body
         assert "*Tool × Category signals:*" in body
         assert "Main risk" in body

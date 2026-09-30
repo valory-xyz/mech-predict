@@ -317,6 +317,71 @@ def test_roster_snapshot_rejects_partial_metadata(
         tool_usage.resolve_mech_tools(["0xa", "0xb"], "https://example.invalid", {})
 
 
+@pytest.mark.parametrize("stage", ["release", "deployment"])
+@pytest.mark.parametrize("exception", [AttributeError, TypeError, RuntimeError])
+def test_unexpected_discovery_error_does_not_abort_audit_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    exception: type[Exception],
+) -> None:
+    """Unexpected upstream failures become auditable unavailable snapshots."""
+
+    def release() -> str:
+        if stage == "release":
+            raise exception("unexpected release shape")
+        return "v-test"
+
+    def resolve(_addresses: Any, url: str, provenance: dict[str, Any]) -> list[str]:
+        if "gnosis" in url:
+            provenance["tools"] = ["resolved-before-failure"]
+            raise exception("unexpected manifest shape")
+        return ["healthy-platform"]
+
+    monkeypatch.setattr(tool_usage, "latest_trader_ref", release)
+    monkeypatch.setattr(
+        tool_usage, "_http_get", lambda _: 'valid_mechs: ${VALID_MECHS:list:["0xa"]}'
+    )
+    monkeypatch.setattr(tool_usage, "resolve_mech_tools", resolve)
+    output = tmp_path / "audit"
+    initialize(tmp_path / "results", output)
+    assert (output / "run.json").is_file()
+    snapshot = json.loads((output / "deployment_snapshot.json").read_text())
+    assert tool_usage.platform_roster(snapshot, "omen")["status"] == "unavailable"
+    if stage == "release":
+        assert exception.__name__ in snapshot["error"]
+        assert (
+            tool_usage.platform_roster(snapshot, "polymarket")["status"]
+            == "unavailable"
+        )
+    else:
+        assert exception.__name__ in snapshot["deployments"]["omenstrat Pearl"]["error"]
+        assert tool_usage.platform_roster(snapshot, "omen")["tools"] == [
+            "resolved-before-failure"
+        ]
+        assert (
+            tool_usage.platform_roster(snapshot, "polymarket")["status"] == "complete"
+        )
+        assert tool_usage.platform_roster(snapshot, "polymarket")["tools"] == [
+            "healthy-platform"
+        ]
+
+
+def test_audit_initialization_still_surfaces_file_write_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery recovery does not swallow failures to persist audit evidence."""
+    monkeypatch.setattr(tool_usage, "latest_trader_ref", lambda: "v-test")
+
+    def write_failure(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("cannot persist audit")
+
+    monkeypatch.setattr(report_audit, "_write", write_failure)
+    with pytest.raises(OSError, match="cannot persist audit"):
+        initialize(tmp_path / "results", tmp_path / "audit")
+
+
 def test_roster_snapshot_retains_manifest_ids_and_partial_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

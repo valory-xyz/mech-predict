@@ -420,8 +420,11 @@ def fetch_deployment_snapshot() -> dict[str, Any]:
     }
     try:
         snapshot["release_ref"] = latest_trader_ref()
-    except (URLError, ValueError, OSError) as exc:
-        snapshot["error"] = str(exc)
+    except Exception as exc:  # pylint: disable=broad-except
+        # External discovery must not stop scoring or persistence of resume
+        # state. Audit-file writes remain outside this recovery boundary.
+        snapshot["error"] = f"{type(exc).__name__}: {exc}"
+        log.warning("audit release discovery unavailable: %s", snapshot["error"])
     for name, (service, chain, platform) in _DEPLOYMENTS.items():
         row: dict[str, Any] = {
             "platform": platform,
@@ -442,8 +445,8 @@ def fetch_deployment_snapshot() -> dict[str, Any]:
                 row["valid_mechs"], MARKETPLACE_SUBGRAPH_URL[chain], row
             )
             row["status"] = "complete"
-        except (URLError, ValueError, OSError) as exc:
-            row["error"] = str(exc)
+        except Exception as exc:  # pylint: disable=broad-except
+            row["error"] = f"{type(exc).__name__}: {exc}"
             log.warning("%s audit roster unavailable: %s", name, exc)
     return snapshot
 

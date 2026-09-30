@@ -298,6 +298,67 @@ def test_post_sends_saved_content_with_only_artifact_link_added(
     assert "example.invalid/artifact" in json.dumps(sent[0]["blocks"][-1])
 
 
+def test_external_names_are_escaped_only_for_slack_and_replay_without_double_encoding(
+    audit_run: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Actions, warnings and category labels remain literal; trusted links work."""
+    results, output = audit_run
+    literal = "`<https://example.invalid|tool> & <!here> <@U123>`"
+    bad, empty, candidate = (
+        prefix + literal for prefix in ("bad", "empty", "candidate")
+    )
+    run = json.loads((output / "run.json").read_text())
+    run["prediction_tools"] = [bad, empty, candidate, "good"]
+    (output / "run.json").write_text(json.dumps(run))
+    snapshot = json.loads((output / "deployment_snapshot.json").read_text())
+    snapshot["deployments"]["polystrat Pearl"]["tools"] = [bad, empty, "good"]
+    (output / "deployment_snapshot.json").write_text(json.dumps(snapshot))
+    for window in WINDOW_FILES:
+        path = results / WINDOW_FILES[window].format(platform="polymarket")
+        payload = json.loads(path.read_text())
+        payload["by_tool"] = (
+            {candidate: _stats(edge=0.20)}
+            if window == "tournament"
+            else {bad: _stats(brier=0.31), "good": _stats(), empty: _stats(brier=None)}
+        )
+        if window == "w1":
+            payload["by_tool_category"] = {
+                f"{bad} | category{literal}": _stats(
+                    directional_accuracy=0.2, outcome_yes_rate=0.8
+                )
+            }
+        path.write_text(json.dumps(payload))
+    bundle = prepare(results, output, "polymarket", f"Summary {literal}")
+    record = json.loads((bundle / "decision.json").read_text())
+    assert record["decision"]["demote"] == [bad]
+    assert record["decision"]["promote"] == [candidate]
+    assert bad in record["production"] and empty in record["production"]
+    assert literal in (bundle / "report.md").read_text()
+    saved = replay(bundle)
+    text = "\n".join(block.get("text", {}).get("text", "") for block in saved["blocks"])
+    encoded = "`&lt;https://example.invalid|tool&gt; &amp; &lt;!here&gt; &lt;@U123&gt;`"
+    for prefix in ("bad", "empty", "candidate", "category", "Summary "):
+        assert prefix + encoded in text
+    assert "<" not in text and ">" not in text
+    assert "&amp;lt;" not in text
+    assert all(
+        len(block.get("text", {}).get("text", "")) <= 3000 for block in saved["blocks"]
+    )
+    sent = []
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://example.invalid/webhook")
+    monkeypatch.setenv("REPORT_ARTIFACT_URL", "https://example.invalid/artifact")
+    monkeypatch.setattr(
+        notify_slack, "post_to_slack", lambda _url, payload: sent.append(payload)
+    )
+    post(bundle)
+    assert sent[0]["blocks"][:-1] == saved["blocks"]
+    assert (
+        sent[0]["blocks"][-1]["elements"][0]["text"]
+        == "<https://example.invalid/artifact|Full report and decision evidence>"
+    )
+
+
 def test_roster_snapshot_rejects_partial_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -113,6 +113,10 @@ message without sending it; `notify_slack=false` still disables workflow posts.
   evaluation unavailable**, not that no candidate qualifies. A failed weekly
   input cannot turn an unevaluated baseline gate into an assessed survivor;
   a valid empty or thin week retains the existing policy behavior.
+- Rejected 90d inputs with a qualified candidate produce a plain promotion
+  proposal alongside the production-unavailable warning. Replacement-first
+  wording requires production evidence; incomplete roster discovery still
+  blocks deployment proposals.
 - A rejected analysis/comparison input suppresses the saved trend narrative in
   Slack, while preserving it in the artifact. Production evidence remains usable.
 - Ambiguous aliases are excluded only from the affected tool/window evaluation.
@@ -125,6 +129,12 @@ message without sending it; `notify_slack=false` still disables workflow posts.
   guard blocks removal of every assessed forecaster.
 - Tool assessment warnings have one owner in the shared decision record and
   appear once in Slack. Trend warnings remain separate.
+- Unexpected exceptions during external roster discovery are captured as
+  unavailable status with diagnostic details, preserving resolved tools and
+  allowing scoring to continue. Audit-file write failures still surface.
+- Slack body text escapes `&`, `<`, and `>` before rendering, including names,
+  warnings and category labels. Raw decision inputs and Markdown evidence stay
+  unchanged; the intentional artifact link is added separately after replay.
 - A deployed tool with no usable scores: explicitly unassessed, retained in the
   roster and remaining-deployed count.
 - Every assessed forecaster fails: preserve the existing replace-first/platform

@@ -30,6 +30,7 @@ from benchmark.slack_blocks import (
     MAX_COLUMNS,
     MAX_TABLE_CHARS,
     cell,
+    escape_mrkdwn,
     message,
     section,
     table_block,
@@ -114,3 +115,17 @@ class TestSectionBudget:
         rendered = section(text)["text"]["text"]
         assert rendered.strip()
         assert len(rendered) <= 3000
+
+
+@pytest.mark.parametrize(
+    ("literal", "escaped"),
+    [
+        ("ordinary_tool-name", "ordinary_tool-name"),
+        ("<https://example.invalid|tool>", "&lt;https://example.invalid|tool&gt;"),
+        ("`<!here> <@U123>` & tool", "`&lt;!here&gt; &lt;@U123&gt;` &amp; tool"),
+        ("literal &lt;", "literal &amp;lt;"),
+    ],
+)
+def test_slack_control_characters_are_literal(literal: str, escaped: str) -> None:
+    """Escape external text once without altering ordinary names or styling."""
+    assert escape_mrkdwn(literal) == escaped

@@ -21,6 +21,7 @@
 Each test asserts a specific cell against a specific input field.
 """
 
+import html
 import json
 import os
 import subprocess
@@ -183,7 +184,7 @@ def _flatten(payload: dict[str, Any]) -> str:
             lines.append(block["text"]["text"])
         elif block["type"] == "context":
             lines.extend(e["text"] for e in block["elements"])
-    return "\n".join(lines)
+    return html.unescape("\n".join(lines))
 
 
 class TestConciseDecisionSummary:

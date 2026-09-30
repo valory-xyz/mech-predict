@@ -63,7 +63,15 @@ from benchmark.decision_policy import (
 from benchmark.decision_report import build_decision_record, decision_text
 from benchmark.roi_sim import RELIABILITY_GATE
 from benchmark.scoring_primitives import MIN_SAMPLE_SIZE
-from benchmark.slack_blocks import Col, context, header, message, section, table_block
+from benchmark.slack_blocks import (
+    Col,
+    context,
+    escape_mrkdwn,
+    header,
+    message,
+    section,
+    table_block,
+)
 from benchmark.slack_tables import display_width
 from benchmark.tool_usage import NON_PREDICTION_TOOLS, normalize_tool_name
 
@@ -1011,13 +1019,13 @@ def build_concise_digest_message(
     category_text = _category_signal_text(categories, prod_tools, priority)
     blocks: list[dict[str, Any]] = [
         header(title),
-        *[section(part) for part in decision.split("\n\n")],
-        section(summary),
-        section(category_text),
+        *[section(escape_mrkdwn(part)) for part in decision.split("\n\n")],
+        section(escape_mrkdwn(summary)),
+        section(escape_mrkdwn(category_text)),
     ]
     warnings = _trend_warnings(windows, sorted(prod_tools))
     if warnings:
-        blocks.append(section("\n".join(warnings)))
+        blocks.append(section(escape_mrkdwn("\n".join(warnings))))
     if report_url:
         blocks.append(context(f"<{report_url}|Full {label} report>"))
     fallback = f"{label} {as_of or ''}: {token}".strip()

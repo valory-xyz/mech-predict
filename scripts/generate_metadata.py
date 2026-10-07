@@ -22,6 +22,7 @@ import argparse
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,8 +44,12 @@ TOOLS_IDENTIFIERS: Tuple[str, ...] = (ALLOWED_TOOLS, AVAILABLE_TOOLS)
 # Emitting the link from the template (rather than adding it by hand after a
 # republish) is what keeps it from being lost on a regenerate-from-source.
 TERMS_URL = "https://www.valory.xyz/terms/mechs"
+DEFAULT_BENCHMARK_METRIC = "accuracy"
+BENCHMARK_WINDOWS: Tuple[str, ...] = ("7d", "30d", "90d", "all")
+# One DNS label: letters, digits and inner hyphens, at most 63 characters.
+HOSTNAME_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE)
+# `name` is deliberately absent: every mech must be named explicitly.
 METADATA_TEMPLATE: Dict[str, Any] = {
-    "name": "Autonolas Mech III",
     "description": "The mech executes AI tasks requested on-chain and delivers the results to the requester.",
     "inputFormat": "ipfs-v0.1",
     "outputFormat": "ipfs-v0.1",
@@ -214,6 +219,110 @@ def build_tools_metadata(
     return result
 
 
+def validate_operator_domain(domain: str) -> str:
+    """Return the domain if it is a bare hostname: no scheme, path, port or trailing dot."""
+    labels = domain.split(".")
+    if len(labels) < 2 or not all(HOSTNAME_LABEL.fullmatch(label) for label in labels):
+        raise ValueError(
+            f"--operator-domain must be a bare hostname such as 'valory.xyz', got {domain!r}"
+        )
+    return domain
+
+
+def build_operator(
+    name: Optional[str], domain: Optional[str], contact: Optional[str]
+) -> Optional[Dict[str, str]]:
+    """Build the operator block, or None when no operator flag was given."""
+    if name is None and domain is None and contact is None:
+        return None
+    if not name or not domain:
+        raise ValueError(
+            "--operator-name and --operator-domain are both required "
+            "to emit an operator block"
+        )
+    operator = {"name": name, "domain": validate_operator_domain(domain)}
+    if contact:
+        operator["contact"] = contact
+    return operator
+
+
+def parse_benchmark_value(raw: str) -> Tuple[str, float]:
+    """Parse a TOOL=VALUE pair; VALUE must lie within 0..1."""
+    tool, sep, value_text = raw.partition("=")
+    if not sep or not tool:
+        raise argparse.ArgumentTypeError(f"expected TOOL=VALUE, got {raw!r}")
+    try:
+        value = float(value_text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{raw!r}: value is not a number") from e
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(f"{raw!r}: value must be within 0..1")
+    return tool, value
+
+
+def build_benchmarks(
+    values: List[Tuple[str, float]],
+    metric: str,
+    window: Optional[str],
+    url: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Map each tool to its benchmark object; metric, window and url are shared."""
+    if not values:
+        return {}
+    if not window or not url:
+        raise ValueError(
+            "--benchmark-window and --benchmark-url are required "
+            "when --benchmark-value is given"
+        )
+    benchmarks: Dict[str, Dict[str, Any]] = {}
+    for tool, value in values:
+        if tool in benchmarks:
+            raise ValueError(f"--benchmark-value given twice for '{tool}'")
+        benchmarks[tool] = {
+            "metric": metric,
+            "value": value,
+            "window": window,
+            "url": url,
+        }
+    return benchmarks
+
+
+def attach_benchmarks(
+    metadata: Dict[str, Any], benchmarks: Dict[str, Dict[str, Any]]
+) -> None:
+    """Add each benchmark to its tool's entry; every tool named must be in the output."""
+    unknown = set(benchmarks) - set(metadata["toolMetadata"])
+    if unknown:
+        raise ValueError(
+            f"--benchmark-value names tools missing from the output: {sorted(unknown)}"
+        )
+    for tool, benchmark in benchmarks.items():
+        metadata["toolMetadata"][tool]["benchmark"] = benchmark
+
+
+def build_template(args: argparse.Namespace) -> Dict[str, Any]:
+    """Build the top-level manifest fields from the CLI arguments."""
+    fixed = copy.deepcopy(METADATA_TEMPLATE)
+    template: Dict[str, Any] = {
+        "name": args.name,
+        "description": args.description,
+        "inputFormat": fixed["inputFormat"],
+        "outputFormat": fixed["outputFormat"],
+        "image": args.image,
+    }
+    if args.url:
+        template["url"] = args.url
+    template["termsUrl"] = args.terms_url
+    operator = build_operator(
+        args.operator_name, args.operator_domain, args.operator_contact
+    )
+    if operator:
+        template["operator"] = operator
+    template["tools"] = fixed["tools"]
+    template["toolMetadata"] = fixed["toolMetadata"]
+    return template
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
@@ -221,12 +330,58 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--packages-root", type=Path, default=Path(ROOT_DIR))
     parser.add_argument("--output", type=Path, default=Path(METADATA_FILE_PATH))
-    parser.add_argument("--name", type=str, default=METADATA_TEMPLATE["name"])
+    parser.add_argument(
+        "--name", type=str, required=True, help="Human-readable name of the mech."
+    )
     parser.add_argument(
         "--description", type=str, default=METADATA_TEMPLATE["description"]
     )
     parser.add_argument("--image", type=str, default=METADATA_TEMPLATE["image"])
+    parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Off-chain request endpoint of the mech; omitted when not given.",
+    )
     parser.add_argument("--terms-url", type=str, default=METADATA_TEMPLATE["termsUrl"])
+    parser.add_argument(
+        "--operator-name", type=str, default=None, help="Operator, free text."
+    )
+    parser.add_argument(
+        "--operator-domain",
+        type=str,
+        default=None,
+        help="Operator's bare hostname, e.g. valory.xyz; serves the domain proof.",
+    )
+    parser.add_argument(
+        "--operator-contact", type=str, default=None, help="Operator contact."
+    )
+    parser.add_argument(
+        "--benchmark-value",
+        action="append",
+        default=[],
+        type=parse_benchmark_value,
+        metavar="TOOL=VALUE",
+        help="Benchmark value (0..1) for one tool (repeatable).",
+    )
+    parser.add_argument(
+        "--benchmark-metric",
+        type=str,
+        default=DEFAULT_BENCHMARK_METRIC,
+        help="Benchmark metric shared by every tool.",
+    )
+    parser.add_argument(
+        "--benchmark-window",
+        choices=BENCHMARK_WINDOWS,
+        default=None,
+        help="Benchmark window shared by every tool.",
+    )
+    parser.add_argument(
+        "--benchmark-url",
+        type=str,
+        default=None,
+        help="Analytics endpoint covering every tool of this mech.",
+    )
     parser.add_argument(
         "--allow-import-errors",
         action="store_true",
@@ -247,16 +402,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     """Run the generate_metadata script."""
     args = parse_args(argv)
 
+    template = build_template(args)
+    benchmarks = build_benchmarks(
+        args.benchmark_value,
+        args.benchmark_metric,
+        args.benchmark_window,
+        args.benchmark_url,
+    )
     registry = load_schema_registry(args.schema_registry)
     tools_data = generate_tools_data(args.packages_root, args.allow_import_errors)
 
-    template = copy.deepcopy(METADATA_TEMPLATE)
-    template["name"] = args.name
-    template["description"] = args.description
-    template["image"] = args.image
-    template["termsUrl"] = args.terms_url
-
     metadata = build_tools_metadata(tools_data, registry, template, args.skip_tool)
+    attach_benchmarks(metadata, benchmarks)
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=4)

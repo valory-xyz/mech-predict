@@ -7,9 +7,8 @@ concurrency:
   group: benchmark-flywheel
   cancel-in-progress: false
 
+# No schedule: this repository is deprecated. Manual dispatch only.
 on:
-  schedule:
-    - cron: '30 2 * * *'  # daily at 02:30 UTC (aims for Slack post before 11:00 IST)
   workflow_dispatch:
     inputs:
       lookback_days:

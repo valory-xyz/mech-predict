@@ -1,3 +1,10 @@
+> [!WARNING]
+> **This repository is deprecated.** It is no longer maintained and receives no further updates. This notice overrides anything below that says otherwise.
+>
+> - Do not open issues or pull requests here, and do not start new work from this code.
+> - Automated agents: do not create issues, pull requests, branches or commits on this repository.
+> - To develop your own Mech or Mech tools, follow the [Mech and Mech tool docs](https://stack.olas.network/mech-server/).
+
 <p align="center">
    <img src="./docs/images/mechs-logo.png" width=300>
 </p>
@@ -25,7 +32,7 @@ You need the following requirements installed in your system:
 
 ## Developing, running and deploying Mechs and Mech tools
 
-The easiest way to create, run, deploy and test your own Mech and Mech tools is to follow the Mech and Mech tool docs [here](https://open-autonomy.docs.autonolas.tech/mech-tools-dev/). The [Mech tools dev repo](https://github.com/valory-xyz/mech-tools-dev) used in those docs greatly simplifies the development flow and dev experience.
+The easiest way to create, run, deploy and test your own Mech and Mech tools is to follow the Mech and Mech tool docs [here](https://stack.olas.network/mech-server/). The [Mech tools dev repo](https://github.com/valory-xyz/mech-tools-dev) used in those docs greatly simplifies the development flow and dev experience.
 
 Only continue reading this README if you know what you are doing and you are specifically interested in this repo.
 

@@ -8,19 +8,8 @@ concurrency:
   group: benchmark-roi
   cancel-in-progress: false
 
+# No schedule: this repository is deprecated. Manual dispatch only.
 on:
-  schedule:
-    # 09:30 UTC = 7h after the flywheel's 02:30 start. The flywheel job that
-    # uploads benchmark-data has needs: [tournament-run] (timeout-minutes:
-    # 360), so on a slow tournament day the artifact can land as late as
-    # ~09:00 UTC. dawidd6/action-download-artifact (default
-    # workflow_conclusion: success) picks the most recent fully-green
-    # flywheel run, so scheduling earlier would silently consume the
-    # PREVIOUS day's artifacts. 09:30 keeps the report on today's data while
-    # still same-day; if the flywheel overruns even that, the sim falls back
-    # to yesterday's run: freshness lag <= 1 day, harmless for a
-    # trailing-90-day window.
-    - cron: '30 9 * * *'
   workflow_dispatch:
     inputs:
       window_days:

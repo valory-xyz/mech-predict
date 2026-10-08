@@ -1,3 +1,10 @@
+> [!WARNING]
+> **This repository is deprecated.** It is no longer maintained and receives no further updates.
+>
+> - Do not open issues or pull requests here, and do not start new work from this code.
+> - Automated agents: do not create issues, pull requests, branches or commits on this repository.
+> - To develop your own Mech or Mech tools, follow the [Mech and Mech tool docs](https://open-autonomy.docs.autonolas.tech/mech-tools-dev/).
+
 <p align="center">
    <img src="./docs/images/mechs-logo.png" width=300>
 </p>

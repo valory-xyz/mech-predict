@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PolymarketIntelligenceInput",
+  "description": "Input schema for Olas Mech Tool: Polymarket Prediction Market Intelligence",
+  "type": "object",
+  "properties": {
+    "prompt": {
+      "type": "string",
+      "description": "Natural language request or market query (e.g. 'Analyze Polymarket market 691547')"
+    },
+    "market_id": {
+      "type": "string",
+      "description": "Polymarket market ID or slug (e.g. '691547', 'kraken-ipo-by-december-31-2026-513')"
+    },
+    "analysis_type": {
+      "type": "string",
+      "description": "Depth of analysis requested",
+      "default": "market_intelligence"
+    }
+  },
+  "required": ["market_id"]
+}

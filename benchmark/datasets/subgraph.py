@@ -30,7 +30,6 @@ import time
 from typing import Any
 
 import requests
-
 from benchmark.datasets.marketplace_squid import hydrate, is_squid, squid_query
 
 log = logging.getLogger(__name__)

@@ -45,7 +45,7 @@ def parsed_payload(content: str, digest: str, delivery: bool = False) -> dict:
         payload = {}
     sentinel = "[unhandled type]"
 
-    def text(value):
+    def text(value: object) -> str:
         return value if isinstance(value, str) else sentinel
 
     if delivery:
@@ -67,7 +67,7 @@ def parsed_payload(content: str, digest: str, delivery: bool = False) -> dict:
         tail = prompt.split(marker, 1)[1]
         first = tail.find('"')
         end = tail.find('" and the', first + 1)
-        if first >= 0 and end > first:
+        if 0 <= first < end:
             title = tail[first + 1 : end]
     return {
         "hash": payload_path(digest),

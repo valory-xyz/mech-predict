@@ -447,6 +447,14 @@ def test_roster_snapshot_retains_manifest_ids_and_partial_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The captured provenance explains both membership and lookup failures."""
+    monkeypatch.setattr(
+        tool_usage,
+        "MARKETPLACE_SUBGRAPH_URL",
+        {
+            **tool_usage.MARKETPLACE_SUBGRAPH_URL,
+            "polygon": "https://squid.test/marketplace-polygon",
+        },
+    )
     monkeypatch.setattr(tool_usage, "latest_trader_ref", lambda: "v-test")
     monkeypatch.setattr(
         tool_usage, "_http_get", lambda _url: 'valid_mechs: ${VALID_MECHS:list:["0xa"]}'

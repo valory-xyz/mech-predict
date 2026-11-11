@@ -48,7 +48,6 @@ from typing import Any, Dict, Literal, Optional, Tuple
 import openai
 import pydantic
 import requests
-
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
     IPFS_FETCH_DELAY,
@@ -58,6 +57,7 @@ from benchmark.datasets.fetch_production import (
     classify_category,
     parse_tool_response,
 )
+from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import load_jsonl
 from benchmark.tools import TOOL_REGISTRY
 
@@ -174,7 +174,6 @@ def _fetch_ipfs_hashes_for_deliver_ids(
         query = DELIVERS_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
 
         try:
-            from benchmark.datasets.subgraph import post_graphql
 
             data = post_graphql(
                 marketplace_url, {"query": query}, timeout=HTTP_TIMEOUT
@@ -1130,7 +1129,9 @@ def stratified_sample(
     :param seed: random seed for reproducibility.
     :return: list of sampled row dicts.
     """
-    rng = random.Random(seed)  # nosec B311 — reproducible benchmark sampling, not security
+    rng = random.Random(
+        seed
+    )  # nosec B311 — reproducible benchmark sampling, not security
 
     # Group by platform
     by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1654,9 +1655,7 @@ def _log_replay_summary(
     parse_verdict = (
         "SAME"
         if abs(parse_delta_pct) < 1e-9
-        else "IMPROVED"
-        if parse_delta_pct > 0
-        else "REGRESSED"
+        else "IMPROVED" if parse_delta_pct > 0 else "REGRESSED"
     )
     log.info("  Parse reliability:")
     log.info(
@@ -2436,9 +2435,7 @@ def replay(  # pylint: disable=too-many-statements,too-many-locals
                     (
                         "BETTER"
                         if c_brier < b_brier
-                        else "WORSE"
-                        if c_brier > b_brier
-                        else "SAME"
+                        else "WORSE" if c_brier > b_brier else "SAME"
                     ),
                 )
             else:

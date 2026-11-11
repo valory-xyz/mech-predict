@@ -29,6 +29,8 @@ from typing import Any
 from graphql import parse, print_ast
 from graphql.language import ast
 
+# isort: split
+
 from benchmark.datasets.marketplace_ipfs import fetch_payload
 
 
@@ -52,7 +54,9 @@ def graph_delivery_id(value: str) -> str:
 def squid_delivery_id(value: str) -> str:
     """Resolve existing pending/shard Graph delivery ids on the squid."""
     if re.fullmatch(r"0x[0-9a-fA-F]{72}", value):
-        return value[:66] + "-" + str(int.from_bytes(bytes.fromhex(value[66:]), "little"))
+        return (
+            value[:66] + "-" + str(int.from_bytes(bytes.fromhex(value[66:]), "little"))
+        )
     if re.fullmatch(r"0x[0-9a-fA-F]{128}", value):
         return value[:66] + "-0x" + value[66:]
     return value
@@ -62,17 +66,22 @@ def _name(value: str) -> ast.NameNode:
     return ast.NameNode(value=value)
 
 
-def _selection(source: str) -> tuple:
-    return parse("{" + source + "}").definitions[0].selection_set.selections
+def _selection(source: str) -> tuple[ast.SelectionNode, ...]:
+    definition = parse("{" + source + "}").definitions[0]
+    if not isinstance(definition, ast.OperationDefinitionNode):
+        raise ValueError("Expected a query operation")
+    return definition.selection_set.selections
 
 
 def squid_query(query: str) -> str:
     """Translate the benchmark's collection queries, preserving response keys."""
     document = parse(query)
 
-    def fields(selection):
-        out = []
+    def fields(selection: ast.SelectionSetNode) -> ast.SelectionSetNode:
+        out: list[ast.SelectionNode] = []
         for node in selection.selections:
+            if not isinstance(node, ast.FieldNode):
+                raise ValueError("Marketplace adapter supports field selections only")
             field = node.name.value
             if field == "parsedRequest":
                 out.extend(
@@ -95,8 +104,16 @@ def squid_query(query: str) -> str:
                 elif argument.name.value == "skip":
                     argument.name = _name("offset")
                 elif argument.name.value == "orderBy":
+                    if not isinstance(argument.value, ast.EnumValueNode):
+                        raise ValueError("Marketplace orderBy must be a literal field")
                     order = argument.value.value
-                    suffix = direction.value.value.upper() if direction else "ASC"
+                    suffix = "ASC"
+                    if direction is not None:
+                        if not isinstance(direction.value, ast.EnumValueNode):
+                            raise ValueError(
+                                "Marketplace orderDirection must be a literal"
+                            )
+                        suffix = direction.value.value.upper()
                     # Deterministic tie order for timestamp pages.
                     values = [ast.EnumValueNode(value=f"{order}_{suffix}")]
                     if order != "id":
@@ -108,7 +125,7 @@ def squid_query(query: str) -> str:
             out.append(node)
         return ast.SelectionSetNode(selections=tuple(out))
 
-    def identifiers(node):
+    def identifiers(node: ast.Node) -> None:
         if isinstance(node, ast.StringValueNode):
             node.value = squid_delivery_id(node.value)
         for key in getattr(node, "keys", ()):
@@ -121,6 +138,8 @@ def squid_query(query: str) -> str:
                         identifiers(child)
 
     for definition in document.definitions:
+        if not isinstance(definition, ast.OperationDefinitionNode):
+            raise ValueError("Marketplace adapter expects query operations")
         definition.selection_set = fields(definition.selection_set)
     identifiers(document)
     return print_ast(document)
@@ -129,7 +148,7 @@ def squid_query(query: str) -> str:
 def hydrate(data: dict[str, Any]) -> dict[str, Any]:
     """Restore the parsed field shape consumed by existing benchmark code."""
 
-    def walk(value):
+    def walk(value: Any) -> Any:
         if isinstance(value, list):
             return [walk(row) for row in value]
         if not isinstance(value, dict):

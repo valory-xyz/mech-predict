@@ -39,6 +39,7 @@ from benchmark.datasets.fetch_production import (
     MECH_MARKETPLACE_POLYGON_URL,
     fetch_ipfs_source_content,
 )
+from benchmark.datasets.subgraph import post_graphql
 from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, replay
 from benchmark.scorer import load_rows, score
 from benchmark.tools import TOOL_REGISTRY
@@ -93,7 +94,6 @@ def _fetch_ipfs_hashes_for_deliver_ids(
         query = DELIVERS_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
 
         try:
-            from benchmark.datasets.subgraph import post_graphql
 
             data = post_graphql(
                 marketplace_url, {"query": query}, timeout=HTTP_TIMEOUT

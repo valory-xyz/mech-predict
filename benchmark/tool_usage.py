@@ -45,6 +45,8 @@ from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
+from benchmark.datasets.marketplace_squid import is_squid, squid_query
+
 log = logging.getLogger(__name__)
 
 # Single source of truth for every deployment we report on. Each entry maps
@@ -163,7 +165,9 @@ def _http_get(url: str) -> str:
     :return: response body decoded as UTF-8.
     """
     req = Request(url, headers={"User-Agent": "mech-predict-benchmark"})
-    with urlopen(req, timeout=FETCH_TIMEOUT) as resp:  # nosec B310 — fixed registry/subgraph/IPFS URLs
+    with urlopen(
+        req, timeout=FETCH_TIMEOUT
+    ) as resp:  # nosec B310 — fixed registry/subgraph/IPFS URLs
         return resp.read().decode("utf-8")
 
 
@@ -181,7 +185,6 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
         ``AttributeError`` from downstream ``data.get(...)`` calls into the
         normal ``None``-fallback path in ``fetch_valid_tools``.
     """
-    from benchmark.datasets.marketplace_squid import is_squid, squid_query
 
     if is_squid(url):
         query = squid_query(query)
@@ -195,7 +198,9 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urlopen(req, timeout=FETCH_TIMEOUT) as resp:  # nosec B310 — fixed marketplace subgraph URLs
+    with urlopen(
+        req, timeout=FETCH_TIMEOUT
+    ) as resp:  # nosec B310 — fixed marketplace subgraph URLs
         payload = json.loads(resp.read().decode("utf-8"))
     if payload.get("errors"):
         raise ValueError(f"GraphQL errors from {url}: {payload['errors']}")

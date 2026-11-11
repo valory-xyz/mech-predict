@@ -24,17 +24,27 @@ from unittest.mock import patch
 import pytest
 from graphql import parse
 
+# isort: split
+
 from benchmark.datasets.marketplace_ipfs import parsed_payload, payload_path
-from benchmark.datasets.marketplace_squid import hydrate, is_squid, squid_query
+from benchmark.datasets.marketplace_squid import (
+    graph_delivery_id,
+    hydrate,
+    is_squid,
+    squid_delivery_id,
+    squid_query,
+)
 
 
-def test_only_configured_endpoint_uses_squid(monkeypatch):
+def test_only_configured_endpoint_uses_squid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the explicitly configured endpoint selects OpenReader."""
     monkeypatch.setenv("MARKETPLACE_POLYGON_SQUID_URL", "https://squid.test")
     assert is_squid("https://squid.test")
     assert not is_squid("https://graph.test")
 
 
-def test_delivery_page_keeps_stable_order_and_response_keys():
+def test_delivery_page_keeps_stable_order_and_response_keys() -> None:
+    """Collection translation preserves deterministic pages and parsed row keys."""
     result = squid_query("""{ delivers(first: 2, skip: 4, orderBy: blockTimestamp,
       orderDirection: desc, where: {blockTimestamp_gt: 10}) {
         id request { id parsedRequest { questionTitle tool content } }
@@ -64,7 +74,8 @@ def test_delivery_page_keeps_stable_order_and_response_keys():
     assert data["delivers"][0]["request"]["parsedRequest"]["questionTitle"] == "Q"
 
 
-def test_payload_failure_propagates_before_page_can_be_consumed():
+def test_payload_failure_propagates_before_page_can_be_consumed() -> None:
+    """Payload failures prevent a successfully hydrated partial page."""
     with patch(
         "benchmark.datasets.marketplace_squid.fetch_payload",
         side_effect=RuntimeError("offline"),
@@ -79,7 +90,8 @@ def test_payload_failure_propagates_before_page_can_be_consumed():
             )
 
 
-def test_ipfs_paths_and_question_parser_match_graph():
+def test_ipfs_paths_and_question_parser_match_graph() -> None:
+    """IPFS paths and quoted question parsing match existing Graph behavior."""
     assert payload_path("0x" + "ab" * 32, "0x10").endswith("/16")
     row = parsed_payload(
         json.dumps(
@@ -93,17 +105,19 @@ def test_ipfs_paths_and_question_parser_match_graph():
     assert row["questionTitle"] == 'Will X say "yes"?'
 
 
-def test_delivery_identifiers_preserve_existing_shard_dedup():
-    from benchmark.datasets.marketplace_squid import (
-        graph_delivery_id,
-        squid_delivery_id,
-    )
+def test_delivery_identifiers_preserve_existing_shard_dedup() -> None:
+    """Both delivery ID encodings round-trip without changing shard row IDs."""
+
     tx = "0x" + "ab" * 32
     request_id = "0x" + "cd" * 32
-    for squid_id, old_id in [(tx + "-258", tx + "02010000"),
-                              (tx + "-" + request_id, tx + request_id[2:])]:
+    for squid_id, old_id in [
+        (tx + "-258", tx + "02010000"),
+        (tx + "-" + request_id, tx + request_id[2:]),
+    ]:
         assert graph_delivery_id(squid_id) == old_id
         assert squid_delivery_id(old_id) == squid_id
-        query = squid_query('{ delivers(first: 1, where: {id_in: ["' + old_id + '"]}) { id } }')
+        query = squid_query(
+            '{ delivers(first: 1, where: {id_in: ["' + old_id + '"]}) { id } }'
+        )
         assert squid_id in query
         assert hydrate({"delivers": [{"id": squid_id}]})["delivers"][0]["id"] == old_id

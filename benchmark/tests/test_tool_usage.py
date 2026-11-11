@@ -23,13 +23,12 @@ from typing import Callable
 from urllib.error import URLError
 
 import pytest
-
 from benchmark import tool_usage
 from benchmark.analyze import section_tool_deployment_status
 
 
 @pytest.fixture(autouse=True)
-def configured_marketplace_urls(monkeypatch):
+def configured_marketplace_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Deployment URLs are supplied by the environment in production."""
     monkeypatch.setattr(
         tool_usage,
@@ -56,9 +55,9 @@ class TestDeploymentConfigInvariants:
         """Each deployment's chain has a marketplace subgraph URL."""
         deployments = tool_usage._DEPLOYMENTS  # pylint: disable=protected-access
         for name, (_service, chain, _platform) in deployments.items():
-            assert chain in tool_usage.MARKETPLACE_SUBGRAPH_URL, (
-                f"{name} resolves on chain {chain!r} with no subgraph URL"
-            )
+            assert (
+                chain in tool_usage.MARKETPLACE_SUBGRAPH_URL
+            ), f"{name} resolves on chain {chain!r} with no subgraph URL"
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +382,9 @@ class TestResolveMechTools:
         )
 
         def fake_tools(metadata_hash: str) -> list[str]:
-            assert metadata_hash == "0x22", (
-                f"unexpected metadata fetch: {metadata_hash}"
-            )
+            assert (
+                metadata_hash == "0x22"
+            ), f"unexpected metadata fetch: {metadata_hash}"
             return ["superforcaster"]
 
         monkeypatch.setattr(tool_usage, "fetch_tools_for_metadata", fake_tools)

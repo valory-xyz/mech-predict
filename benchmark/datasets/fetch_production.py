@@ -32,8 +32,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
+from benchmark.datasets.marketplace_squid import is_squid
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl
 
@@ -978,7 +978,6 @@ def detect_delivers_schema(marketplace_url: str) -> str:
     :param marketplace_url: subgraph endpoint URL.
     :return: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.
     """
-    from benchmark.datasets.marketplace_squid import is_squid
 
     if is_squid(marketplace_url):
         return DELIVERS_SCHEMA_PARSED
@@ -1017,7 +1016,6 @@ def _parsed_delivery_extra_fields(marketplace_url: str) -> str:
     :param marketplace_url: subgraph endpoint URL.
     :return: ``PARSED_DELIVERY_EXTRA_FIELDS`` or an empty string.
     """
-    from benchmark.datasets.marketplace_squid import is_squid
 
     if is_squid(marketplace_url):
         return PARSED_DELIVERY_EXTRA_FIELDS

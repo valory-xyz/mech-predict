@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -110,7 +111,7 @@ TRADER_SERVICE_YAML_URL = (
 MARKETPLACE_SUBGRAPH_URL: Mapping[str, str] = MappingProxyType(
     {
         "gnosis": "https://api.subgraph.autonolas.tech/api/proxy/marketplace-gnosis",
-        "polygon": "https://api.subgraph.autonolas.tech/api/proxy/marketplace-polygon",
+        "polygon": os.environ.get("MARKETPLACE_POLYGON_SQUID_URL", ""),
     }
 )
 # IPFS gateway and the CIDv1 prefix mech-interact prepends to a metadata hash.
@@ -162,9 +163,7 @@ def _http_get(url: str) -> str:
     :return: response body decoded as UTF-8.
     """
     req = Request(url, headers={"User-Agent": "mech-predict-benchmark"})
-    with urlopen(
-        req, timeout=FETCH_TIMEOUT
-    ) as resp:  # nosec B310 — fixed registry/subgraph/IPFS URLs
+    with urlopen(req, timeout=FETCH_TIMEOUT) as resp:  # nosec B310 — fixed registry/subgraph/IPFS URLs
         return resp.read().decode("utf-8")
 
 
@@ -182,6 +181,10 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
         ``AttributeError`` from downstream ``data.get(...)`` calls into the
         normal ``None``-fallback path in ``fetch_valid_tools``.
     """
+    from benchmark.datasets.marketplace_squid import is_squid, squid_query
+
+    if is_squid(url):
+        query = squid_query(query)
     body = json.dumps({"query": query}).encode("utf-8")
     req = Request(
         url,
@@ -192,9 +195,7 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urlopen(
-        req, timeout=FETCH_TIMEOUT
-    ) as resp:  # nosec B310 — fixed marketplace subgraph URLs
+    with urlopen(req, timeout=FETCH_TIMEOUT) as resp:  # nosec B310 — fixed marketplace subgraph URLs
         payload = json.loads(resp.read().decode("utf-8"))
     if payload.get("errors"):
         raise ValueError(f"GraphQL errors from {url}: {payload['errors']}")

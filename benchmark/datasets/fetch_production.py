@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl
@@ -92,10 +93,7 @@ MECH_MARKETPLACE_GNOSIS_URL = os.environ.get(
     "MECH_MARKETPLACE_GNOSIS_URL",
     "https://api.subgraph.autonolas.tech/api/proxy/marketplace-gnosis",
 )
-MECH_MARKETPLACE_POLYGON_URL = os.environ.get(
-    "MECH_MARKETPLACE_POLYGON_URL",
-    "https://api.subgraph.autonolas.tech/api/proxy/marketplace-polygon",
-)
+MECH_MARKETPLACE_POLYGON_URL = os.environ.get("MARKETPLACE_POLYGON_SQUID_URL", "")
 IPFS_GATEWAY_URL = os.environ.get(
     "IPFS_GATEWAY_URL",
     "https://gateway.autonolas.tech/ipfs",
@@ -980,6 +978,10 @@ def detect_delivers_schema(marketplace_url: str) -> str:
     :param marketplace_url: subgraph endpoint URL.
     :return: ``DELIVERS_SCHEMA_PARSED`` or ``DELIVERS_SCHEMA_LEGACY``.
     """
+    from benchmark.datasets.marketplace_squid import is_squid
+
+    if is_squid(marketplace_url):
+        return DELIVERS_SCHEMA_PARSED
     cached = _DELIVERS_SCHEMA_CACHE.get(marketplace_url)
     if cached is not None:
         return cached
@@ -1015,6 +1017,10 @@ def _parsed_delivery_extra_fields(marketplace_url: str) -> str:
     :param marketplace_url: subgraph endpoint URL.
     :return: ``PARSED_DELIVERY_EXTRA_FIELDS`` or an empty string.
     """
+    from benchmark.datasets.marketplace_squid import is_squid
+
+    if is_squid(marketplace_url):
+        return PARSED_DELIVERY_EXTRA_FIELDS
     cached = _PARSED_FIELDS_CACHE.get(marketplace_url)
     if cached is not None:
         return cached

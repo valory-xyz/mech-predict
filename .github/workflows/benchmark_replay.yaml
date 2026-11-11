@@ -34,6 +34,9 @@ on:
         required: false
         default: ''
 
+env:
+  MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
+
 jobs:
   replay:
     # For issue_comment: only run on PR comments starting with /benchmark, from authorized users

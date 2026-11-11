@@ -31,7 +31,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-import requests
 from benchmark.compare import compare, format_markdown
 from benchmark.datasets.fetch_production import (
     DELIVERS_BY_IDS_QUERY,
@@ -94,13 +93,11 @@ def _fetch_ipfs_hashes_for_deliver_ids(
         query = DELIVERS_BY_IDS_QUERY % {"first": len(batch), "ids": ids_str}
 
         try:
-            resp = requests.post(
-                marketplace_url,
-                json={"query": query},
-                timeout=HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json().get("data", {}).get("delivers", [])
+            from benchmark.datasets.subgraph import post_graphql
+
+            data = post_graphql(
+                marketplace_url, {"query": query}, timeout=HTTP_TIMEOUT
+            ).get("delivers", [])
             for d in data:
                 mp = d.get("marketplaceDelivery") or {}
                 result[d["id"]] = mp.get("ipfsHashBytes")

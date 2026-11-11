@@ -31,6 +31,8 @@ from typing import Any
 
 import requests
 
+from benchmark.datasets.marketplace_squid import hydrate, is_squid, squid_query
+
 log = logging.getLogger(__name__)
 
 DEFAULT_HTTP_TIMEOUT = 60
@@ -104,6 +106,9 @@ def post_graphql(
     :return: the ``data`` object from the GraphQL response.
     :raises RuntimeError: on a non-retryable GraphQL-level error.
     """
+    use_squid = is_squid(url)
+    if use_squid:
+        payload = {**payload, "query": squid_query(payload["query"])}
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
@@ -115,7 +120,8 @@ def post_graphql(
                     _backoff_before_retry(url, attempt, "chain reorg")
                     continue
                 raise RuntimeError(f"GraphQL errors from {url}: {errors}")
-            return body.get("data", {})
+            data = body.get("data", {})
+            return hydrate(data) if use_squid else data
         except requests.exceptions.HTTPError as exc:
             if attempt >= MAX_RETRIES or not _is_retryable_http_error(exc):
                 raise

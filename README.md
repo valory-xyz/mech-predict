@@ -214,3 +214,27 @@ aea-helpers make-release --version <VERSION> --env <ENV> --description "<DESCRIP
 
 - **Gemini prediction** (`gemini_prediction.py`): Makes LLM prediction requests to Gemini.
   - `gemini-prediction`, `gemini-completion`
+
+### Base / Polygon Marketplace squid migration
+
+Configure the relevant runtime/job environment (values are kept outside the repository):
+
+```dotenv
+MARKETPLACE_POLYGON_SQUID_URL=
+```
+
+This is a legacy compatibility patch; this public repository is deprecated.
+Active deployments should use the corresponding internal-repository change.
+
+Polygon collection queries use OpenReader syntax. Parsed request/delivery
+fields are hydrated from the raw IPFS digests, preserving the existing benchmark
+row format, question-title parsing and full payload content. Failed enrichment
+raises before a page is returned. `IPFS_GATEWAY_URL` remains the gateway override.
+Gnosis and other logical indexers retain their existing queries. Update any
+scheduled-job environment before running the migrated Polygon readers.
+
+For GitHub Actions, configure the repository secret `MARKETPLACE_POLYGON_SQUID_URL`;
+the benchmark workflows pass it to the migrated readers.
+
+Delivery IDs are translated to the existing Graph representation at the reader
+boundary, preserving shard row IDs, deduplication and pending-row refreshes.

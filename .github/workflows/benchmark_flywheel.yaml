@@ -58,6 +58,9 @@ on:
         type: string
         default: '0'
 
+env:
+  MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
+
 jobs:
   # -----------------------------------------------------------------------
   # Job 1: Production benchmark

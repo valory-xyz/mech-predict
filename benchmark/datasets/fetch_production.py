@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import logging
@@ -33,6 +32,13 @@ from typing import Any, Optional
 
 import requests
 from benchmark.categories import PLATFORM_ALLOWED_CATEGORIES
+from benchmark.datasets.marketplace_config import (
+    SUBGRAPH_UNHANDLED_TYPE,
+)
+from benchmark.datasets.marketplace_config import ipfs_hash_to_cid as _ipfs_hash_to_cid
+from benchmark.datasets.marketplace_config import (
+    require_polygon_url,
+)
 from benchmark.datasets.marketplace_squid import is_squid
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import append_jsonl
@@ -62,7 +68,6 @@ PROBABILITY_SUM_TOLERANCE = 0.05
 # Sentinel the marketplace subgraph writes into ParsedDelivery's non-null
 # String fields when the payload omits the key or is unparseable
 # (valory-xyz/autonolas-subgraph#113).
-SUBGRAPH_UNHANDLED_TYPE = "[unhandled type]"
 
 # ParsedDelivery is written by an async file-data-source handler, so it can
 # lag the on-chain Deliver entity. A matched delivery whose ParsedDelivery
@@ -1599,31 +1604,6 @@ def _inject_timestamp_lt(query: str, timestamp_lt: int, query_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _ipfs_hash_to_cid(ipfs_hash: str) -> str:
-    """Convert an IPFS hash from the subgraph to a base32 CIDv1.
-
-    Handles two formats:
-    - ``0x`` raw sha256 hash (from ``marketplaceDelivery.ipfsHashBytes``):
-      wraps as CIDv1 (version=1, codec=dag-pb, sha256 multihash).
-    - ``f``-prefixed hex CIDv1 (from ``mechDelivery.ipfsHash``):
-      strips multibase prefix and re-encodes.
-
-    The IPFS gateway expects base32 CIDv1 like ``bafybei...``.
-
-    :param ipfs_hash: hex-encoded IPFS hash from the subgraph.
-    :return: base32-encoded CIDv1 string.
-    """
-    if ipfs_hash.startswith("0x"):
-        hash_bytes = bytes.fromhex(ipfs_hash[2:])
-        # CIDv1: version=0x01, codec=0x70 (dag-pb), multihash=0x12 (sha256) + 0x20 (32 bytes) + hash
-        cid_bytes = bytes([0x01, 0x70, 0x12, 0x20]) + hash_bytes
-        return "b" + base64.b32encode(cid_bytes).decode().lower().rstrip("=")
-    if ipfs_hash.startswith("f"):
-        raw = bytes.fromhex(ipfs_hash[1:])
-        return "b" + base64.b32encode(raw).decode().lower().rstrip("=")
-    return ipfs_hash
-
-
 def fetch_ipfs_metadata(ipfs_hash: str) -> Optional[dict[str, Any]]:
     """Fetch the full IPFS payload and return the metadata dict.
 
@@ -2954,6 +2934,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """CLI entry point for fetching production data."""
     args = _build_arg_parser().parse_args()
+    require_polygon_url(MECH_MARKETPLACE_POLYGON_URL)
 
     # One-time migration: move old single-file log into logs/ directory
     legacy_path = args.logs_dir.parent / "production_log.jsonl"

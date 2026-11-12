@@ -1521,6 +1521,7 @@ class TestNoScoreFlag:
         from benchmark.datasets import fetch_production as fp
 
         calls: list[tuple] = []
+        monkeypatch.setattr(fp, "MECH_MARKETPLACE_POLYGON_URL", "https://squid.test")
 
         monkeypatch.setattr(fp, "_migrate_legacy_log", lambda *a, **kw: None)
         monkeypatch.setattr(fp, "load_fetch_state", lambda *a, **kw: {})

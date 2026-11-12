@@ -22,8 +22,8 @@ Only the explicitly configured Polygon endpoint uses this adapter. Other
 indexers keep their existing query and retry paths.
 """
 
-import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from graphql import parse, print_ast
@@ -31,13 +31,18 @@ from graphql.language import ast
 
 # isort: split
 
+from benchmark.datasets.marketplace_config import (
+    is_squid,  # re-export for existing callers
+)
 from benchmark.datasets.marketplace_ipfs import fetch_payload
 
-
-def is_squid(url: str) -> bool:
-    """Whether this is the configured Polygon Marketplace squid."""
-    configured = os.environ.get("MARKETPLACE_POLYGON_SQUID_URL")
-    return bool(configured) and url == configured
+__all__ = [
+    "is_squid",
+    "squid_query",
+    "hydrate",
+    "graph_delivery_id",
+    "squid_delivery_id",
+]
 
 
 def graph_delivery_id(value: str) -> str:
@@ -148,6 +153,30 @@ def squid_query(query: str) -> str:
 def hydrate(data: dict[str, Any]) -> dict[str, Any]:
     """Restore the parsed field shape consumed by existing benchmark code."""
 
+    references: set[tuple[str, str | None]] = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, list):
+            for child in value:
+                collect(child)
+        elif isinstance(value, dict):
+            for key, reference in value.items():
+                if key in ("_squidRequest", "_squidDelivery") and reference:
+                    digest = reference.get("ipfsHashBytes")
+                    request_id = (
+                        reference.get("requestIdBytes")
+                        if key == "_squidDelivery"
+                        else None
+                    )
+                    if digest and (key == "_squidRequest" or request_id):
+                        references.add((digest, request_id))
+                collect(reference)
+
+    collect(data)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        keys = list(references)
+        payloads = dict(zip(keys, pool.map(lambda key: fetch_payload(*key), keys)))
+
     def walk(value: Any) -> Any:
         if isinstance(value, list):
             return [walk(row) for row in value]
@@ -160,14 +189,14 @@ def hydrate(data: dict[str, Any]) -> dict[str, Any]:
         reference = row.pop("_squidRequest", None) or {}
         if has_request:
             digest = reference.get("ipfsHashBytes")
-            payload = fetch_payload(digest) if digest else None
+            payload = payloads.get((digest, None)) if digest else None
             row["parsedRequest"] = payload
         has_delivery = "_squidDelivery" in row
         reference = row.pop("_squidDelivery", None) or {}
         if has_delivery:
             digest = reference.get("ipfsHashBytes")
             payload = (
-                fetch_payload(digest, reference.get("requestIdBytes"))
+                payloads.get((digest, reference.get("requestIdBytes")))
                 if digest
                 else None
             )

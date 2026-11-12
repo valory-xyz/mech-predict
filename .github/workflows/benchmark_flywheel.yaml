@@ -58,8 +58,6 @@ on:
         type: string
         default: '0'
 
-env:
-  MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
 
 jobs:
   # -----------------------------------------------------------------------
@@ -186,6 +184,8 @@ jobs:
       # backfill_error=true against degrading subgraphs, which cascades
       # into the wipe step below deleting scores_history.jsonl.
       - name: Backfill null tool responses (self-healing)
+        env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
         id: backfill
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         continue-on-error: true
@@ -264,6 +264,7 @@ jobs:
       - name: Fetch production data
         if: env.USE_MECH_ANALYTICS_ROWS != 'true'
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           INPUT_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '7' }}
           FORCE_REBUILD: ${{ (github.event.inputs.force_rebuild == 'true' || steps.backfill.outputs.repaired > 0 || steps.backfill.outputs.backfill_error == 'true' || steps.backfill.outcome == 'failure') && 'true' || 'false' }}
         run: |
@@ -543,6 +544,8 @@ jobs:
       # keeping the bounded steps (10 + 5) plus the roughly 13 minutes of
       # fixed cost inside the 30-minute job budget.
       - name: Simulate trader ROI (companion)
+        env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
         if: always() && !cancelled()
         timeout-minutes: 5
         continue-on-error: true
@@ -570,12 +573,14 @@ jobs:
       - name: Prepare Omenstrat decision bundle
         if: always() && !cancelled() && hashFiles('benchmark/results/decision_audit/**/run.json') != ''
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
         run: python -m benchmark.report_audit prepare --output "$REPORT_AUDIT_DIR" --platform omen
 
       - name: Prepare Polystrat decision bundle
         if: always() && !cancelled() && hashFiles('benchmark/results/decision_audit/**/run.json') != ''
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           OPENAI_API_KEY: ${{ secrets.BENCHMARK_OPENAI_API_KEY }}
         run: python -m benchmark.report_audit prepare --output "$REPORT_AUDIT_DIR" --platform polymarket
 
@@ -709,7 +714,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests graphql-core==3.2.6
 
       - name: Download previous open markets
         uses: dawidd6/action-download-artifact@09f2f74827fd3a8607589e5ad7f9398816f540fe  # v3
@@ -723,6 +728,7 @@ jobs:
       # Inputs routed via env to avoid shell injection — see note in benchmark job.
       - name: Fetch Omen open markets
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
         run: |
           python -m benchmark.datasets.fetch_open \
@@ -731,6 +737,7 @@ jobs:
 
       - name: Fetch Polymarket open markets
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           INPUT_MAX_MARKETS: ${{ github.event.inputs.max_markets || '45' }}
           INPUT_CREATED_WITHIN_HOURS: ${{ github.event.inputs.created_within_hours || '144' }}
         run: |

@@ -30,7 +30,7 @@ import time
 from typing import Any
 
 import requests
-from benchmark.datasets.marketplace_squid import hydrate, is_squid, squid_query
+from benchmark.datasets.marketplace_config import is_squid, require_polygon_url
 
 log = logging.getLogger(__name__)
 
@@ -105,8 +105,14 @@ def post_graphql(
     :return: the ``data`` object from the GraphQL response.
     :raises RuntimeError: on a non-retryable GraphQL-level error.
     """
+    require_polygon_url(url)
     use_squid = is_squid(url)
     if use_squid:
+        from benchmark.datasets.marketplace_squid import (  # pylint: disable=import-outside-toplevel
+            hydrate,
+            squid_query,
+        )
+
         payload = {**payload, "query": squid_query(payload["query"])}
     for attempt in range(1, MAX_RETRIES + 1):
         try:

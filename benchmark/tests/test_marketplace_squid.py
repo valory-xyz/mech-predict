@@ -19,6 +19,8 @@
 """Marketplace squid query and payload compatibility regressions."""
 
 import json
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -121,3 +123,75 @@ def test_delivery_identifiers_preserve_existing_shard_dedup() -> None:
         )
         assert squid_id in query
         assert hydrate({"delivers": [{"id": squid_id}]})["delivers"][0]["id"] == old_id
+
+
+def test_parsed_deliveries_translation_and_missing_payload_are_row_local() -> None:
+    """The by-ID query joins the delivery layout, and missing siblings do not abort."""
+    query = squid_query(
+        '{ parsedDeliveries(first: 1000, where: {id_in: ["old"]}) { id content } }'
+    )
+    assert "marketplaceDelivery" in query and "requestIdBytes" in query
+    with patch(
+        "benchmark.datasets.marketplace_squid.fetch_payload",
+        side_effect=lambda digest, request_id=None: (
+            None if digest == "missing" else {"content": "valid"}
+        ),
+    ) as fetch:
+        result = hydrate(
+            {
+                "parsedDeliveries": [
+                    {
+                        "id": "a",
+                        "_squidDelivery": {
+                            "ipfsHashBytes": "good",
+                            "requestIdBytes": "0x01",
+                        },
+                    },
+                    {
+                        "id": "b",
+                        "_squidDelivery": {
+                            "ipfsHashBytes": "missing",
+                            "requestIdBytes": "0x02",
+                        },
+                    },
+                ]
+            }
+        )
+    assert result == {"parsedDeliveries": [{"id": "a", "content": "valid"}]}
+    assert {call.args for call in fetch.call_args_list} == {
+        ("good", "0x01"),
+        ("missing", "0x02"),
+    }
+
+
+def test_stdlib_tools_import_without_optional_dependencies() -> None:
+    """ROI imports must work when site-packages are unavailable."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import benchmark.tool_usage; import benchmark.roi_sim",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_missing_polygon_url_fails_before_fetching_or_writing() -> None:
+    """Misconfiguration must name the env before any platform work starts."""
+    from benchmark.datasets import (
+        fetch_production as fp,  # pylint: disable=import-outside-toplevel
+    )
+
+    with (
+        patch.object(sys, "argv", ["fetch_production"]),
+        patch.object(fp, "MECH_MARKETPLACE_POLYGON_URL", ""),
+        patch.object(fp, "process_platform") as process,
+        patch.object(fp, "append_rows") as append,
+        pytest.raises(ValueError, match="MARKETPLACE_POLYGON_SQUID_URL"),
+    ):
+        fp.main()
+    process.assert_not_called()
+    append.assert_not_called()

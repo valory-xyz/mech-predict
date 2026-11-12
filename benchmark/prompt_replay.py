@@ -57,6 +57,7 @@ from benchmark.datasets.fetch_production import (
     classify_category,
     parse_tool_response,
 )
+from benchmark.datasets.marketplace_config import require_polygon_url
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.io import load_jsonl
 from benchmark.tools import TOOL_REGISTRY
@@ -167,6 +168,8 @@ def _fetch_ipfs_hashes_for_deliver_ids(
     marketplace_url: str,
 ) -> dict[str, Optional[str]]:
     """Query the subgraph for IPFS hashes by deliver IDs."""
+    if deliver_ids:
+        require_polygon_url(marketplace_url)
     result: dict[str, Optional[str]] = {}
     for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
         batch = deliver_ids[i : i + DEFAULT_BATCH_SIZE]

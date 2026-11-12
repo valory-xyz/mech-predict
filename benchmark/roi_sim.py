@@ -36,7 +36,8 @@ Network access on the legacy path is limited to the deployment-status
 resolution (the same trader service.yaml valid_mechs -> mech metadata
 procedure the daily report uses; disable with --skip-deployment-fetch). The
 mech-analytics path additionally hits ``/v1/data/scored-rows``. Stdlib only
-on the legacy path so light CI jobs can run it install-free; the
+when deployment lookups use Graph so light CI jobs can run it install-free.
+Polygon squid lookups lazily load ``graphql-core`` and ``requests``; the
 mech-analytics path pulls in ``benchmark.mech_analytics_client``, which
 requires ``requests``.
 

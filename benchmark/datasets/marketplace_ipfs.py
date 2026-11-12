@@ -18,12 +18,16 @@
 # ------------------------------------------------------------------------------
 """Read Marketplace IPFS payloads without relying on Graph file data sources."""
 
-import base64
 import json
 import os
+import time
 from functools import lru_cache
 
 import requests
+from benchmark.datasets.marketplace_config import (
+    SUBGRAPH_UNHANDLED_TYPE,
+    ipfs_hash_to_cid,
+)
 
 
 def payload_path(digest: str, request_id: str | None = None) -> str:
@@ -31,19 +35,16 @@ def payload_path(digest: str, request_id: str | None = None) -> str:
     raw = bytes.fromhex(digest.removeprefix("0x"))
     if len(raw) != 32:
         raise ValueError("Marketplace IPFS digest must be 32 bytes")
-    cid = "b" + base64.b32encode(b"\x01\x70\x12\x20" + raw).decode().lower().rstrip("=")
+    cid = ipfs_hash_to_cid("0x" + raw.hex())
     return cid if request_id is None else cid + "/" + str(int(request_id, 16))
 
 
 def parsed_payload(content: str, digest: str, delivery: bool = False) -> dict:
     """Match the existing Graph parser's fields while retaining the full payload."""
-    try:
-        payload = json.loads(content)
-    except (ValueError, TypeError):
-        payload = {}
+    payload = json.loads(content)
     if not isinstance(payload, dict):
-        payload = {}
-    sentinel = "[unhandled type]"
+        raise ValueError("Marketplace payload must be a JSON object")
+    sentinel = SUBGRAPH_UNHANDLED_TYPE
 
     def text(value: object) -> str:
         return value if isinstance(value, str) else sentinel
@@ -79,17 +80,40 @@ def parsed_payload(content: str, digest: str, delivery: bool = False) -> dict:
 
 
 @lru_cache(maxsize=4096)
-def fetch_payload(digest: str, request_id: str | None = None) -> dict:
-    """Try both supported layouts. Unavailable payloads raise, permitting retries."""
-    path = payload_path(digest, request_id)
+def fetch_payload(digest: str, request_id: str | None = None) -> dict | None:
+    """Return None for absent/malformed digests; retry transient gateway failures.
+
+    A permanent miss is row-local, just like a null Graph parsed payload.
+    Exhausted transient failures still raise before a page can be committed.
+    """
+    try:
+        path = payload_path(digest, request_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
     gateway = os.environ.get(
         "IPFS_GATEWAY_URL", "https://gateway.autonolas.tech/ipfs"
     ).rstrip("/")
-    # Directory-style payloads contain metadata.json; legacy files are bare.
-    for suffix in ("/metadata.json", ""):
-        response = requests.get(f"{gateway}/{path}{suffix}", timeout=60)
-        if response.status_code == 404 and suffix:
-            continue
-        response.raise_for_status()
-        return parsed_payload(response.text, digest, request_id is not None)
-    raise RuntimeError("Marketplace IPFS payload unavailable")
+    suffixes = ("",) if request_id is not None else ("/metadata.json", "")
+    for suffix in suffixes:
+        for attempt in range(4):
+            try:
+                response = requests.get(f"{gateway}/{path}{suffix}", timeout=60)
+                if response.status_code in (400, 404, 410):
+                    break
+                response.raise_for_status()
+                return parsed_payload(response.text, digest, request_id is not None)
+            except (requests.RequestException, ValueError) as error:
+                status = (
+                    error.response.status_code
+                    if isinstance(error, requests.HTTPError)
+                    and error.response is not None
+                    else None
+                )
+                if status is not None and status != 429 and status < 500:
+                    raise
+                if attempt == 3:
+                    raise RuntimeError(
+                        f"IPFS fetch failed for digest {digest}, request {request_id}"
+                    ) from error
+                time.sleep(2**attempt)
+    return None

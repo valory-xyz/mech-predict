@@ -215,7 +215,7 @@ aea-helpers make-release --version <VERSION> --env <ENV> --description "<DESCRIP
 - **Gemini prediction** (`gemini_prediction.py`): Makes LLM prediction requests to Gemini.
   - `gemini-prediction`, `gemini-completion`
 
-### Base / Polygon Marketplace squid migration
+### Polygon Marketplace squid migration
 
 Configure the relevant runtime/job environment (values are kept outside the repository):
 
@@ -228,8 +228,9 @@ Active deployments should use the corresponding internal-repository change.
 
 Polygon collection queries use OpenReader syntax. Parsed request/delivery
 fields are hydrated from the raw IPFS digests, preserving the existing benchmark
-row format, question-title parsing and full payload content. Failed enrichment
-raises before a page is returned. `IPFS_GATEWAY_URL` remains the gateway override.
+row format, question-title parsing and full payload content. Transient enrichment
+failures retry, then raise before a page is returned; permanent misses retain the
+existing null-payload skip/grace behavior. `IPFS_GATEWAY_URL` remains the gateway override.
 Gnosis and other logical indexers retain their existing queries. Update any
 scheduled-job environment before running the migrated Polygon readers.
 
@@ -238,3 +239,9 @@ the benchmark workflows pass it to the migrated readers.
 
 Delivery IDs are translated to the existing Graph representation at the reader
 boundary, preserving shard row IDs, deduplication and pending-row refreshes.
+
+Polygon hydration treats permanent IPFS misses as absent parsed rows, retaining the existing
+skip/grace logic. Transient gateway failures retry; page hydration uses at most eight workers
+and deduplicates payload keys. `MARKETPLACE_POLYGON_SQUID_URL` is required before Polygon
+fetches; it has no default. Standard-library-only tools remain importable without GraphQL
+or requests installed; runtime squid reads install those optional dependencies in their fetch jobs.

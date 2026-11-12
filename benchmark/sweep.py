@@ -39,6 +39,7 @@ from benchmark.datasets.fetch_production import (
     MECH_MARKETPLACE_POLYGON_URL,
     fetch_ipfs_source_content,
 )
+from benchmark.datasets.marketplace_config import require_polygon_url
 from benchmark.datasets.subgraph import post_graphql
 from benchmark.runner import DEFAULT_MODEL, TASK_DEADLINE, replay
 from benchmark.scorer import load_rows, score
@@ -87,6 +88,8 @@ def _fetch_ipfs_hashes_for_deliver_ids(
     :param marketplace_url: subgraph endpoint URL.
     :return: dict mapping deliver_id to ipfs_hash (or None).
     """
+    if deliver_ids:
+        require_polygon_url(marketplace_url)
     result: dict[str, Optional[str]] = {}
     for i in range(0, len(deliver_ids), DEFAULT_BATCH_SIZE):
         batch = deliver_ids[i : i + DEFAULT_BATCH_SIZE]

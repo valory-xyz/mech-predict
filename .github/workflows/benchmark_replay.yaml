@@ -34,8 +34,6 @@ on:
         required: false
         default: ''
 
-env:
-  MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
 
 jobs:
   replay:

@@ -45,7 +45,7 @@ from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from benchmark.datasets.marketplace_squid import is_squid, squid_query
+from benchmark.datasets.marketplace_config import is_squid, require_polygon_url
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +187,12 @@ def _post_graphql(url: str, query: str) -> dict[str, Any]:
     """
 
     if is_squid(url):
+        from benchmark.datasets.marketplace_squid import (  # pylint: disable=import-outside-toplevel
+            squid_query,
+        )
+
         query = squid_query(query)
+    require_polygon_url(url)
     body = json.dumps({"query": query}).encode("utf-8")
     req = Request(
         url,

@@ -148,7 +148,7 @@ SHARD_DATE_RE = re.compile(r"production_log_(\d{4})_(\d{2})_(\d{2})\.jsonl$")
 
 # Platform (as recorded in each row) -> marketplace subgraph endpoint.
 # The URLs come from fetch_production and therefore respect the same
-# env-var overrides (MECH_MARKETPLACE_GNOSIS_URL / _POLYGON_URL).
+# env-var overrides (MECH_MARKETPLACE_GNOSIS_URL / MARKETPLACE_POLYGON_SQUID_URL).
 PLATFORM_MARKETPLACE_URLS: dict[str, str] = {
     "omen": MECH_MARKETPLACE_GNOSIS_URL,
     "polymarket": MECH_MARKETPLACE_POLYGON_URL,

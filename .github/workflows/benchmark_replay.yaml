@@ -34,7 +34,6 @@ on:
         required: false
         default: ''
 
-
 jobs:
   replay:
     # For issue_comment: only run on PR comments starting with /benchmark, from authorized users

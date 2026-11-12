@@ -58,7 +58,6 @@ on:
         type: string
         default: '0'
 
-
 jobs:
   # -----------------------------------------------------------------------
   # Job 1: Production benchmark

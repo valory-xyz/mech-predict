@@ -21,7 +21,6 @@ on:
         required: false
         default: ''
 
-
 jobs:
   # -----------------------------------------------------------------------
   # ROI companion simulation. Pure read-side consumer of the flywheel's
@@ -54,6 +53,8 @@ jobs:
       - name: Install optional Marketplace query dependencies
         run: pip install requests graphql-core==3.2.6
 
+      # Route dispatch inputs through env to prevent shell injection from
+      # direct GitHub expression interpolation; validate before use.
       - name: Validate inputs
         env:
           WINDOW_DAYS: ${{ github.event.inputs.window_days || '90' }}

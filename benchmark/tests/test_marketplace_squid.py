@@ -181,9 +181,8 @@ def test_stdlib_tools_import_without_optional_dependencies() -> None:
 
 def test_missing_polygon_url_fails_before_fetching_or_writing() -> None:
     """Misconfiguration must name the env before any platform work starts."""
-    from benchmark.datasets import (
-        fetch_production as fp,  # pylint: disable=import-outside-toplevel
-    )
+    # pylint: disable-next=import-outside-toplevel
+    from benchmark.datasets import fetch_production as fp
 
     with (
         patch.object(sys, "argv", ["fetch_production"]),
@@ -195,3 +194,29 @@ def test_missing_polygon_url_fails_before_fetching_or_writing() -> None:
         fp.main()
     process.assert_not_called()
     append.assert_not_called()
+
+
+def test_workflow_secret_reaches_roster_capture() -> None:
+    """The frozen roster must be captured with the Polygon endpoint available."""
+    from pathlib import Path  # pylint: disable=import-outside-toplevel
+
+    import yaml  # pylint: disable=import-outside-toplevel
+
+    workflow = yaml.safe_load(
+        Path(".github/workflows/benchmark_flywheel.yaml").read_text()
+    )
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    init = next(
+        step
+        for step in steps
+        if step.get("name") == "Initialize decision audit and capture deployment roster"
+    )
+    assert (
+        init["env"]["MARKETPLACE_POLYGON_SQUID_URL"]
+        == "${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}"
+    )
+
+    replay = yaml.safe_load(Path(".github/workflows/benchmark_replay.yaml").read_text())
+    steps = [step for job in replay["jobs"].values() for step in job.get("steps", [])]
+    enrich = next(step for step in steps if step.get("name") == "Enrich dataset")
+    assert "MARKETPLACE_POLYGON_SQUID_URL" in enrich["env"]

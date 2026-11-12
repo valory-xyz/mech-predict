@@ -240,6 +240,7 @@ jobs:
       - name: Enrich dataset
         if: steps.cache.outputs.cache-hit != 'true'
         env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
           PLATFORM: ${{ steps.parse.outputs.platform }}
         run: |
           # --platform is optional; ${PLATFORM:+...} expands to the flag only

@@ -81,3 +81,17 @@ def test_bad_digest_does_not_make_gateway_request() -> None:
     with patch.object(ipfs.requests, "get") as get:
         assert ipfs.fetch_payload("0x11") is None
     get.assert_not_called()
+
+
+def test_malformed_content_is_row_local_without_retries() -> None:
+    """Immutable invalid bodies retain Graph sentinel semantics in one GET."""
+    for content in ["not json", "[]", '"plain string"']:
+        ipfs.fetch_payload.cache_clear()
+        with patch.object(
+            ipfs.requests, "get", return_value=response(200, content)
+        ) as get:
+            payload = ipfs.fetch_payload(DIGEST)
+        assert payload is not None
+        assert payload["content"] == content
+        assert payload["tool"] == "[unhandled type]"
+        assert get.call_count == 1

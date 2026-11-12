@@ -65,9 +65,6 @@ DEFAULT_BATCH_SIZE = 1000
 HTTP_TIMEOUT = 60
 PROBABILITY_SUM_TOLERANCE = 0.05
 
-# Sentinel the marketplace subgraph writes into ParsedDelivery's non-null
-# String fields when the payload omits the key or is unparseable
-# (valory-xyz/autonolas-subgraph#113).
 
 # ParsedDelivery is written by an async file-data-source handler, so it can
 # lag the on-chain Deliver entity. A matched delivery whose ParsedDelivery

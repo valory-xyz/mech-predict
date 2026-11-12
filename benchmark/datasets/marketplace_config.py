@@ -37,6 +37,7 @@ def require_polygon_url(url: str) -> str:
     return url
 
 
+# Graph sentinel for missing or unparseable ParsedDelivery fields.
 SUBGRAPH_UNHANDLED_TYPE = "[unhandled type]"
 
 

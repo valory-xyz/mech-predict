@@ -241,7 +241,8 @@ Delivery IDs are translated to the existing Graph representation at the reader
 boundary, preserving shard row IDs, deduplication and pending-row refreshes.
 
 Polygon hydration treats permanent IPFS misses as absent parsed rows, retaining the existing
-skip/grace logic. Transient gateway failures retry; page hydration uses at most eight workers
+skip/grace logic. Malformed content retains Graph sentinel fields and its original body.
+Transient gateway failures retry; page hydration uses at most eight workers
 and deduplicates payload keys. `MARKETPLACE_POLYGON_SQUID_URL` is required before Polygon
 fetches; it has no default. Standard-library-only tools remain importable without GraphQL
 or requests installed; runtime squid reads install those optional dependencies in their fetch jobs.

@@ -41,9 +41,12 @@ def payload_path(digest: str, request_id: str | None = None) -> str:
 
 def parsed_payload(content: str, digest: str, delivery: bool = False) -> dict:
     """Match the existing Graph parser's fields while retaining the full payload."""
-    payload = json.loads(content)
+    try:
+        payload = json.loads(content)
+    except (ValueError, TypeError):
+        payload = {}
     if not isinstance(payload, dict):
-        raise ValueError("Marketplace payload must be a JSON object")
+        payload = {}
     sentinel = SUBGRAPH_UNHANDLED_TYPE
 
     def text(value: object) -> str:
@@ -85,6 +88,13 @@ def fetch_payload(digest: str, request_id: str | None = None) -> dict | None:
 
     A permanent miss is row-local, just like a null Graph parsed payload.
     Exhausted transient failures still raise before a page can be committed.
+    Malformed content retains Graph sentinel fields and its original body.
+
+    :param digest: sha256 digest from the squid, as hex.
+    :param request_id: hex request id for a delivery, or None for a request.
+    :return: parsed payload, or None for an absent payload or malformed digest.
+    :raises RuntimeError: if transient gateway failures exhaust retries.
+    :raises requests.RequestException: if the gateway rejects the request.
     """
     try:
         path = payload_path(digest, request_id)
@@ -102,7 +112,7 @@ def fetch_payload(digest: str, request_id: str | None = None) -> dict | None:
                     break
                 response.raise_for_status()
                 return parsed_payload(response.text, digest, request_id is not None)
-            except (requests.RequestException, ValueError) as error:
+            except requests.RequestException as error:
                 status = (
                     error.response.status_code
                     if isinstance(error, requests.HTTPError)

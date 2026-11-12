@@ -156,6 +156,8 @@ jobs:
       # Capture the roster once for both reports. This also removes restored
       # derived windows/reports before scoring; cumulative resume state stays.
       - name: Initialize decision audit and capture deployment roster
+        env:
+          MARKETPLACE_POLYGON_SQUID_URL: ${{ secrets.MARKETPLACE_POLYGON_SQUID_URL }}
         run: python -m benchmark.report_audit init --output "$REPORT_AUDIT_DIR"
 
       # Self-healing backfill: delivery rows are occasionally written to
